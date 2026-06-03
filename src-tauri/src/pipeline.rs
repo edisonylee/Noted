@@ -47,6 +47,73 @@ pub fn qa_context(hits: &[SearchHit]) -> String {
     s
 }
 
+/// JSON schema constraining the agent router's decision. Mirrors `routing_schema`.
+pub fn agent_router_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": { "type": "string", "enum": ["answer", "create_category", "edit_entry"] },
+            "category": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "description": { "type": "string" }
+                }
+            },
+            "edit": {
+                "type": "object",
+                "properties": {
+                    "entry_id": { "type": "integer" },
+                    "data": { "type": "object" },
+                    "summary": { "type": "string" }
+                }
+            },
+            "clarify": { "type": ["string", "null"] }
+        },
+        "required": ["action"]
+    })
+}
+
+/// System prompt for the agent router: classify a chat message as a plain answer,
+/// a category creation, or an entry edit — and extract the parameters.
+pub fn route_system(today: &str) -> String {
+    format!(
+        "You are the action router for a personal life-logging app's assistant. Today is {today}. \
+Read the user's latest message (with the prior conversation for context) and return ONE JSON object \
+deciding what to do.\n\
+Set \"action\" to one of:\n\
+- \"answer\" — the DEFAULT. Use it for any question, lookup, or chitchat about the log. The answer \
+text is generated separately; you only set the action.\n\
+- \"create_category\" — ONLY when the user explicitly asks to make/add a new category. Fill \
+\"category\" with a short, lowercase \"name\" and a one-line \"description\".\n\
+- \"edit_entry\" — ONLY when the user clearly asks to correct or change a value in a specific entry \
+they logged. You are given candidate entries, each prefixed `entry #<id>`. Choose the ONE they mean \
+and fill \"edit\": \"entry_id\" (the number after #), \"data\" (the entry's CURRENT data object copied \
+verbatim with ONLY the requested change applied — keep every other field), and \"summary\" (a short \
+human description of the change, e.g. \"squat reps 8 -> 6\").\n\
+If the user wants to edit something but you cannot tell which entry, set action=\"answer\" and put a \
+short clarifying question in \"clarify\".\n\
+Be conservative: if you are unsure whether they want an action at all, choose \"answer\". Never invent \
+an entry_id that is not in the candidates. Return JSON only."
+    )
+}
+
+/// Format candidate entries (with their row ids) for the router so it can target
+/// a specific entry to edit.
+pub fn agent_context(entries: &[crate::db::EntryRow]) -> String {
+    let mut s = String::new();
+    for e in entries {
+        s.push_str(&format!(
+            "entry #{} {} [{}]: {}\n",
+            e.entry_id,
+            e.event_date,
+            e.category.as_deref().unwrap_or("uncategorized"),
+            e.data
+        ));
+    }
+    s
+}
+
 /// Best-effort date scrape from the note text itself — a reliable backstop for
 /// when the (vision) model fails to populate event_date from a written date like
 /// "6/2". Handles ISO (2026-06-02) and US slash dates (6/2, 6/2/26). A slash date
@@ -134,10 +201,55 @@ fn routing_schema() -> Value {
             "is_new_category": { "type": "boolean" },
             "description": { "type": "string" },
             "event_date": { "type": ["string", "null"] },
-            "data": { "type": "object" }
+            "data": { "type": "object" },
+            "entities": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "type": { "type": "string" },
+                        "fact": { "type": ["string", "null"] },
+                        "relationship": { "type": ["string", "null"] }
+                    },
+                    "required": ["name", "type"]
+                }
+            }
         },
         "required": ["category", "is_new_category", "data"]
     })
+}
+
+/// Pull the entity candidates {name, type} out of a model reply (best effort).
+fn parse_entities(v: &Value) -> Vec<Value> {
+    v.get("entities")
+        .and_then(|e| e.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|e| {
+                    let name = e.get("name").and_then(|n| n.as_str())?.trim();
+                    let etype = e.get("type").and_then(|t| t.as_str())?.trim().to_lowercase();
+                    if name.is_empty() || etype.is_empty() {
+                        return None;
+                    }
+                    let mut out = json!({ "name": name, "type": etype });
+                    // Curated person details (best effort): a short fact about them in
+                    // this note and their stated relationship to the author.
+                    if let Some(fact) = e.get("fact").and_then(|f| f.as_str()).map(str::trim) {
+                        if !fact.is_empty() {
+                            out["fact"] = json!(fact);
+                        }
+                    }
+                    if let Some(rel) = e.get("relationship").and_then(|r| r.as_str()).map(str::trim) {
+                        if !rel.is_empty() {
+                            out["relationship"] = json!(rel);
+                        }
+                    }
+                    Some(out)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -245,14 +357,14 @@ fn header_label(s: &str) -> Option<String> {
 
 /// Extract one segment into a proposal. `forced` (a header label) fixes the
 /// category by code; otherwise the model classifies (and may choose `misc`).
-/// Returns (proposal, the model's raw event_date guess for note-level resolution).
+/// Returns (proposal, the model's raw event_date guess, entity candidates).
 async fn extract_segment(
     catalog: &str,
     known: &[String],
     body: &str,
     today: &str,
     forced: Option<&str>,
-) -> Result<(Value, Option<String>)> {
+) -> Result<(Value, Option<String>, Vec<Value>)> {
     let system = build_categorize_prompt(catalog, today);
     let hint = forced
         .map(|c| format!("This note is specifically about \"{c}\" — extract its structured data and keep that category.\n\n"))
@@ -272,6 +384,7 @@ async fn extract_segment(
         match ollama::chat_json(ollama::TEXT_MODEL, &system, &user, None, Some(routing_schema())).await {
             Ok(v) => {
                 let raw_date = v.get("event_date").and_then(|d| d.as_str()).map(String::from);
+                let ents = parse_entities(&v);
                 match validate_proposal(v) {
                     Ok(mut proposal) => {
                         let cat = match forced {
@@ -281,7 +394,7 @@ async fn extract_segment(
                         proposal["is_new_category"] = json!(!known.contains(&cat));
                         proposal["routed_by"] = json!(if forced.is_some() { "header" } else { "classifier" });
                         proposal["category"] = json!(cat);
-                        return Ok((proposal, raw_date));
+                        return Ok((proposal, raw_date, ents));
                     }
                     Err(e) => last_err = e,
                 }
@@ -306,12 +419,23 @@ async fn extract_note(
     let segments = split_sections(text);
     let mut entries: Vec<Value> = Vec::new();
     let mut model_dates: Vec<Option<String>> = Vec::new();
+    // Entity candidates are note-level: collected across all segments, deduped by
+    // (normalized name, type) so the same person/place isn't proposed twice.
+    let mut entities: Vec<Value> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     for seg in &segments {
-        if let Ok((proposal, raw_date)) =
+        if let Ok((proposal, raw_date, ents)) =
             extract_segment(catalog, known, &seg.body, today, seg.hint.as_deref()).await
         {
             entries.push(proposal);
             model_dates.push(raw_date);
+            for ent in ents {
+                let name = ent["name"].as_str().unwrap_or("");
+                let etype = ent["type"].as_str().unwrap_or("").to_string();
+                if seen.insert((crate::entities::normalize(name), etype)) {
+                    entities.push(ent);
+                }
+            }
         }
     }
     if entries.is_empty() {
@@ -341,6 +465,7 @@ async fn extract_note(
         "event_date": date,
         "date_was_extracted": extracted,
         "entries": entries,
+        "entities": entities,
     }))
 }
 
@@ -406,7 +531,16 @@ note fits one. Only invent a new category when none fit; use a short, lowercase 
 2) event_date: the date the note refers to, resolved to YYYY-MM-DD using today's date for relative \
 or partial dates (e.g. \"6/2\" -> the closest such date, \"yesterday\" -> today minus one). If the \
 note mentions no date at all, use null.\n\
-3) EXTRACT the structured data the note contains into \"data\".\n\n\
+3) EXTRACT the structured data the note contains into \"data\".\n\
+4) ENTITIES: list the concrete things this note refers to — people, places, activities, foods, \
+organizations, or recurring topics — as objects {{\"name\", \"type\"}} where type is one of \
+person|place|activity|food|item|org|topic. Use the name as written (e.g. \"Jake\", \"Planet Fitness\", \
+\"chipotle bowl\"). Skip generic words and anything you aren't sure is a real entity; empty list if none.\n\
+   For a \"person\", also add: \"fact\" — a short phrase capturing what happened or what you learned \
+about THEM in this note (e.g. \"got engaged\", \"started a new job at Stripe\"); and \"relationship\" \
+— how they relate to the author IF the note says so (e.g. \"friend\", \"coworker\", \"brother\"). Omit \
+either when the note doesn't provide it. NEVER list the author/narrator (first-person \"I\"/\"me\"/\"my\") \
+as a person.\n\n\
 Existing categories (reuse if the note fits one):\n{catalog}\n\n\
 Rules:\n\
 - When reusing a category, match its existing shape so data stays consistent over time.\n\
@@ -415,15 +549,19 @@ only create a new category when the note is clearly a recurring, substantial top
 - Structure repeated things as an ARRAY OF OBJECTS — one object per item, each keeping its own \
 attributes together. NEVER use parallel arrays (separate name[], weight[], reps[] arrays). \
 For example a workout becomes: \"exercises\": [{{\"name\": \"squat\", \"weight\": 245, \"sets\": 3, \
-\"reps\": 5, \"rpe\": 9}}, ...]; a day becomes: \"blocks\": [{{\"task\": \"coding\", \"duration_min\": 120}}, ...].\n\
+\"reps\": 5, \"rpe\": 9}}, ...]; a schedule becomes: \"blocks\": [{{\"task\": \"coding\", \"start\": \"09:00\", \
+\"end\": \"11:00\", \"duration_min\": 120}}, ...].\n\
+- Time periods matter: when an activity has a clock time or time range, capture \"start\" and \"end\" \
+in 24-hour HH:MM (e.g. \"2-4pm\" -> start \"14:00\", end \"16:00\"; \"9am\" -> start \"09:00\"), and \
+\"duration_min\" when you can derive it. Omit start/end when no time is given.\n\
 - Numbers as numbers, not strings. Omit fields you don't know rather than guessing.\n\
 - Keep keys short, lowercase, snake_case.\n\
 - Feelings matter: whenever the note says how the user felt, add a \"mood\" key inside data (a short \
 phrase, e.g. \"satisfied\", \"anxious and unfocused\") — in ANY category.\n\
 - If a note is mostly about feelings or mental state with no concrete activity, use category \"mood\".\n\
-- event_date is the calendar day only; intra-day times belong inside data.\n\n\
+- event_date is the calendar day only; the clock times within a day go in start/end fields.\n\n\
 Return JSON only, exactly this form:\n\
-{{\"category\": string, \"is_new_category\": bool, \"description\": string, \"event_date\": string|null, \"data\": object}}"
+{{\"category\": string, \"is_new_category\": bool, \"description\": string, \"event_date\": string|null, \"data\": object, \"entities\": [{{\"name\": string, \"type\": string, \"fact\": string|null, \"relationship\": string|null}}]}}"
     )
 }
 

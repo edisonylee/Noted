@@ -89,3 +89,48 @@ async fn categorize_save_and_reuse() {
 
     let _ = std::fs::remove_file(&tmp);
 }
+
+#[tokio::test]
+async fn one_note_with_headers_makes_many_entries() {
+    // The headline feature: section headers route a single note into several
+    // categories, each its own entry. Routing is deterministic (the header label),
+    // so we can assert the categories regardless of model wording.
+    let note = "Gym:\nsquat 245 5x5, felt strong\n\n\
+                Food:\nchipotle bowl — chicken, rice, guac\n\n\
+                Schedule:\n9-12 coded the parser, 2-4 class";
+    let env = pipeline::categorize("(none yet)", &[], note, "2026-06-02").await.unwrap();
+
+    let entries = env["entries"].as_array().unwrap();
+    let cats: Vec<&str> = entries.iter().map(|e| e["category"].as_str().unwrap()).collect();
+    println!("headered note -> {} entries: {cats:?}", entries.len());
+
+    assert!(entries.len() >= 3, "three headers -> at least three entries: {cats:?}");
+    assert!(cats.contains(&"gym"), "gym header routed: {cats:?}");
+    assert!(cats.contains(&"food"), "food header routed: {cats:?}");
+    assert!(cats.contains(&"schedule"), "schedule header routed: {cats:?}");
+    // header-routed entries are marked as such (category decided by code, not model)
+    assert!(
+        entries.iter().all(|e| e["routed_by"] == json!("header")),
+        "every tagged section is routed_by=header"
+    );
+}
+
+#[tokio::test]
+async fn surfaces_entities_from_a_note() {
+    let env = pipeline::categorize(
+        "(none yet)",
+        &[],
+        "had lunch with Jake at Chipotle, then hit the gym",
+        "2026-06-02",
+    )
+    .await
+    .unwrap();
+    let ents = env["entities"].as_array().unwrap();
+    let names: Vec<String> = ents
+        .iter()
+        .filter_map(|e| e["name"].as_str().map(|s| s.to_lowercase()))
+        .collect();
+    println!("entities -> {names:?}");
+    assert!(!ents.is_empty(), "an entity-rich note should surface entities");
+    assert!(names.iter().any(|n| n.contains("jake")), "Jake surfaced: {names:?}");
+}

@@ -3,17 +3,19 @@ import { listen } from "@tauri-apps/api/event";
 import { Camera, Check, Download, Mic, Moon, Smartphone, Square, Sun } from "lucide-react";
 import { startRecording, type Recorder } from "./audio";
 import { useTheme } from "./useTheme";
-import { api, type CategoryInfo, type Envelope, type Health, type NoteRow } from "./api";
+import { api, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow } from "./api";
 import { DataView } from "./DataView";
 import { TrendsView } from "./Trends";
 import { RecapsView } from "./Recaps";
 import { TimelineView } from "./Timeline";
+import { PeopleView } from "./PeopleView";
 import { PhonePanel } from "./PhonePanel";
 import { FloatingChat } from "./FloatingChat";
+import { SelfView } from "./Self";
 import "./App.css";
 
 type Phase = "idle" | "thinking" | "review";
-type View = "log" | "timeline" | "trends" | "recaps";
+type View = "log" | "timeline" | "trends" | "recaps" | "people" | "self";
 type Source = "text" | "photo";
 type Img = { base64: string; ext: string; dataUrl: string };
 // One editable review card per extracted entry.
@@ -37,6 +39,21 @@ async function fileToImg(file: File): Promise<Img> {
   return { base64, ext, dataUrl };
 }
 
+// Time-adaptive home greeting: planning prompt in the morning → recap prompt at night.
+function homeGreeting(): { dateLine: string; title: string } {
+  const now = new Date();
+  const h = now.getHours();
+  const partOfDay = h < 12 ? "morning" : h < 17 ? "afternoon" : h < 21 ? "evening" : "night";
+  const dateStr = now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+  const title =
+    h < 11
+      ? "What's your schedule looking like today?"
+      : h < 17
+        ? "How's your day going?"
+        : "What did you do today?";
+  return { dateLine: `${dateStr} · ${partOfDay}`, title };
+}
+
 export default function App() {
   const { theme, toggle } = useTheme();
   const [view, setView] = useState<View>("log");
@@ -53,6 +70,7 @@ export default function App() {
   const [ocrText, setOcrText] = useState(""); // editable transcription (photo path)
   const [eventDate, setEventDate] = useState(""); // canonical day, editable
   const [dateWasExtracted, setDateWasExtracted] = useState(false);
+  const [entityChips, setEntityChips] = useState<EntityCandidate[]>([]); // graph entities to confirm
 
   const [notes, setNotes] = useState<NoteRow[]>([]);
   const [cats, setCats] = useState<CategoryInfo[]>([]);
@@ -166,6 +184,11 @@ export default function App() {
     else setCards(next);
   };
 
+  const updateEntity = (i: number, patch: Partial<EntityCandidate>) =>
+    setEntityChips((es) => es.map((e, idx) => (idx === i ? { ...e, ...patch } : e)));
+  const removeEntity = (i: number) =>
+    setEntityChips((es) => es.filter((_, idx) => idx !== i));
+
   async function pickFile(file?: File | null) {
     if (!file) return;
     setError(null);
@@ -184,6 +207,7 @@ export default function App() {
     setOcrText(env.raw_text ?? "");
     setEventDate(env.event_date ?? "");
     setDateWasExtracted(!!env.date_was_extracted);
+    setEntityChips(env.entities ?? []);
     setSource(src);
     setPhase("review");
   }
@@ -255,12 +279,21 @@ export default function App() {
         description: c.description,
         data: (cardParses[i] as { ok: true; value: Record<string, unknown> }).value,
       }));
+      const entities = entityChips
+        .map((e) => ({
+          name: e.name.trim(),
+          type: e.type.trim().toLowerCase(),
+          fact: e.fact?.trim() || undefined,
+          relationship: e.relationship?.trim() || undefined,
+        }))
+        .filter((e) => e.name && e.type);
       await api.save({
         raw_text: source === "photo" ? ocrText : text.trim(),
         source,
         image_path,
         event_date: eventDate,
         entries,
+        entities,
       });
       const savedCats = Array.from(new Set(entries.map((e) => e.category))).join(", ");
       resetAll();
@@ -280,6 +313,7 @@ export default function App() {
     setOcrText("");
     setEventDate("");
     setDateWasExtracted(false);
+    setEntityChips([]);
     setPhase("idle");
   }
 
@@ -304,16 +338,14 @@ export default function App() {
           <button className={view === "recaps" ? "on" : ""} onClick={() => setView("recaps")}>
             Recaps
           </button>
+          <button className={view === "people" ? "on" : ""} onClick={() => setView("people")}>
+            People
+          </button>
+          <button className={view === "self" ? "on" : ""} onClick={() => setView("self")}>
+            Self
+          </button>
         </nav>
         <span className="spacer" />
-        <div className="cats">
-          {cats.map((c) => (
-            <span className="chip" key={c.id} title={c.description}>
-              {c.name}
-              <em>{c.entry_count}</em>
-            </span>
-          ))}
-        </div>
         <button
           className="icon-btn"
           onClick={toggle}
@@ -332,10 +364,18 @@ export default function App() {
           <TrendsView cats={cats} theme={theme} />
         ) : view === "recaps" ? (
           <RecapsView />
+        ) : view === "people" ? (
+          <PeopleView />
+        ) : view === "self" ? (
+          <SelfView theme={theme} />
         ) : view === "timeline" ? (
           <TimelineView notes={notes} />
         ) : (
-        <>
+        <div className="log-hero">
+        <div className="greeting">
+          <div className="greet-date">{homeGreeting().dateLine}</div>
+          <h1 className="greet-title">{homeGreeting().title}</h1>
+        </div>
         <section
           className={"capture" + (dragOver ? " dragover" : "")}
           onDragOver={(e) => {
@@ -502,6 +542,49 @@ export default function App() {
               })}
             </div>
 
+            {entityChips.length > 0 && (
+              <div className="entities-review">
+                <label>Entities — people, places &amp; things in this note (confirm or remove)</label>
+                <div className="entity-chips">
+                  {entityChips.map((e, i) => (
+                    <span className="entity-chip" key={i}>
+                      <input
+                        className="entity-name"
+                        value={e.name}
+                        onChange={(ev) => updateEntity(i, { name: ev.target.value })}
+                        spellCheck={false}
+                      />
+                      <select
+                        className="entity-type"
+                        value={e.type}
+                        onChange={(ev) => updateEntity(i, { type: ev.target.value })}
+                      >
+                        {Array.from(
+                          new Set(["person", "place", "activity", "food", "item", "org", "topic", e.type])
+                        )
+                          .filter(Boolean)
+                          .map((t) => (
+                            <option key={t} value={t}>
+                              {t}
+                            </option>
+                          ))}
+                      </select>
+                      {e.type === "person" && (e.relationship || e.fact) && (
+                        <span className="entity-fact" title="captured about this person">
+                          {e.relationship ? `${e.relationship}` : ""}
+                          {e.relationship && e.fact ? " · " : ""}
+                          {e.fact ?? ""}
+                        </span>
+                      )}
+                      <button className="entity-x" onClick={() => removeEntity(i)} title="remove">
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="review-actions">
               <button onClick={resetAll}>Discard all</button>
               <button className="primary" onClick={onSave} disabled={!allValid}>
@@ -518,7 +601,7 @@ export default function App() {
             <Check size={15} /> Filed under <strong>{savedMsg}</strong> · view timeline
           </button>
         )}
-        </>
+        </div>
         )}
       </main>
 
@@ -540,7 +623,7 @@ export default function App() {
       </footer>
 
       {showPhone && <PhonePanel onClose={() => setShowPhone(false)} />}
-      <FloatingChat />
+      <FloatingChat onMutated={refresh} />
     </div>
   );
 }

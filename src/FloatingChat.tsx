@@ -1,11 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, Mic, Sparkles, Square, Volume2, VolumeX, X } from "lucide-react";
-import { api, type AskSource } from "./api";
+import { ArrowUp, Check, Mic, Sparkles, Square, Volume2, VolumeX, X } from "lucide-react";
+import { api, type AskSource, type ChatProposal } from "./api";
 import { startRecording, type Recorder } from "./audio";
 
-type Msg = { role: "user" | "assistant"; content: string; sources?: AskSource[] };
+type Msg = {
+  role: "user" | "assistant";
+  content: string;
+  sources?: AskSource[];
+  proposal?: ChatProposal; // when set, render Confirm/Cancel
+  resolved?: "confirmed" | "cancelled";
+};
 
-export function FloatingChat() {
+export function FloatingChat({ onMutated }: { onMutated?: () => void }) {
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
@@ -43,13 +49,52 @@ export function FloatingChat() {
     setAsking(true);
     try {
       const res = await api.chat(q, history);
-      setMessages((p) => [...p, { role: "assistant", content: res.answer, sources: res.sources }]);
-      if (!muted) api.speak(res.answer).catch(() => {});
+      if (res.kind === "proposal") {
+        setMessages((p) => [
+          ...p,
+          { role: "assistant", content: proposalText(res.proposal), proposal: res.proposal },
+        ]);
+      } else {
+        setMessages((p) => [...p, { role: "assistant", content: res.answer, sources: res.sources }]);
+        if (!muted) api.speak(res.answer).catch(() => {});
+      }
     } catch (e) {
       setMessages((p) => [...p, { role: "assistant", content: `Sorry — ${e}` }]);
     } finally {
       setAsking(false);
     }
+  }
+
+  function proposalText(p: ChatProposal): string {
+    if (p.action === "create_category") {
+      return p.already_exists
+        ? `“${p.name}” already exists — open it anyway?`
+        : `Create a new category “${p.name}”?`;
+    }
+    return `Apply this change — ${p.summary}?`;
+  }
+
+  async function confirmProposal(i: number, p: ChatProposal) {
+    setMessages((ms) => ms.map((m, idx) => (idx === i ? { ...m, resolved: "confirmed" } : m)));
+    try {
+      let done: string;
+      if (p.action === "create_category") {
+        await api.createCategory(p.name, p.description);
+        done = `Created category “${p.name}”.`;
+      } else {
+        await api.updateEntry(p.entry_id, p.data);
+        done = "Done — updated that entry.";
+      }
+      setMessages((ms) => [...ms, { role: "assistant", content: done }]);
+      onMutated?.();
+    } catch (e) {
+      setMessages((ms) => [...ms, { role: "assistant", content: `Couldn’t apply that — ${e}` }]);
+    }
+  }
+
+  function cancelProposal(i: number) {
+    setMessages((ms) => ms.map((m, idx) => (idx === i ? { ...m, resolved: "cancelled" } : m)));
+    setMessages((ms) => [...ms, { role: "assistant", content: "Okay, left it as is." }]);
   }
 
   async function onMic() {
@@ -130,6 +175,19 @@ export function FloatingChat() {
                   </span>
                 ))}
               </div>
+            )}
+            {m.proposal && !m.resolved && (
+              <div className="proposal-actions">
+                <button className="primary" onClick={() => confirmProposal(i, m.proposal!)}>
+                  <Check size={14} /> Confirm
+                </button>
+                <button className="ghost" onClick={() => cancelProposal(i)}>
+                  Cancel
+                </button>
+              </div>
+            )}
+            {m.proposal && m.resolved && (
+              <span className="proposal-state">{m.resolved}</span>
             )}
           </div>
         ))}

@@ -17,6 +17,7 @@
     "qrcode": "^1.5.4",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-force-graph-2d": "^1.29.1",
     "recharts": "^3.8.1"
   },
   "devDependencies": {

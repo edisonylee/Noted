@@ -9,13 +9,48 @@ export type Proposal = {
   data: Record<string, unknown>;
 };
 
+// A candidate knowledge-graph entity surfaced from a note (proposed, pre-save).
+// For a person the note may also yield a curated `fact` and `relationship`.
+export type EntityCandidate = {
+  name: string;
+  type: string;
+  fact?: string;
+  relationship?: string;
+};
+
+// A stored entity node (for the graph view / management).
+export type EntityRow = { id: number; name: string; type: string; mention_count: number };
+
+// Knowledge-graph ("Self" view) shapes.
+export type GraphNode = { id: number; name: string; type: string; mention_count: number };
+export type GraphEdge = { source: number; target: number; weight: number };
+export type GraphData = { nodes: GraphNode[]; edges: GraphEdge[] };
+export type EntityMention = { note_id: number; event_date: string; snippet: string };
+
+// A dated, curated fact about a person, drawn from one note mention.
+export type PersonMention = { date: string; text: string; note_id: number };
+
+// A person's accumulated profile for the People view.
+export type PersonProfile = {
+  id: number;
+  name: string;
+  relationship: string | null;
+  mention_count: number;
+  first_seen: string | null;
+  last_seen: string | null;
+  aliases: string[];
+  mentions: PersonMention[];
+};
+
 // What categorize/categorizePhoto return: the note-level envelope wrapping one
-// or more entries (a single note can fill several categories).
+// or more entries (a single note can fill several categories) plus the entities
+// the note refers to.
 export type Envelope = {
   raw_text?: string; // original text, or the transcription on the photo path
   event_date: string; // canonical day (YYYY-MM-DD), extracted or defaulted to today
   date_was_extracted?: boolean; // true if read from the note, false if defaulted
   entries: Proposal[];
+  entities: EntityCandidate[];
 };
 
 export type NoteEntry = { category: string | null; data: Record<string, unknown> | null };
@@ -45,7 +80,15 @@ export type AskSource = {
   event_date: string;
   snippet: string;
 };
-export type AskResult = { answer: string; sources: AskSource[] };
+// A pending action the chat agent proposes (applied only on user confirm).
+export type ChatProposal =
+  | { action: "create_category"; name: string; description: string; already_exists: boolean }
+  | { action: "edit_entry"; entry_id: number; data: Record<string, unknown>; summary: string };
+
+// chat() returns either a grounded answer or a proposal awaiting confirmation.
+export type AskResult =
+  | { kind: "answer"; answer: string; sources: AskSource[] }
+  | { kind: "proposal"; proposal: ChatProposal };
 
 export type Recap = {
   content: string;
@@ -80,11 +123,21 @@ export const api = {
     image_path?: string | null;
     event_date: string;
     entries: { category: string; description?: string; data: Record<string, unknown> }[];
+    entities?: EntityCandidate[];
   }) => invoke<number>("save_entry", { args }),
+  listEntities: () => invoke<EntityRow[]>("list_entities"),
+  mergeEntities: (keep: number, drop: number) => invoke<void>("merge_entities", { keep, drop }),
+  entityGraph: () => invoke<GraphData>("entity_graph"),
+  entityDetail: (entityId: number) => invoke<EntityMention[]>("entity_detail", { entityId }),
+  listPeople: () => invoke<PersonProfile[]>("list_people"),
   listNotes: () => invoke<NoteRow[]>("list_notes"),
   listCategories: () => invoke<CategoryInfo[]>("list_categories"),
   chat: (question: string, history: { role: string; content: string }[]) =>
     invoke<AskResult>("chat", { question, history }),
+  createCategory: (name: string, description: string) =>
+    invoke<number>("create_category", { name, description }),
+  updateEntry: (entryId: number, data: Record<string, unknown>) =>
+    invoke<number>("update_entry", { entryId, data }),
   speak: (text: string) => invoke<void>("speak", { text }),
   stopSpeaking: () => invoke<void>("stop_speaking"),
   reindex: () => invoke<number>("reindex"),
@@ -94,6 +147,7 @@ export const api = {
   transcribe: (audioB64: string, sampleRate: number) =>
     invoke<string>("transcribe", { audioB64, sampleRate }),
   generateRecap: (period: "day" | "week") => invoke<Recap>("generate_recap", { period }),
+  backfillRecaps: () => invoke<void>("backfill_recaps"),
   listRecaps: () => invoke<RecapRow[]>("list_recaps"),
   exportDb: () => invoke<string>("export_db"),
   phoneInfo: () => invoke<PhoneInfo>("phone_info"),

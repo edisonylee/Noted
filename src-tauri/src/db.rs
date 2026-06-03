@@ -58,6 +58,40 @@ CREATE TABLE IF NOT EXISTS recaps (
   entry_count  INTEGER NOT NULL,
   created_at   TEXT NOT NULL
 );
+
+-- Knowledge graph (Phase 2): entities are typed nouns surfaced from notes;
+-- mentions link them to the note/entry they appeared in. Edges are derived
+-- from co-mention at query time (no edge table).
+CREATE TABLE IF NOT EXISTS entities (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL,           -- canonical display name ("Planet Fitness")
+  norm          TEXT NOT NULL,           -- dedup key (lowercased, trimmed)
+  type          TEXT NOT NULL,           -- person|place|activity|food|item|org|topic
+  aliases       TEXT NOT NULL DEFAULT '[]',   -- JSON array of alternate spellings
+  relationship  TEXT,                    -- how a person relates to the author (latest stated)
+  first_seen    TEXT,
+  last_seen     TEXT,
+  mention_count INTEGER NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL,
+  UNIQUE(norm, type)
+);
+
+CREATE TABLE IF NOT EXISTS entity_mentions (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity_id  INTEGER NOT NULL REFERENCES entities(id),
+  note_id    INTEGER NOT NULL REFERENCES notes(id),
+  entry_id   INTEGER REFERENCES entries(id),
+  context    TEXT,
+  event_date TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mention_entity ON entity_mentions(entity_id);
+CREATE INDEX IF NOT EXISTS idx_mention_note   ON entity_mentions(note_id);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS entity_embeddings USING vec0(
+  entity_id INTEGER PRIMARY KEY,
+  embedding FLOAT[768]
+);
 "#;
 
 /// Register sqlite-vec as an auto extension (process-wide, must happen before
@@ -74,6 +108,7 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     conn.execute_batch(SCHEMA)?;
     // Migrations for DBs created before a column existed (additive only).
     ensure_column(&conn, "entries", "event_date", "TEXT")?;
+    ensure_column(&conn, "entities", "relationship", "TEXT")?;
     // Note: the reserved catch-all "misc" is not pre-seeded — the classifier is
     // told about it by name in the prompt, and it's created on first real use
     // (so an unused misc never clutters the catalog/UI).
@@ -241,6 +276,24 @@ pub fn notes_missing_embeddings(conn: &Connection) -> Result<Vec<(i64, String)>>
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// The text we embed for ONE note (category names + raw text + entry data) —
+/// same composition as `notes_missing_embeddings`. Used to re-embed a note after
+/// the chat agent edits one of its entries.
+pub fn note_embed_text(conn: &Connection, note_id: i64) -> Result<String> {
+    let text: String = conn.query_row(
+        "SELECT COALESCE(group_concat(DISTINCT c.name), '') || char(10) || n.raw_text || char(10)
+                || COALESCE(group_concat(e.data_json, char(10)), '')
+         FROM notes n
+         LEFT JOIN entries e ON e.note_id = n.id
+         LEFT JOIN categories c ON c.id = e.category_id
+         WHERE n.id = ?1
+         GROUP BY n.id",
+        [note_id],
+        |r| r.get(0),
+    )?;
+    Ok(text)
+}
+
 /// (event_date, data) for every entry in a category, oldest first — feeds trends.
 pub fn category_entries(conn: &Connection, category: &str) -> Result<Vec<(String, Value)>> {
     let mut stmt = conn.prepare(
@@ -253,6 +306,35 @@ pub fn category_entries(conn: &Connection, category: &str) -> Result<Vec<(String
         let date: String = r.get(0)?;
         let data_str: String = r.get(1)?;
         Ok((date, serde_json::from_str(&data_str).unwrap_or(Value::Null)))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// One entry of a note, with its row id — feeds the chat agent's edit targeting
+/// (the agent needs a stable `entry_id` to point at) and the edit preview.
+#[derive(Serialize)]
+pub struct EntryRow {
+    pub entry_id: i64,
+    pub category: Option<String>,
+    pub event_date: String,
+    pub data: Value,
+}
+
+pub fn note_entries(conn: &Connection, note_id: i64) -> Result<Vec<EntryRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT e.id, c.name, COALESCE(e.event_date, date(e.created_at)), e.data_json
+         FROM entries e LEFT JOIN categories c ON c.id = e.category_id
+         WHERE e.note_id = ?1
+         ORDER BY e.id",
+    )?;
+    let rows = stmt.query_map([note_id], |r| {
+        let data_str: String = r.get(3)?;
+        Ok(EntryRow {
+            entry_id: r.get(0)?,
+            category: r.get(1)?,
+            event_date: r.get(2)?,
+            data: serde_json::from_str(&data_str).unwrap_or(Value::Null),
+        })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -354,6 +436,16 @@ pub struct RecapRow {
     pub content: String,
     pub entry_count: i64,
     pub created_at: String,
+}
+
+/// Does a recap already exist for this exact period + range?
+pub fn recap_exists(conn: &Connection, period: &str, start: &str, end: &str) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM recaps WHERE period = ?1 AND period_start = ?2 AND period_end = ?3",
+        rusqlite::params![period, start, end],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
 }
 
 /// Store a recap, replacing any existing one for the same period + range.
@@ -495,6 +587,55 @@ fn upsert_category(
     Ok(id)
 }
 
+/// Create a category by name if it doesn't already exist, with no entries yet
+/// (entry_count 0). Returns the category id (existing or new). Used by the chat
+/// agent's `create_category` action — unlike `upsert_category`, this is standalone
+/// (not tied to saving a note) and never bumps a count.
+pub fn create_category(conn: &Connection, name: &str, description: &str, now: &str) -> Result<i64> {
+    if let Ok(id) = conn.query_row(
+        "SELECT id FROM categories WHERE name = ?1",
+        [name],
+        |r| r.get::<_, i64>(0),
+    ) {
+        return Ok(id);
+    }
+    conn.execute(
+        "INSERT INTO categories (name, description, schema_json, entry_count, created_at)
+         VALUES (?1, ?2, ?3, 0, ?4)",
+        rusqlite::params![name, description, default_schema().to_string(), now],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Overwrite one entry's structured data in place — the only mutation path for
+/// entries (writes are otherwise append-only). Returns the entry's `note_id` so
+/// the caller can re-embed the note. Used by the chat agent's `edit_entry` action.
+pub fn update_entry_data(conn: &Connection, entry_id: i64, data: &Value) -> Result<i64> {
+    let (note_id, cur): (i64, String) = conn
+        .query_row(
+            "SELECT note_id, data_json FROM entries WHERE id = ?1",
+            [entry_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| anyhow::anyhow!("entry {entry_id} not found"))?;
+    // Shallow-merge the correction over the existing data: if the model returns a
+    // partial object (only the changed key), untouched top-level fields survive.
+    let merged = match (serde_json::from_str::<Value>(&cur).ok(), data) {
+        (Some(Value::Object(mut base)), Value::Object(patch)) => {
+            for (k, v) in patch {
+                base.insert(k.clone(), v.clone());
+            }
+            Value::Object(base)
+        }
+        _ => data.clone(),
+    };
+    conn.execute(
+        "UPDATE entries SET data_json = ?1 WHERE id = ?2",
+        rusqlite::params![merged.to_string(), entry_id],
+    )?;
+    Ok(note_id)
+}
+
 fn default_schema() -> Value {
     json!({ "shape": {}, "field_freq": {} })
 }
@@ -569,4 +710,305 @@ fn collect_paths(v: &Value, prefix: String, out: &mut Vec<String>) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge graph (Phase 2): entity storage. Resolution/normalization lives in
+// entities.rs; this module is pure storage and takes already-normalized keys.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct EntityRow {
+    pub id: i64,
+    pub name: String,
+    pub r#type: String,
+    pub mention_count: i64,
+}
+
+/// All entities, most-mentioned first.
+pub fn list_entities(conn: &Connection) -> Result<Vec<EntityRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, type, mention_count FROM entities ORDER BY mention_count DESC, name",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(EntityRow {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            r#type: r.get(2)?,
+            mention_count: r.get(3)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+#[derive(Serialize)]
+pub struct GraphEdge {
+    pub source: i64,
+    pub target: i64,
+    pub weight: i64,
+}
+
+/// Co-mention edges for the knowledge graph: two entities are linked when they
+/// appear in the same note, weighted by how many distinct notes they share.
+pub fn entity_edges(conn: &Connection) -> Result<Vec<GraphEdge>> {
+    let mut stmt = conn.prepare(
+        "SELECT a.entity_id, b.entity_id, COUNT(DISTINCT a.note_id) AS w
+         FROM entity_mentions a
+         JOIN entity_mentions b ON a.note_id = b.note_id AND a.entity_id < b.entity_id
+         GROUP BY a.entity_id, b.entity_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(GraphEdge {
+            source: r.get(0)?,
+            target: r.get(1)?,
+            weight: r.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+#[derive(Serialize)]
+pub struct EntityMentionRow {
+    pub note_id: i64,
+    pub event_date: String,
+    pub snippet: String,
+}
+
+/// Notes that mention an entity, newest first — for the graph's detail panel.
+pub fn entity_detail(conn: &Connection, entity_id: i64, limit: i64) -> Result<Vec<EntityMentionRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT m.note_id, m.event_date, n.raw_text
+         FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+         WHERE m.entity_id = ?1
+         ORDER BY m.event_date DESC, m.note_id DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![entity_id, limit], |r| {
+        let raw: String = r.get(2)?;
+        Ok(EntityMentionRow {
+            note_id: r.get(0)?,
+            event_date: r.get(1)?,
+            snippet: raw.replace('\n', " ").chars().take(140).collect(),
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Find an existing entity by exact normalized key OR alias match, within a type.
+pub fn entity_exact(conn: &Connection, norm: &str, etype: &str) -> Result<Option<i64>> {
+    let id = conn
+        .query_row(
+            "SELECT id FROM entities
+             WHERE type = ?1 AND (norm = ?2 OR EXISTS (
+                 SELECT 1 FROM json_each(entities.aliases) WHERE lower(json_each.value) = ?2
+             ))
+             LIMIT 1",
+            rusqlite::params![etype, norm],
+            |r| r.get::<_, i64>(0),
+        )
+        .ok();
+    Ok(id)
+}
+
+/// Nearest existing entity of the same type by embedding distance (for merge
+/// suggestions). Returns (entity_id, L2 distance) or None.
+pub fn nearest_entity(conn: &Connection, qvec: &[f32], etype: &str) -> Result<Option<(i64, f32)>> {
+    let json = serde_json::to_string(qvec)?;
+    let hit = conn
+        .query_row(
+            "SELECT e.entity_id, e.distance FROM (
+                 SELECT entity_id, distance FROM entity_embeddings
+                 WHERE embedding MATCH ?1 ORDER BY distance LIMIT 5
+             ) e
+             JOIN entities ent ON ent.id = e.entity_id
+             WHERE ent.type = ?2
+             ORDER BY e.distance LIMIT 1",
+            rusqlite::params![json, etype],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f32>(1)?)),
+        )
+        .ok();
+    Ok(hit)
+}
+
+/// Create a new entity. `aliases` is a JSON array string. Returns its id.
+pub fn create_entity(
+    conn: &Connection,
+    name: &str,
+    norm: &str,
+    etype: &str,
+    aliases: &str,
+    event_date: &str,
+    now: &str,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO entities (name, norm, type, aliases, first_seen, last_seen, mention_count, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5, 0, ?6)",
+        rusqlite::params![name, norm, etype, aliases, event_date, now],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Record a mention of an entity, bumping its count and extending its date span.
+pub fn add_mention(
+    conn: &Connection,
+    entity_id: i64,
+    note_id: i64,
+    entry_id: Option<i64>,
+    context: &str,
+    event_date: &str,
+    now: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO entity_mentions (entity_id, note_id, entry_id, context, event_date, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![entity_id, note_id, entry_id, context, event_date, now],
+    )?;
+    conn.execute(
+        "UPDATE entities SET
+             mention_count = mention_count + 1,
+             first_seen = MIN(COALESCE(first_seen, ?2), ?2),
+             last_seen  = MAX(COALESCE(last_seen, ?2), ?2)
+         WHERE id = ?1",
+        rusqlite::params![entity_id, event_date],
+    )?;
+    Ok(())
+}
+
+pub fn insert_entity_embedding(conn: &Connection, entity_id: i64, vec: &[f32]) -> Result<()> {
+    let json = serde_json::to_string(vec)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO entity_embeddings(entity_id, embedding) VALUES (?1, ?2)",
+        rusqlite::params![entity_id, json],
+    )?;
+    Ok(())
+}
+
+/// Merge `drop_id` into `keep_id`: reassign its mentions, union its aliases +
+/// name into keep's aliases, recompute keep's count, then delete the dropped
+/// entity (and its embedding). Derived co-mention edges recompute automatically.
+pub fn merge_entities(conn: &mut Connection, keep_id: i64, drop_id: i64) -> Result<()> {
+    if keep_id == drop_id {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    tx.execute(
+        "UPDATE entity_mentions SET entity_id = ?1 WHERE entity_id = ?2",
+        rusqlite::params![keep_id, drop_id],
+    )?;
+    // fold the dropped name + aliases into keep's alias list
+    let dropped_name: String = tx.query_row("SELECT name FROM entities WHERE id = ?1", [drop_id], |r| r.get(0))?;
+    let keep_aliases: String = tx.query_row("SELECT aliases FROM entities WHERE id = ?1", [keep_id], |r| r.get(0))?;
+    let dropped_aliases: String = tx.query_row("SELECT aliases FROM entities WHERE id = ?1", [drop_id], |r| r.get(0))?;
+    let mut set: Vec<String> = serde_json::from_str(&keep_aliases).unwrap_or_default();
+    set.push(dropped_name);
+    if let Ok(extra) = serde_json::from_str::<Vec<String>>(&dropped_aliases) {
+        set.extend(extra);
+    }
+    set.sort();
+    set.dedup();
+    tx.execute(
+        "UPDATE entities SET aliases = ?1,
+             mention_count = (SELECT COUNT(*) FROM entity_mentions WHERE entity_id = ?2)
+         WHERE id = ?2",
+        rusqlite::params![serde_json::to_string(&set)?, keep_id],
+    )?;
+    tx.execute("DELETE FROM entity_embeddings WHERE entity_id = ?1", [drop_id])?;
+    tx.execute("DELETE FROM entities WHERE id = ?1", [drop_id])?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Set/refresh a person's relationship to the author. Latest non-empty wins;
+/// an empty/blank value is ignored so a later note without a relationship never
+/// clobbers a known one.
+pub fn set_entity_relationship(conn: &Connection, id: i64, rel: &str) -> Result<()> {
+    let rel = rel.trim();
+    if rel.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE entities SET relationship = ?2 WHERE id = ?1",
+        rusqlite::params![id, rel],
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// People view: person-typed entities + their dated mentions (curated facts).
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct PersonMention {
+    pub date: String,
+    pub text: String,
+    pub note_id: i64,
+}
+
+#[derive(Serialize)]
+pub struct PersonProfile {
+    pub id: i64,
+    pub name: String,
+    pub relationship: Option<String>,
+    pub mention_count: i64,
+    pub first_seen: Option<String>,
+    pub last_seen: Option<String>,
+    pub aliases: Vec<String>,
+    pub mentions: Vec<PersonMention>,
+}
+
+/// All mentions of an entity, most recent first (the curated `fact` lives in the
+/// `context` column).
+pub fn mentions_for(conn: &Connection, entity_id: i64) -> Result<Vec<PersonMention>> {
+    let mut stmt = conn.prepare(
+        "SELECT event_date, COALESCE(context, ''), note_id
+         FROM entity_mentions WHERE entity_id = ?1
+         ORDER BY event_date DESC, id DESC",
+    )?;
+    let rows = stmt.query_map([entity_id], |r| {
+        Ok(PersonMention {
+            date: r.get(0)?,
+            text: r.get(1)?,
+            note_id: r.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Every `person` entity with its dated mentions — the People view's data.
+/// Most-mentioned first, mirroring `list_entities`.
+pub fn person_profiles(conn: &Connection) -> Result<Vec<PersonProfile>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, relationship, mention_count, first_seen, last_seen, aliases
+         FROM entities WHERE type = 'person'
+         ORDER BY mention_count DESC, last_seen DESC, name",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            let aliases: String = r.get(6)?;
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+                aliases,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for (id, name, relationship, mention_count, first_seen, last_seen, aliases) in rows {
+        out.push(PersonProfile {
+            id,
+            name,
+            relationship,
+            mention_count,
+            first_seen,
+            last_seen,
+            aliases: serde_json::from_str(&aliases).unwrap_or_default(),
+            mentions: mentions_for(conn, id)?,
+        });
+    }
+    Ok(out)
 }

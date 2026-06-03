@@ -13,6 +13,7 @@ import {
 } from "recharts";
 import { api, type CategoryInfo, type Trends } from "./api";
 import type { Theme } from "./useTheme";
+import { groupByPillar } from "./pillars";
 
 // muted series palette — blue accent leads, then earthy neutrals
 const COLORS_LIGHT = ["#3d79bd", "#46413a", "#3f7d5b", "#b8893f", "#5e7e86", "#9b8b6e", "#8a5a4a", "#7a6c84"];
@@ -106,25 +107,42 @@ export function TrendsView({ cats, theme }: { cats: CategoryInfo[]; theme: Theme
   return (
     <div className="trends">
       <div className="trend-controls">
-        <select value={cat} onChange={(e) => setCat(e.target.value)}>
-          {cats.map((c) => (
-            <option key={c.id} value={c.name}>
-              {c.name} ({c.entry_count})
-            </option>
+        <select
+          className="cat-select"
+          value={cat}
+          onChange={(e) => setCat(e.target.value)}
+          aria-label="category"
+        >
+          {groupByPillar(cats).map(({ pillar, cats: group }) => (
+            <optgroup key={pillar} label={pillar}>
+              {group.map((c) => (
+                <option key={c.id} value={c.name}>
+                  {c.name} ({c.entry_count})
+                </option>
+              ))}
+            </optgroup>
           ))}
         </select>
         {trends && trends.metrics.length > 0 && (
           <>
-            <select value={metric} onChange={(e) => setMetric(e.target.value)}>
+            <div className="pill-group" role="group" aria-label="metric">
               {trends.metrics.map((m) => (
-                <option key={m} value={m}>
+                <button
+                  key={m}
+                  className={"pill" + (metric === m ? " on" : "")}
+                  onClick={() => setMetric(m)}
+                >
                   {m}
-                </option>
+                </button>
               ))}
-            </select>
-            <div className="seg">
+            </div>
+            <div className="pill-group" role="group" aria-label="aggregation">
               {(["max", "sum", "avg"] as const).map((a) => (
-                <button key={a} className={agg === a ? "on" : ""} onClick={() => setAgg(a)}>
+                <button
+                  key={a}
+                  className={"pill" + (agg === a ? " on" : "")}
+                  onClick={() => setAgg(a)}
+                >
                   {a}
                 </button>
               ))}

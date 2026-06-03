@@ -1,5 +1,6 @@
 pub mod analytics;
 pub mod db;
+pub mod entities;
 pub mod ollama;
 pub mod phone;
 pub mod pipeline;
@@ -9,7 +10,7 @@ use db::{Db, SaveInput};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// Local calendar date (YYYY-MM-DD) — the user's "today", not UTC.
 fn today_local() -> String {
@@ -140,6 +141,17 @@ struct EntryArg {
 }
 
 #[derive(Deserialize)]
+struct EntityArg {
+    name: String,
+    #[serde(rename = "type")]
+    etype: String,
+    #[serde(default)]
+    fact: Option<String>,
+    #[serde(default)]
+    relationship: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct SaveArgs {
     raw_text: String,
     #[serde(default = "default_source")]
@@ -148,6 +160,8 @@ struct SaveArgs {
     #[serde(default)]
     event_date: String,
     entries: Vec<EntryArg>,
+    #[serde(default)]
+    entities: Vec<EntityArg>,
 }
 
 fn default_source() -> String {
@@ -187,6 +201,9 @@ async fn save_entry(state: tauri::State<'_, Db>, args: SaveArgs) -> Result<i64, 
         })
         .collect();
 
+    // Keep a copy of the note text for entity-mention context (raw_text is moved).
+    let raw = args.raw_text.clone();
+
     let note_id = {
         let mut conn = state.0.lock().unwrap();
         db::save_note(
@@ -195,7 +212,7 @@ async fn save_entry(state: tauri::State<'_, Db>, args: SaveArgs) -> Result<i64, 
                 raw_text: args.raw_text,
                 source: args.source,
                 image_path: args.image_path,
-                event_date,
+                event_date: event_date.clone(),
                 entries,
             },
             &now,
@@ -210,6 +227,53 @@ async fn save_entry(state: tauri::State<'_, Db>, args: SaveArgs) -> Result<i64, 
         let conn = state.0.lock().unwrap();
         let _ = db::insert_embedding(&conn, note_id, &v);
     }
+
+    // Persist knowledge-graph entities (best effort — never fails the save). Embed
+    // each off-lock, then resolve (exact/alias or near-neighbor) + create + link
+    // a mention under the lock.
+    if !args.entities.is_empty() {
+        // Carry the curated person details (fact, relationship) alongside each
+        // embedding so they can be stored once the entity is resolved.
+        let mut embedded: Vec<(String, String, Vec<f32>, Option<String>, Option<String>)> = Vec::new();
+        for e in &args.entities {
+            let name = e.name.trim();
+            let etype = e.etype.trim().to_lowercase();
+            if name.is_empty() || etype.is_empty() {
+                continue;
+            }
+            if let Ok(v) = entities::embed_entity(name, &etype).await {
+                let fact = e.fact.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+                let rel = e.relationship.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+                embedded.push((name.to_string(), etype, v, fact, rel));
+            }
+        }
+        let conn = state.0.lock().unwrap();
+        let snippet: String = raw.chars().take(200).collect();
+        for (name, etype, emb, fact, rel) in &embedded {
+            let id = match entities::resolve_with_embedding(&conn, name, etype, emb) {
+                Ok(entities::Resolution::Exact(id)) | Ok(entities::Resolution::Suggest(id, _)) => id,
+                Ok(entities::Resolution::New) => {
+                    let norm = entities::normalize(name);
+                    match db::create_entity(&conn, name, &norm, etype, "[]", &event_date, &now) {
+                        Ok(id) => {
+                            let _ = db::insert_entity_embedding(&conn, id, emb);
+                            id
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                Err(_) => continue,
+            };
+            if let Some(r) = rel {
+                let _ = db::set_entity_relationship(&conn, id, r);
+            }
+            // Prefer the curated per-person fact as the mention context; fall back
+            // to the note snippet when none was extracted.
+            let context = fact.as_deref().unwrap_or(snippet.as_str());
+            let _ = db::add_mention(&conn, id, note_id, None, context, &event_date, &now);
+        }
+    }
+
     Ok(note_id)
 }
 
@@ -283,6 +347,100 @@ async fn generate_recap(state: tauri::State<'_, Db>, period: String) -> Result<V
     }))
 }
 
+const RECAP_SYSTEM: &str = "You write brief, friendly recaps of the user's personal log. Write in \
+    second person. Group by category. Highlight concrete numbers (weights, hours, counts) and \
+    anything notable like personal records. Keep it tight — a few short sentences or bullets. \
+    Do not invent anything not in the entries.";
+
+/// Generate + store a recap for an explicit [start,end] range. Skips if one
+/// already exists (unless `force`) or the range has no entries. Emits
+/// "recap-generated" on success so the UI refreshes. Returns whether it wrote one.
+async fn recap_period(
+    app: &tauri::AppHandle,
+    period: &str,
+    start: &str,
+    end: &str,
+    force: bool,
+) -> Result<bool, String> {
+    let state = app.state::<Db>();
+    if !force {
+        let exists = {
+            let conn = state.0.lock().unwrap();
+            db::recap_exists(&conn, period, start, end).map_err(|e| e.to_string())?
+        };
+        if exists {
+            return Ok(false);
+        }
+    }
+    let entries = {
+        let conn = state.0.lock().unwrap();
+        db::entries_between(&conn, start, end).map_err(|e| e.to_string())?
+    };
+    if entries.is_empty() {
+        return Ok(false);
+    }
+    let entry_count = entries.len() as i64;
+
+    let mut ctx = String::new();
+    for (date, cat, data) in &entries {
+        ctx.push_str(&format!("- {date} [{cat}]: {}\n", data));
+    }
+    let span = if period == "week" {
+        format!("the week of {start} to {end}")
+    } else {
+        format!("{end}")
+    };
+    let user = format!("Period: {span}.\nEntries:\n{ctx}\nWrite the recap.");
+    let content = ollama::chat_text(ollama::TEXT_MODEL, RECAP_SYSTEM, &user)
+        .await
+        .map_err(|e| e.to_string())?
+        .trim()
+        .to_string();
+
+    {
+        let conn = state.0.lock().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        db::upsert_recap(&conn, period, start, end, &content, entry_count, &now)
+            .map_err(|e| e.to_string())?;
+    }
+    let _ = app.emit("recap-generated", json!({ "period": period, "start": start, "end": end }));
+    Ok(true)
+}
+
+/// (Monday, Sunday) ISO dates of the most recent FULLY-completed calendar week.
+pub fn last_completed_week(today: chrono::NaiveDate) -> (String, String) {
+    use chrono::{Datelike, Duration};
+    let this_monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+    (
+        (this_monday - Duration::days(7)).to_string(),
+        (this_monday - Duration::days(1)).to_string(),
+    )
+}
+
+/// The last `n` completed days (yesterday back), as ISO date strings.
+pub fn recent_completed_days(today: chrono::NaiveDate, n: i64) -> Vec<String> {
+    (1..=n).map(|i| (today - chrono::Duration::days(i)).to_string()).collect()
+}
+
+/// Auto-fill recaps for COMPLETED periods (the app may be closed at midnight, so
+/// this is lazy catch-up): the last few finished days + the last finished
+/// calendar week (Mon–Sun). Idempotent — `recap_period` skips ones that exist.
+async fn auto_backfill_recaps(app: &tauri::AppHandle) {
+    let today = chrono::Local::now().date_naive();
+    for d in recent_completed_days(today, 3) {
+        let _ = recap_period(app, "day", &d, &d, false).await;
+    }
+    let (mon, sun) = last_completed_week(today);
+    let _ = recap_period(app, "week", &mon, &sun, false).await;
+}
+
+/// Manual fallback (e.g. Ollama was down at launch): re-run the auto backfill.
+#[tauri::command]
+async fn backfill_recaps(app: tauri::AppHandle) -> Result<(), String> {
+    auto_backfill_recaps(&app).await;
+    Ok(())
+}
+
 #[tauri::command]
 async fn list_recaps(state: tauri::State<'_, Db>) -> Result<Value, String> {
     let conn = state.0.lock().unwrap();
@@ -337,26 +495,32 @@ async fn chat(
     };
     if hits.is_empty() {
         return Ok(json!({
+            "kind": "answer",
             "answer": "I don't have any notes yet — log a few and ask again.",
             "sources": [],
         }));
     }
 
-    let context = pipeline::qa_context(&hits);
-    let mut messages = vec![json!({ "role": "system", "content": pipeline::qa_system(&today_local()) })];
-    for m in &history {
-        let role = if m.role == "assistant" { "assistant" } else { "user" };
-        messages.push(json!({ "role": role, "content": m.content }));
-    }
-    messages.push(json!({
-        "role": "user",
-        "content": format!("Entries:\n{context}\nQuestion: {question}")
-    }));
+    // Candidate entries (with row ids) + known category names, for the action router.
+    let (agent_ctx, valid_ids, known) = {
+        let conn = state.0.lock().unwrap();
+        let mut ctx = String::new();
+        let mut ids = HashSet::new();
+        for h in &hits {
+            for e in db::note_entries(&conn, h.note_id).map_err(|e| e.to_string())? {
+                ids.insert(e.entry_id);
+                ctx.push_str(&pipeline::agent_context(std::slice::from_ref(&e)));
+            }
+        }
+        let known: Vec<String> = db::list_categories(&conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        (ctx, ids, known)
+    };
 
-    let answer = ollama::chat_messages(ollama::TEXT_MODEL, messages, 0.2)
-        .await
-        .map_err(|e| e.to_string())?;
-
+    // sources block, shared by the answer + clarify paths
     let sources: Vec<Value> = hits
         .iter()
         .take(6)
@@ -370,7 +534,149 @@ async fn chat(
         })
         .collect();
 
-    Ok(json!({ "answer": answer.trim(), "sources": sources }))
+    // 1) Route the message: answer | create_category | edit_entry.
+    let mut convo = String::new();
+    for m in &history {
+        let role = if m.role == "assistant" { "assistant" } else { "user" };
+        convo.push_str(&format!("{role}: {}\n", m.content));
+    }
+    convo.push_str(&format!("user: {question}"));
+    let route_user = format!("Candidate entries:\n{agent_ctx}\nConversation:\n{convo}");
+    let routed = ollama::chat_json(
+        ollama::TEXT_MODEL,
+        &pipeline::route_system(&today_local()),
+        &route_user,
+        None,
+        Some(pipeline::agent_router_schema()),
+    )
+    .await
+    .ok();
+    let action = routed
+        .as_ref()
+        .and_then(|v| v.get("action"))
+        .and_then(|a| a.as_str())
+        .unwrap_or("answer");
+
+    // 2) Mutating actions return a PROPOSAL (no DB write) for the user to confirm.
+    if action == "create_category" {
+        if let Some(cat) = routed.as_ref().and_then(|v| v.get("category")) {
+            let raw = cat.get("name").and_then(|n| n.as_str()).unwrap_or("").trim();
+            if !raw.is_empty() {
+                let name = pipeline::snap_category(raw, &known);
+                let description = cat
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let already_exists = known.iter().any(|k| k == &name);
+                return Ok(json!({
+                    "kind": "proposal",
+                    "proposal": {
+                        "action": "create_category",
+                        "name": name,
+                        "description": description,
+                        "already_exists": already_exists,
+                    }
+                }));
+            }
+        }
+    } else if action == "edit_entry" {
+        if let Some(edit) = routed.as_ref().and_then(|v| v.get("edit")) {
+            let entry_id = edit.get("entry_id").and_then(|i| i.as_i64());
+            let data = edit.get("data").cloned();
+            if let (Some(eid), Some(data)) = (entry_id, data) {
+                if valid_ids.contains(&eid) && data.is_object() {
+                    let summary = edit
+                        .get("summary")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("update this entry")
+                        .to_string();
+                    return Ok(json!({
+                        "kind": "proposal",
+                        "proposal": {
+                            "action": "edit_entry",
+                            "entry_id": eid,
+                            "data": data,
+                            "summary": summary,
+                        }
+                    }));
+                }
+            }
+        }
+        // fall through to a normal answer if the edit target was invalid/ambiguous
+    }
+
+    // 3) Router chose answer but flagged ambiguity → ask the clarifying question.
+    if let Some(clarify) = routed
+        .as_ref()
+        .and_then(|v| v.get("clarify"))
+        .and_then(|c| c.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Ok(json!({ "kind": "answer", "answer": clarify, "sources": sources }));
+    }
+
+    // 4) Default: grounded free-text answer (unchanged behavior).
+    let context = pipeline::qa_context(&hits);
+    let mut messages = vec![json!({ "role": "system", "content": pipeline::qa_system(&today_local()) })];
+    for m in &history {
+        let role = if m.role == "assistant" { "assistant" } else { "user" };
+        messages.push(json!({ "role": role, "content": m.content }));
+    }
+    messages.push(json!({
+        "role": "user",
+        "content": format!("Entries:\n{context}\nQuestion: {question}")
+    }));
+    let answer = ollama::chat_messages(ollama::TEXT_MODEL, messages, 0.2)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(json!({ "kind": "answer", "answer": answer.trim(), "sources": sources }))
+}
+
+/// Create a new category by name — the chat agent's confirmed `create_category`
+/// action. Idempotent: returns the existing id if the name already exists.
+#[tauri::command]
+async fn create_category(
+    state: tauri::State<'_, Db>,
+    name: String,
+    description: String,
+) -> Result<i64, String> {
+    let name = name.trim().to_lowercase();
+    if name.is_empty() {
+        return Err("empty category name".into());
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = state.0.lock().unwrap();
+    db::create_category(&conn, &name, description.trim(), &now).map_err(|e| e.to_string())
+}
+
+/// Overwrite one entry's structured data — the chat agent's confirmed `edit_entry`
+/// action — then re-embed the affected note so semantic search reflects the fix.
+#[tauri::command]
+async fn update_entry(
+    state: tauri::State<'_, Db>,
+    entry_id: i64,
+    data: Value,
+) -> Result<i64, String> {
+    if !data.is_object() {
+        return Err("entry data must be an object".into());
+    }
+    let (note_id, text) = {
+        let conn = state.0.lock().unwrap();
+        let note_id = db::update_entry_data(&conn, entry_id, &data).map_err(|e| e.to_string())?;
+        let text = db::note_embed_text(&conn, note_id).map_err(|e| e.to_string())?;
+        (note_id, text)
+    };
+    // re-embed off-lock; insert_embedding REPLACEs the stale vector
+    if let Ok(v) = ollama::embed(&text).await {
+        let v = normalize(v);
+        let conn = state.0.lock().unwrap();
+        let _ = db::insert_embedding(&conn, note_id, &v);
+    }
+    Ok(note_id)
 }
 
 /// Speak text aloud via macOS `say` (free, on-device). Cancels any prior speech.
@@ -519,6 +825,49 @@ async fn transcribe(
         .map_err(|e| e.to_string())
 }
 
+/// Knowledge-graph entities, most-mentioned first (for the graph view + management).
+#[tauri::command]
+async fn list_entities(state: tauri::State<'_, Db>) -> Result<Value, String> {
+    let conn = state.0.lock().unwrap();
+    let ents = db::list_entities(&conn).map_err(|e| e.to_string())?;
+    serde_json::to_value(ents).map_err(|e| e.to_string())
+}
+
+/// Merge one entity into another (manual dedup). Reassigns mentions + aliases.
+#[tauri::command]
+async fn merge_entities(state: tauri::State<'_, Db>, keep: i64, drop: i64) -> Result<(), String> {
+    let mut conn = state.0.lock().unwrap();
+    db::merge_entities(&mut conn, keep, drop).map_err(|e| e.to_string())
+}
+
+/// The whole knowledge graph for the "Self" view: entity nodes + co-mention edges.
+#[tauri::command]
+async fn entity_graph(state: tauri::State<'_, Db>) -> Result<Value, String> {
+    let conn = state.0.lock().unwrap();
+    let nodes = db::list_entities(&conn).map_err(|e| e.to_string())?;
+    let edges = db::entity_edges(&conn).map_err(|e| e.to_string())?;
+    Ok(json!({
+        "nodes": serde_json::to_value(nodes).map_err(|e| e.to_string())?,
+        "edges": serde_json::to_value(edges).map_err(|e| e.to_string())?,
+    }))
+}
+
+/// The notes that mention one entity (for the graph's detail panel).
+#[tauri::command]
+async fn entity_detail(state: tauri::State<'_, Db>, entity_id: i64) -> Result<Value, String> {
+    let conn = state.0.lock().unwrap();
+    let rows = db::entity_detail(&conn, entity_id, 20).map_err(|e| e.to_string())?;
+    serde_json::to_value(rows).map_err(|e| e.to_string())
+}
+
+/// People view: every `person` entity with its dated, curated-fact mentions.
+#[tauri::command]
+async fn list_people(state: tauri::State<'_, Db>) -> Result<Value, String> {
+    let conn = state.0.lock().unwrap();
+    let people = db::person_profiles(&conn).map_err(|e| e.to_string())?;
+    serde_json::to_value(people).map_err(|e| e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // App setup
 // ---------------------------------------------------------------------------
@@ -552,6 +901,18 @@ pub fn run() {
                     port: 0,
                 });
             }
+
+            // Auto recaps: catch up missing completed-period recaps on launch, then
+            // re-check hourly so a day/week rolling over while open gets recapped.
+            let h = app.handle().clone();
+            tauri::async_runtime::spawn(async move { auto_backfill_recaps(&h).await });
+            let h2 = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+                let h3 = h2.clone();
+                tauri::async_runtime::spawn(async move { auto_backfill_recaps(&h3).await });
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -563,11 +924,14 @@ pub fn run() {
             list_notes,
             list_categories,
             chat,
+            create_category,
+            update_entry,
             speak,
             stop_speaking,
             reindex,
             category_trends,
             generate_recap,
+            backfill_recaps,
             list_recaps,
             export_db,
             phone_info,
@@ -575,6 +939,11 @@ pub fn run() {
             voice_status,
             download_voice_model,
             transcribe,
+            list_entities,
+            merge_entities,
+            entity_graph,
+            entity_detail,
+            list_people,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

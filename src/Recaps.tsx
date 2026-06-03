@@ -1,75 +1,84 @@
 import { useEffect, useState } from "react";
-import { api, type Recap, type RecapRow } from "./api";
+import { listen } from "@tauri-apps/api/event";
+import { RefreshCw } from "lucide-react";
+import { api, type RecapRow } from "./api";
 
 export function RecapsView() {
-  const [past, setPast] = useState<RecapRow[]>([]);
-  const [current, setCurrent] = useState<Recap | null>(null);
-  const [busy, setBusy] = useState<"day" | "week" | null>(null);
+  const [recaps, setRecaps] = useState<RecapRow[]>([]);
+  const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const refresh = () => api.listRecaps().then(setPast).catch((e) => setErr(String(e)));
+  const refresh = () => api.listRecaps().then(setRecaps).catch((e) => setErr(String(e)));
+
   useEffect(() => {
     refresh();
+    // auto-generated recaps notify us when they land
+    const un = listen("recap-generated", () => refresh());
+    return () => {
+      un.then((f) => f());
+    };
   }, []);
 
-  async function gen(period: "day" | "week") {
-    setBusy(period);
+  async function checkNow() {
+    setBusy(true);
     setErr(null);
-    setCurrent(null);
     try {
-      setCurrent(await api.generateRecap(period));
+      await api.backfillRecaps();
       await refresh();
     } catch (e) {
       setErr(String(e));
     } finally {
-      setBusy(null);
+      setBusy(false);
     }
   }
 
   return (
     <div className="recaps">
-      <div className="recap-actions">
-        <button className="primary" onClick={() => gen("day")} disabled={busy !== null}>
-          {busy === "day" ? "Writing…" : "Recap today"}
-        </button>
-        <button className="primary" onClick={() => gen("week")} disabled={busy !== null}>
-          {busy === "week" ? "Writing…" : "Recap past 7 days"}
+      <div className="recaps-head">
+        <p className="muted">Recaps write themselves at the end of each day and week.</p>
+        <button className="link" onClick={checkNow} disabled={busy}>
+          <RefreshCw size={13} /> {busy ? "checking…" : "Check now"}
         </button>
       </div>
 
       {err && <div className="error">{err}</div>}
 
-      {current && (
-        <article className="recap-card fresh">
+      {recaps.length === 0 && !busy && (
+        <p className="muted">
+          Nothing yet — once you&rsquo;ve logged a full day, yesterday&rsquo;s recap shows up here on its own.
+        </p>
+      )}
+
+      {recaps.map((r, i) => (
+        <article className={"recap-card" + (i === 0 ? " fresh" : "")} key={r.id}>
           <div className="recap-head">
-            <span className="recap-period">{label(current)}</span>
-            <span className="muted">{current.entry_count} entries</span>
+            <span className="recap-period">{label(r)}</span>
+            <span className="muted">{r.entry_count} entries</span>
           </div>
-          <p className="recap-text">{current.content}</p>
+          <p className="recap-text">{r.content}</p>
         </article>
-      )}
-
-      {past.length > 0 && <h2 className="recaps-h2">Past recaps</h2>}
-      {past
-        .filter((r) => !current || r.created_at !== undefined)
-        .map((r) => (
-          <article className="recap-card" key={r.id}>
-            <div className="recap-head">
-              <span className="recap-period">{label(r)}</span>
-              <span className="muted">{r.entry_count} entries</span>
-            </div>
-            <p className="recap-text">{r.content}</p>
-          </article>
-        ))}
-
-      {past.length === 0 && !current && (
-        <p className="muted">No recaps yet. Generate one above — it summarizes what you logged.</p>
-      )}
+      ))}
     </div>
   );
 }
 
-function label(r: { period: string; period_start: string; period_end: string }) {
-  if (r.period === "day") return r.period_end;
-  return `${r.period_start} → ${r.period_end}`;
+function fmt(dateStr: string, opts: Intl.DateTimeFormatOptions) {
+  return new Date(dateStr + "T00:00:00").toLocaleDateString(undefined, opts);
+}
+
+function relDay(dateStr: string): string {
+  const d = new Date(dateStr + "T00:00:00");
+  const t = new Date();
+  t.setHours(0, 0, 0, 0);
+  const diff = Math.round((t.getTime() - d.getTime()) / 86_400_000);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Yesterday";
+  return fmt(dateStr, { weekday: "long", month: "long", day: "numeric" });
+}
+
+function label(r: { period: string; period_start: string; period_end: string }): string {
+  if (r.period === "day") return relDay(r.period_end);
+  const s = fmt(r.period_start, { month: "short", day: "numeric" });
+  const e = fmt(r.period_end, { month: "short", day: "numeric" });
+  return `Week of ${s} – ${e}`;
 }

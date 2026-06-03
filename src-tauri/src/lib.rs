@@ -132,24 +132,30 @@ async fn save_image(
 }
 
 #[derive(Deserialize)]
+struct EntryArg {
+    category: String,
+    #[serde(default)]
+    description: String,
+    data: Value,
+}
+
+#[derive(Deserialize)]
 struct SaveArgs {
     raw_text: String,
     #[serde(default = "default_source")]
     source: String,
     image_path: Option<String>,
-    category: String,
-    #[serde(default)]
-    description: String,
     #[serde(default)]
     event_date: String,
-    data: Value,
+    entries: Vec<EntryArg>,
 }
 
 fn default_source() -> String {
     "text".to_string()
 }
 
-/// Commit a reviewed proposal: writes note + entry, creates/evolves the category.
+/// Commit a reviewed note: writes the note + one entry per category, creating/
+/// evolving each category. One embedding per note covers all its entries.
 #[tauri::command]
 async fn save_entry(state: tauri::State<'_, Db>, args: SaveArgs) -> Result<i64, String> {
     let now = chrono::Utc::now().to_rfc3339();
@@ -158,21 +164,39 @@ async fn save_entry(state: tauri::State<'_, Db>, args: SaveArgs) -> Result<i64, 
         let d = args.event_date.trim();
         if d.is_empty() { today_local() } else { d.to_string() }
     };
-    // Compose the text we'll embed for semantic search (category + note + data).
-    let embed_text = format!("{}\n{}\n{}", args.category, args.raw_text, args.data);
+    if args.entries.is_empty() {
+        return Err("no entries to save".into());
+    }
+    // Compose the text we'll embed for semantic search: the note plus every
+    // category name and every entry's data.
+    let mut embed_text = args.raw_text.clone();
+    for e in &args.entries {
+        embed_text.push('\n');
+        embed_text.push_str(&e.category);
+        embed_text.push('\n');
+        embed_text.push_str(&e.data.to_string());
+    }
+
+    let entries: Vec<db::EntryInput> = args
+        .entries
+        .into_iter()
+        .map(|e| db::EntryInput {
+            category: e.category.trim().to_lowercase(),
+            description: e.description,
+            data: e.data,
+        })
+        .collect();
 
     let note_id = {
         let mut conn = state.0.lock().unwrap();
-        db::save_entry(
+        db::save_note(
             &mut conn,
             SaveInput {
                 raw_text: args.raw_text,
                 source: args.source,
                 image_path: args.image_path,
-                category: args.category.trim().to_lowercase(),
-                description: args.description,
-                data: args.data,
                 event_date,
+                entries,
             },
             &now,
         )

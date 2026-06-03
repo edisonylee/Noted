@@ -12,17 +12,34 @@ import {
   YAxis,
 } from "recharts";
 import { api, type CategoryInfo, type Trends } from "./api";
+import type { Theme } from "./useTheme";
 
-// series palette anchored on Chartwell Blue, tuned for the light canvas
-const COLORS = ["#3ba6f1", "#6366f1", "#15a06a", "#c2710c", "#dc2626", "#0ea5e9", "#8b5cf6", "#d97706"];
+// muted series palette — blue accent leads, then earthy neutrals
+const COLORS_LIGHT = ["#3d79bd", "#46413a", "#3f7d5b", "#b8893f", "#5e7e86", "#9b8b6e", "#8a5a4a", "#7a6c84"];
+const COLORS_DARK = ["#5797df", "#b8b0a2", "#6fb78c", "#d6a45f", "#83a7af", "#c0b193", "#cc8576", "#a99bb8"];
 // metrics that usually make the most interesting default chart
 const PRIMARY_METRICS = ["weight", "hours", "duration_min", "minutes", "calories", "amount", "value", "count"];
 type Agg = "sum" | "max" | "avg";
 
-const axis = { stroke: "#78716c", fontSize: 11 };
-const tooltipStyle = { background: "#ffffff", border: "1px solid #e5e7eb", borderRadius: 8, color: "#0c0a09" };
+const CHART = {
+  light: {
+    colors: COLORS_LIGHT,
+    axis: { stroke: "#8c857a", fontSize: 11 },
+    grid: "#eee9e0",
+    bar: "#3d79bd",
+    tooltip: { background: "#ffffff", border: "1px solid #e9e5dd", borderRadius: 12, color: "#1b1916" },
+  },
+  dark: {
+    colors: COLORS_DARK,
+    axis: { stroke: "#a8a08f", fontSize: 11 },
+    grid: "#322e26",
+    bar: "#5797df",
+    tooltip: { background: "#211e18", border: "1px solid #423c31", borderRadius: 12, color: "#f3efe7" },
+  },
+} as const;
 
-export function TrendsView({ cats }: { cats: CategoryInfo[] }) {
+export function TrendsView({ cats, theme }: { cats: CategoryInfo[]; theme: Theme }) {
+  const c = CHART[theme];
   const [cat, setCat] = useState(cats[0]?.name ?? "");
   const [trends, setTrends] = useState<Trends | null>(null);
   const [metric, setMetric] = useState("");
@@ -125,17 +142,17 @@ export function TrendsView({ cats }: { cats: CategoryInfo[] }) {
           </div>
           <ResponsiveContainer width="100%" height={320}>
             <LineChart data={data} margin={{ top: 8, right: 18, bottom: 0, left: -8 }}>
-              <CartesianGrid stroke="#e5e7eb" strokeDasharray="3 3" />
-              <XAxis dataKey="date" {...axis} />
-              <YAxis {...axis} />
-              <Tooltip contentStyle={tooltipStyle} />
+              <CartesianGrid stroke={c.grid} strokeDasharray="3 3" />
+              <XAxis dataKey="date" {...c.axis} />
+              <YAxis {...c.axis} />
+              <Tooltip contentStyle={c.tooltip} />
               <Legend wrapperStyle={{ fontSize: 12 }} />
               {series.map((s, i) => (
                 <Line
                   key={s}
                   type="monotone"
                   dataKey={s}
-                  stroke={COLORS[i % COLORS.length]}
+                  stroke={c.colors[i % c.colors.length]}
                   strokeWidth={2}
                   dot={{ r: 3 }}
                   connectNulls
@@ -149,11 +166,11 @@ export function TrendsView({ cats }: { cats: CategoryInfo[] }) {
           <div className="chart-title">entries over time</div>
           <ResponsiveContainer width="100%" height={280}>
             <BarChart data={countData} margin={{ top: 8, right: 18, bottom: 0, left: -8 }}>
-              <CartesianGrid stroke="#e5e7eb" strokeDasharray="3 3" />
-              <XAxis dataKey="date" {...axis} />
-              <YAxis {...axis} allowDecimals={false} />
-              <Tooltip contentStyle={tooltipStyle} />
-              <Bar dataKey="count" fill="#3ba6f1" radius={[4, 4, 0, 0]} />
+              <CartesianGrid stroke={c.grid} strokeDasharray="3 3" />
+              <XAxis dataKey="date" {...c.axis} />
+              <YAxis {...c.axis} allowDecimals={false} />
+              <Tooltip contentStyle={c.tooltip} />
+              <Bar dataKey="count" fill={c.bar} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
           {trends.metrics.length === 0 && (

@@ -19,12 +19,13 @@ async fn reads_handwritten_photo() {
         .expect("vision pipeline returns a proposal");
 
     let raw = p["raw_text"].as_str().unwrap_or("");
+    let e = &p["entries"][0];
     println!("--- transcription ---\n{raw}");
-    println!("--- category: {} ---", p["category"]);
-    println!("--- data ---\n{}", serde_json::to_string_pretty(&p["data"]).unwrap());
+    println!("--- category: {} ---", e["category"]);
+    println!("--- data ---\n{}", serde_json::to_string_pretty(&e["data"]).unwrap());
 
-    assert_eq!(p["is_new_category"], serde_json::json!(true));
-    assert!(p["data"].is_object(), "data is an object");
+    assert_eq!(e["is_new_category"], serde_json::json!(true));
+    assert!(e["data"].is_object(), "data is an object");
 
     // The note is dated "6/2"; with today=2026-06-15 it must resolve to 2026-06-02.
     println!("event_date: {} (extracted={})", p["event_date"], p["date_was_extracted"]);
@@ -36,7 +37,7 @@ async fn reads_handwritten_photo() {
     assert_eq!(p["date_was_extracted"], serde_json::json!(true));
 
     // The model should have read the workout off the image.
-    let blob = format!("{} {}", raw.to_lowercase(), p["data"].to_string().to_lowercase());
+    let blob = format!("{} {}", raw.to_lowercase(), e["data"].to_string().to_lowercase());
     assert!(blob.contains("squat"), "should read 'squat'; got: {blob}");
     assert!(blob.contains("225"), "should read the 225 weight; got: {blob}");
 }

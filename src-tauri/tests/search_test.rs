@@ -29,16 +29,18 @@ async fn embeds_and_retrieves_relevant_note() {
          json!({"blocks":[{"task":"coding","hours":3}]})),
     ];
     for (i, (cat, text, data)) in notes.iter().enumerate() {
-        db::save_entry(
+        db::save_note(
             &mut conn,
             SaveInput {
                 raw_text: text.to_string(),
                 source: "text".into(),
                 image_path: None,
-                category: cat.to_string(),
-                description: String::new(),
-                data: data.clone(),
                 event_date: "2026-06-10".into(),
+                entries: vec![db::EntryInput {
+                    category: cat.to_string(),
+                    description: String::new(),
+                    data: data.clone(),
+                }],
             },
             "2026-06-10T00:00:00Z",
         )

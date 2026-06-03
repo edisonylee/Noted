@@ -19,11 +19,12 @@ async fn food_note_makes_a_new_category() {
     )
     .await
     .unwrap();
-    let cat = p["category"].as_str().unwrap();
-    println!("food -> {cat} | data {}", p["data"]);
+    let e = &p["entries"][0];
+    let cat = e["category"].as_str().unwrap();
+    println!("food -> {cat} | data {}", e["data"]);
     assert_ne!(cat, "gym", "a meal must not be filed under gym");
     assert_ne!(cat, "schedule");
-    assert_eq!(p["is_new_category"], serde_json::json!(true));
+    assert_eq!(e["is_new_category"], serde_json::json!(true));
 }
 
 #[tokio::test]
@@ -36,10 +37,11 @@ async fn gym_note_reused_with_feeling_captured() {
     )
     .await
     .unwrap();
-    println!("gym -> {} | data {}", p["category"], p["data"]);
-    assert_eq!(p["category"], serde_json::json!("gym"));
-    assert_eq!(p["is_new_category"], serde_json::json!(false));
-    let blob = p["data"].to_string().to_lowercase();
+    let e = &p["entries"][0];
+    println!("gym -> {} | data {}", e["category"], e["data"]);
+    assert_eq!(e["category"], serde_json::json!("gym"));
+    assert_eq!(e["is_new_category"], serde_json::json!(false));
+    let blob = e["data"].to_string().to_lowercase();
     assert!(
         blob.contains("mood") || blob.contains("strong") || blob.contains("energ"),
         "the feeling should be captured in data: {blob}"
@@ -56,9 +58,10 @@ async fn feeling_note_is_not_gym_or_schedule() {
     )
     .await
     .unwrap();
-    let cat = p["category"].as_str().unwrap();
-    let blob = format!("{}{}", cat, p["data"]).to_lowercase();
-    println!("feeling -> {cat} | data {}", p["data"]);
+    let e = &p["entries"][0];
+    let cat = e["category"].as_str().unwrap();
+    let blob = format!("{}{}", cat, e["data"]).to_lowercase();
+    println!("feeling -> {cat} | data {}", e["data"]);
     assert_ne!(cat, "gym");
     assert_ne!(cat, "schedule");
     assert!(blob.contains("mood") || blob.contains("anx") || blob.contains("feel"), "mood captured: {blob}");

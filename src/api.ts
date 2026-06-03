@@ -1,21 +1,30 @@
 import { invoke } from "@tauri-apps/api/core";
 
+// One extracted observation within a note (a category + its structured data).
 export type Proposal = {
   category: string;
   is_new_category: boolean;
   description: string;
+  routed_by?: "header" | "classifier"; // how the category was decided
   data: Record<string, unknown>;
+};
+
+// What categorize/categorizePhoto return: the note-level envelope wrapping one
+// or more entries (a single note can fill several categories).
+export type Envelope = {
+  raw_text?: string; // original text, or the transcription on the photo path
   event_date: string; // canonical day (YYYY-MM-DD), extracted or defaulted to today
   date_was_extracted?: boolean; // true if read from the note, false if defaulted
-  raw_text?: string; // present on the photo path (the transcription)
+  entries: Proposal[];
 };
+
+export type NoteEntry = { category: string | null; data: Record<string, unknown> | null };
 
 export type NoteRow = {
   id: number;
   raw_text: string;
   source: string;
-  category: string | null;
-  data: Record<string, unknown> | null;
+  entries: NoteEntry[];
   event_date: string;
   created_at: string;
 };
@@ -60,19 +69,17 @@ export type Trends = {
 
 export const api = {
   health: () => invoke<Health>("health"),
-  categorize: (text: string) => invoke<Proposal>("categorize_note", { text }),
+  categorize: (text: string) => invoke<Envelope>("categorize_note", { text }),
   categorizePhoto: (imageBase64: string) =>
-    invoke<Proposal>("categorize_photo", { imageBase64 }),
+    invoke<Envelope>("categorize_photo", { imageBase64 }),
   saveImage: (imageBase64: string, ext: string) =>
     invoke<string>("save_image", { imageBase64, ext }),
   save: (args: {
     raw_text: string;
     source?: string;
     image_path?: string | null;
-    category: string;
-    description?: string;
     event_date: string;
-    data: Record<string, unknown>;
+    entries: { category: string; description?: string; data: Record<string, unknown> }[];
   }) => invoke<number>("save_entry", { args }),
   listNotes: () => invoke<NoteRow[]>("list_notes"),
   listCategories: () => invoke<CategoryInfo[]>("list_categories"),

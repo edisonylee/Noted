@@ -1,17 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { Camera, Check, Download, Mic, Moon, Smartphone, Square, Sun } from "lucide-react";
 import { startRecording, type Recorder } from "./audio";
-import { api, type AskSource, type CategoryInfo, type Health, type NoteRow, type Proposal } from "./api";
+import { useTheme } from "./useTheme";
+import { api, type CategoryInfo, type Envelope, type Health, type NoteRow } from "./api";
 import { DataView } from "./DataView";
 import { TrendsView } from "./Trends";
 import { RecapsView } from "./Recaps";
+import { TimelineView } from "./Timeline";
 import { PhonePanel } from "./PhonePanel";
+import { FloatingChat } from "./FloatingChat";
 import "./App.css";
 
 type Phase = "idle" | "thinking" | "review";
-type View = "log" | "trends" | "recaps";
+type View = "log" | "timeline" | "trends" | "recaps";
 type Source = "text" | "photo";
 type Img = { base64: string; ext: string; dataUrl: string };
+// One editable review card per extracted entry.
+type ReviewCard = {
+  catName: string;
+  dataText: string;
+  description: string;
+  routedBy?: "header" | "classifier";
+};
 
 async function fileToImg(file: File): Promise<Img> {
   const dataUrl: string = await new Promise((res, rej) => {
@@ -27,6 +38,7 @@ async function fileToImg(file: File): Promise<Img> {
 }
 
 export default function App() {
+  const { theme, toggle } = useTheme();
   const [view, setView] = useState<View>("log");
   const [text, setText] = useState("");
   const [img, setImg] = useState<Img | null>(null);
@@ -36,29 +48,20 @@ export default function App() {
   const [dragOver, setDragOver] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  // review state (editable proposal)
-  const [proposal, setProposal] = useState<Proposal | null>(null);
-  const [catName, setCatName] = useState("");
-  const [dataText, setDataText] = useState("");
+  // review state: one editable card per extracted entry, plus note-level fields
+  const [cards, setCards] = useState<ReviewCard[]>([]);
   const [ocrText, setOcrText] = useState(""); // editable transcription (photo path)
   const [eventDate, setEventDate] = useState(""); // canonical day, editable
+  const [dateWasExtracted, setDateWasExtracted] = useState(false);
 
   const [notes, setNotes] = useState<NoteRow[]>([]);
   const [cats, setCats] = useState<CategoryInfo[]>([]);
   const [health, setHealth] = useState<Health | null>(null);
 
-  // Ask my notes — conversational voice assistant
-  type ChatMessage = { role: "user" | "assistant"; content: string; sources?: AskSource[] };
-  const [askQ, setAskQ] = useState("");
-  const [asking, setAsking] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [muted, setMuted] = useState(false);
-  const [chatRecording, setChatRecording] = useState(false);
-  const chatRecorderRef = useRef<Recorder | null>(null);
-
   // Phone capture + backup
   const [showPhone, setShowPhone] = useState(false);
   const [backupMsg, setBackupMsg] = useState<string | null>(null);
+  const [savedMsg, setSavedMsg] = useState<string | null>(null);
 
   // Voice (speech-to-text)
   const [voiceReady, setVoiceReady] = useState<boolean | null>(null);
@@ -125,64 +128,6 @@ export default function App() {
     }
   }
 
-  async function sendMessage(q: string) {
-    const question = q.trim();
-    if (!question || asking) return;
-    setError(null);
-    setAskQ("");
-    const history = messages.map((m) => ({ role: m.role, content: m.content }));
-    setMessages((prev) => [...prev, { role: "user", content: question }]);
-    setAsking(true);
-    try {
-      const res = await api.chat(question, history);
-      setMessages((prev) => [...prev, { role: "assistant", content: res.answer, sources: res.sources }]);
-      if (!muted) api.speak(res.answer).catch(() => {});
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setAsking(false);
-    }
-  }
-
-  // Ask by voice: record -> transcribe -> send as the next turn.
-  async function onChatMic() {
-    setError(null);
-    if (!(await ensureVoice())) return;
-    if (chatRecording) {
-      setChatRecording(false);
-      setAsking(true);
-      try {
-        const { b64, sampleRate } = await chatRecorderRef.current!.stop();
-        const q = await api.transcribe(b64, sampleRate);
-        setAsking(false);
-        if (q) await sendMessage(q);
-      } catch (e) {
-        setError(`voice question failed: ${e}`);
-        setAsking(false);
-      } finally {
-        chatRecorderRef.current = null;
-      }
-    } else {
-      try {
-        chatRecorderRef.current = await startRecording();
-        setChatRecording(true);
-      } catch (e) {
-        setError(`couldn't access the microphone: ${e}`);
-      }
-    }
-  }
-
-  function toggleMute() {
-    setMuted((m) => {
-      if (!m) api.stopSpeaking().catch(() => {});
-      return !m;
-    });
-  }
-
-  function clearChat() {
-    setMessages([]);
-    api.stopSpeaking().catch(() => {});
-  }
 
   // paste an image straight from the clipboard (screenshots etc.)
   useEffect(() => {
@@ -200,13 +145,26 @@ export default function App() {
     return () => window.removeEventListener("paste", onPaste);
   }, []);
 
-  const dataParse = useMemo(() => {
-    try {
-      return { ok: true as const, value: JSON.parse(dataText || "{}") };
-    } catch (e) {
-      return { ok: false as const, err: (e as Error).message };
-    }
-  }, [dataText]);
+  const cardParses = useMemo(
+    () =>
+      cards.map((c) => {
+        try {
+          return { ok: true as const, value: JSON.parse(c.dataText || "{}") };
+        } catch (e) {
+          return { ok: false as const, err: (e as Error).message };
+        }
+      }),
+    [cards]
+  );
+  const allValid = cardParses.every((p) => p.ok);
+
+  const updateCard = (i: number, patch: Partial<ReviewCard>) =>
+    setCards((cs) => cs.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
+  const discardCard = (i: number) => {
+    const next = cards.filter((_, idx) => idx !== i);
+    if (next.length === 0) resetAll();
+    else setCards(next);
+  };
 
   async function pickFile(file?: File | null) {
     if (!file) return;
@@ -214,12 +172,18 @@ export default function App() {
     setImg(await fileToImg(file));
   }
 
-  function enterReview(p: Proposal, src: Source) {
-    setProposal(p);
-    setCatName(p.category);
-    setDataText(JSON.stringify(p.data, null, 2));
-    setOcrText(p.raw_text ?? "");
-    setEventDate(p.event_date ?? "");
+  function enterReview(env: Envelope, src: Source) {
+    setCards(
+      env.entries.map((e) => ({
+        catName: e.category,
+        dataText: JSON.stringify(e.data, null, 2),
+        description: e.description,
+        routedBy: e.routed_by,
+      }))
+    );
+    setOcrText(env.raw_text ?? "");
+    setEventDate(env.event_date ?? "");
+    setDateWasExtracted(!!env.date_was_extracted);
     setSource(src);
     setPhase("review");
   }
@@ -279,24 +243,30 @@ export default function App() {
   }
 
   async function onSave() {
-    if (!proposal || !dataParse.ok) return;
+    if (!cards.length || !allValid) return;
     setError(null);
     try {
       let image_path: string | null = null;
       if (source === "photo" && img) {
         image_path = await api.saveImage(img.base64, img.ext);
       }
+      const entries = cards.map((c, i) => ({
+        category: c.catName.trim().toLowerCase(),
+        description: c.description,
+        data: (cardParses[i] as { ok: true; value: Record<string, unknown> }).value,
+      }));
       await api.save({
         raw_text: source === "photo" ? ocrText : text.trim(),
         source,
         image_path,
-        category: catName.trim().toLowerCase(),
-        description: proposal.description,
         event_date: eventDate,
-        data: dataParse.value,
+        entries,
       });
+      const savedCats = Array.from(new Set(entries.map((e) => e.category))).join(", ");
       resetAll();
       await refresh();
+      setSavedMsg(savedCats);
+      setTimeout(() => setSavedMsg(null), 4000);
     } catch (e) {
       setError(String(e));
     }
@@ -306,16 +276,13 @@ export default function App() {
     setText("");
     setImg(null);
     setSource("text");
-    setProposal(null);
-    setDataText("");
+    setCards([]);
     setOcrText("");
     setEventDate("");
-    setCatName("");
+    setDateWasExtracted(false);
     setPhase("idle");
   }
 
-  const knownCat = cats.find((c) => c.name === catName.trim().toLowerCase());
-  const willCreate = !knownCat;
   const busy = phase === "thinking";
 
   return (
@@ -328,6 +295,9 @@ export default function App() {
           <button className={view === "log" ? "on" : ""} onClick={() => setView("log")}>
             Log
           </button>
+          <button className={view === "timeline" ? "on" : ""} onClick={() => setView("timeline")}>
+            Timeline
+          </button>
           <button className={view === "trends" ? "on" : ""} onClick={() => setView("trends")}>
             Trends
           </button>
@@ -335,9 +305,7 @@ export default function App() {
             Recaps
           </button>
         </nav>
-        <button className="phone-btn" onClick={() => setShowPhone(true)} title="Capture from your phone">
-          📱
-        </button>
+        <span className="spacer" />
         <div className="cats">
           {cats.map((c) => (
             <span className="chip" key={c.id} title={c.description}>
@@ -346,13 +314,26 @@ export default function App() {
             </span>
           ))}
         </div>
+        <button
+          className="icon-btn"
+          onClick={toggle}
+          title={theme === "dark" ? "Switch to light" : "Switch to dark"}
+          aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+        >
+          {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+        </button>
+        <button className="icon-btn" onClick={() => setShowPhone(true)} title="Capture from your phone">
+          <Smartphone size={18} />
+        </button>
       </header>
 
       <main className="content">
         {view === "trends" ? (
-          <TrendsView cats={cats} />
+          <TrendsView cats={cats} theme={theme} />
         ) : view === "recaps" ? (
           <RecapsView />
+        ) : view === "timeline" ? (
+          <TimelineView notes={notes} />
         ) : (
         <>
         <section
@@ -401,31 +382,32 @@ export default function App() {
           <div className="capture-actions">
             {!img && (
               <button className="ghost" onClick={() => fileInput.current?.click()} disabled={busy}>
-                📷 Photo
+                <Camera size={15} /> Photo
               </button>
             )}
             {!img && (
               <button
-                className={"ghost mic" + (recording ? " recording" : "")}
+                className={"ghost" + (recording ? " recording" : "")}
                 onClick={onMic}
                 disabled={busy || transcribing || dlModel}
                 title="Talk through your day"
               >
+                {recording ? <Square size={14} strokeWidth={2.5} /> : <Mic size={15} />}
                 {dlModel
-                  ? "Downloading voice…"
+                  ? "Downloading…"
                   : transcribing
                     ? "Transcribing…"
                     : recording
-                      ? "⏹ Stop"
+                      ? "Stop"
                       : voiceReady === false
-                        ? "🎙 Enable voice"
-                        : "🎙 Speak"}
+                        ? "Enable voice"
+                        : "Speak"}
               </button>
             )}
-            <span className="hint">{img ? "check the transcription on the next step" : "⌘↵ to file it"}</span>
+            <span className="hint">{img ? "review the transcription next" : "⌘↵ to file"}</span>
             {img ? (
               <button className="primary" onClick={onCategorizePhoto} disabled={busy}>
-                {busy ? "Reading photo…" : "Read photo"}
+                {busy ? "Reading…" : "Read photo"}
               </button>
             ) : (
               <button className="primary" onClick={onCategorizeText} disabled={busy || !text.trim()}>
@@ -437,26 +419,19 @@ export default function App() {
 
         {error && <div className="error">{error}</div>}
 
-        {phase === "review" && proposal && (
+        {phase === "review" && cards.length > 0 && (
           <section className="review">
             <div className="review-head">
-              <div className="cat-edit">
-                <label>Category</label>
-                <input value={catName} onChange={(e) => setCatName(e.target.value)} />
-                {willCreate ? (
-                  <span className="badge new">new category</span>
-                ) : (
-                  <span className="badge existing">{knownCat?.entry_count} existing</span>
-                )}
-              </div>
               <div className="cat-edit date-edit">
                 <label>Date</label>
                 <input type="date" value={eventDate} onChange={(e) => setEventDate(e.target.value)} />
-                <span className={"badge " + (proposal.date_was_extracted ? "existing" : "new")}>
-                  {proposal.date_was_extracted ? "from note" : "today"}
+                <span className={"badge " + (dateWasExtracted ? "existing" : "new")}>
+                  {dateWasExtracted ? "from note" : "today"}
                 </span>
               </div>
-              {proposal.description && <p className="desc">{proposal.description}</p>}
+              <span className="review-count">
+                {cards.length} {cards.length === 1 ? "entry" : "entries"} from this note
+              </span>
             </div>
 
             {source === "photo" && (
@@ -469,135 +444,103 @@ export default function App() {
               </div>
             )}
 
-            <div className="review-body">
-              <div className="pane">
-                <label>Extracted data {dataParse.ok ? "" : "⚠︎ invalid JSON"}</label>
-                <textarea
-                  className={"json " + (dataParse.ok ? "" : "bad")}
-                  value={dataText}
-                  onChange={(e) => setDataText(e.target.value)}
-                  spellCheck={false}
-                />
-              </div>
-              <div className="pane preview">
-                <label>Preview</label>
-                <div className="preview-box">
-                  {dataParse.ok ? <DataView value={dataParse.value} /> : <span className="muted">fix JSON to preview</span>}
-                </div>
-              </div>
+            <div className="review-cards">
+              {cards.map((card, i) => {
+                const known = cats.find((c) => c.name === card.catName.trim().toLowerCase());
+                const parse = cardParses[i];
+                return (
+                  <div className="entry-card" key={i}>
+                    <div className="entry-head">
+                      <div className="cat-edit">
+                        <label>Category</label>
+                        <input
+                          value={card.catName}
+                          onChange={(e) => updateCard(i, { catName: e.target.value })}
+                        />
+                        {known ? (
+                          <span className="badge existing">{known.entry_count} existing</span>
+                        ) : (
+                          <span className="badge new">new category</span>
+                        )}
+                        {card.routedBy === "header" && (
+                          <span className="badge routed" title="You tagged this section with a header">
+                            tagged
+                          </span>
+                        )}
+                      </div>
+                      {cards.length > 1 && (
+                        <button className="link" onClick={() => discardCard(i)}>
+                          discard
+                        </button>
+                      )}
+                    </div>
+                    {card.description && <p className="desc">{card.description}</p>}
+
+                    <div className="review-body">
+                      <div className="pane">
+                        <label>Extracted data {parse.ok ? "" : "⚠︎ invalid JSON"}</label>
+                        <textarea
+                          className={"json " + (parse.ok ? "" : "bad")}
+                          value={card.dataText}
+                          onChange={(e) => updateCard(i, { dataText: e.target.value })}
+                          spellCheck={false}
+                        />
+                      </div>
+                      <div className="pane preview">
+                        <label>Preview</label>
+                        <div className="preview-box">
+                          {parse.ok ? (
+                            <DataView value={parse.value} />
+                          ) : (
+                            <span className="muted">fix JSON to preview</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
 
             <div className="review-actions">
-              <button onClick={resetAll}>Discard</button>
-              <button className="primary" onClick={onSave} disabled={!dataParse.ok}>
-                Save to {catName.trim().toLowerCase() || "…"}
+              <button onClick={resetAll}>Discard all</button>
+              <button className="primary" onClick={onSave} disabled={!allValid}>
+                {cards.length > 1
+                  ? `Save ${cards.length} entries`
+                  : `Save to ${cards[0].catName.trim().toLowerCase() || "…"}`}
               </button>
             </div>
           </section>
         )}
 
-        <section className="ask chat">
-          {(messages.length > 0 || asking) && (
-            <div className="chat-thread">
-              {messages.map((m, i) => (
-                <div className={"bubble " + m.role} key={i}>
-                  <p>{m.content}</p>
-                  {m.sources && m.sources.length > 0 && (
-                    <div className="sources">
-                      {m.sources.slice(0, 4).map((s) => (
-                        <span className="source-chip" key={s.note_id} title={s.snippet}>
-                          {s.category ?? "note"} · {s.event_date}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-              {asking && !chatRecording && (
-                <div className="bubble assistant">
-                  <p className="muted">thinking…</p>
-                </div>
-              )}
-            </div>
-          )}
-          <div className="ask-bar">
-            <input
-              value={askQ}
-              placeholder="Ask about your day — “what was my last workout?”, “what did I do yesterday?”"
-              onChange={(e) => setAskQ(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") sendMessage(askQ);
-              }}
-              disabled={asking}
-            />
-            <button
-              className={"ghost mic" + (chatRecording ? " recording" : "")}
-              onClick={onChatMic}
-              disabled={asking && !chatRecording}
-              title="Ask by voice"
-            >
-              {dlModel ? "…" : chatRecording ? "⏹" : "🎙"}
-            </button>
-            <button className="primary" onClick={() => sendMessage(askQ)} disabled={asking || !askQ.trim()}>
-              {asking ? "…" : "Ask"}
-            </button>
-          </div>
-          <div className="chat-tools">
-            <button className="link" onClick={toggleMute} title="Speak answers aloud">
-              {muted ? "🔇 muted" : "🔊 voice on"}
-            </button>
-            {messages.length > 0 && (
-              <button className="link" onClick={clearChat}>
-                clear
-              </button>
-            )}
-          </div>
-        </section>
-
-        <section className="timeline">
-          <h2>Timeline</h2>
-          {notes.length === 0 && <p className="muted">Nothing yet. File your first note above.</p>}
-          {notes.map((n) => (
-            <article className="note" key={n.id}>
-              <div className="note-meta">
-                <span className="note-cat">{n.category ?? "uncategorized"}</span>
-                {n.source === "photo" && <span className="src-tag">📷 photo</span>}
-                <time title={`logged ${new Date(n.created_at).toLocaleString()}`}>
-                  {new Date(n.event_date + "T00:00:00").toLocaleDateString(undefined, {
-                    weekday: "short",
-                    month: "short",
-                    day: "numeric",
-                    year: "numeric",
-                  })}
-                </time>
-              </div>
-              {n.data && <DataView value={n.data} />}
-              <details className="raw">
-                <summary>raw note</summary>
-                <pre>{n.raw_text}</pre>
-              </details>
-            </article>
-          ))}
-        </section>
+        {savedMsg && (
+          <button className="saved-toast" onClick={() => setView("timeline")}>
+            <Check size={15} /> Filed under <strong>{savedMsg}</strong> · view timeline
+          </button>
+        )}
         </>
         )}
       </main>
 
       <footer className="status">
-        <span>
+        <span className="meta">
+          <span className="live-dot" />
           {health
-            ? `sqlite-vec ${health.vec_version} · ${health.models.length} models · ${
+            ? `${health.models.length} local models · ${
                 health.models.some((m) => m.startsWith("qwen2.5vl")) ? "vision ready" : "no vision model"
               }`
             : "connecting to local models…"}
         </span>
-        <button className="link" onClick={onBackup}>
-          ⤓ Back up
-        </button>
-        {backupMsg && <span className="backup-msg">{backupMsg}</span>}
+        <span className="meta">
+          {backupMsg && <span className="backup-msg">{backupMsg}</span>}
+          <button className="link" onClick={onBackup}>
+            <Download size={14} /> Back up
+          </button>
+        </span>
       </footer>
 
       {showPhone && <PhonePanel onClose={() => setShowPhone(false)} />}
+      <FloatingChat />
     </div>
   );
 }

@@ -1,6 +1,12 @@
 // The categorize/extract pipeline, factored out of the Tauri command so it can
 // be tested headlessly against the real Ollama server. The command in lib.rs is
 // a thin wrapper that supplies DB-derived catalog + known category names.
+//
+// A note is split into sections (PROTOCOL.md §2): a `Section header:` routes its
+// section to a category deterministically (the model only extracts data), while
+// untagged prose is classified. Each section becomes one entry, so a single note
+// can fill several categories. The result is the envelope:
+//   { raw_text, event_date, date_was_extracted, entries: [ {category, ...} ] }
 
 use anyhow::{anyhow, Result};
 use chrono::{Datelike, NaiveDate};
@@ -14,10 +20,14 @@ pub fn qa_system(today: &str) -> String {
     format!(
         "You are the user's personal assistant, answering questions about their own life log. \
 Today is {today}. You are given the user's recent and most-relevant entries, each tagged with its \
-DATE and CATEGORY. Answer using ONLY these entries. Resolve relative dates yourself (\"yesterday\" \
-is the day before today; \"last workout\" is the most recent entry in a workout/gym category; etc.) \
-and prefer the most recent matching entry. Be concise and specific — cite the date and the concrete \
-numbers from the entry. If the entries don't contain the answer, say you don't have that logged."
+DATE (YYYY-MM-DD) and CATEGORY. Answer using ONLY these entries.\n\
+- Resolve relative dates yourself: \"yesterday\" is the day before today; \"last workout\" is the \
+most recent entry in a gym/workout category; prefer the most recent matching entry.\n\
+- Talk about dates the way a person would: say the month and day like \"June 1st\" — NEVER output \
+an ISO date like 2026-06-01, and omit the year unless it is a different year than today. If a date \
+is today or the day before today, say \"today\" or \"yesterday\" instead of the date.\n\
+- Be concise and specific; cite the concrete numbers. If the entries don't contain the answer, \
+say you don't have that logged."
     )
 }
 
@@ -72,9 +82,6 @@ pub fn extract_date_from_text(text: &str, today: &str) -> Option<String> {
     Some(cand.to_string())
 }
 
-/// Normalize the model's date guess. Returns (YYYY-MM-DD, was_extracted).
-/// A valid ISO date from the note is kept; anything missing/unparseable falls
-/// back to `today` (so every entry is always dated).
 /// Snap a model-returned category onto an existing one when it's really the same
 /// (the model sometimes echoes the description, e.g. "gym: workout logs" -> "gym",
 /// or pluralizes). Otherwise returns the cleaned name as a genuinely new category.
@@ -100,6 +107,8 @@ pub fn snap_category(raw: &str, known: &[String]) -> String {
     head
 }
 
+/// Normalize the model's date guess. Returns (YYYY-MM-DD, was_extracted).
+/// A valid ISO date is kept; anything missing/unparseable yields (today, false).
 pub fn resolve_date(raw: Option<&str>, today: &str) -> (String, bool) {
     if let Some(s) = raw {
         let s = s.trim();
@@ -113,179 +122,285 @@ pub fn resolve_date(raw: Option<&str>, today: &str) -> (String, bool) {
     (today.to_string(), false)
 }
 
-/// JSON-schema for the routing reply. Constraining decoding to this shape both
-/// prevents degenerate-JSON loops and keeps the top-level keys reliable, while
-/// `data` stays a permissive object so emergent structure is unconstrained.
-fn routing_schema(with_raw_text: bool) -> Value {
-    let mut props = json!({
-        "category": { "type": "string" },
-        "is_new_category": { "type": "boolean" },
-        "description": { "type": "string" },
-        "event_date": { "type": ["string", "null"] },
-        "data": { "type": "object" }
-    });
-    let mut required = vec!["category", "is_new_category", "data"];
-    if with_raw_text {
-        props["raw_text"] = json!({ "type": "string" });
-        required.insert(0, "raw_text");
-    }
-    json!({ "type": "object", "properties": props, "required": required })
+/// JSON-schema for a single segment's extraction reply. Constraining decoding to
+/// this shape prevents degenerate-JSON loops and keeps the top-level keys
+/// reliable, while `data` stays a permissive object so emergent structure is
+/// unconstrained.
+fn routing_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "category": { "type": "string" },
+            "is_new_category": { "type": "boolean" },
+            "description": { "type": "string" },
+            "event_date": { "type": ["string", "null"] },
+            "data": { "type": "object" }
+        },
+        "required": ["category", "is_new_category", "data"]
+    })
 }
 
-/// Run a messy note through the local text model and return a normalized
-/// proposal: { category, is_new_category, description, data }.
-/// `is_new_category` is decided authoritatively from `known_names`, not the model.
+// ---------------------------------------------------------------------------
+// Section splitting (deterministic, runs before any LLM call).
+// ---------------------------------------------------------------------------
+
+/// A note segment: an explicitly header-tagged section (`hint = Some(label)`) or
+/// untagged prose (`hint = None`). `body` is the text that belongs to it.
+pub struct Segment {
+    pub hint: Option<String>,
+    pub body: String,
+}
+
+/// Labels that look like headers but never route a category (avoid false
+/// positives like "Note:" / "TODO:").
+const HEADER_STOPLIST: &[&str] = &[
+    "note", "notes", "todo", "ps", "today", "tomorrow", "yesterday", "am", "pm", "re", "update",
+];
+
+/// Split a note on `Section header:` lines (PROTOCOL.md §2). A header is a short
+/// line (<=3 alphabetic words) ending in a separator (`:` / `—` / trailing `-`)
+/// or a leading markdown `#`; text on the header line after the separator, plus
+/// every line until the next header, is that section's body. Text before the
+/// first header is an untagged segment. Always returns >= 1 segment.
+pub fn split_sections(text: &str) -> Vec<Segment> {
+    fn flush(hint: Option<String>, body: &str, out: &mut Vec<Segment>) {
+        if !body.trim().is_empty() {
+            out.push(Segment { hint, body: body.trim().to_string() });
+        }
+    }
+
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut hint: Option<String> = None;
+    let mut body = String::new();
+
+    for line in text.lines() {
+        if let Some((label, inline)) = parse_header(line) {
+            flush(hint.take(), &body, &mut segments);
+            body = String::new();
+            hint = Some(label);
+            if !inline.trim().is_empty() {
+                body.push_str(inline.trim());
+                body.push('\n');
+            }
+        } else {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    flush(hint.take(), &body, &mut segments);
+
+    if segments.is_empty() {
+        segments.push(Segment { hint: None, body: text.trim().to_string() });
+    }
+    segments
+}
+
+/// Recognize a section-header line; returns (lowercased label, inline remainder).
+fn parse_header(line: &str) -> Option<(String, String)> {
+    let t = line.trim();
+    if t.is_empty() {
+        return None;
+    }
+    // markdown heading: "## Work"
+    if let Some(rest) = t.strip_prefix('#') {
+        return header_label(rest.trim_start_matches('#').trim()).map(|l| (l, String::new()));
+    }
+    // "Label:" / "Label —" — split on the first separator; body may follow on-line.
+    for sep in [":", "—"] {
+        if let Some(idx) = t.find(sep) {
+            if let Some(label) = header_label(&t[..idx]) {
+                return Some((label, t[idx + sep.len()..].trim().to_string()));
+            }
+        }
+    }
+    // trailing hyphen / en-dash header: "Schedule -", "Gym –"
+    if let Some(head) = t.strip_suffix('-').or_else(|| t.strip_suffix('–')) {
+        if let Some(label) = header_label(head.trim()) {
+            return Some((label, String::new()));
+        }
+    }
+    None
+}
+
+/// Validate a header label: 1-3 alphabetic words, not in the stoplist.
+fn header_label(s: &str) -> Option<String> {
+    let s = s.trim();
+    let words: Vec<&str> = s.split_whitespace().collect();
+    if words.is_empty() || words.len() > 3 {
+        return None;
+    }
+    if !words.iter().all(|w| w.chars().all(|c| c.is_alphabetic())) {
+        return None;
+    }
+    let label = s.to_lowercase();
+    if HEADER_STOPLIST.contains(&label.as_str()) {
+        return None;
+    }
+    Some(label)
+}
+
+// ---------------------------------------------------------------------------
+// Extraction (one LLM call per segment).
+// ---------------------------------------------------------------------------
+
+/// Extract one segment into a proposal. `forced` (a header label) fixes the
+/// category by code; otherwise the model classifies (and may choose `misc`).
+/// Returns (proposal, the model's raw event_date guess for note-level resolution).
+async fn extract_segment(
+    catalog: &str,
+    known: &[String],
+    body: &str,
+    today: &str,
+    forced: Option<&str>,
+) -> Result<(Value, Option<String>)> {
+    let system = build_categorize_prompt(catalog, today);
+    let hint = forced
+        .map(|c| format!("This note is specifically about \"{c}\" — extract its structured data and keep that category.\n\n"))
+        .unwrap_or_default();
+
+    let mut last_err = String::new();
+    for attempt in 0..2 {
+        let user = if attempt == 0 {
+            format!("{hint}{body}")
+        } else {
+            format!(
+                "{hint}{body}\n\n(Your previous reply was invalid: {last_err}. Return JSON with keys \
+                 category (string), is_new_category (bool), description (string), \
+                 event_date (YYYY-MM-DD or null), data (object). JSON only.)"
+            )
+        };
+        match ollama::chat_json(ollama::TEXT_MODEL, &system, &user, None, Some(routing_schema())).await {
+            Ok(v) => {
+                let raw_date = v.get("event_date").and_then(|d| d.as_str()).map(String::from);
+                match validate_proposal(v) {
+                    Ok(mut proposal) => {
+                        let cat = match forced {
+                            Some(f) => snap_category(f, known),
+                            None => snap_category(proposal["category"].as_str().unwrap_or(""), known),
+                        };
+                        proposal["is_new_category"] = json!(!known.contains(&cat));
+                        proposal["routed_by"] = json!(if forced.is_some() { "header" } else { "classifier" });
+                        proposal["category"] = json!(cat);
+                        return Ok((proposal, raw_date));
+                    }
+                    Err(e) => last_err = e,
+                }
+            }
+            Err(e) => last_err = e.to_string(),
+        }
+    }
+    Err(anyhow!("could not extract segment: {last_err}"))
+}
+
+/// Split a note into sections, extract each, and assemble the envelope. Header-
+/// tagged sections route deterministically; untagged ones are classified. The
+/// calendar day is resolved once for the whole note. A single failing segment is
+/// skipped rather than failing the note; zero entries is an error.
+async fn extract_note(
+    catalog: &str,
+    known: &[String],
+    text: &str,
+    raw_text: &str,
+    today: &str,
+) -> Result<Value> {
+    let segments = split_sections(text);
+    let mut entries: Vec<Value> = Vec::new();
+    let mut model_dates: Vec<Option<String>> = Vec::new();
+    for seg in &segments {
+        if let Ok((proposal, raw_date)) =
+            extract_segment(catalog, known, &seg.body, today, seg.hint.as_deref()).await
+        {
+            entries.push(proposal);
+            model_dates.push(raw_date);
+        }
+    }
+    if entries.is_empty() {
+        return Err(anyhow!("could not extract any entries from the note"));
+    }
+
+    // One calendar day for the whole note: first model date that parses, else a
+    // date scraped from the text, else today.
+    let (mut date, mut extracted) = (today.to_string(), false);
+    for d in &model_dates {
+        let (dd, ok) = resolve_date(d.as_deref(), today);
+        if ok {
+            date = dd;
+            extracted = true;
+            break;
+        }
+    }
+    if !extracted {
+        if let Some(d) = extract_date_from_text(text, today) {
+            date = d;
+            extracted = true;
+        }
+    }
+
+    Ok(json!({
+        "raw_text": raw_text,
+        "event_date": date,
+        "date_was_extracted": extracted,
+        "entries": entries,
+    }))
+}
+
+/// Transcribe a photo of a note (handwritten/printed) to text, preserving the
+/// user's words, line breaks, and any section headers, so the shared text path
+/// can route + extract it the same way a typed note is handled.
+async fn transcribe_photo(image_b64: &str) -> Result<String> {
+    let system = "You transcribe a photo of a personal note as faithfully as you can. Preserve the \
+        user's exact words, line breaks, and any section headers (lines like \"Food:\" or \"Gym —\"). \
+        Do not summarize, translate, or add anything. Return JSON only: {\"raw_text\": string}.";
+    let schema = json!({
+        "type": "object",
+        "properties": { "raw_text": { "type": "string" } },
+        "required": ["raw_text"]
+    });
+    let v = ollama::chat_json(
+        ollama::VISION_MODEL,
+        system,
+        "Transcribe this note exactly.",
+        Some(vec![image_b64.to_string()]),
+        Some(schema),
+    )
+    .await?;
+    Ok(v.get("raw_text").and_then(|t| t.as_str()).unwrap_or("").trim().to_string())
+}
+
+/// Typed-note path: split into sections, route + extract each, return the
+/// envelope `{ raw_text, event_date, date_was_extracted, entries:[...] }`.
 pub async fn categorize(
     catalog: &str,
     known_names: &[String],
     text: &str,
     today: &str,
 ) -> Result<Value> {
-    let system = build_categorize_prompt(catalog, today);
-
-    let mut last_err = String::new();
-    for attempt in 0..2 {
-        let user = if attempt == 0 {
-            text.to_string()
-        } else {
-            format!(
-                "{text}\n\n(Your previous reply was invalid: {last_err}. \
-                 Return JSON with keys category (string), is_new_category (bool), \
-                 description (string), event_date (YYYY-MM-DD or null), data (object). JSON only.)"
-            )
-        };
-
-        match ollama::chat_json(ollama::TEXT_MODEL, &system, &user, None, Some(routing_schema(false))).await {
-            Ok(v) => {
-                let raw_date = v.get("event_date").and_then(|d| d.as_str()).map(String::from);
-                match validate_proposal(v) {
-                    Ok(mut proposal) => {
-                        let cat = snap_category(proposal["category"].as_str().unwrap_or(""), known_names);
-                        proposal["category"] = json!(cat);
-                        proposal["is_new_category"] = json!(!known_names.contains(&cat));
-                        let (mut date, mut extracted) = resolve_date(raw_date.as_deref(), today);
-                        if !extracted {
-                            if let Some(d) = extract_date_from_text(text, today) {
-                                date = d;
-                                extracted = true;
-                            }
-                        }
-                        proposal["event_date"] = json!(date);
-                        proposal["date_was_extracted"] = json!(extracted);
-                        return Ok(proposal);
-                    }
-                    Err(e) => last_err = e,
-                }
-            }
-            Err(e) => last_err = e.to_string(),
-        }
-    }
-    Err(anyhow!("could not get a valid proposal: {last_err}"))
+    extract_note(catalog, known_names, text, text, today).await
 }
 
-/// One-shot vision path: a photo of a (often handwritten) note goes straight to
-/// the vision model, which transcribes it AND routes/extracts in a single call.
-/// Returns the same proposal shape plus `raw_text` (the transcription).
+/// Photo path: transcribe with the vision model, then route + extract the
+/// transcription exactly like a typed note. The envelope's raw_text is the
+/// transcription (editable in review).
 pub async fn categorize_photo(
     catalog: &str,
     known_names: &[String],
     image_b64: &str,
     today: &str,
 ) -> Result<Value> {
-    let system = build_photo_prompt(catalog, today);
-
-    let mut last_err = String::new();
-    for attempt in 0..2 {
-        let user = if attempt == 0 {
-            "Transcribe this note, then categorize and extract it.".to_string()
-        } else {
-            format!(
-                "Your previous reply was invalid: {last_err}. Return JSON with keys \
-                 raw_text (string), category (string), is_new_category (bool), \
-                 description (string), event_date (YYYY-MM-DD or null), data (object). JSON only."
-            )
-        };
-
-        match ollama::chat_json(
-            ollama::VISION_MODEL,
-            &system,
-            &user,
-            Some(vec![image_b64.to_string()]),
-            Some(routing_schema(true)),
-        )
-        .await
-        {
-            Ok(v) => {
-                let raw_text = v
-                    .get("raw_text")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let raw_date = v.get("event_date").and_then(|d| d.as_str()).map(String::from);
-                match validate_proposal(v) {
-                    Ok(mut proposal) => {
-                        let cat = snap_category(proposal["category"].as_str().unwrap_or(""), known_names);
-                        proposal["category"] = json!(cat);
-                        proposal["is_new_category"] = json!(!known_names.contains(&cat));
-                        proposal["raw_text"] = json!(raw_text);
-                        let (mut date, mut extracted) = resolve_date(raw_date.as_deref(), today);
-                        // Vision often misses a handwritten date; scrape the transcription.
-                        if !extracted {
-                            if let Some(d) = extract_date_from_text(&raw_text, today) {
-                                date = d;
-                                extracted = true;
-                            }
-                        }
-                        proposal["event_date"] = json!(date);
-                        proposal["date_was_extracted"] = json!(extracted);
-                        return Ok(proposal);
-                    }
-                    Err(e) => last_err = e,
-                }
-            }
-            Err(e) => last_err = e.to_string(),
-        }
+    let raw_text = transcribe_photo(image_b64).await?;
+    if raw_text.is_empty() {
+        return Err(anyhow!("could not read any text from the photo"));
     }
-    Err(anyhow!("could not read the photo: {last_err}"))
-}
-
-fn build_photo_prompt(catalog: &str, today: &str) -> String {
-    format!(
-        "You are the classifier for \"noted\", a personal life-logging app. \
-Today's date is {today}. \
-You are given a PHOTO of a note — often messy handwriting (a gym log, a daily schedule, meals). \
-Return ONE JSON object with these steps:\n\
-1) raw_text: transcribe the note as faithfully as you can, preserving the user's own words and line breaks.\n\
-2) category: reuse an existing category name verbatim when the note fits one; only invent a short \
-lowercase name when none fit (set is_new_category=true with a one-line description).\n\
-3) event_date: the date the note refers to, resolved to YYYY-MM-DD using today's date for relative \
-or partial dates (e.g. \"6/2\" -> the closest such date, \"yesterday\" -> today minus one). If the \
-note shows no date at all, use null.\n\
-4) data: extract the structured content.\n\n\
-Existing categories (reuse if the note fits one):\n{catalog}\n\n\
-Rules:\n\
-- When reusing a category, match its existing shape so data stays consistent over time.\n\
-- Structure repeated things as an ARRAY OF OBJECTS — one object per item, each keeping its own \
-attributes together. NEVER use parallel arrays. \
-e.g. \"exercises\": [{{\"name\": \"squat\", \"weight\": 245, \"sets\": 3, \"reps\": 5, \"rpe\": 9}}, ...].\n\
-- Numbers as numbers, not strings. Omit fields you can't read rather than guessing.\n\
-- Keep keys short, lowercase, snake_case.\n\
-- Feelings matter: whenever the note says how the user felt, add a \"mood\" key inside data (a short \
-phrase, e.g. \"satisfied\", \"anxious and unfocused\") — in ANY category.\n\
-- If a note is mostly about feelings or mental state with no concrete activity, use category \"mood\".\n\
-- event_date is the calendar day only; intra-day times (e.g. a 2-4pm block) belong inside data.\n\n\
-Return JSON only, exactly this form:\n\
-{{\"raw_text\": string, \"category\": string, \"is_new_category\": bool, \"description\": string, \"event_date\": string|null, \"data\": object}}"
-    )
+    extract_note(catalog, known_names, &raw_text, &raw_text, today).await
 }
 
 pub fn build_categorize_prompt(catalog: &str, today: &str) -> String {
     format!(
         "You are the classifier for \"noted\", a personal life-logging app. \
 Today's date is {today}. \
-The user dumps a messy note (a workout, a daily schedule, meals, anything). \
+The user dumps a messy note about ONE thing (a workout, a meal, a stretch of their day). \
 Do these and return ONE JSON object.\n\n\
-1) Pick the single best CATEGORY. Reuse an existing category name verbatim when the \
+1) Pick the single best CATEGORY for this note. Reuse an existing category name verbatim when the \
 note fits one. Only invent a new category when none fit; use a short, lowercase name \
 (e.g. \"gym\", \"schedule\", \"meals\") and set is_new_category=true with a one-line description.\n\
 2) event_date: the date the note refers to, resolved to YYYY-MM-DD using today's date for relative \
@@ -295,6 +410,8 @@ note mentions no date at all, use null.\n\
 Existing categories (reuse if the note fits one):\n{catalog}\n\n\
 Rules:\n\
 - When reusing a category, match its existing shape so data stays consistent over time.\n\
+- Prefer the catch-all category \"misc\" over inventing a brand-new category you're unsure about; \
+only create a new category when the note is clearly a recurring, substantial topic.\n\
 - Structure repeated things as an ARRAY OF OBJECTS — one object per item, each keeping its own \
 attributes together. NEVER use parallel arrays (separate name[], weight[], reps[] arrays). \
 For example a workout becomes: \"exercises\": [{{\"name\": \"squat\", \"weight\": 245, \"sets\": 3, \

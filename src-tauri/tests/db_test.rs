@@ -5,16 +5,14 @@ use serde_json::json;
 use tauri_app_lib::db::{self, SaveInput};
 
 fn save(conn: &mut rusqlite::Connection, cat: &str, desc: &str, data: serde_json::Value, ts: &str) {
-    db::save_entry(
+    db::save_note(
         conn,
         SaveInput {
             raw_text: format!("note about {cat}"),
             source: "text".into(),
             image_path: None,
-            category: cat.into(),
-            description: desc.into(),
-            data,
             event_date: ts[..10].to_string(), // YYYY-MM-DD from the timestamp
+            entries: vec![db::EntryInput { category: cat.into(), description: desc.into(), data }],
         },
         ts,
     )

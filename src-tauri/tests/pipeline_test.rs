@@ -26,22 +26,25 @@ async fn categorize_save_and_reuse() {
     let note1 = "chest day. incline db press 70s 4x10 felt strong. flat bench 185 5,5,4. cable flys 3x15 burnout";
     let p1 = pipeline::categorize(&catalog, &names, note1, "2026-06-02").await.unwrap();
 
-    assert_eq!(p1["is_new_category"], json!(true), "first note creates a category");
-    let cat1 = p1["category"].as_str().unwrap().to_string();
+    let e1 = &p1["entries"][0];
+    assert_eq!(e1["is_new_category"], json!(true), "first note creates a category");
+    let cat1 = e1["category"].as_str().unwrap().to_string();
     assert!(!cat1.is_empty());
-    assert!(p1["data"].is_object(), "data is an object");
-    println!("note1 -> category '{cat1}', data: {}", p1["data"]);
+    assert!(e1["data"].is_object(), "data is an object");
+    println!("note1 -> category '{cat1}', data: {}", e1["data"]);
 
-    db::save_entry(
+    db::save_note(
         &mut conn,
         SaveInput {
             raw_text: note1.into(),
             source: "text".into(),
             image_path: None,
-            category: cat1.clone(),
-            description: p1["description"].as_str().unwrap_or("").into(),
-            data: p1["data"].clone(),
             event_date: p1["event_date"].as_str().unwrap_or("2026-06-02").into(),
+            entries: vec![db::EntryInput {
+                category: cat1.clone(),
+                description: e1["description"].as_str().unwrap_or("").into(),
+                data: e1["data"].clone(),
+            }],
         },
         "2026-06-02T00:00:00Z",
     )
@@ -51,25 +54,28 @@ async fn categorize_save_and_reuse() {
     let (catalog2, names2) = catalog_and_names(&conn);
     let note2 = "back day. pullups bodyweight 4x8. barbell row 135 3x10. lat pulldown 120 3x12 solid pump";
     let p2 = pipeline::categorize(&catalog2, &names2, note2, "2026-06-02").await.unwrap();
-    println!("note2 -> category '{}', is_new {}", p2["category"], p2["is_new_category"]);
+    let e2 = &p2["entries"][0];
+    println!("note2 -> category '{}', is_new {}", e2["category"], e2["is_new_category"]);
 
     assert_eq!(
-        p2["category"].as_str().unwrap(),
+        e2["category"].as_str().unwrap(),
         cat1,
         "second workout note should reuse the existing category, not fork a new one"
     );
-    assert_eq!(p2["is_new_category"], json!(false));
+    assert_eq!(e2["is_new_category"], json!(false));
 
-    db::save_entry(
+    db::save_note(
         &mut conn,
         SaveInput {
             raw_text: note2.into(),
             source: "text".into(),
             image_path: None,
-            category: p2["category"].as_str().unwrap().into(),
-            description: String::new(),
-            data: p2["data"].clone(),
             event_date: p2["event_date"].as_str().unwrap_or("2026-06-02").into(),
+            entries: vec![db::EntryInput {
+                category: e2["category"].as_str().unwrap().into(),
+                description: String::new(),
+                data: e2["data"].clone(),
+            }],
         },
         "2026-06-02T01:00:00Z",
     )

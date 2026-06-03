@@ -19,16 +19,14 @@ fn norm(mut v: Vec<f32>) -> Vec<f32> {
 }
 
 async fn save_and_embed(conn: &mut rusqlite::Connection, id: i64, cat: &str, raw: &str, data: serde_json::Value, date: &str) {
-    db::save_entry(
+    db::save_note(
         conn,
         SaveInput {
             raw_text: raw.into(),
             source: "text".into(),
             image_path: None,
-            category: cat.into(),
-            description: String::new(),
-            data: data.clone(),
             event_date: date.into(),
+            entries: vec![db::EntryInput { category: cat.into(), description: String::new(), data: data.clone() }],
         },
         &format!("{date}T00:00:00Z"),
     )

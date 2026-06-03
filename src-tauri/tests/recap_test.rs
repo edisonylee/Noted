@@ -4,16 +4,14 @@ use tauri_app_lib::db::{self, SaveInput};
 use tauri_app_lib::ollama;
 
 fn save(conn: &mut rusqlite::Connection, cat: &str, data: serde_json::Value, date: &str) {
-    db::save_entry(
+    db::save_note(
         conn,
         SaveInput {
             raw_text: format!("{cat} note"),
             source: "text".into(),
             image_path: None,
-            category: cat.into(),
-            description: String::new(),
-            data,
             event_date: date.into(),
+            entries: vec![db::EntryInput { category: cat.into(), description: String::new(), data }],
         },
         &format!("{date}T00:00:00Z"),
     )

@@ -27,6 +27,17 @@ pub async fn chat_json(
     images: Option<Vec<String>>,
     format: Option<Value>,
 ) -> Result<Value> {
+    // Balanced mode: route the latency-sensitive structured calls (note extract
+    // + photo OCR) to Gemini. On any failure (bad key, offline, rate limit) we
+    // fall through to the local model so capture never hard-fails.
+    if crate::provider::use_cloud_for_extract() {
+        let vision = images.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+        match crate::provider::gemini_chat_json(system, user, images.clone(), format.clone(), vision).await {
+            Ok(v) => return Ok(v),
+            Err(e) => eprintln!("[noted] gemini extract failed, falling back to local: {e}"),
+        }
+    }
+
     let mut user_msg = json!({ "role": "user", "content": user });
     if let Some(imgs) = images {
         user_msg["images"] = json!(imgs);

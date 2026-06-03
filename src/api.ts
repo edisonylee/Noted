@@ -1,4 +1,32 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+
+// noted runs in two places: the desktop Tauri shell, and a phone browser that
+// loads the same UI over the LAN HTTPS server (see src-tauri/src/phone.rs).
+// On desktop we use Tauri's IPC; in the browser we POST to /api/<cmd> with the
+// access token from the launch URL (?t=…), cached so it survives reloads.
+export const isDesktop =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+function webToken(): string {
+  const fromUrl = new URLSearchParams(window.location.search).get("t");
+  if (fromUrl) {
+    localStorage.setItem("noted_token", fromUrl);
+    return fromUrl;
+  }
+  return localStorage.getItem("noted_token") ?? "";
+}
+
+async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (isDesktop) return tauriInvoke<T>(cmd, args as Record<string, unknown>);
+  const res = await fetch(`/api/${cmd}?t=${encodeURIComponent(webToken())}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(args ?? {}),
+  });
+  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
+  const text = await res.text();
+  return (text ? JSON.parse(text) : undefined) as T;
+}
 
 // One extracted observation within a note (a category + its structured data).
 export type Proposal = {
@@ -73,6 +101,16 @@ export type CategoryInfo = {
 };
 
 export type Health = { models: string[]; vec_version: string };
+
+// Model-provider settings. "local" = 100% Ollama; "balanced" routes the
+// extract/OCR hot path to Gemini while keeping embeddings + chat local.
+export type ProviderMode = "local" | "balanced";
+export type ProviderSettings = {
+  mode: ProviderMode;
+  gemini_text_model: string;
+  gemini_vision_model: string;
+  has_gemini_key: boolean;
+};
 
 export type AskSource = {
   note_id: number;
@@ -151,6 +189,14 @@ export const api = {
   listRecaps: () => invoke<RecapRow[]>("list_recaps"),
   exportDb: () => invoke<string>("export_db"),
   phoneInfo: () => invoke<PhoneInfo>("phone_info"),
+  getProviderSettings: () => invoke<ProviderSettings>("get_provider_settings"),
+  setProviderSettings: (args: {
+    mode: ProviderMode;
+    gemini_api_key?: string | null;
+    gemini_text_model?: string;
+    gemini_vision_model?: string;
+  }) => invoke<void>("set_provider_settings", args),
+  testProvider: () => invoke<string>("test_provider"),
   readInboxImage: (path: string) =>
     invoke<{ base64: string; ext: string }>("read_inbox_image", { path }),
 };

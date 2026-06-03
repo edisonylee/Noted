@@ -1,13 +1,22 @@
-// Phone capture: a tiny LAN HTTP server so you can snap a photo on your phone
-// (same wifi) and have it flow straight into noted — no cable, no cloud.
-//   GET  /         -> a mobile upload page (camera input)
-//   POST /upload   -> saves the image to the inbox, emits "photo-received"
-// Uploads are gated by a random token shown in the desktop app (as a QR/url).
+// Phone access: a small LAN server so your phone can use noted while your
+// computer does the work. Two roles:
+//   GET  /            -> the FULL noted web app (same UI as desktop), served
+//                        from the app's bundled assets (or proxied from the
+//                        Vite dev server during `tauri dev`).
+//   POST /api/<cmd>   -> RPC bridge: every Tauri command, callable over HTTP so
+//                        the web client behaves exactly like the desktop one.
+//   GET  /capture     -> the original lightweight photo-only upload page.
+//   POST /upload      -> save a photo into the inbox (the /capture page uses it).
+//
+// It runs over HTTPS (self-signed cert): mobile browsers only grant microphone
+// and camera access in a "secure context", so voice capture needs TLS. Every
+// /api and /upload call is gated by a random token shown in the desktop app.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use serde_json::json;
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
+use tiny_http::Method;
 
 /// Connection info surfaced to the UI (url contains the token).
 pub struct PhoneState {
@@ -16,52 +25,262 @@ pub struct PhoneState {
     pub port: u16,
 }
 
-/// Bind a port (trying a few), returning the bound server + chosen port.
-pub fn bind(preferred: u16) -> Option<(tiny_http::Server, u16)> {
+// ── TLS: a persisted self-signed cert for the current LAN IP ────────────────
+// Cached under app_data/tls so the user only accepts the browser warning once.
+// Regenerated if the machine's IP changed (the cert's SAN must match the host).
+fn load_or_make_cert(dir: &Path, ip: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let tls = dir.join("tls");
+    let _ = std::fs::create_dir_all(&tls);
+    let cert_path = tls.join("cert.pem");
+    let key_path = tls.join("key.pem");
+    let ip_path = tls.join("ip.txt");
+
+    let cached_ip = std::fs::read_to_string(&ip_path).unwrap_or_default();
+    if cached_ip.trim() == ip {
+        if let (Ok(c), Ok(k)) = (std::fs::read(&cert_path), std::fs::read(&key_path)) {
+            if !c.is_empty() && !k.is_empty() {
+                return Ok((c, k));
+            }
+        }
+    }
+
+    let certified = rcgen::generate_simple_self_signed(vec![ip.to_string(), "localhost".to_string()])
+        .map_err(|e| format!("cert generation failed: {e}"))?;
+    let cert_pem = certified.cert.pem().into_bytes();
+    let key_pem = certified.key_pair.serialize_pem().into_bytes();
+    let _ = std::fs::write(&cert_path, &cert_pem);
+    let _ = std::fs::write(&key_path, &key_pem);
+    let _ = std::fs::write(&ip_path, ip);
+    Ok((cert_pem, key_pem))
+}
+
+/// Bind an HTTPS port (trying a few), returning the bound server + chosen port.
+pub fn bind_https(dir: &Path, ip: &str, preferred: u16) -> Option<(tiny_http::Server, u16)> {
+    let (certificate, private_key) = load_or_make_cert(dir, ip)
+        .map_err(|e| eprintln!("[noted] {e}"))
+        .ok()?;
     for port in [preferred, preferred + 1, preferred + 2] {
-        if let Ok(s) = tiny_http::Server::http(("0.0.0.0", port)) {
+        let cfg = tiny_http::SslConfig {
+            certificate: certificate.clone(),
+            private_key: private_key.clone(),
+        };
+        if let Ok(s) = tiny_http::Server::https(("0.0.0.0", port), cfg) {
             return Some((s, port));
         }
     }
     None
 }
 
+/// Spawn a small pool of worker threads that each handle requests. A handful is
+/// plenty for one person's phone + desktop and lets the initial parallel loads
+/// (notes, categories, health) overlap instead of serializing.
 pub fn serve(server: tiny_http::Server, app: AppHandle, inbox: PathBuf, token: String) {
-    std::thread::spawn(move || {
-        for mut req in server.incoming_requests() {
-            let url = req.url().to_string();
-            let method = req.method().clone();
-            if matches!(method, tiny_http::Method::Get) && !url.starts_with("/upload") {
-                let _ = req.respond(html_response(PAGE));
-                continue;
+    let server = std::sync::Arc::new(server);
+    for _ in 0..4 {
+        let server = server.clone();
+        let app = app.clone();
+        let inbox = inbox.clone();
+        let token = token.clone();
+        std::thread::spawn(move || {
+            while let Ok(req) = server.recv() {
+                handle_request(&app, &inbox, &token, req);
             }
-            if matches!(method, tiny_http::Method::Post) && url.starts_with("/upload") {
-                if !query_token_ok(&url, &token) {
-                    let _ = req.respond(tiny_http::Response::from_string("forbidden").with_status_code(403));
-                    continue;
-                }
-                let ext = content_type_ext(&req);
-                let mut bytes = Vec::new();
-                if req.as_reader().read_to_end(&mut bytes).is_err() || bytes.is_empty() {
-                    let _ = req.respond(tiny_http::Response::from_string("bad").with_status_code(400));
-                    continue;
-                }
-                match save_and_notify(&app, &inbox, &bytes, &ext) {
-                    Ok(_) => {
-                        let _ = req.respond(tiny_http::Response::from_string("ok"));
-                    }
-                    Err(e) => {
-                        let _ = req.respond(tiny_http::Response::from_string(e).with_status_code(500));
-                    }
-                }
-                continue;
-            }
-            let _ = req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
-        }
-    });
+        });
+    }
 }
 
-fn save_and_notify(app: &AppHandle, inbox: &PathBuf, bytes: &[u8], ext: &str) -> Result<(), String> {
+fn handle_request(app: &AppHandle, inbox: &Path, token: &str, mut req: tiny_http::Request) {
+    let url = req.url().to_string();
+    let path = url.split('?').next().unwrap_or("/").to_string();
+    let method = req.method().clone();
+
+    // POST /upload — the lightweight photo capture path (unchanged behavior).
+    if method == Method::Post && path == "/upload" {
+        if !query_token_ok(&url, token) {
+            let _ = req.respond(tiny_http::Response::from_string("forbidden").with_status_code(403));
+            return;
+        }
+        let ext = content_type_ext(&req);
+        let mut bytes = Vec::new();
+        if req.as_reader().read_to_end(&mut bytes).is_err() || bytes.is_empty() {
+            let _ = req.respond(tiny_http::Response::from_string("bad").with_status_code(400));
+            return;
+        }
+        match save_and_notify(app, inbox, &bytes, &ext) {
+            Ok(_) => {
+                let _ = req.respond(tiny_http::Response::from_string("ok"));
+            }
+            Err(e) => {
+                let _ = req.respond(tiny_http::Response::from_string(e).with_status_code(500));
+            }
+        }
+        return;
+    }
+
+    // POST /api/<command> — the full RPC bridge for the web client.
+    if method == Method::Post && path.starts_with("/api/") {
+        if !query_token_ok(&url, token) {
+            let _ = req.respond(tiny_http::Response::from_string("forbidden").with_status_code(403));
+            return;
+        }
+        let cmd = path.trim_start_matches("/api/").to_string();
+        let mut body = Vec::new();
+        let _ = req.as_reader().read_to_end(&mut body);
+        let args: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        match tauri::async_runtime::block_on(handle_api(app, &cmd, &args)) {
+            Ok(v) => {
+                let _ = req.respond(json_response(&v));
+            }
+            Err(e) => {
+                let _ = req.respond(tiny_http::Response::from_string(e).with_status_code(500));
+            }
+        }
+        return;
+    }
+
+    // Everything else: serve the web app shell (or the capture page).
+    serve_static(app, &path, req);
+}
+
+/// Dispatch one HTTP RPC to the matching Tauri command. The argument keys mirror
+/// exactly what the frontend passes to `invoke(...)`, so the desktop and web
+/// transports stay byte-for-byte compatible.
+async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, String> {
+    let a = app.clone();
+    match cmd {
+        "health" => crate::health(a).await,
+        "categorize_note" => crate::categorize_note(a, sarg(b, "text")).await,
+        "categorize_photo" => crate::categorize_photo(a, sarg(b, "imageBase64")).await,
+        "save_image" => crate::save_image(a, sarg(b, "imageBase64"), sarg(b, "ext")).await.map(|s| json!(s)),
+        "save_entry" => {
+            let args: crate::SaveArgs =
+                serde_json::from_value(varg(b, "args")).map_err(|e| e.to_string())?;
+            crate::save_entry(a, args).await.map(|n| json!(n))
+        }
+        "list_notes" => crate::list_notes(a).await,
+        "list_categories" => crate::list_categories(a).await,
+        "chat" => {
+            let history: Vec<crate::ChatMsg> =
+                serde_json::from_value(varg(b, "history")).unwrap_or_default();
+            crate::chat(a, sarg(b, "question"), history).await
+        }
+        "create_category" => {
+            crate::create_category(a, sarg(b, "name"), sarg(b, "description")).await.map(|n| json!(n))
+        }
+        "update_entry" => {
+            crate::update_entry(a, iarg(b, "entryId"), varg(b, "data")).await.map(|n| json!(n))
+        }
+        "speak" => crate::speak(sarg(b, "text")).map(|_| Value::Null),
+        "stop_speaking" => {
+            crate::stop_speaking();
+            Ok(Value::Null)
+        }
+        "reindex" => crate::reindex(a).await.map(|n| json!(n)),
+        "category_trends" => crate::category_trends(a, sarg(b, "category")).await,
+        "generate_recap" => crate::generate_recap(a, sarg(b, "period")).await,
+        "backfill_recaps" => crate::backfill_recaps(a).await.map(|_| Value::Null),
+        "list_recaps" => crate::list_recaps(a).await,
+        "export_db" => crate::export_db(a).await.map(|s| json!(s)),
+        "phone_info" => Ok(crate::phone_info(a)),
+        "read_inbox_image" => crate::read_inbox_image(sarg(b, "path")).await,
+        "voice_status" => Ok(crate::voice_status(a)),
+        "download_voice_model" => crate::download_voice_model(a).await.map(|ok| json!(ok)),
+        "transcribe" => {
+            crate::transcribe(a, sarg(b, "audioB64"), iarg(b, "sampleRate") as u32)
+                .await
+                .map(|s| json!(s))
+        }
+        "list_entities" => crate::list_entities(a).await,
+        "merge_entities" => {
+            crate::merge_entities(a, iarg(b, "keep"), iarg(b, "drop")).await.map(|_| Value::Null)
+        }
+        "entity_graph" => crate::entity_graph(a).await,
+        "entity_detail" => crate::entity_detail(a, iarg(b, "entityId")).await,
+        "list_people" => crate::list_people(a).await,
+        "get_provider_settings" => Ok(crate::get_provider_settings()),
+        "set_provider_settings" => crate::set_provider_settings(
+            a,
+            sarg(b, "mode"),
+            oarg(b, "gemini_api_key"),
+            oarg(b, "gemini_text_model"),
+            oarg(b, "gemini_vision_model"),
+        )
+        .map(|_| Value::Null),
+        "test_provider" => crate::test_provider().await.map(|s| json!(s)),
+        other => Err(format!("unknown command: {other}")),
+    }
+}
+
+// ── arg helpers (read frontend-shaped JSON keys) ────────────────────────────
+fn sarg(b: &Value, k: &str) -> String {
+    b.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+}
+fn iarg(b: &Value, k: &str) -> i64 {
+    b.get(k).and_then(|v| v.as_i64()).unwrap_or(0)
+}
+fn varg(b: &Value, k: &str) -> Value {
+    b.get(k).cloned().unwrap_or(Value::Null)
+}
+fn oarg(b: &Value, k: &str) -> Option<String> {
+    b.get(k).and_then(|v| v.as_str()).map(String::from)
+}
+
+// ── static assets: bundled SPA in release, Vite proxy in dev ────────────────
+fn serve_static(app: &AppHandle, path: &str, req: tiny_http::Request) {
+    if path == "/capture" {
+        let _ = req.respond(html_response(PAGE));
+        return;
+    }
+    let rel = if path == "/" || path.is_empty() {
+        "index.html"
+    } else {
+        path.trim_start_matches('/')
+    };
+
+    // 1) Bundled assets (release / `tauri build`).
+    let resolver = app.asset_resolver();
+    if let Some(asset) = resolver.get(format!("/{rel}")).or_else(|| resolver.get(rel.to_string())) {
+        let _ = req.respond(
+            tiny_http::Response::from_data(asset.bytes).with_header(header("Content-Type", &asset.mime_type)),
+        );
+        return;
+    }
+
+    // 2) Dev fallback: proxy the Vite dev server so the phone works in `tauri dev`.
+    let target = format!("http://localhost:1420/{rel}");
+    let fetched = tauri::async_runtime::block_on(async {
+        let r = reqwest::get(&target).await.ok()?;
+        let ct = r
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let bytes = r.bytes().await.ok()?;
+        Some((ct, bytes.to_vec()))
+    });
+    match fetched {
+        Some((ct, bytes)) => {
+            let _ = req.respond(tiny_http::Response::from_data(bytes).with_header(header("Content-Type", &ct)));
+        }
+        None => {
+            let _ = req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
+        }
+    }
+}
+
+// ── small response helpers ──────────────────────────────────────────────────
+fn header(name: &str, value: &str) -> tiny_http::Header {
+    tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes())
+        .unwrap_or_else(|_| tiny_http::Header::from_bytes(&b"X-Noted"[..], &b"1"[..]).unwrap())
+}
+
+fn json_response(v: &Value) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    let body = serde_json::to_string(v).unwrap_or_else(|_| "null".to_string());
+    tiny_http::Response::from_string(body).with_header(header("Content-Type", "application/json"))
+}
+
+fn save_and_notify(app: &AppHandle, inbox: &Path, bytes: &[u8], ext: &str) -> Result<(), String> {
     // unique-enough filename without Date::now() shenanigans
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

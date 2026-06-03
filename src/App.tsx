@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
-import { Camera, Check, Download, Mic, Moon, Smartphone, Square, Sun } from "lucide-react";
+import { listen } from "./events";
+import { Camera, Check, Download, Mic, Moon, Settings, Smartphone, Square, Sun } from "lucide-react";
+import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
 import { useTheme } from "./useTheme";
 import { api, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow } from "./api";
@@ -78,6 +79,7 @@ export default function App() {
 
   // Phone capture + backup
   const [showPhone, setShowPhone] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [backupMsg, setBackupMsg] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
 
@@ -357,6 +359,9 @@ export default function App() {
         <button className="icon-btn" onClick={() => setShowPhone(true)} title="Capture from your phone">
           <Smartphone size={18} />
         </button>
+        <button className="icon-btn" onClick={() => setShowSettings(true)} title="Models & settings">
+          <Settings size={18} />
+        </button>
       </header>
 
       <main className="content">
@@ -623,6 +628,7 @@ export default function App() {
       </footer>
 
       {showPhone && <PhonePanel onClose={() => setShowPhone(false)} />}
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       <FloatingChat onMutated={refresh} />
     </div>
   );

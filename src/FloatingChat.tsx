@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowUp, Check, Mic, Sparkles, Square, Volume2, VolumeX, X } from "lucide-react";
-import { api, type AskSource, type ChatProposal } from "./api";
+import { api, isDesktop, type AskSource, type ChatProposal } from "./api";
 import { startRecording, type Recorder } from "./audio";
+import { DataView } from "./DataView";
 
 type Msg = {
   role: "user" | "assistant";
@@ -56,7 +57,7 @@ export function FloatingChat({ onMutated }: { onMutated?: () => void }) {
         ]);
       } else {
         setMessages((p) => [...p, { role: "assistant", content: res.answer, sources: res.sources }]);
-        if (!muted) api.speak(res.answer).catch(() => {});
+        if (!muted && isDesktop) api.speak(res.answer).catch(() => {});
       }
     } catch (e) {
       setMessages((p) => [...p, { role: "assistant", content: `Sorry — ${e}` }]);
@@ -147,9 +148,11 @@ export function FloatingChat({ onMutated }: { onMutated?: () => void }) {
           Assistant<span className="sub">your log, answered</span>
         </span>
         <div className="tools">
-          <button className="icon-btn" onClick={toggleMute} title={muted ? "Unmute" : "Mute voice"}>
-            {muted ? <VolumeX size={17} /> : <Volume2 size={17} />}
-          </button>
+          {isDesktop && (
+            <button className="icon-btn" onClick={toggleMute} title={muted ? "Unmute" : "Mute voice"}>
+              {muted ? <VolumeX size={17} /> : <Volume2 size={17} />}
+            </button>
+          )}
           <button className="icon-btn" onClick={() => setOpen(false)} title="Close">
             <X size={17} />
           </button>
@@ -174,6 +177,11 @@ export function FloatingChat({ onMutated }: { onMutated?: () => void }) {
                     {s.category ?? "note"} · {s.event_date}
                   </span>
                 ))}
+              </div>
+            )}
+            {m.proposal?.action === "edit_entry" && !m.resolved && (
+              <div className="proposal-preview">
+                <DataView value={m.proposal.data} />
               </div>
             )}
             {m.proposal && !m.resolved && (

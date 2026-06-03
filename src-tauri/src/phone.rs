@@ -324,7 +324,13 @@ fn serve_static(app: &AppHandle, path: &str, req: tiny_http::Request) {
     });
     match fetched {
         Some((ct, bytes)) => {
-            let _ = req.respond(tiny_http::Response::from_data(bytes).with_header(header("Content-Type", &ct)));
+            // no-store so a phone in dev never serves a stale module (release
+            // assets are content-hashed, so this path is dev-only anyway).
+            let _ = req.respond(
+                tiny_http::Response::from_data(bytes)
+                    .with_header(header("Content-Type", &ct))
+                    .with_header(header("Cache-Control", "no-store")),
+            );
         }
         None => {
             let _ = req.respond(tiny_http::Response::from_string("not found").with_status_code(404));

@@ -3,6 +3,10 @@ import { listen } from "./events";
 import { Camera, Check, Download, Mic, Moon, Settings, Smartphone, Square, Sun } from "lucide-react";
 import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
+import { fileToImg, type Img } from "./image";
+import { useIsMobile } from "./useIsMobile";
+import { MobileCapture } from "./MobileCapture";
+import { BottomNav, type MobileTab } from "./BottomNav";
 import { useTheme } from "./useTheme";
 import { api, TokenError, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow } from "./api";
 import { DataView } from "./DataView";
@@ -18,7 +22,6 @@ import "./App.css";
 type Phase = "idle" | "thinking" | "review";
 type View = "log" | "timeline" | "trends" | "recaps" | "people" | "self";
 type Source = "text" | "photo";
-type Img = { base64: string; ext: string; dataUrl: string };
 // One editable review card per extracted entry.
 type ReviewCard = {
   catName: string;
@@ -26,19 +29,6 @@ type ReviewCard = {
   description: string;
   routedBy?: "header" | "classifier";
 };
-
-async function fileToImg(file: File): Promise<Img> {
-  const dataUrl: string = await new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res(r.result as string);
-    r.onerror = rej;
-    r.readAsDataURL(file);
-  });
-  const base64 = dataUrl.split(",")[1] ?? "";
-  const mime = dataUrl.slice(5, dataUrl.indexOf(";"));
-  const ext = mime.includes("jpeg") ? "jpg" : mime.split("/")[1] || "png";
-  return { base64, ext, dataUrl };
-}
 
 // Time-adaptive home greeting: planning prompt in the morning → recap prompt at night.
 function homeGreeting(): { dateLine: string; title: string } {
@@ -83,6 +73,11 @@ export default function App() {
   const [backupMsg, setBackupMsg] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [needsRepair, setNeedsRepair] = useState(false); // 403 from a stale phone token
+
+  // Mobile-first layout: phone viewports get a bottom-nav + dedicated capture
+  // screen instead of the desktop topbar/review flow.
+  const isMobile = useIsMobile();
+  const [mobileTab, setMobileTab] = useState<MobileTab>("capture");
 
   // Route a thrown error: a TokenError (phone 403) trips the re-pair screen;
   // anything else shows the normal inline error.
@@ -345,6 +340,49 @@ export default function App() {
             Try again
           </button>
         </div>
+      </div>
+    );
+  }
+
+  // Mobile-first shell: slim top bar + bottom nav + dedicated capture screen.
+  // The desktop layout below is left entirely untouched.
+  if (isMobile) {
+    return (
+      <div className="app mobile">
+        <header className="mobile-topbar">
+          <div className="brand">
+            noted<span className="dot">.</span>
+          </div>
+          <button className="icon-btn" onClick={() => setShowSettings(true)} aria-label="Settings">
+            <Settings size={18} />
+          </button>
+        </header>
+
+        <main className="mobile-content">
+          {mobileTab === "capture" && <MobileCapture onCaptured={() => refresh().catch(handleErr)} />}
+          {mobileTab === "timeline" && <TimelineView notes={notes} />}
+          {mobileTab === "recaps" && <RecapsView />}
+        </main>
+
+        <BottomNav
+          active={mobileTab}
+          onChange={(t) => {
+            setMobileTab(t);
+            // Re-fetch when navigating to a list so a freshly auto-filed note shows.
+            if (t === "timeline" || t === "recaps") refresh().catch(handleErr);
+          }}
+        />
+
+        <FloatingChat
+          variant="sheet"
+          open={mobileTab === "ask"}
+          onOpenChange={(o) => {
+            if (!o) setMobileTab("capture");
+          }}
+          onMutated={() => refresh().catch(handleErr)}
+        />
+
+        {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       </div>
     );
   }

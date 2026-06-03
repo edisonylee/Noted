@@ -12,8 +12,20 @@ type Msg = {
   resolved?: "confirmed" | "cancelled";
 };
 
-export function FloatingChat({ onMutated }: { onMutated?: () => void }) {
-  const [open, setOpen] = useState(false);
+export function FloatingChat({
+  onMutated,
+  open: openProp,
+  onOpenChange,
+  variant = "floating",
+}: {
+  onMutated?: () => void;
+  open?: boolean; // controlled (mobile "Ask" tab); omit for the floating FAB
+  onOpenChange?: (open: boolean) => void;
+  variant?: "floating" | "sheet";
+}) {
+  const [openState, setOpenState] = useState(false);
+  const open = openProp ?? openState;
+  const setOpen = (o: boolean) => (onOpenChange ? onOpenChange(o) : setOpenState(o));
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [asking, setAsking] = useState(false);
@@ -131,6 +143,9 @@ export function FloatingChat({ onMutated }: { onMutated?: () => void }) {
   }
 
   if (!open) {
+    // In sheet mode (mobile) the parent owns open state via the bottom-nav tab;
+    // render nothing when closed and never show the floating FAB.
+    if (variant === "sheet") return null;
     return (
       <button className="fab" onClick={() => setOpen(true)} aria-label="Ask the assistant">
         <Sparkles size={22} strokeWidth={2} />
@@ -139,7 +154,7 @@ export function FloatingChat({ onMutated }: { onMutated?: () => void }) {
   }
 
   return (
-    <div className="chat-panel">
+    <div className={"chat-panel" + (variant === "sheet" ? " chat-sheet" : "")}>
       <div className="chat-panel-head">
         <span className="assistant-mark">
           <Sparkles size={15} strokeWidth={2} />

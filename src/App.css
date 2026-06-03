@@ -588,3 +588,99 @@ textarea.json.bad { border-color: var(--bad); }
   background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-md);
   color: var(--muted); font-size: 12px; padding: 3px 6px; outline: none; cursor: pointer;
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Mobile-first layout (phone). These classes only render in the mobile shell
+   (App.tsx isMobile branch); the desktop layout is untouched. Safe-area insets
+   assume index.html's viewport-fit=cover.
+   ───────────────────────────────────────────────────────────────────────── */
+.app.mobile {
+  max-width: none;
+  padding: 0;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.mobile-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(env(safe-area-inset-top) + 12px) 18px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--canvas);
+  flex: none;
+}
+.mobile-topbar .brand { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; }
+.mobile-topbar .dot { color: var(--accent); }
+
+.mobile-content {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 18px 16px calc(env(safe-area-inset-bottom) + 86px);
+}
+/* Timeline's sticky day header assumes the desktop topbar offset; pin to the
+   mobile scroll container instead. */
+.mobile-content .tl-date { top: 0; }
+
+/* Bottom tab bar */
+.bottom-nav {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  display: flex;
+  justify-content: space-around;
+  padding: 8px 6px calc(env(safe-area-inset-bottom) + 8px);
+  background: color-mix(in srgb, var(--canvas) 88%, transparent);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-top: 1px solid var(--line);
+  z-index: 40;
+}
+.bn-item {
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  flex: 1; background: none; border: none; cursor: pointer;
+  color: var(--faint); font: inherit; font-size: 10.5px; font-weight: 540;
+  padding: 4px 0; transition: color 0.14s var(--ease);
+}
+.bn-item.on { color: var(--accent); }
+.bn-item:active { transform: scale(0.94); }
+
+/* Mobile capture screen */
+.mobile-capture { display: flex; flex-direction: column; gap: 14px; height: 100%; }
+.mobile-capture textarea {
+  flex: 1; min-height: 200px; width: 100%; box-sizing: border-box; resize: none;
+  font: inherit; font-size: 17px; line-height: 1.5; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-lg); padding: 16px; outline: none;
+}
+.mobile-capture textarea:focus { border-color: var(--accent); }
+.mc-actions { display: flex; align-items: center; gap: 10px; }
+.mc-actions .ghost {
+  display: inline-flex; align-items: center; gap: 7px; font: inherit; font-size: 14px;
+  color: var(--ink-soft); background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-md); padding: 11px 15px; cursor: pointer;
+}
+.mc-actions .ghost.recording { color: var(--bad); border-color: var(--bad); }
+.mc-actions .mc-send {
+  margin-left: auto; display: inline-flex; align-items: center; justify-content: center;
+  width: 48px; height: 46px; border-radius: var(--r-md); border: none; cursor: pointer;
+  background: var(--ink); color: var(--on-ink);
+}
+.mc-actions .mc-send:disabled { opacity: 0.4; }
+.mc-saved {
+  display: inline-flex; align-items: center; gap: 7px; align-self: flex-start;
+  font-size: 13.5px; color: var(--good); background: rgba(63, 125, 91, 0.1);
+  padding: 9px 13px; border-radius: var(--r-md); animation: fade 0.2s var(--ease);
+}
+.mc-err { font-size: 13px; color: var(--error-ink); }
+
+/* Assistant as a full-screen sheet on mobile (overrides the floating panel). */
+.chat-panel.chat-sheet {
+  position: fixed; inset: 0; width: 100vw; height: 100dvh;
+  max-width: none; max-height: none; border-radius: 0; border: none;
+  padding-top: env(safe-area-inset-top);
+  z-index: 60;
+}
+.chat-panel.chat-sheet .chat-input-row { padding-bottom: calc(env(safe-area-inset-bottom) + 10px); }

@@ -1,0 +1,52 @@
+[package]
+name = "tauri-app"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "tauri_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+hound = "3"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Local DB + vector search (pinned compatible combo — see sqlite-vec rust docs)
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+sqlite-vec = "=0.1.9"
+zerocopy = "0.7"
+
+# Talk to local Ollama (text + vision + embeddings)
+reqwest = { version = "0.12", features = ["json"] }
+base64 = "0.22"
+
+# Shared async runtime / error helpers
+tokio = { version = "1", features = ["sync"] }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+
+# Phone capture: tiny LAN upload server
+tiny_http = "0.12"
+local-ip-address = "0.6"
+rand = "0.8"
+
+# Local speech-to-text (whisper.cpp, in-process)
+whisper-rs = "0.16"
+

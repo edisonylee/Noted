@@ -280,9 +280,10 @@ fn serve_static(app: &AppHandle, path: &str, req: tiny_http::Request) {
     // 1) Bundled assets (release / `tauri build`).
     let resolver = app.asset_resolver();
     if let Some(asset) = resolver.get(format!("/{rel}")).or_else(|| resolver.get(rel.to_string())) {
-        let _ = req.respond(
-            tiny_http::Response::from_data(asset.bytes).with_header(header("Content-Type", &asset.mime_type)),
-        );
+        // Tauri's mime guesser doesn't know .webmanifest — correct it so the
+        // browser recognizes the PWA manifest (otherwise install is flaky).
+        let ct = mime_override(rel).unwrap_or(asset.mime_type.as_str());
+        let _ = req.respond(tiny_http::Response::from_data(asset.bytes).with_header(header("Content-Type", ct)));
         return;
     }
 
@@ -306,6 +307,15 @@ fn serve_static(app: &AppHandle, path: &str, req: tiny_http::Request) {
         None => {
             let _ = req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
         }
+    }
+}
+
+// Correct content-types Tauri's guesser gets wrong (notably .webmanifest).
+fn mime_override(path: &str) -> Option<&'static str> {
+    if path.ends_with(".webmanifest") {
+        Some("application/manifest+json")
+    } else {
+        None
     }
 }
 

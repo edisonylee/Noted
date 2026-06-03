@@ -428,6 +428,12 @@ textarea.json.bad { border-color: var(--bad); }
 .phone-fallback code { word-break: break-all; color: var(--ink-soft); }
 .phone-cert-note { font-size: 11.5px; margin-top: 12px; color: var(--faint); }
 
+.repair-screen { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; }
+.repair-card { max-width: 380px; text-align: center; }
+.repair-card .brand { font-size: 24px; font-weight: 650; margin-bottom: 18px; }
+.repair-card h2 { font-size: 19px; margin: 0 0 10px; }
+.repair-card p { color: var(--muted); line-height: 1.55; font-size: 14px; margin: 0 0 20px; }
+
 /* ── settings: model provider ──────────────────────────── */
 .settings-modal { max-width: 440px; text-align: left; }
 .settings-sub { font-size: 13px; line-height: 1.55; color: var(--muted); margin: 0 0 18px; }

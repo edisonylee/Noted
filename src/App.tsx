@@ -4,7 +4,7 @@ import { Camera, Check, Download, Mic, Moon, Settings, Smartphone, Square, Sun }
 import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
 import { useTheme } from "./useTheme";
-import { api, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow } from "./api";
+import { api, TokenError, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow } from "./api";
 import { DataView } from "./DataView";
 import { TrendsView } from "./Trends";
 import { RecapsView } from "./Recaps";
@@ -82,6 +82,12 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [backupMsg, setBackupMsg] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [needsRepair, setNeedsRepair] = useState(false); // 403 from a stale phone token
+
+  // Route a thrown error: a TokenError (phone 403) trips the re-pair screen;
+  // anything else shows the normal inline error.
+  const handleErr = (e: unknown) =>
+    e instanceof TokenError ? setNeedsRepair(true) : setError(String(e));
 
   // Voice (speech-to-text)
   const [voiceReady, setVoiceReady] = useState<boolean | null>(null);
@@ -97,8 +103,8 @@ export default function App() {
   };
 
   useEffect(() => {
-    api.health().then(setHealth).catch((e) => setError(String(e)));
-    refresh().catch((e) => setError(String(e)));
+    api.health().then(setHealth).catch(handleErr);
+    refresh().catch(handleErr);
     api.reindex().catch(() => {}); // backfill any notes missing embeddings
     api.voiceStatus().then((s) => setVoiceReady(s.ready)).catch(() => setVoiceReady(false));
   }, []);
@@ -320,6 +326,28 @@ export default function App() {
   }
 
   const busy = phase === "thinking";
+
+  // Phone lost its access token (403) — show a recoverable re-pair screen
+  // instead of a dead app. Relaunching from the home-screen icon (whose URL
+  // carries the token) clears this on next load.
+  if (needsRepair) {
+    return (
+      <div className="app repair-screen">
+        <div className="repair-card">
+          <div className="brand">noted<span className="dot">.</span></div>
+          <h2>Reconnect to your Mac</h2>
+          <p>
+            This phone’s connection expired. Open <strong>noted</strong> on your Mac, click the
+            phone button, and scan the QR code again — or just relaunch noted from your Home Screen
+            icon.
+          </p>
+          <button className="primary" onClick={() => window.location.reload()}>
+            Try again
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app">

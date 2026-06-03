@@ -16,6 +16,15 @@ function webToken(): string {
   return localStorage.getItem("noted_token") ?? "";
 }
 
+// Thrown when the server rejects our token (403) — the app catches this to show
+// a friendly "re-scan the QR" state instead of a raw "forbidden".
+export class TokenError extends Error {
+  constructor() {
+    super("Connection expired — re-scan the QR code shown in noted on your Mac.");
+    this.name = "TokenError";
+  }
+}
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (isDesktop) return tauriInvoke<T>(cmd, args as Record<string, unknown>);
   const res = await fetch(`/api/${cmd}?t=${encodeURIComponent(webToken())}`, {
@@ -23,6 +32,12 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(args ?? {}),
   });
+  if (res.status === 403) {
+    // Stale/empty token — drop it so a relaunch from the (tokened) home-screen
+    // icon re-captures a fresh one from the URL.
+    localStorage.removeItem("noted_token");
+    throw new TokenError();
+  }
   if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
   const text = await res.text();
   return (text ? JSON.parse(text) : undefined) as T;

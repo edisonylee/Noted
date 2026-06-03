@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tiny_http::Method;
 
 /// Connection info surfaced to the UI (urls contain the token).
@@ -267,6 +267,19 @@ fn oarg(b: &Value, k: &str) -> Option<String> {
 
 // ── static assets: bundled SPA in release, Vite proxy in dev ────────────────
 fn serve_static(app: &AppHandle, path: &str, req: tiny_http::Request) {
+    // Serve the PWA manifest dynamically so its start_url carries the access
+    // token. Without this, an installed iOS home-screen icon launches at "/"
+    // with no token — and iOS standalone apps have their own empty localStorage,
+    // so every /api call would 403. Baking the (persistent) token into start_url
+    // means the installed app launches authenticated and stays that way.
+    if path == "/manifest.webmanifest" {
+        let token = app.state::<PhoneState>().token.clone();
+        let _ = req.respond(
+            tiny_http::Response::from_string(manifest_json(&token))
+                .with_header(header("Content-Type", "application/manifest+json")),
+        );
+        return;
+    }
     if path == "/capture" {
         let _ = req.respond(html_response(PAGE));
         return;
@@ -308,6 +321,26 @@ fn serve_static(app: &AppHandle, path: &str, req: tiny_http::Request) {
             let _ = req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
         }
     }
+}
+
+// PWA manifest with the token baked into start_url (see serve_static).
+fn manifest_json(token: &str) -> String {
+    json!({
+        "name": "noted",
+        "short_name": "noted",
+        "description": "Your personal log — capture, search, and ask.",
+        "start_url": format!("/?t={token}"),
+        "scope": "/",
+        "display": "standalone",
+        "background_color": "#0e0f13",
+        "theme_color": "#0e0f13",
+        "icons": [
+            { "src": "/pwa-192.png", "sizes": "192x192", "type": "image/png" },
+            { "src": "/pwa-512.png", "sizes": "512x512", "type": "image/png" },
+            { "src": "/pwa-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+        ]
+    })
+    .to_string()
 }
 
 // Correct content-types Tauri's guesser gets wrong (notably .webmanifest).

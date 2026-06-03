@@ -282,6 +282,38 @@ async fn save_entry(app: tauri::AppHandle, args: SaveArgs) -> Result<i64, String
     Ok(note_id)
 }
 
+/// Instant capture: queue the raw note/photo and return its id immediately (no
+/// LLM). A background worker categorizes it and writes a real note later. This
+/// is the phone's capture path — it never blocks on the local model.
+#[tauri::command]
+async fn quick_capture(
+    app: tauri::AppHandle,
+    raw_text: String,
+    source: Option<String>,
+    image_path: Option<String>,
+    event_date: Option<String>,
+) -> Result<i64, String> {
+    let source = source.unwrap_or_else(default_source);
+    if raw_text.trim().is_empty() && image_path.is_none() {
+        return Err("empty capture".into());
+    }
+    let id = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        db::insert_pending(
+            &conn,
+            &raw_text,
+            &source,
+            image_path.as_deref(),
+            event_date.as_deref().filter(|s| !s.trim().is_empty()),
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .map_err(|e| e.to_string())?
+    };
+    let _ = app.emit("capture-queued", json!({ "id": id }));
+    Ok(id)
+}
+
 #[tauri::command]
 async fn list_notes(app: tauri::AppHandle) -> Result<Value, String> {
     let state = app.state::<Db>();
@@ -928,6 +960,114 @@ async fn test_provider() -> Result<String, String> {
     provider::test_gemini().await.map_err(|e| e.to_string())
 }
 
+// ── Quick-capture background worker ─────────────────────────────────────────
+const PENDING_MAX_ATTEMPTS: i64 = 5;
+static PENDING_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Read an image file and base64-encode it for the vision pipeline.
+fn load_image_b64(path: &str) -> Option<String> {
+    use base64::Engine;
+    std::fs::read(path)
+        .ok()
+        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+}
+
+/// Record a capture-processing failure and notify the UI (recoverable; retried
+/// until PENDING_MAX_ATTEMPTS).
+fn stamp_pending_error(app: &tauri::AppHandle, id: i64, err: &str) {
+    {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        let _ = db::set_pending_error(&conn, id, err);
+    }
+    let _ = app.emit("capture-needs-attention", json!({ "id": id, "error": err }));
+    eprintln!("[noted] capture {id} failed: {err}");
+}
+
+/// Drain the quick-capture queue: categorize each pending capture with the local
+/// pipeline and write it as a real note via the normal save path, then delete
+/// the row (or stamp an error for retry). Re-entrancy-guarded so a slow pass
+/// can't overlap the next tick and double-file.
+async fn process_pending_captures(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    if PENDING_BUSY.swap(true, Ordering::SeqCst) {
+        return; // a previous pass is still running
+    }
+    if let Err(e) = process_pending_inner(app).await {
+        eprintln!("[noted] pending-capture pass error: {e}");
+    }
+    PENDING_BUSY.store(false, Ordering::SeqCst);
+}
+
+async fn process_pending_inner(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let pending = {
+        let conn = state.0.lock().unwrap();
+        db::list_pending(&conn, PENDING_MAX_ATTEMPTS).map_err(|e| e.to_string())?
+    };
+    for p in pending {
+        // Load catalog + known category names (lock dropped before any await).
+        let (catalog, known) = {
+            let conn = state.0.lock().unwrap();
+            let catalog = db::category_catalog(&conn).map_err(|e| e.to_string())?;
+            let names: Vec<String> = db::list_categories(&conn)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|c| c.name)
+                .collect();
+            (catalog, names)
+        };
+        let today = today_local();
+
+        // Categorize: text directly; photos via the vision transcription path.
+        let envelope = if p.source == "photo" {
+            match p.image_path.as_deref().and_then(load_image_b64) {
+                Some(b64) => pipeline::categorize_photo(&catalog, &known, &b64, &today).await,
+                None => Err(anyhow::anyhow!("missing or unreadable image")),
+            }
+        } else {
+            pipeline::categorize(&catalog, &known, &p.raw_text, &today).await
+        };
+
+        match envelope {
+            Ok(env) => {
+                // Prefer the user's explicit date, else the extracted one.
+                let event_date = p
+                    .event_date
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| env.get("event_date").and_then(|d| d.as_str()).map(String::from))
+                    .unwrap_or_else(today_local);
+                // The envelope's entries/entities already match SaveArgs' shape
+                // (category/description/data, name/type/fact/relationship).
+                let save_json = json!({
+                    "raw_text": env.get("raw_text").cloned().unwrap_or_else(|| json!(p.raw_text)),
+                    "source": p.source,
+                    "image_path": p.image_path,
+                    "event_date": event_date,
+                    "entries": env.get("entries").cloned().unwrap_or_else(|| json!([])),
+                    "entities": env.get("entities").cloned().unwrap_or_else(|| json!([])),
+                });
+                match serde_json::from_value::<SaveArgs>(save_json) {
+                    Ok(args) => match save_entry(app.clone(), args).await {
+                        Ok(_) => {
+                            {
+                                let conn = state.0.lock().unwrap();
+                                let _ = db::delete_pending(&conn, p.id);
+                            }
+                            let _ = app.emit("note-filed", json!({ "id": p.id }));
+                        }
+                        Err(e) => stamp_pending_error(app, p.id, &e),
+                    },
+                    Err(e) => stamp_pending_error(app, p.id, &e.to_string()),
+                }
+            }
+            Err(e) => stamp_pending_error(app, p.id, &e.to_string()),
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -984,6 +1124,17 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move { auto_backfill_recaps(&h3).await });
             });
 
+            // Quick-capture worker: drain leftovers at launch, then poll every 5s
+            // so phone captures get categorized + filed shortly after they arrive.
+            let hp = app.handle().clone();
+            tauri::async_runtime::spawn(async move { process_pending_captures(&hp).await });
+            let hp2 = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let h = hp2.clone();
+                tauri::async_runtime::spawn(async move { process_pending_captures(&h).await });
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -992,6 +1143,7 @@ pub fn run() {
             categorize_photo,
             save_image,
             save_entry,
+            quick_capture,
             list_notes,
             list_categories,
             chat,

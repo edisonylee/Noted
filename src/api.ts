@@ -178,6 +178,10 @@ export const api = {
     entries: { category: string; description?: string; data: Record<string, unknown> }[];
     entities?: EntityCandidate[];
   }) => invoke<number>("save_entry", { args }),
+  // Instant capture: queue raw text/photo on the Mac (no LLM wait); the Mac
+  // categorizes + files it in the background. Returns a pending id.
+  quickCapture: (rawText: string, source?: string, imagePath?: string, eventDate?: string) =>
+    invoke<number>("quick_capture", { rawText, source, imagePath, eventDate }),
   listEntities: () => invoke<EntityRow[]>("list_entities"),
   mergeEntities: (keep: number, drop: number) => invoke<void>("merge_entities", { keep, drop }),
   entityGraph: () => invoke<GraphData>("entity_graph"),

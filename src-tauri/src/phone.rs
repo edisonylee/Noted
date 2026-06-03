@@ -197,6 +197,15 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
                 serde_json::from_value(varg(b, "args")).map_err(|e| e.to_string())?;
             crate::save_entry(a, args).await.map(|n| json!(n))
         }
+        "quick_capture" => crate::quick_capture(
+            a,
+            sarg(b, "rawText"),
+            oarg(b, "source"),
+            oarg(b, "imagePath"),
+            oarg(b, "eventDate"),
+        )
+        .await
+        .map(|id| json!(id)),
         "list_notes" => crate::list_notes(a).await,
         "list_categories" => crate::list_categories(a).await,
         "chat" => {

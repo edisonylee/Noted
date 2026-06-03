@@ -92,6 +92,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS entity_embeddings USING vec0(
   entity_id INTEGER PRIMARY KEY,
   embedding FLOAT[768]
 );
+
+-- Quick-capture queue: a note captured (e.g. from the phone) that hasn't been
+-- categorized yet. A background worker runs extraction, writes it as a real
+-- note + entries, then deletes the row. `attempts` caps retries on poison rows.
+CREATE TABLE IF NOT EXISTS pending_captures (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  raw_text    TEXT NOT NULL,
+  source      TEXT NOT NULL DEFAULT 'text',
+  image_path  TEXT,
+  event_date  TEXT,
+  created_at  TEXT NOT NULL,
+  error       TEXT,
+  attempts    INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 /// Register sqlite-vec as an auto extension (process-wide, must happen before
@@ -487,6 +501,78 @@ pub fn list_recaps(conn: &Connection, limit: i64) -> Result<Vec<RecapRow>> {
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+// ---------------------------------------------------------------------------
+// Quick-capture queue: raw notes awaiting background categorization.
+// ---------------------------------------------------------------------------
+
+pub struct PendingCapture {
+    pub id: i64,
+    pub raw_text: String,
+    pub source: String,
+    pub image_path: Option<String>,
+    pub event_date: Option<String>,
+}
+
+/// Queue a raw capture for later categorization. Returns its id.
+pub fn insert_pending(
+    conn: &Connection,
+    raw_text: &str,
+    source: &str,
+    image_path: Option<&str>,
+    event_date: Option<&str>,
+    now: &str,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO pending_captures (raw_text, source, image_path, event_date, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![raw_text, source, image_path, event_date, now],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Pending captures still worth processing (under the retry cap), oldest first.
+pub fn list_pending(conn: &Connection, max_attempts: i64) -> Result<Vec<PendingCapture>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, raw_text, source, image_path, event_date
+         FROM pending_captures WHERE attempts < ?1 ORDER BY id ASC",
+    )?;
+    let rows = stmt
+        .query_map([max_attempts], |r| {
+            Ok(PendingCapture {
+                id: r.get(0)?,
+                raw_text: r.get(1)?,
+                source: r.get(2)?,
+                image_path: r.get(3)?,
+                event_date: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn delete_pending(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM pending_captures WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// Record a processing failure and bump the attempt count (for retry + visibility).
+pub fn set_pending_error(conn: &Connection, id: i64, error: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE pending_captures SET error = ?2, attempts = attempts + 1 WHERE id = ?1",
+        rusqlite::params![id, error],
+    )?;
+    Ok(())
+}
+
+/// Count captures that have exhausted their retries (for a "needs attention" badge).
+pub fn count_pending_errors(conn: &Connection, max_attempts: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM pending_captures WHERE attempts >= ?1",
+        [max_attempts],
+        |r| r.get(0),
+    )?)
 }
 
 // ---------------------------------------------------------------------------

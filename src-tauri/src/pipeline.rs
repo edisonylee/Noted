@@ -88,9 +88,12 @@ text is generated separately; you only set the action.\n\
 \"category\" with a short, lowercase \"name\" and a one-line \"description\".\n\
 - \"edit_entry\" — ONLY when the user clearly asks to correct or change a value in a specific entry \
 they logged. You are given candidate entries, each prefixed `entry #<id>`. Choose the ONE they mean \
-and fill \"edit\": \"entry_id\" (the number after #), \"data\" (the entry's CURRENT data object copied \
-verbatim with ONLY the requested change applied — keep every other field), and \"summary\" (a short \
-human description of the change, e.g. \"squat reps 8 -> 6\").\n\
+and fill \"edit\": \"entry_id\" (the number after #), \"data\", and \"summary\" (a short human \
+description, e.g. \"squat reps 8 -> 6\"). CRITICAL: \"data\" must be the entry's CURRENT data object \
+reproduced IN FULL — copy EVERY field and EVERY element of EVERY array exactly as given, then change \
+ONLY the specific value the user asked about. Do not drop, summarize, or omit any other item. E.g. if \
+the entry has exercises [squat, bench] and the user fixes squat's reps, return BOTH squat (with the \
+new reps) AND bench unchanged.\n\
 If the user wants to edit something but you cannot tell which entry, set action=\"answer\" and put a \
 short clarifying question in \"clarify\".\n\
 Be conservative: if you are unsure whether they want an action at all, choose \"answer\". Never invent \

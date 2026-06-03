@@ -136,7 +136,7 @@ export type Recap = {
   entry_count: number;
 };
 export type RecapRow = Recap & { id: number; created_at: string };
-export type PhoneInfo = { url: string; token: string; port: number };
+export type PhoneInfo = { url: string; lan_url: string; token: string; port: number };
 
 export type TrendRow = { date: string; label: string; values: Record<string, number> };
 export type Trends = {

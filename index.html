@@ -3,8 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>noted</title>
+
+    <!-- Installable web app (phone): "Add to Home Screen" gives a real
+         fullscreen noted icon. See src-tauri/src/phone.rs for the LAN server. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#0e0f13" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="noted" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <script>
       // Set theme before paint to avoid a flash of the wrong palette.
       (function () {

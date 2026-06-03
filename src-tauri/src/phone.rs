@@ -18,25 +18,64 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tiny_http::Method;
 
-/// Connection info surfaced to the UI (url contains the token).
+/// Connection info surfaced to the UI (urls contain the token).
 pub struct PhoneState {
+    /// Primary URL — prefers the stable `<host>.local` name (survives IP changes).
     pub url: String,
+    /// Raw-IP fallback URL, for networks where `.local` (mDNS) doesn't resolve.
+    pub lan_url: String,
     pub token: String,
     pub port: u16,
+}
+
+/// Persisted access token so the phone URL stays stable across launches — a
+/// saved "Add to Home Screen" icon keeps working instead of breaking each run.
+pub fn load_or_make_token(dir: &Path) -> String {
+    let path = dir.join("phone_token.txt");
+    if let Ok(t) = std::fs::read_to_string(&path) {
+        let t = t.trim().to_string();
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    let t = format!("{:016x}", rand::random::<u64>());
+    let _ = std::fs::write(&path, &t);
+    t
+}
+
+/// The Mac's Bonjour/mDNS name (e.g. "Edisons-MacBook-Pro") for a stable
+/// `<name>.local` URL that survives DHCP IP changes. None if unavailable.
+pub fn local_hostname() -> Option<String> {
+    let out = std::process::Command::new("scutil")
+        .args(["--get", "LocalHostName"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 // ── TLS: a persisted self-signed cert for the current LAN IP ────────────────
 // Cached under app_data/tls so the user only accepts the browser warning once.
 // Regenerated if the machine's IP changed (the cert's SAN must match the host).
-fn load_or_make_cert(dir: &Path, ip: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
+fn load_or_make_cert(dir: &Path, sans: &[String]) -> Result<(Vec<u8>, Vec<u8>), String> {
     let tls = dir.join("tls");
     let _ = std::fs::create_dir_all(&tls);
     let cert_path = tls.join("cert.pem");
     let key_path = tls.join("key.pem");
-    let ip_path = tls.join("ip.txt");
+    let sans_path = tls.join("sans.txt");
 
-    let cached_ip = std::fs::read_to_string(&ip_path).unwrap_or_default();
-    if cached_ip.trim() == ip {
+    // Reuse the cached cert while the SAN set (hostname + IP) is unchanged, so
+    // the user only accepts the browser warning once per host/IP combination.
+    let key = sans.join(",");
+    let cached = std::fs::read_to_string(&sans_path).unwrap_or_default();
+    if cached.trim() == key {
         if let (Ok(c), Ok(k)) = (std::fs::read(&cert_path), std::fs::read(&key_path)) {
             if !c.is_empty() && !k.is_empty() {
                 return Ok((c, k));
@@ -44,19 +83,20 @@ fn load_or_make_cert(dir: &Path, ip: &str) -> Result<(Vec<u8>, Vec<u8>), String>
         }
     }
 
-    let certified = rcgen::generate_simple_self_signed(vec![ip.to_string(), "localhost".to_string()])
+    let certified = rcgen::generate_simple_self_signed(sans.to_vec())
         .map_err(|e| format!("cert generation failed: {e}"))?;
     let cert_pem = certified.cert.pem().into_bytes();
     let key_pem = certified.key_pair.serialize_pem().into_bytes();
     let _ = std::fs::write(&cert_path, &cert_pem);
     let _ = std::fs::write(&key_path, &key_pem);
-    let _ = std::fs::write(&ip_path, ip);
+    let _ = std::fs::write(&sans_path, &key);
     Ok((cert_pem, key_pem))
 }
 
 /// Bind an HTTPS port (trying a few), returning the bound server + chosen port.
-pub fn bind_https(dir: &Path, ip: &str, preferred: u16) -> Option<(tiny_http::Server, u16)> {
-    let (certificate, private_key) = load_or_make_cert(dir, ip)
+/// `sans` are the cert's subject-alt-names (hostname.local, LAN IP, localhost).
+pub fn bind_https(dir: &Path, sans: &[String], preferred: u16) -> Option<(tiny_http::Server, u16)> {
+    let (certificate, private_key) = load_or_make_cert(dir, sans)
         .map_err(|e| eprintln!("[noted] {e}"))
         .ok()?;
     for port in [preferred, preferred + 1, preferred + 2] {

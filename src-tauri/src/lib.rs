@@ -765,7 +765,7 @@ async fn export_db(app: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 fn phone_info(app: tauri::AppHandle) -> Value {
     let state = app.state::<phone::PhoneState>();
-    json!({ "url": state.url, "token": state.token, "port": state.port })
+    json!({ "url": state.url, "lan_url": state.lan_url, "token": state.token, "port": state.port })
 }
 
 /// Read an inbox image (from a phone upload) as base64 for the vision pipeline.
@@ -944,18 +944,30 @@ pub fn run() {
             // Phone capture: tiny LAN upload server gated by a random token.
             let inbox = dir.join("inbox");
             std::fs::create_dir_all(&inbox)?;
-            let token = format!("{:016x}", rand::random::<u64>());
+            // Stable token + stable hostname so a phone's "Add to Home Screen"
+            // icon keeps working across launches (and DHCP IP changes).
+            let token = phone::load_or_make_token(&dir);
             let ip = local_ip_address::local_ip()
                 .map(|i| i.to_string())
                 .unwrap_or_else(|_| "localhost".to_string());
-            if let Some((server, port)) = phone::bind_https(&dir, &ip, 8787) {
-                let url = format!("https://{ip}:{port}/?t={token}");
+            let host = phone::local_hostname().map(|h| format!("{h}.local"));
+            // Cert SANs: the .local name (primary), the LAN IP, and localhost.
+            let mut sans = vec![ip.clone(), "localhost".to_string()];
+            if let Some(h) = &host {
+                sans.insert(0, h.clone());
+            }
+            if let Some((server, port)) = phone::bind_https(&dir, &sans, 8787) {
+                // Prefer the stable .local name; fall back to the raw IP.
+                let host_for_url = host.clone().unwrap_or_else(|| ip.clone());
+                let url = format!("https://{host_for_url}:{port}/?t={token}");
+                let lan_url = format!("https://{ip}:{port}/?t={token}");
                 println!("[noted] phone access ready (full app): {url}");
-                app.manage(phone::PhoneState { url, token: token.clone(), port });
+                app.manage(phone::PhoneState { url, lan_url, token: token.clone(), port });
                 phone::serve(server, app.handle().clone(), inbox, token);
             } else {
                 app.manage(phone::PhoneState {
                     url: String::new(),
+                    lan_url: String::new(),
                     token,
                     port: 0,
                 });

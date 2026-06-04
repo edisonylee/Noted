@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { CalendarDays, Camera, Loader, Pencil, Plus, X } from "lucide-react";
-import { api, type NoteRow } from "./api";
+import { api, type EntityCandidate, type NoteRow } from "./api";
 import { fileToImg, type Img } from "./image";
 
 // Local YYYY-MM-DD. NOT toISOString() — that's UTC and would roll the day over
@@ -74,6 +74,81 @@ function parseBlocks(data: Record<string, unknown> | null | undefined): Block[] 
 
 const isSchedule = (cat: string | null) => cat?.toLowerCase() === "schedule";
 
+// "0830" minutes-of-day -> "08:30". Wraps into [0,1440).
+function minToStr(m: number): string {
+  const mm = ((Math.round(m) % 1440) + 1440) % 1440;
+  return `${String(Math.floor(mm / 60)).padStart(2, "0")}:${String(mm % 60).padStart(2, "0")}`;
+}
+
+// Resolve a clock value (hour, minute, am/pm) to minutes-of-day. With no am/pm we
+// assume the day moves forward (monotonic): pick the smallest reading that isn't
+// before `prevMin`, so a bare "2:00" after noon lands at 14:00, not 02:00.
+function pickMonotonic(hour: number, min: number, ap: "a" | "p" | null, prevMin: number): number {
+  if (ap === "a") return (hour === 12 ? 0 : hour) * 60 + min;
+  if (ap === "p") return (hour === 12 ? 12 : hour + 12) * 60 + min;
+  if (hour >= 13) return hour * 60 + min; // already 24h, e.g. "18:30"
+  const base = (hour % 12) * 60 + min; // 12 -> 0
+  if (base >= prevMin) return base;
+  if (base + 720 >= prevMin) return base + 720;
+  return base + 720;
+}
+
+// Parse one leading time token ("8", "8:30", "8:30pm", "930", "1145").
+function resolveTime(tok: string, prevMin: number): number | null {
+  const t = tok.trim();
+  const m = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm|a|p)?$/i.exec(t);
+  if (m) {
+    const hour = Number(m[1]);
+    const min = m[2] ? Number(m[2]) : 0;
+    if (hour > 23 || min > 59) return null;
+    const ap = m[3] ? (m[3][0].toLowerCase() as "a" | "p") : null;
+    return pickMonotonic(hour, min, ap, prevMin);
+  }
+  const d = /^(\d{3,4})$/.exec(t); // colon-less "930" / "1145"
+  if (d) {
+    const n = d[1];
+    const hh = Number(n.slice(0, n.length - 2));
+    const mm = Number(n.slice(-2));
+    if (hh > 23 || mm > 59) return null;
+    return pickMonotonic(hh, mm, null, prevMin);
+  }
+  return null;
+}
+
+// am/pm (or bare a/p) only counts as a meridiem when not glued to a word, so
+// "2:00 profound" keeps its "p" instead of reading it as "2:00 p.m.".
+const TIME_TOK = "\\d{1,2}(?::\\d{2})?(?:\\s*(?:am|pm|a|p)(?![a-z]))?|\\d{3,4}";
+const LINE_RE = new RegExp(`^\\s*~?\\s*(${TIME_TOK})\\s*(?:(?:[-–—]|to)\\s*~?\\s*(${TIME_TOK}))?`, "i");
+
+// Turn a typed/transcribed schedule into ordered blocks — deterministic, no LLM.
+// Lines that start with a clock time become timed blocks; everything else is an
+// "Anytime" task. The whole point is reliability: this never hard-fails.
+function parseSchedule(text: string): Block[] {
+  const blocks: Block[] = [];
+  let prev = -1;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim().replace(/^[-*•]\s+/, "");
+    if (!line) continue;
+    const m = LINE_RE.exec(line);
+    const start = m?.[1] ? resolveTime(m[1], prev) : null;
+    if (m && start != null) {
+      const end = m[2] ? resolveTime(m[2], start) : null;
+      const task = line.slice(m[0].length).replace(/^[\s:.,–—-]+/, "").trim();
+      if (!task) continue;
+      const b: Block = { task, start: minToStr(start) };
+      if (end != null && end > start) {
+        b.end = minToStr(end);
+        b.duration_min = end - start;
+      }
+      blocks.push(b);
+      prev = end ?? start;
+    } else {
+      blocks.push({ task: line });
+    }
+  }
+  return blocks;
+}
+
 const PLACEHOLDER = `Lay out your day, however messy:
 
 woke up 7:30, gym 8–9
@@ -141,46 +216,41 @@ export function TodayView({
     setBusy(true);
     setEditError(null);
     try {
-      let env;
-      let raw_text: string;
+      let body = draft.trim();
       let source = "text";
       let image_path: string | null = null;
+      let entities: EntityCandidate[] = [];
 
+      // Photo: use the vision model ONLY to transcribe the handwriting to text,
+      // then parse it the same deterministic way as typed input.
       if (photo) {
-        env = await api.categorizePhoto(photo.base64);
-        raw_text = env.raw_text ?? draft.trim();
+        const env = await api.categorizePhoto(photo.base64);
+        body = (env.raw_text ?? "").trim() || body;
         source = "photo";
         image_path = await api.saveImage(photo.base64, photo.ext);
-      } else {
-        const body = draft.trim();
-        if (!body) {
-          setBusy(false);
-          return;
-        }
-        // A "Schedule:" header forces the pipeline's schedule category (PROTOCOL
-        // §2 / pipeline split_sections), so the day reliably lands as time blocks.
-        env = await api.categorize(`Schedule:\n${body}`);
-        raw_text = body;
+        entities = env.entities; // keep any people the photo surfaced
       }
 
-      const entries = env.entries.map((e) => ({
-        category: e.category.trim().toLowerCase(),
-        description: e.description,
-        data: e.data,
-      }));
-      // Dedicated schedule flow: guarantee it shows on Today even if the model
-      // labeled the note something else.
-      if (entries.length && !entries.some((e) => e.category === "schedule")) {
-        entries[0].category = "schedule";
+      if (!body) {
+        setBusy(false);
+        return;
+      }
+
+      // Deterministic parse — instant, offline, never hard-fails on the model.
+      const blocks = parseSchedule(body);
+      if (!blocks.length) {
+        setEditError('Couldn’t find anything to schedule. Try lines like "9:00 gym" or "2–4pm errands".');
+        setBusy(false);
+        return;
       }
 
       await api.save({
-        raw_text,
+        raw_text: body,
         source,
         image_path,
         event_date: today, // always today's schedule
-        entries,
-        entities: env.entities,
+        entries: [{ category: "schedule", description: "today's schedule", data: { blocks } }],
+        entities,
       });
 
       setEditing(false);

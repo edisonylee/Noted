@@ -345,6 +345,95 @@ textarea.json.bad { border-color: var(--bad); }
 .tl-src { color: var(--faint); margin-left: auto; flex-shrink: 0; }
 .tl-body { padding: 2px 2px 16px 25px; animation: rise 0.16s var(--ease); }
 
+/* ---- Today: the day's schedule, read-only ---- */
+.today { width: 100%; max-width: 620px; margin: 0 auto; padding: 4px 2px 40px; }
+.today-head { margin-bottom: 22px; }
+.today-eyebrow {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.09em;
+  color: var(--accent); margin-bottom: 4px;
+}
+.today-date { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; color: var(--ink); margin: 0; }
+
+.today-agenda { display: flex; flex-direction: column; }
+.today-block {
+  display: grid; grid-template-columns: 62px 18px 1fr; align-items: start; gap: 12px;
+  padding: 12px 10px; border-radius: var(--r-md);
+  transition: background 0.18s var(--ease), opacity 0.18s var(--ease);
+}
+.today-time {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 1px; padding-top: 1px; text-align: right;
+}
+.today-start { font-size: 13.5px; font-weight: 560; color: var(--ink); font-variant-numeric: tabular-nums; }
+.today-end { font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+
+.today-rail { position: relative; display: flex; justify-content: center; padding-top: 5px; }
+.today-rail::before {
+  content: ""; position: absolute; top: 6px; bottom: -24px; left: 50%; width: 2px;
+  transform: translateX(-50%); background: var(--line); display: none;
+}
+/* Connector only between consecutive timed blocks — never dangling off the last
+   one or into the "Anytime" group. */
+.today-block:has(+ .today-block:not(.untimed)) .today-rail::before { display: block; }
+.today-dot {
+  position: relative; z-index: 1; width: 9px; height: 9px; border-radius: 99px;
+  background: var(--surface); border: 2px solid var(--line-strong);
+}
+
+.today-info { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.today-task { font-size: 15px; font-weight: 500; color: var(--ink); line-height: 1.35; }
+.today-meta { display: inline-flex; align-items: center; gap: 8px; }
+.today-dur {
+  font-size: 11.5px; font-weight: 500; color: var(--muted); background: var(--surface-2);
+  border: 1px solid var(--line); padding: 1px 8px; border-radius: 99px;
+}
+.today-nowtag {
+  font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--accent); background: var(--accent-tint);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line)); padding: 1px 8px; border-radius: 99px;
+}
+
+/* The current block — the only thing rendered in blue. */
+.today-block.now { background: var(--accent-tint); }
+.today-block.now .today-dot {
+  background: var(--accent); border-color: var(--accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.today-block.now .today-start { color: var(--accent); }
+.today-block.now .today-task { font-weight: 600; }
+
+/* Blocks whose time has passed recede. */
+.today-block.past { opacity: 0.48; }
+.today-block.past .today-dot { background: var(--line); border-color: var(--line); }
+
+.today-untimed { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.today-untimed-label {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--faint); margin: 0 0 4px 12px;
+}
+
+.today-notes { margin-top: 24px; }
+.today-notes summary { color: var(--muted); font-size: 12px; cursor: pointer; list-style: none; }
+.today-notes summary::-webkit-details-marker { display: none; }
+.today-notes pre {
+  margin: 8px 0 0; padding: 12px; background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: var(--r-sm); font-size: 12.5px; color: var(--ink-soft); white-space: pre-wrap;
+  font-family: ui-monospace, "SF Mono", monospace; line-height: 1.5;
+}
+
+.today-empty {
+  display: flex; flex-direction: column; align-items: center; text-align: center; padding: 56px 20px; gap: 6px;
+}
+.today-empty-icon { color: var(--faint); margin-bottom: 8px; }
+.today-empty-title { font-size: 17px; font-weight: 560; color: var(--ink); margin: 0; }
+.today-empty-sub { font-size: 13.5px; color: var(--muted); max-width: 36ch; line-height: 1.5; margin: 0 0 10px; }
+.today-make {
+  display: inline-flex; align-items: center; gap: 7px; padding: 10px 18px;
+  background: var(--ink); color: var(--on-ink); border: none; border-radius: 99px;
+  font-size: 14px; font-weight: 540; transition: background 0.16s var(--ease), transform 0.12s var(--ease);
+}
+.today-make:hover { background: var(--ink-hover); }
+.today-make:active { transform: scale(0.97); }
+
 .raw { margin-top: 12px; }
 .raw summary { color: var(--muted); font-size: 12px; cursor: pointer; list-style: none; }
 .raw summary::-webkit-details-marker { display: none; }

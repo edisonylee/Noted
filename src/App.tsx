@@ -17,10 +17,11 @@ import { PeopleView } from "./PeopleView";
 import { PhonePanel } from "./PhonePanel";
 import { FloatingChat } from "./FloatingChat";
 import { SelfView } from "./Self";
+import { TodayView } from "./Today";
 import "./App.css";
 
 type Phase = "idle" | "thinking" | "review";
-type View = "log" | "timeline" | "trends" | "recaps" | "people" | "self";
+type View = "today" | "log" | "timeline" | "trends" | "recaps" | "people" | "self";
 type Source = "text" | "photo";
 // One editable review card per extracted entry.
 type ReviewCard = {
@@ -47,7 +48,7 @@ function homeGreeting(): { dateLine: string; title: string } {
 
 export default function App() {
   const { theme, toggle } = useTheme();
-  const [view, setView] = useState<View>("log");
+  const [view, setView] = useState<View>("today");
   const [text, setText] = useState("");
   const [img, setImg] = useState<Img | null>(null);
   const [source, setSource] = useState<Source>("text");
@@ -77,7 +78,7 @@ export default function App() {
   // Mobile-first layout: phone viewports get a bottom-nav + dedicated capture
   // screen instead of the desktop topbar/review flow.
   const isMobile = useIsMobile();
-  const [mobileTab, setMobileTab] = useState<MobileTab>("capture");
+  const [mobileTab, setMobileTab] = useState<MobileTab>("today");
 
   // Route a thrown error: a TokenError (phone 403) trips the re-pair screen;
   // anything else shows the normal inline error.
@@ -359,6 +360,9 @@ export default function App() {
         </header>
 
         <main className="mobile-content">
+          {mobileTab === "today" && (
+            <TodayView notes={notes} onMakeSchedule={() => setMobileTab("capture")} />
+          )}
           {mobileTab === "capture" && <MobileCapture onCaptured={() => refresh().catch(handleErr)} />}
           {mobileTab === "timeline" && <TimelineView notes={notes} />}
           {mobileTab === "recaps" && <RecapsView />}
@@ -368,8 +372,8 @@ export default function App() {
           active={mobileTab}
           onChange={(t) => {
             setMobileTab(t);
-            // Re-fetch when navigating to a list so a freshly auto-filed note shows.
-            if (t === "timeline" || t === "recaps") refresh().catch(handleErr);
+            // Re-fetch when navigating to a list/schedule so a freshly auto-filed note shows.
+            if (t === "today" || t === "timeline" || t === "recaps") refresh().catch(handleErr);
           }}
         />
 
@@ -394,6 +398,9 @@ export default function App() {
           noted<span className="dot">.</span>
         </div>
         <nav className="nav">
+          <button className={view === "today" ? "on" : ""} onClick={() => setView("today")}>
+            Today
+          </button>
           <button className={view === "log" ? "on" : ""} onClick={() => setView("log")}>
             Log
           </button>
@@ -431,7 +438,9 @@ export default function App() {
       </header>
 
       <main className="content">
-        {view === "trends" ? (
+        {view === "today" ? (
+          <TodayView notes={notes} onMakeSchedule={() => setView("log")} />
+        ) : view === "trends" ? (
           <TrendsView cats={cats} theme={theme} />
         ) : view === "recaps" ? (
           <RecapsView />

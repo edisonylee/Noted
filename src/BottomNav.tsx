@@ -1,8 +1,9 @@
-import { PenLine, Clock, ScrollText, MessageCircle } from "lucide-react";
+import { CalendarDays, PenLine, Clock, ScrollText, MessageCircle } from "lucide-react";
 
-export type MobileTab = "capture" | "timeline" | "recaps" | "ask";
+export type MobileTab = "today" | "capture" | "timeline" | "recaps" | "ask";
 
 const TABS = [
+  { id: "today", label: "Today", Icon: CalendarDays },
   { id: "capture", label: "Capture", Icon: PenLine },
   { id: "timeline", label: "Timeline", Icon: Clock },
   { id: "recaps", label: "Recaps", Icon: ScrollText },

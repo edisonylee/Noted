@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { listen } from "./events";
 import { RefreshCw } from "lucide-react";
 import { api, type RecapRow } from "./api";
+import { dayDiff, easternDay, formatDay } from "./day";
 
 export function RecapsView() {
   const [recaps, setRecaps] = useState<RecapRow[]>([]);
@@ -63,14 +64,11 @@ export function RecapsView() {
 }
 
 function fmt(dateStr: string, opts: Intl.DateTimeFormatOptions) {
-  return new Date(dateStr + "T00:00:00").toLocaleDateString(undefined, opts);
+  return formatDay(dateStr, opts);
 }
 
 function relDay(dateStr: string): string {
-  const d = new Date(dateStr + "T00:00:00");
-  const t = new Date();
-  t.setHours(0, 0, 0, 0);
-  const diff = Math.round((t.getTime() - d.getTime()) / 86_400_000);
+  const diff = dayDiff(easternDay(), dateStr);
   if (diff === 0) return "Today";
   if (diff === 1) return "Yesterday";
   return fmt(dateStr, { weekday: "long", month: "long", day: "numeric" });

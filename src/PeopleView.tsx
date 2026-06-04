@@ -1,17 +1,16 @@
 import { useEffect, useState } from "react";
 import { Users } from "lucide-react";
 import { api, type PersonProfile } from "./api";
+import { dayDiff, easternDay, formatDay } from "./day";
 
 // "Today" / "Yesterday" / "Jun 1" (year only if not the current year).
 function relativeDay(dateStr: string): string {
-  const d = new Date(dateStr + "T00:00:00");
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const diff = Math.round((today.getTime() - d.getTime()) / 86_400_000);
+  const today = easternDay();
+  const diff = dayDiff(today, dateStr);
   if (diff === 0) return "Today";
   if (diff === 1) return "Yesterday";
-  const sameYear = d.getFullYear() === today.getFullYear();
-  return d.toLocaleDateString(undefined, {
+  const sameYear = dateStr.slice(0, 4) === today.slice(0, 4);
+  return formatDay(dateStr, {
     month: "short",
     day: "numeric",
     ...(sameYear ? {} : { year: "numeric" }),

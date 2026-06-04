@@ -1,20 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "./events";
-import { Camera, Check, Download, Mic, Moon, Settings, Smartphone, Square, Sun } from "lucide-react";
+import { Camera, Check, Download, Loader, Mic, Moon, Settings, Smartphone, Square, Sun } from "lucide-react";
 import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg, type Img } from "./image";
 import { useIsMobile } from "./useIsMobile";
+import { useConnection } from "./useConnection";
 import { MobileCapture } from "./MobileCapture";
 import { BottomNav, type MobileTab } from "./BottomNav";
 import { useTheme } from "./useTheme";
-import { api, TokenError, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow } from "./api";
+import { api, TokenError, OfflineError, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow } from "./api";
 import { DataView } from "./DataView";
 import { TimelineView } from "./Timeline";
 import { PhonePanel } from "./PhonePanel";
 import { FloatingChat } from "./FloatingChat";
 import { KnowledgeView } from "./Knowledge";
 import { TodayView } from "./Today";
+import { APP_TZ, easternHour } from "./day";
 import "./App.css";
 
 type Phase = "idle" | "thinking" | "review";
@@ -31,9 +33,14 @@ type ReviewCard = {
 // Time-adaptive home greeting: planning prompt in the morning → recap prompt at night.
 function homeGreeting(): { dateLine: string; title: string } {
   const now = new Date();
-  const h = now.getHours();
+  const h = easternHour(now);
   const partOfDay = h < 12 ? "morning" : h < 17 ? "afternoon" : h < 21 ? "evening" : "night";
-  const dateStr = now.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+  const dateStr = now.toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    timeZone: APP_TZ,
+  });
   const title =
     h < 11
       ? "What's your schedule looking like today?"
@@ -77,10 +84,15 @@ export default function App() {
   const isMobile = useIsMobile();
   const [mobileTab, setMobileTab] = useState<MobileTab>("today");
 
-  // Route a thrown error: a TokenError (phone 403) trips the re-pair screen;
-  // anything else shows the normal inline error.
+  // Route a thrown error: a TokenError (phone 403) trips the re-pair screen; an
+  // OfflineError (Mac unreachable, e.g. mid-rebuild) shows the reconnecting
+  // overlay and lets the watcher auto-recover; anything else is an inline error.
   const handleErr = (e: unknown) =>
-    e instanceof TokenError ? setNeedsRepair(true) : setError(String(e));
+    e instanceof TokenError
+      ? setNeedsRepair(true)
+      : e instanceof OfflineError
+        ? markOffline()
+        : setError(String(e));
 
   // Voice (speech-to-text)
   const [voiceReady, setVoiceReady] = useState<boolean | null>(null);
@@ -94,6 +106,15 @@ export default function App() {
     setNotes(n);
     setCats(c);
   };
+
+  // Phone web client only: watch the connection to the Mac and auto-recover when
+  // it comes back (e.g. after a dev rebuild) — refetch health + data, no reload.
+  const { online, markOffline } = useConnection({
+    onReconnect: () => {
+      api.health().then(setHealth).catch(() => {});
+      refresh().catch(handleErr);
+    },
+  });
 
   useEffect(() => {
     api.health().then(setHealth).catch(handleErr);
@@ -323,6 +344,19 @@ export default function App() {
   // Phone lost its access token (403) — show a recoverable re-pair screen
   // instead of a dead app. Relaunching from the home-screen icon (whose URL
   // carries the token) clears this on next load.
+  // Non-destructive overlay shown while the Mac is unreachable (e.g. mid-rebuild).
+  // `online` stays true on desktop, so this only ever appears on the phone. It
+  // preserves the screen underneath and auto-dismisses when the watcher recovers
+  // — distinct from the 403 re-pair screen, and never forces a reload.
+  const reconnectingOverlay = !online && (
+    <div className="reconnecting-overlay">
+      <div className="reconnecting-card">
+        <Loader size={18} className="spin" />
+        <span>Reconnecting to your Mac…</span>
+      </div>
+    </div>
+  );
+
   if (needsRepair) {
     return (
       <div className="app repair-screen">
@@ -347,6 +381,7 @@ export default function App() {
   if (isMobile) {
     return (
       <div className="app mobile">
+        {reconnectingOverlay}
         <header className="mobile-topbar">
           <div className="brand">
             noted<span className="dot">.</span>
@@ -358,7 +393,7 @@ export default function App() {
 
         <main className="mobile-content">
           {mobileTab === "today" && (
-            <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} />
+            <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} onOpenSettings={() => setShowSettings(true)} />
           )}
           {mobileTab === "capture" && <MobileCapture onCaptured={() => refresh().catch(handleErr)} />}
           {mobileTab === "timeline" && <TimelineView notes={notes} />}
@@ -389,6 +424,7 @@ export default function App() {
 
   return (
     <div className="app">
+      {reconnectingOverlay}
       <header className="topbar">
         <div className="brand">
           noted<span className="dot">.</span>
@@ -426,7 +462,7 @@ export default function App() {
 
       <main className="content">
         {view === "today" ? (
-          <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} />
+          <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} onOpenSettings={() => setShowSettings(true)} />
         ) : view === "knowledge" ? (
           <KnowledgeView theme={theme} />
         ) : view === "timeline" ? (

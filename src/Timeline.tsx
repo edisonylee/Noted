@@ -3,17 +3,16 @@ import { Camera, ChevronRight, RefreshCw } from "lucide-react";
 import { listen } from "./events";
 import { DataView } from "./DataView";
 import { api, type NoteRow, type RecapRow } from "./api";
+import { dayDiff, easternDay, formatDay } from "./day";
 
 // "Today" / "Yesterday" / "Monday, June 1" (year only if not the current year)
 function relativeDay(dateStr: string): string {
-  const d = new Date(dateStr + "T00:00:00");
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const diff = Math.round((today.getTime() - d.getTime()) / 86_400_000);
+  const today = easternDay();
+  const diff = dayDiff(today, dateStr);
   if (diff === 0) return "Today";
   if (diff === 1) return "Yesterday";
-  const sameYear = d.getFullYear() === today.getFullYear();
-  return d.toLocaleDateString(undefined, {
+  const sameYear = dateStr.slice(0, 4) === today.slice(0, 4);
+  return formatDay(dateStr, {
     weekday: "long",
     month: "long",
     day: "numeric",
@@ -23,7 +22,7 @@ function relativeDay(dateStr: string): string {
 
 // Short, dated label for a recap card woven into the feed.
 function fmtDate(dateStr: string, opts: Intl.DateTimeFormatOptions): string {
-  return new Date(dateStr + "T00:00:00").toLocaleDateString(undefined, opts);
+  return formatDay(dateStr, opts);
 }
 function recapLabel(r: RecapRow): string {
   if (r.period === "week") {

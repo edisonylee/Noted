@@ -272,6 +272,26 @@ const HEADER_STOPLIST: &[&str] = &[
     "note", "notes", "todo", "ps", "today", "tomorrow", "yesterday", "am", "pm", "re", "update",
 ];
 
+/// Below these, an untagged block is treated as ONE topic and extracted whole
+/// rather than paying an LLM segmentation pass — and, crucially, keeping the full
+/// context so a short note's entities (e.g. "lunch with Jake") aren't lost when a
+/// small model extracts from a 4-word shard.
+const MULTITOPIC_MIN_WORDS: usize = 40;
+const MULTITOPIC_MIN_SENTENCES: usize = 3;
+
+/// Is this untagged block long enough to plausibly hold several loggable topics?
+/// A cheap, deterministic gate: only a real multi-sentence paragraph is worth a
+/// semantic-segmentation call; short scraps ("felt tired today") pass through as
+/// one segment.
+pub fn is_multi_topic_candidate(body: &str) -> bool {
+    let words = body.split_whitespace().count();
+    let sentences = body
+        .split(|c| matches!(c, '.' | '!' | '?' | '\n'))
+        .filter(|s| !s.trim().is_empty())
+        .count();
+    words >= MULTITOPIC_MIN_WORDS && sentences >= MULTITOPIC_MIN_SENTENCES
+}
+
 /// Split a note on `Section header:` lines (PROTOCOL.md §2). A header is a short
 /// line (<=3 alphabetic words) ending in a separator (`:` / `—` / trailing `-`)
 /// or a leading markdown `#`; text on the header line after the separator, plus
@@ -320,18 +340,22 @@ fn parse_header(line: &str) -> Option<(String, String)> {
     if let Some(rest) = t.strip_prefix('#') {
         return header_label(rest.trim_start_matches('#').trim()).map(|l| (l, String::new()));
     }
-    // "Label:" / "Label —" — split on the first separator; body may follow on-line.
-    for sep in [":", "—"] {
-        if let Some(idx) = t.find(sep) {
-            if let Some(label) = header_label(&t[..idx]) {
-                return Some((label, t[idx + sep.len()..].trim().to_string()));
-            }
+    // "Label:" — a colon may carry an inline body on the same line
+    // (e.g. "Food: rice, chicken"), so split on the first colon.
+    if let Some(idx) = t.find(':') {
+        if let Some(label) = header_label(&t[..idx]) {
+            return Some((label, t[idx + 1..].trim().to_string()));
         }
     }
-    // trailing hyphen / en-dash header: "Schedule -", "Gym –"
-    if let Some(head) = t.strip_suffix('-').or_else(|| t.strip_suffix('–')) {
-        if let Some(label) = header_label(head.trim()) {
-            return Some((label, String::new()));
+    // Dash headers ("Gym —", "Schedule -", "Gym –") must be the WHOLE line — no
+    // inline body — so a prose line with a mid-sentence dash ("chipotle bowl —
+    // chicken, rice, guac") isn't misread as a header that steals the section it
+    // sits under.
+    for dash in ['—', '–', '-'] {
+        if let Some(head) = t.strip_suffix(dash) {
+            if let Some(label) = header_label(head.trim()) {
+                return Some((label, String::new()));
+            }
         }
     }
     None
@@ -521,11 +545,19 @@ async fn extract_note(
     let mut segments: Vec<Segment> = Vec::new();
     for seg in split_sections(text) {
         match seg.hint {
-            Some(_) => segments.push(seg), // explicit header → deterministic
-            None => match segment_note(catalog, known, &seg.body, today).await {
-                Ok(mut segs) if !segs.is_empty() => segments.append(&mut segs),
-                _ => segments.push(seg),
-            },
+            // Explicit header → deterministic routing, untouched.
+            Some(_) => segments.push(seg),
+            // Untagged prose: only a long, multi-sentence block is worth a
+            // semantic-segmentation pass. A short scrap is extracted whole so its
+            // entities survive and we skip a needless LLM call. If segmentation
+            // fails, fall back to the single classified segment.
+            None if is_multi_topic_candidate(&seg.body) => {
+                match segment_note(catalog, known, &seg.body, today).await {
+                    Ok(mut segs) if !segs.is_empty() => segments.append(&mut segs),
+                    _ => segments.push(seg),
+                }
+            }
+            None => segments.push(seg),
         }
     }
     let mut entries: Vec<Value> = Vec::new();
@@ -672,10 +704,20 @@ attributes together. NEVER use parallel arrays (separate name[], weight[], reps[
 For example a workout becomes: \"exercises\": [{{\"name\": \"squat\", \"weight\": 245, \"sets\": 3, \
 \"reps\": 5, \"rpe\": 9}}, ...]; a schedule becomes: \"blocks\": [{{\"task\": \"coding\", \"start\": \"09:00\", \
 \"end\": \"11:00\", \"duration_min\": 120}}, ...].\n\
-- Time periods matter: when an activity has a clock time or time range, capture \"start\" and \"end\" \
-in 24-hour HH:MM (e.g. \"2-4pm\" -> start \"14:00\", end \"16:00\"; \"9am\" -> start \"09:00\"), and \
-\"duration_min\" when you can derive it. Omit start/end when no time is given.\n\
-- Numbers as numbers, not strings. Omit fields you don't know rather than guessing.\n\
+- Time periods matter: when an activity has a clock time or time range, capture \"start\" then \
+\"end\" (start before end) in 24-hour HH:MM (e.g. \"2-4pm\" -> start \"14:00\", end \"16:00\"; \"9am\" \
+-> start \"09:00\"), and \"duration_min\" when you can derive it. Omit start/end when no time is given.\n\
+- AM/PM: clock times often omit it. INFER it from the note's chronological flow — a day's note runs \
+morning -> night, so use the surrounding times and their order to decide, then output 24-hour HH:MM \
+(e.g. wake 8:30 -> 08:30, gym 10:40 -> 10:40, shift at 12 -> 12:00, home 12:45 -> 12:45, evening \
+events like 6:30 -> 18:30).\n\
+- For a \"schedule\", capture EVERY time block mentioned across the WHOLE note — morning to night — \
+each as its own block with start and end. Do not stop partway through the day.\n\
+- Numbers as numbers, not strings. Read fractions and decimals literally: \"7 1/2 mg\" -> 7.5 (NEVER \
+7500); never concatenate digits. Weights are in POUNDS — record the plain number (\"32lb\" -> \
+\"weight\": 32); never convert to kilograms and do not add a unit field. Sanity-check magnitudes (a \
+supplement dose in mg is usually < 1000); omit a value rather than emit an absurd one. Omit fields \
+you don't know rather than guessing.\n\
 - Keep keys short, lowercase, snake_case.\n\
 - Feelings matter: whenever the note says how the user felt, add a \"mood\" key inside data (a short \
 phrase, e.g. \"satisfied\", \"anxious and unfocused\") — in ANY category.\n\

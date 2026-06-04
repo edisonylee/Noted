@@ -513,6 +513,7 @@ textarea.json.bad { border-color: var(--bad); }
 .dv-key { color: var(--muted); min-width: 116px; flex-shrink: 0; }
 .dv-val { color: var(--ink-soft); }
 .dv-list { margin: 0; padding-left: 16px; }
+.dv-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .dv-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .dv-table th { text-align: left; color: var(--muted); font-weight: 480; padding: 0 14px 6px 0; border-bottom: 1px solid var(--line); text-transform: capitalize; }
 .dv-table td { padding: 7px 14px 7px 0; border-bottom: 1px solid var(--line); color: var(--ink-soft); }

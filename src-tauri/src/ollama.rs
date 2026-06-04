@@ -38,10 +38,16 @@ pub async fn chat_json(
         }
     }
 
+    let has_images = images.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
     let mut user_msg = json!({ "role": "user", "content": user });
     if let Some(imgs) = images {
         user_msg["images"] = json!(imgs);
     }
+
+    // Ollama defaults num_ctx to 2048, which a single photo's image tokens blow
+    // straight past (llama.cpp then 400s with "exceeds the available context
+    // size"). Give vision OCR generous headroom; text extraction needs less.
+    let num_ctx = if has_images { 16384 } else { 8192 };
 
     let mut body = json!({
         "model": model,
@@ -49,7 +55,7 @@ pub async fn chat_json(
         "keep_alive": "5m",
         // A small non-zero temperature avoids two temp-0 failure modes: degenerate
         // JSON loops and anchoring every note onto the first listed category.
-        "options": { "temperature": 0.3 },
+        "options": { "temperature": 0.3, "num_ctx": num_ctx },
         "messages": [
             { "role": "system", "content": system },
             user_msg,
@@ -92,7 +98,7 @@ pub async fn chat_text(model: &str, system: &str, user: &str) -> Result<String> 
         "model": model,
         "stream": false,
         "keep_alive": "5m",
-        "options": { "temperature": 0.2 },
+        "options": { "temperature": 0.2, "num_ctx": 8192 },
         "messages": [
             { "role": "system", "content": system },
             { "role": "user", "content": user },
@@ -120,7 +126,7 @@ pub async fn chat_messages(model: &str, messages: Vec<Value>, temperature: f32) 
         "model": model,
         "stream": false,
         "keep_alive": "5m",
-        "options": { "temperature": temperature },
+        "options": { "temperature": temperature, "num_ctx": 8192 },
         "messages": messages,
     });
     let client = reqwest::Client::new();

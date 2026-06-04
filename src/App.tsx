@@ -10,18 +10,15 @@ import { BottomNav, type MobileTab } from "./BottomNav";
 import { useTheme } from "./useTheme";
 import { api, TokenError, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow } from "./api";
 import { DataView } from "./DataView";
-import { TrendsView } from "./Trends";
-import { RecapsView } from "./Recaps";
 import { TimelineView } from "./Timeline";
-import { PeopleView } from "./PeopleView";
 import { PhonePanel } from "./PhonePanel";
 import { FloatingChat } from "./FloatingChat";
-import { SelfView } from "./Self";
+import { KnowledgeView } from "./Knowledge";
 import { TodayView } from "./Today";
 import "./App.css";
 
 type Phase = "idle" | "thinking" | "review";
-type View = "today" | "log" | "timeline" | "trends" | "recaps" | "people" | "self";
+type View = "today" | "log" | "timeline" | "knowledge";
 type Source = "text" | "photo";
 // One editable review card per extracted entry.
 type ReviewCard = {
@@ -365,7 +362,6 @@ export default function App() {
           )}
           {mobileTab === "capture" && <MobileCapture onCaptured={() => refresh().catch(handleErr)} />}
           {mobileTab === "timeline" && <TimelineView notes={notes} />}
-          {mobileTab === "recaps" && <RecapsView />}
         </main>
 
         <BottomNav
@@ -373,7 +369,7 @@ export default function App() {
           onChange={(t) => {
             setMobileTab(t);
             // Re-fetch when navigating to a list/schedule so a freshly auto-filed note shows.
-            if (t === "today" || t === "timeline" || t === "recaps") refresh().catch(handleErr);
+            if (t === "today" || t === "timeline") refresh().catch(handleErr);
           }}
         />
 
@@ -407,17 +403,8 @@ export default function App() {
           <button className={view === "timeline" ? "on" : ""} onClick={() => setView("timeline")}>
             Timeline
           </button>
-          <button className={view === "trends" ? "on" : ""} onClick={() => setView("trends")}>
-            Trends
-          </button>
-          <button className={view === "recaps" ? "on" : ""} onClick={() => setView("recaps")}>
-            Recaps
-          </button>
-          <button className={view === "people" ? "on" : ""} onClick={() => setView("people")}>
-            People
-          </button>
-          <button className={view === "self" ? "on" : ""} onClick={() => setView("self")}>
-            Self
+          <button className={view === "knowledge" ? "on" : ""} onClick={() => setView("knowledge")}>
+            Knowledge
           </button>
         </nav>
         <span className="spacer" />
@@ -440,14 +427,8 @@ export default function App() {
       <main className="content">
         {view === "today" ? (
           <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} />
-        ) : view === "trends" ? (
-          <TrendsView cats={cats} theme={theme} />
-        ) : view === "recaps" ? (
-          <RecapsView />
-        ) : view === "people" ? (
-          <PeopleView />
-        ) : view === "self" ? (
-          <SelfView theme={theme} />
+        ) : view === "knowledge" ? (
+          <KnowledgeView theme={theme} />
         ) : view === "timeline" ? (
           <TimelineView notes={notes} />
         ) : (

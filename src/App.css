@@ -318,6 +318,20 @@ textarea.json.bad { border-color: var(--bad); }
   font-weight: 540; margin: 0 0 16px;
 }
 .tl { margin-top: 2px; }
+.tl-top { display: flex; justify-content: flex-end; margin-bottom: 10px; }
+.recap-card.inline { margin: 0 0 14px; }
+
+/* Knowledge: People / Self section toggle */
+.kn-tabs { display: inline-flex; gap: 4px; padding: 4px; margin-bottom: 18px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 99px; }
+.kn-tab {
+  display: inline-flex; align-items: center; gap: 7px; padding: 7px 16px;
+  background: none; border: none; border-radius: 99px; color: var(--muted);
+  font-size: 13.5px; font-weight: 500; transition: color 0.16s var(--ease), background 0.16s var(--ease);
+}
+.kn-tab:hover { color: var(--ink); }
+.kn-tab.on { color: var(--ink); background: var(--surface); box-shadow: var(--shadow-1); }
+
 .tl-group { margin-bottom: 26px; }
 .tl-date {
   font-size: 13px; font-weight: 560; color: var(--ink); margin: 0 0 6px; letter-spacing: -0.01em;

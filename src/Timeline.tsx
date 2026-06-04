@@ -1,7 +1,8 @@
-import { useState } from "react";
-import { Camera, ChevronRight } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Camera, ChevronRight, RefreshCw } from "lucide-react";
+import { listen } from "./events";
 import { DataView } from "./DataView";
-import type { NoteRow } from "./api";
+import { api, type NoteRow, type RecapRow } from "./api";
 
 // "Today" / "Yesterday" / "Monday, June 1" (year only if not the current year)
 function relativeDay(dateStr: string): string {
@@ -18,6 +19,19 @@ function relativeDay(dateStr: string): string {
     day: "numeric",
     ...(sameYear ? {} : { year: "numeric" }),
   });
+}
+
+// Short, dated label for a recap card woven into the feed.
+function fmtDate(dateStr: string, opts: Intl.DateTimeFormatOptions): string {
+  return new Date(dateStr + "T00:00:00").toLocaleDateString(undefined, opts);
+}
+function recapLabel(r: RecapRow): string {
+  if (r.period === "week") {
+    const s = fmtDate(r.period_start, { month: "short", day: "numeric" });
+    const e = fmtDate(r.period_end, { month: "short", day: "numeric" });
+    return `Week of ${s} – ${e}`;
+  }
+  return "Day recap";
 }
 
 const LABEL_KEYS = ["name", "task", "title", "label", "exercise", "activity", "item", "food", "meal"];
@@ -52,6 +66,40 @@ export function TimelineView({ notes }: { notes: NoteRow[] }) {
       return n;
     });
 
+  // Recaps live inline in the feed now (no separate tab). Fetch them and slot
+  // each under the day it covers (period_end). They auto-generate and notify.
+  const [recaps, setRecaps] = useState<RecapRow[]>([]);
+  const [checking, setChecking] = useState(false);
+  useEffect(() => {
+    const load = () => api.listRecaps().then(setRecaps).catch(() => {});
+    load();
+    const un = listen("recap-generated", load);
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
+  async function checkRecaps() {
+    setChecking(true);
+    try {
+      await api.backfillRecaps();
+      setRecaps(await api.listRecaps());
+    } catch {
+      /* surfaced elsewhere; keep the timeline quiet */
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  // Week recaps sort before day recaps within the same day.
+  const recapsByDay = new Map<string, RecapRow[]>();
+  for (const r of recaps) {
+    const arr = recapsByDay.get(r.period_end) ?? [];
+    arr.push(r);
+    arr.sort((a, b) => (a.period === b.period ? 0 : a.period === "week" ? -1 : 1));
+    recapsByDay.set(r.period_end, arr);
+  }
+
   if (!notes.length) {
     return <p className="muted">Nothing logged yet. Brain-dump a note in Log to start your timeline.</p>;
   }
@@ -66,9 +114,23 @@ export function TimelineView({ notes }: { notes: NoteRow[] }) {
 
   return (
     <div className="tl">
+      <div className="tl-top">
+        <button className="link" onClick={checkRecaps} disabled={checking}>
+          <RefreshCw size={13} /> {checking ? "checking…" : "Check recaps"}
+        </button>
+      </div>
       {groups.map((g) => (
         <section className="tl-group" key={g.date}>
           <h3 className="tl-date">{relativeDay(g.date)}</h3>
+          {(recapsByDay.get(g.date) ?? []).map((r) => (
+            <article className="recap-card inline" key={"recap-" + r.id}>
+              <div className="recap-head">
+                <span className="recap-period">{recapLabel(r)}</span>
+                <span className="muted">{r.entry_count} entries</span>
+              </div>
+              <p className="recap-text">{r.content}</p>
+            </article>
+          ))}
           {g.items.map((n) => {
             const open = expanded.has(n.id);
             const summary = n.entries.map((e) => summarize(e.data)).filter(Boolean).join(" · ");

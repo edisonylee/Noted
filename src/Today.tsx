@@ -2,14 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { CalendarDays, Camera, Loader, Pencil, Plus, X } from "lucide-react";
 import { api, type EntityCandidate, type NoteRow } from "./api";
 import { fileToImg, type Img } from "./image";
-
-// Local YYYY-MM-DD. NOT toISOString() — that's UTC and would roll the day over
-// late at night, showing tomorrow's (empty) schedule before midnight.
-function localDay(d: Date): string {
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${d.getFullYear()}-${m}-${day}`;
-}
+import { APP_TZ, easternDay, easternMinutes } from "./day";
 
 type Block = {
   task: string;
@@ -87,6 +80,40 @@ function parseBlocks(data: Record<string, unknown> | null | undefined): Block[] 
 
 const isSchedule = (cat: string | null) => cat?.toLowerCase() === "schedule";
 
+// Lay timed blocks out in the order they were authored, rolling any backward
+// time-jump forward across midnight: a small clock value written after a later
+// one ("12am" or "1am" after "10pm") is the next morning, not the start of
+// today, so "bedtime" stays at the bottom where it was typed instead of sorting
+// 00:00 to the very top. Returns absolute start/effEnd minutes. The stored array
+// is already in authored order, so no separate sort is needed and it survives
+// save/reload.
+export function layoutRows(blocks: Block[]): { b: Block; start: number; effEnd: number }[] {
+  const timed = blocks
+    .map((b) => ({ b, clock: toMinutes(b.start) }))
+    .filter((x): x is { b: Block; clock: number } => x.clock != null);
+
+  let carry = 0; // minutes of accumulated day rollover
+  let prevStart = -1;
+  return timed
+    .map((x) => {
+      if (carry + x.clock < prevStart) carry += 1440;
+      const start = carry + x.clock;
+      prevStart = start;
+      // End shares the start's day; if it reads earlier it crosses midnight too.
+      const endClock = toMinutes(x.b.end);
+      const end =
+        endClock == null ? null : endClock < x.clock ? carry + endClock + 1440 : carry + endClock;
+      return { b: x.b, start, end };
+    })
+    .map((x, i, arr) => {
+      // Effective end: explicit end, else next block's start, else +1h — used to
+      // decide which block is "now" and which have already passed.
+      const nextStart = arr[i + 1]?.start ?? null;
+      const effEnd = x.end ?? nextStart ?? x.start + 60;
+      return { b: x.b, start: x.start, effEnd };
+    });
+}
+
 // "0830" minutes-of-day -> "08:30". Wraps into [0,1440).
 function minToStr(m: number): string {
   const mm = ((Math.round(m) % 1440) + 1440) % 1440;
@@ -133,15 +160,48 @@ function resolveTime(tok: string, prevMin: number): number | null {
 const TIME_TOK = "\\d{1,2}(?::\\d{2})?(?:\\s*(?:am|pm|a|p)(?![a-z]))?|\\d{3,4}";
 const LINE_RE = new RegExp(`^\\s*~?\\s*(${TIME_TOK})\\s*(?:(?:[-–—]|to)\\s*~?\\s*(${TIME_TOK}))?`, "i");
 
+// Longest-first so the alternation matches full names before abbreviations.
+const WEEKDAY =
+  "(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|weds|wed|thurs|thur|thu|fri|sat|sun)";
+const MONTH =
+  "(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)";
+
+// A line that is *only* a date ("Thursday, June 4th", "6/4/2026", "2026-06-04").
+// These ride along in photos to confirm the day — they're a sanity check, not a
+// task, so we drop them rather than parking them under "Anytime". We require a
+// real date signal (month/weekday/numeric date) AND that nothing survives once
+// the date pieces are stripped, so "dentist on the 4th" stays a task.
+function isDateOnly(line: string): boolean {
+  const s = line.trim().toLowerCase();
+  if (!s) return false;
+  const hasSignal =
+    new RegExp(`\\b${MONTH}\\b`).test(s) ||
+    new RegExp(`\\b${WEEKDAY}\\b`).test(s) ||
+    /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/.test(s) ||
+    /\b\d{4}-\d{1,2}-\d{1,2}\b/.test(s);
+  if (!hasSignal) return false;
+  const rest = s
+    .replace(new RegExp(`\\b${WEEKDAY}\\b`, "g"), " ")
+    .replace(new RegExp(`\\b${MONTH}\\b`, "g"), " ")
+    .replace(/\b\d{1,2}(?:st|nd|rd|th)?\b/g, " ") // day-of-month or ordinal
+    .replace(/\b\d{4}\b/g, " ") // year
+    .replace(/\b(?:of|the)\b/g, " ")
+    .replace(/[/.,–—-]/g, " ")
+    .replace(/\s+/g, "")
+    .trim();
+  return rest === "";
+}
+
 // Turn a typed/transcribed schedule into ordered blocks — deterministic, no LLM.
 // Lines that start with a clock time become timed blocks; everything else is an
 // "Anytime" task. The whole point is reliability: this never hard-fails.
-function parseSchedule(text: string): Block[] {
+export function parseSchedule(text: string): Block[] {
   const blocks: Block[] = [];
   let prev = -1;
   for (const raw of text.split("\n")) {
     const line = raw.trim().replace(/^[-*•]\s+/, "");
     if (!line) continue;
+    if (isDateOnly(line)) continue;
     const m = LINE_RE.exec(line);
     const start = m?.[1] ? resolveTime(m[1], prev) : null;
     if (m && start != null) {
@@ -192,11 +252,12 @@ export function TodayView({
   const [editError, setEditError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
-  const today = localDay(now);
+  const today = easternDay(now);
   const dateLine = now.toLocaleDateString(undefined, {
     weekday: "long",
     month: "long",
     day: "numeric",
+    timeZone: APP_TZ,
   });
 
   // notes are newest-first (db.rs orders by event_date, id DESC), so the first
@@ -323,7 +384,7 @@ export function TodayView({
             <input
               ref={fileRef}
               type="file"
-              accept="image/*"
+              accept="image/*,.heic,.heif"
               capture="environment"
               hidden
               onChange={(e) => attachPhoto(e.target.files?.[0])}
@@ -387,20 +448,9 @@ export function TodayView({
   }
 
   // ---- Agenda ----
-  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const nowMin = easternMinutes(now);
 
-  const rows = blocks
-    .map((b) => ({ b, start: toMinutes(b.start) }))
-    .filter((x): x is { b: Block; start: number } => x.start != null)
-    .sort((a, z) => a.start - z.start)
-    .map((x, i, arr) => {
-      // Effective end: explicit end, else next block's start, else +1h — used to
-      // decide which block is "now" and which have already passed.
-      const end = toMinutes(x.b.end);
-      const nextStart = arr[i + 1]?.start ?? null;
-      const effEnd = end ?? nextStart ?? x.start + 60;
-      return { ...x, effEnd };
-    });
+  const rows = layoutRows(blocks);
   const untimed = blocks.filter((b) => toMinutes(b.start) == null);
 
   const currentIdx = rows.findIndex((r) => nowMin >= r.start && nowMin < r.effEnd);

@@ -475,7 +475,7 @@ export default function App() {
           <input
             ref={fileInput}
             type="file"
-            accept="image/*"
+            accept="image/*,.heic,.heif"
             hidden
             onChange={(e) => pickFile(e.target.files?.[0])}
           />

@@ -120,7 +120,7 @@ export function MobileCapture({ onCaptured }: { onCaptured?: () => void }) {
       <input
         ref={fileInput}
         type="file"
-        accept="image/*"
+        accept="image/*,.heic,.heif"
         capture="environment"
         hidden
         onChange={(e) => onPhoto(e.target.files?.[0])}

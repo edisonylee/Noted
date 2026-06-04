@@ -233,7 +233,11 @@ pub async fn gemini_chat_json(
         "response_format": response_format,
     });
 
-    let client = reqwest::Client::new();
+    // A bounded timeout so a wedged network never leaves the UI spinning with no
+    // result — a failed connectivity test should fail *visibly*, not hang.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
     let resp = client
         .post(format!("{GEMINI_BASE}/chat/completions"))
         .bearer_auth(&key)

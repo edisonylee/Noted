@@ -370,6 +370,11 @@ textarea.json.bad { border-color: var(--bad); }
   transition: color 0.16s var(--ease), border-color 0.16s var(--ease);
 }
 .today-edit:hover { color: var(--ink); border-color: var(--faint); }
+.today-edit:disabled { opacity: 0.5; cursor: not-allowed; }
+.today-headbtns { display: inline-flex; gap: 8px; }
+.today-syncmsg { margin-top: 10px; font-size: 12.5px; font-weight: 500; }
+.today-syncmsg.ok { color: var(--accent); }
+.today-syncmsg.err { color: #c0563f; }
 .today-eyebrow {
   font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.09em;
   color: var(--accent); margin-bottom: 4px;
@@ -433,6 +438,55 @@ textarea.json.bad { border-color: var(--bad); }
   font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;
   color: var(--faint); margin: 0 0 4px 12px;
 }
+
+/* Inline row editing on the agenda */
+.today-block.editable:hover { background: var(--surface-2); }
+.today-block.editable .today-task { cursor: text; }
+
+.today-rowedit {
+  /* break out of the 3-col grid into one flex row */
+  display: flex !important;
+  align-items: center; gap: 8px;
+  background: var(--surface); border: 1px solid var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+.today-rowedit-times { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.today-rowedit-dash { color: var(--faint); }
+.today-timeinput {
+  font-size: 13px; font-variant-numeric: tabular-nums; padding: 5px 7px;
+  background: var(--surface-2); border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm); color: var(--ink);
+}
+.today-timeinput:disabled { opacity: 0.5; }
+.today-timeinput:focus { outline: none; border-color: var(--accent); }
+.today-taskinput {
+  flex: 1; min-width: 0; font-size: 15px; padding: 6px 9px;
+  background: var(--surface-2); border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm); color: var(--ink);
+}
+.today-taskinput::placeholder { color: var(--faint); }
+.today-taskinput:focus { outline: none; border-color: var(--accent); }
+.today-rowedit-actions { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.today-rowbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: var(--r-sm);
+  background: var(--surface-2); border: 1px solid var(--line); color: var(--muted);
+  transition: color 0.16s var(--ease), border-color 0.16s var(--ease);
+}
+.today-rowbtn:hover { color: var(--ink); border-color: var(--faint); }
+.today-rowbtn.save:hover { color: var(--accent); border-color: var(--accent); }
+.today-rowbtn.del:hover { color: #e5484d; border-color: #e5484d; }
+.today-rowbtn:disabled { opacity: 0.4; }
+
+.today-addrow {
+  display: inline-flex; align-items: center; gap: 6px; align-self: flex-start;
+  margin: 10px 0 0 10px; padding: 7px 12px;
+  background: transparent; border: 1px dashed var(--line-strong); border-radius: 99px;
+  color: var(--muted); font-size: 13px; font-weight: 500;
+  transition: color 0.16s var(--ease), border-color 0.16s var(--ease);
+}
+.today-addrow:hover { color: var(--ink); border-color: var(--faint); }
+.today-rowerror { margin-top: 12px; }
 
 .today-notes { margin-top: 24px; }
 .today-notes summary { color: var(--muted); font-size: 12px; cursor: pointer; list-style: none; }
@@ -591,9 +645,25 @@ textarea.json.bad { border-color: var(--bad); }
 .repair-card h2 { font-size: 19px; margin: 0 0 10px; }
 .repair-card p { color: var(--muted); line-height: 1.55; font-size: 14px; margin: 0 0 20px; }
 
+/* Non-destructive "reconnecting" overlay (phone, while the Mac is restarting).
+   A thin top banner — keeps the app visible underneath, unlike the re-pair screen. */
+.reconnecting-overlay {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
+  display: flex; justify-content: center; padding: 10px 16px;
+  padding-top: max(10px, env(safe-area-inset-top));
+  pointer-events: none;
+}
+.reconnecting-card {
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 8px 16px; border-radius: 99px;
+  background: var(--ink); color: var(--on-ink);
+  font-size: 13px; font-weight: 500; box-shadow: var(--shadow-1);
+}
+
 /* ── settings: model provider ──────────────────────────── */
-.settings-modal { max-width: 440px; text-align: left; }
+.settings-modal { max-width: 440px; text-align: left; max-height: calc(100vh - 52px); overflow-y: auto; }
 .settings-sub { font-size: 13px; line-height: 1.55; color: var(--muted); margin: 0 0 18px; }
+.settings-section { margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--line); }
 .settings-seg { display: flex; gap: 8px; margin-bottom: 4px; }
 .settings-seg .pill { flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 11px 13px; }
 .settings-fields { margin-top: 18px; display: flex; flex-direction: column; gap: 16px; animation: fade 0.16s var(--ease); }
@@ -610,9 +680,16 @@ textarea.json.bad { border-color: var(--bad); }
 .ghost-btn:hover { border-color: var(--line-strong); color: var(--ink); }
 .ghost-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .test-btn { align-self: flex-start; }
-.test-result { font-size: 12.5px; line-height: 1.45; padding: 9px 11px; border-radius: var(--r-sm); }
-.test-result.ok { color: var(--accent); background: rgba(var(--accent-rgb), 0.1); }
-.test-result.err { color: #c0563f; background: rgba(192, 86, 63, 0.1); word-break: break-word; }
+.field-clear { font: inherit; font-size: 11px; font-weight: 530; color: var(--faint); background: transparent; border: none; padding: 0; cursor: pointer; text-decoration: underline; }
+.field-clear:hover { color: #c0563f; }
+
+/* Persistent connection badge — always tells the user where Gemini stands. */
+.conn-status { display: inline-flex; align-items: center; gap: 7px; align-self: flex-start; font-size: 12.5px; font-weight: 530; padding: 6px 11px; border-radius: 99px; }
+.conn-status.ok { color: var(--accent); background: rgba(var(--accent-rgb), 0.12); }
+.conn-status.err { color: #c0563f; background: rgba(192, 86, 63, 0.12); }
+.conn-status.checking,
+.conn-status.idle { color: var(--faint); background: var(--surface-2); }
+.conn-detail { font-size: 12px; line-height: 1.45; color: #c0563f; background: rgba(192, 86, 63, 0.08); padding: 8px 11px; border-radius: var(--r-sm); word-break: break-word; }
 .settings-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
 .spin { animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

@@ -408,10 +408,103 @@ async fn extract_segment(
     Err(anyhow!("could not extract segment: {last_err}"))
 }
 
-/// Split a note into sections, extract each, and assemble the envelope. Header-
-/// tagged sections route deterministically; untagged ones are classified. The
-/// calendar day is resolved once for the whole note. A single failing segment is
-/// skipped rather than failing the note; zero entries is an error.
+// ---------------------------------------------------------------------------
+// Stage A: semantic segmentation. One LLM pass reads the whole (often messy,
+// transcribed) dump and carves it into discrete loggable ITEMS, each routed to
+// a category — so a rambling brain-dump becomes many clean entries instead of
+// being lumped under one accidental header. Stage B (extract_segment) then
+// extracts each item's structured data, unchanged.
+// ---------------------------------------------------------------------------
+
+/// JSON schema for the segmenter: a list of {category, verbatim text} items.
+fn segment_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "category": { "type": "string" },
+                        "text": { "type": "string" }
+                    },
+                    "required": ["category", "text"]
+                }
+            }
+        },
+        "required": ["items"]
+    })
+}
+
+fn build_segment_prompt(catalog: &str, today: &str) -> String {
+    format!(
+        "You are the segmenter for \"noted\", a personal life-logging app. Today is {today}. \
+The user dumped a long, messy note (often spoken then transcribed) about their day. Group it into a \
+SMALL number of coarse loggable ITEMS — aim for a handful (roughly 3 to 7 for a full day), NOT one \
+per sentence. Return JSON: {{\"items\": [{{\"category\": string, \"text\": string}}]}}.\n\n\
+HOW TO GROUP:\n\
+- Put the day's general flow — waking/sleep, getting ready, errands, work blocks, shifts, \
+appointments, and plans for later or tomorrow — TOGETHER into ONE schedule/day item (reuse the \
+\"schedule\" category if it exists). Keep the clock times.\n\
+- Pull OUT as their own item ONLY things with rich, trackable structure worth their own record: a \
+workout; a supplement/medication stack (group ALL supplements taken in ONE session into a SINGLE \
+item — a morning stack and a bedtime stack are two items); a notable meeting or call with a named \
+person.\n\
+- Keep how the user FELT inside the item it happened during. Never make a mood its own item unless a \
+whole passage is purely reflection with no activity.\n\n\
+COVERAGE: every sentence must land inside some item's \"text\"; don't drop content. \"text\" is the \
+user's OWN WORDS copied VERBATIM — you only cut the note into spans (trimming whitespace is fine), \
+never rewriting or summarizing. A schedule item's text may gather several sentences from across the \
+note.\n\n\
+CATEGORY: short, lowercase. REUSE an existing category name from the list below whenever it fits — \
+do NOT invent a near-synonym of one that already exists (use \"schedule\", not \"work\" or \"day\"). \
+Prefer the catch-all \"misc\" over a shaky new category.\n\n\
+A full day usually becomes ~4-6 items: one \"schedule\" item (the day's blocks/errands/plans, with \
+times), plus standouts like a \"gym\" workout, a supplement stack, and a meeting with a named person \
+— each keeping any mood felt during it.\n\n\
+Existing categories (REUSE these when they fit):\n{catalog}\n\n\
+Return JSON only."
+    )
+}
+
+/// Stage A: ask the model to split the dump into routed items. Returns segments
+/// whose `hint` is the proposed category (consumed by Stage B as the forced
+/// category, exactly like a header label).
+async fn segment_note(
+    catalog: &str,
+    known: &[String],
+    text: &str,
+    today: &str,
+) -> Result<Vec<Segment>> {
+    let system = build_segment_prompt(catalog, today);
+    let v = ollama::chat_json(ollama::TEXT_MODEL, &system, text, None, Some(segment_schema())).await?;
+    let items = v
+        .get("items")
+        .and_then(|i| i.as_array())
+        .ok_or_else(|| anyhow!("segmentation returned no items array"))?;
+
+    let mut segs = Vec::new();
+    for it in items {
+        let body = it.get("text").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
+        if body.is_empty() {
+            continue;
+        }
+        let cat = it.get("category").and_then(|c| c.as_str()).unwrap_or("").trim().to_lowercase();
+        let hint = if cat.is_empty() { None } else { Some(snap_category(&cat, known)) };
+        segs.push(Segment { hint, body });
+    }
+    if segs.is_empty() {
+        return Err(anyhow!("segmentation produced no usable items"));
+    }
+    Ok(segs)
+}
+
+/// Split a note into items, extract each, and assemble the envelope. Stage A
+/// (semantic segmentation) routes each item to a category; if that LLM call
+/// fails we fall back to the deterministic header split. The calendar day is
+/// resolved once for the whole note. A single failing item is skipped rather
+/// than failing the note; zero entries is an error.
 async fn extract_note(
     catalog: &str,
     known: &[String],
@@ -419,7 +512,22 @@ async fn extract_note(
     raw_text: &str,
     today: &str,
 ) -> Result<Value> {
-    let segments = split_sections(text);
+    // Hybrid split: run the deterministic header parser FIRST so a section you
+    // explicitly tagged (`Gym:`) routes by code, never by the model — you keep
+    // control of routing when you ask for it. Only the UNTAGGED prose (the
+    // freeform brain-dump, or a note with no headers at all) is handed to the
+    // semantic segmenter, which fans it into many routed items. If that LLM call
+    // fails, the untagged block falls back to a single classified segment.
+    let mut segments: Vec<Segment> = Vec::new();
+    for seg in split_sections(text) {
+        match seg.hint {
+            Some(_) => segments.push(seg), // explicit header → deterministic
+            None => match segment_note(catalog, known, &seg.body, today).await {
+                Ok(mut segs) if !segs.is_empty() => segments.append(&mut segs),
+                _ => segments.push(seg),
+            },
+        }
+    }
     let mut entries: Vec<Value> = Vec::new();
     let mut model_dates: Vec<Option<String>> = Vec::new();
     // Entity candidates are note-level: collected across all segments, deduped by
@@ -430,6 +538,16 @@ async fn extract_note(
         if let Ok((proposal, raw_date, ents)) =
             extract_segment(catalog, known, &seg.body, today, seg.hint.as_deref()).await
         {
+            // Guardrail: drop entries the model couldn't extract any data for
+            // (empty `data` object) — they'd just be timeline noise.
+            let empty = proposal
+                .get("data")
+                .and_then(|d| d.as_object())
+                .map(|o| o.is_empty())
+                .unwrap_or(true);
+            if empty {
+                continue;
+            }
             entries.push(proposal);
             model_dates.push(raw_date);
             for ent in ents {

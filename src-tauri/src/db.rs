@@ -198,6 +198,7 @@ pub fn category_catalog(conn: &Connection) -> Result<String> {
 
 #[derive(Serialize)]
 pub struct NoteEntry {
+    pub id: Option<i64>,
     pub category: Option<String>,
     pub data: Value,
 }
@@ -219,12 +220,13 @@ fn parse_note_entries(s: &str) -> Vec<NoteEntry> {
     let arr: Vec<Value> = serde_json::from_str(s).unwrap_or_default();
     arr.into_iter()
         .filter_map(|v| {
+            let id = v.get("id").and_then(|i| i.as_i64());
             let category = v.get("category").and_then(|c| c.as_str()).map(String::from);
             let data = v.get("data").cloned().unwrap_or(Value::Null);
             if category.is_none() && data.is_null() {
                 None
             } else {
-                Some(NoteEntry { category, data })
+                Some(NoteEntry { id, category, data })
             }
         })
         .collect()
@@ -237,7 +239,7 @@ pub fn list_notes(conn: &Connection) -> Result<Vec<NoteRow>> {
     let mut stmt = conn.prepare(
         "SELECT n.id, n.raw_text, n.source,
                 COALESCE(MAX(e.event_date), date(n.created_at)) AS event_date,
-                json_group_array(json_object('category', c.name, 'data', json(e.data_json))) AS entries,
+                json_group_array(json_object('id', e.id, 'category', c.name, 'data', json(e.data_json))) AS entries,
                 n.created_at
          FROM notes n
          LEFT JOIN entries e ON e.note_id = n.id
@@ -322,6 +324,28 @@ pub fn category_entries(conn: &Connection, category: &str) -> Result<Vec<(String
         Ok((date, serde_json::from_str(&data_str).unwrap_or(Value::Null)))
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The latest `schedule` entry's blocks for one day (`YYYY-MM-DD`). Mirrors the
+/// "newest note wins" selection in Today.tsx (a re-captured schedule supersedes
+/// earlier ones), so this feeds Google Calendar sync the same blocks the UI shows.
+/// Returns an empty vec when there's no schedule for that day.
+pub fn schedule_blocks_for(conn: &Connection, event_date: &str) -> Result<Vec<Value>> {
+    let data_str: Option<String> = conn
+        .query_row(
+            "SELECT e.data_json
+             FROM entries e JOIN categories c ON c.id = e.category_id
+             WHERE c.name = 'schedule' AND e.event_date = ?1
+             ORDER BY e.id DESC LIMIT 1",
+            [event_date],
+            |r| r.get(0),
+        )
+        .ok();
+    let blocks = data_str
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v.get("blocks").and_then(|b| b.as_array()).cloned())
+        .unwrap_or_default();
+    Ok(blocks)
 }
 
 /// One entry of a note, with its row id — feeds the chat agent's edit targeting

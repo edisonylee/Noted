@@ -93,19 +93,60 @@ fn load_or_make_cert(dir: &Path, sans: &[String]) -> Result<(Vec<u8>, Vec<u8>), 
     Ok((cert_pem, key_pem))
 }
 
-/// Bind an HTTPS port (trying a few), returning the bound server + chosen port.
+/// Bind a TCP listener with SO_REUSEADDR set. REUSEADDR (not REUSEPORT) lets us
+/// rebind the port while a just-exited process's socket lingers in TIME_WAIT,
+/// but the kernel still rejects a *second live* LISTEN — so two overlapping dev
+/// instances can't silently split traffic on the same port.
+fn try_bind_reuse(port: u16) -> std::io::Result<std::net::TcpListener> {
+    use socket2::{Domain, Socket, Type};
+    let sock = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+    sock.set_reuse_address(true)?;
+    let addr: std::net::SocketAddr = ([0, 0, 0, 0], port).into();
+    sock.bind(&addr.into())?;
+    sock.listen(128)?;
+    Ok(sock.into())
+}
+
+/// Bind the phone HTTPS server, keeping the port STABLE at `preferred` (8787) so
+/// a phone's saved "Add to Home Screen" icon — which bakes in a fixed host:port
+/// — keeps working across `tauri dev` restarts. We retry `preferred` for a few
+/// seconds to ride out the window where the previous dev process is still
+/// exiting, and only drift to an alternate port as a loud last resort.
 /// `sans` are the cert's subject-alt-names (hostname.local, LAN IP, localhost).
 pub fn bind_https(dir: &Path, sans: &[String], preferred: u16) -> Option<(tiny_http::Server, u16)> {
     let (certificate, private_key) = load_or_make_cert(dir, sans)
         .map_err(|e| eprintln!("[noted] {e}"))
         .ok()?;
-    for port in [preferred, preferred + 1, preferred + 2] {
-        let cfg = tiny_http::SslConfig {
-            certificate: certificate.clone(),
-            private_key: private_key.clone(),
-        };
-        if let Ok(s) = tiny_http::Server::https(("0.0.0.0", port), cfg) {
-            return Some((s, port));
+    let ssl = || tiny_http::SslConfig {
+        certificate: certificate.clone(),
+        private_key: private_key.clone(),
+    };
+
+    // Hold the preferred port: ~8 tries over ~4s covers a previous instance
+    // still releasing the socket during a hot restart.
+    for attempt in 0..8 {
+        match try_bind_reuse(preferred) {
+            Ok(listener) => match tiny_http::Server::from_listener(listener, Some(ssl())) {
+                Ok(s) => return Some((s, preferred)),
+                Err(e) => eprintln!("[noted] phone TLS setup on :{preferred} failed: {e}"),
+            },
+            Err(_) if attempt < 7 => std::thread::sleep(std::time::Duration::from_millis(500)),
+            Err(_) => {}
+        }
+    }
+
+    // Last resort: drift to an adjacent port, but warn loudly — a saved phone
+    // icon points at `preferred` and won't reach this one.
+    for port in [preferred + 1, preferred + 2] {
+        if let Ok(listener) = try_bind_reuse(port) {
+            if let Ok(s) = tiny_http::Server::from_listener(listener, Some(ssl())) {
+                eprintln!(
+                    "[noted] WARNING: phone port {preferred} was held, bound :{port} instead. \
+                     Your saved phone icon expects :{preferred}; free it with \
+                     `lsof -nP -iTCP:{preferred} -sTCP:LISTEN` and relaunch."
+                );
+                return Some((s, port));
+            }
         }
     }
     None
@@ -256,6 +297,13 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         )
         .map(|_| Value::Null),
         "test_provider" => crate::test_provider().await.map(|s| json!(s)),
+        "gcal_auth_status" => Ok(crate::gcal_auth_status()),
+        "gcal_set_client" => {
+            crate::gcal_set_client(a, sarg(b, "clientId"), sarg(b, "clientSecret")).map(|_| Value::Null)
+        }
+        "gcal_begin_auth" => crate::gcal_begin_auth(a).await,
+        "gcal_disconnect" => crate::gcal_disconnect(a).map(|_| Value::Null),
+        "gcal_sync" => crate::gcal_sync(a, oarg(b, "eventDate")).await,
         other => Err(format!("unknown command: {other}")),
     }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CalendarDays, Camera, Loader, Pencil, Plus, X } from "lucide-react";
+import { CalendarCheck, CalendarDays, Camera, Check, Loader, Pencil, Plus, Trash2, X } from "lucide-react";
 import { api, type EntityCandidate, type NoteRow } from "./api";
 import { fileToImg, type Img } from "./image";
 import { APP_TZ, easternDay, easternMinutes } from "./day";
@@ -115,6 +115,30 @@ export function layoutRows(blocks: Block[]): { b: Block; start: number; effEnd: 
       const effEnd = x.end ?? nextStart ?? x.start + 60;
       return { b: x.b, start: x.start, effEnd };
     });
+}
+
+// Serialize blocks back to the text form parseSchedule understands, so inline
+// edits keep raw_text (and therefore the text/photo editor) in sync with the
+// structured blocks. "HH:MM" round-trips cleanly through resolveTime.
+function blocksToText(blocks: Block[]): string {
+  return blocks
+    .map((b) => {
+      if (!b.start) return b.task;
+      const time = b.end ? `${b.start}-${b.end}` : b.start;
+      return `${time} ${b.task}`;
+    })
+    .join("\n");
+}
+
+// Inline editing manipulates one explicit day, so order timed blocks by clock
+// (untimed kept last, in their existing order). This is plain chronological
+// sort — the next-day rollover in layoutRows is a heuristic for ambiguous typed
+// text, not for times the user set directly with a picker.
+function sortBlocks(blocks: Block[]): Block[] {
+  const at = (b: Block) => toMinutes(b.start);
+  const timed = blocks.filter((b) => at(b) != null).sort((a, z) => at(a)! - at(z)!);
+  const untimed = blocks.filter((b) => at(b) == null);
+  return [...timed, ...untimed];
 }
 
 // "0830" minutes-of-day -> "08:30". Wraps into [0,1440).
@@ -233,12 +257,100 @@ lunch w/ sam 12:30
 errands 2–4, call the dentist sometime
 dinner 7, wind down by 10`;
 
+// Inline row editor: start/end time pickers + task field, with save/delete/cancel.
+// Used both for editing an existing block and for adding a new one. Enter saves,
+// Escape cancels. Returns a fully-formed Block (duration recomputed) to onCommit.
+function ScheduleRowForm({
+  init,
+  busy,
+  onCommit,
+  onCancel,
+  onDelete,
+}: {
+  init: Block;
+  busy: boolean;
+  onCommit: (b: Block) => void;
+  onCancel: () => void;
+  onDelete?: () => void;
+}) {
+  const [start, setStart] = useState(init.start ?? "");
+  const [end, setEnd] = useState(init.end ?? "");
+  const [task, setTask] = useState(init.task ?? "");
+
+  function commit() {
+    const t = task.trim();
+    if (!t) return;
+    const b: Block = { task: t };
+    if (start) {
+      b.start = start;
+      const s = toMinutes(start);
+      const e = end ? toMinutes(end) : null;
+      if (s != null && e != null && e > s) {
+        b.end = end;
+        b.duration_min = e - s;
+      }
+    }
+    onCommit(b);
+  }
+
+  return (
+    <div className="today-block today-rowedit">
+      <div className="today-rowedit-times">
+        <input
+          type="time"
+          className="today-timeinput"
+          value={start}
+          disabled={busy}
+          onChange={(e) => setStart(e.target.value)}
+          aria-label="Start time"
+        />
+        <span className="today-rowedit-dash">–</span>
+        <input
+          type="time"
+          className="today-timeinput"
+          value={end}
+          disabled={busy || !start}
+          onChange={(e) => setEnd(e.target.value)}
+          aria-label="End time"
+        />
+      </div>
+      <input
+        className="today-taskinput"
+        value={task}
+        disabled={busy}
+        autoFocus
+        placeholder="What's happening?"
+        onChange={(e) => setTask(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit();
+          else if (e.key === "Escape") onCancel();
+        }}
+      />
+      <div className="today-rowedit-actions">
+        <button className="today-rowbtn save" onClick={commit} disabled={busy || !task.trim()} title="Save (Enter)">
+          <Check size={15} />
+        </button>
+        {onDelete && (
+          <button className="today-rowbtn del" onClick={onDelete} disabled={busy} title="Delete">
+            <Trash2 size={15} />
+          </button>
+        )}
+        <button className="today-rowbtn" onClick={onCancel} disabled={busy} title="Cancel (Esc)">
+          <X size={15} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function TodayView({
   notes,
   onSaved,
+  onOpenSettings,
 }: {
   notes: NoteRow[];
   onSaved: () => void | Promise<void>;
+  onOpenSettings?: () => void;
 }) {
   // Re-render each minute so the "now" highlight stays accurate through the day.
   const [now, setNow] = useState(() => new Date());
@@ -255,6 +367,22 @@ export function TodayView({
   const [editError, setEditError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
+  // Inline row editing on the agenda: which block index is open, an "add new"
+  // flag, and a save-in-flight flag shared by both.
+  const [editIdx, setEditIdx] = useState<number | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [rowBusy, setRowBusy] = useState(false);
+
+  // Google Calendar sync: whether we're connected, and the last sync's outcome.
+  const [gcalConnected, setGcalConnected] = useState<boolean | null>(null);
+  const [sync, setSync] = useState<{ state: "idle" | "syncing" | "ok" | "err"; msg: string }>({
+    state: "idle",
+    msg: "",
+  });
+  useEffect(() => {
+    api.gcalAuthStatus().then((st) => setGcalConnected(st.connected)).catch(() => setGcalConnected(false));
+  }, []);
+
   const today = easternDay(now);
   const dateLine = now.toLocaleDateString(undefined, {
     weekday: "long",
@@ -270,9 +398,44 @@ export function TodayView({
   );
   const entry = note?.entries.find((e) => isSchedule(e.category));
   const blocks = parseBlocks(entry?.data);
+  // Only timed blocks can become calendar events; "Anytime" tasks are skipped.
+  const hasTimed = blocks.some((b) => toMinutes(b.start) != null);
+
+  // Push today's schedule to Google Calendar. Not connected → open Settings.
+  async function syncToGcal() {
+    if (!gcalConnected) {
+      onOpenSettings?.();
+      return;
+    }
+    if (sync.state === "syncing") return;
+    setSync({ state: "syncing", msg: "" });
+    try {
+      const r = await api.gcalSync(today);
+      const pushed = r.created + r.updated;
+      const parts = [`Synced ${pushed} block${pushed === 1 ? "" : "s"}`];
+      if (r.skipped) parts.push(`${r.skipped} anytime skipped`);
+      if (r.deleted) parts.push(`${r.deleted} removed`);
+      if (r.errors.length) {
+        setSync({
+          state: "err",
+          msg: `${parts.join(" · ")} — ${r.errors.length} error${r.errors.length === 1 ? "" : "s"}: ${r.errors[0]}`,
+        });
+      } else {
+        setSync({ state: "ok", msg: parts.join(" · ") });
+      }
+    } catch (e) {
+      setSync({ state: "err", msg: String(e) });
+    }
+  }
 
   function openEditor() {
-    setDraft(note?.raw_text ?? "");
+    // Inline edits update blocks in place but leave raw_text as the original
+    // capture. If they've diverged, seed the text editor from the current blocks
+    // so it can't overwrite an inline edit with stale text; otherwise keep the
+    // user's original phrasing.
+    const fromRaw = note?.raw_text ?? "";
+    const diverged = blocksToText(parseSchedule(fromRaw)) !== blocksToText(blocks);
+    setDraft(diverged ? blocksToText(blocks) : fromRaw);
     setPhoto(null);
     setEditError(null);
     setEditing(true);
@@ -341,6 +504,45 @@ export function TodayView({
     }
   }
 
+  // Persist inline edits. If today's schedule entry already exists we update it
+  // IN PLACE (update_entry) so the same DB row changes — Today and the Timeline
+  // reflect the edit with no duplicate note, and the note is re-embedded. Only
+  // when there's no schedule yet do we insert a fresh note.
+  async function persistBlocks(next: Block[]) {
+    if (rowBusy) return;
+    setRowBusy(true);
+    setEditError(null);
+    try {
+      const cleaned = sortBlocks(next.filter((b) => b.task.trim()));
+      if (entry?.id != null) {
+        await api.updateEntry(entry.id, { blocks: cleaned });
+      } else {
+        await api.save({
+          raw_text: blocksToText(cleaned),
+          source: note?.source ?? "text",
+          event_date: today,
+          entries: [{ category: "schedule", description: "today's schedule", data: { blocks: cleaned } }],
+        });
+      }
+      setEditIdx(null);
+      setAdding(false);
+      await onSaved();
+    } catch (e) {
+      setEditError(String(e));
+    } finally {
+      setRowBusy(false);
+    }
+  }
+
+  const commitEdit = (idx: number, b: Block) => persistBlocks(blocks.map((x, i) => (i === idx ? b : x)));
+  const deleteBlock = (idx: number) => persistBlocks(blocks.filter((_, i) => i !== idx));
+  const commitAdd = (b: Block) => persistBlocks([...blocks, b]);
+  const beginEdit = (idx: number) => {
+    setAdding(false);
+    setEditError(null);
+    setEditIdx(idx);
+  };
+
   const Head = (withEdit: boolean) => (
     <header className="today-head">
       <div className="today-headrow">
@@ -349,11 +551,33 @@ export function TodayView({
           <h1 className="today-date">{dateLine}</h1>
         </div>
         {withEdit && (
-          <button className="today-edit" onClick={openEditor} aria-label="Edit schedule">
-            <Pencil size={14} /> Edit
-          </button>
+          <div className="today-headbtns">
+            <button
+              className="today-edit"
+              onClick={syncToGcal}
+              disabled={sync.state === "syncing" || (!!gcalConnected && !hasTimed)}
+              title={
+                gcalConnected
+                  ? "Push today's schedule to Google Calendar"
+                  : "Connect Google Calendar in Settings"
+              }
+            >
+              {sync.state === "syncing" ? (
+                <Loader size={14} className="spin" />
+              ) : (
+                <CalendarCheck size={14} />
+              )}
+              {gcalConnected === false ? "Connect Calendar" : "Sync"}
+            </button>
+            <button className="today-edit" onClick={openEditor} aria-label="Edit schedule">
+              <Pencil size={14} /> Edit
+            </button>
+          </div>
         )}
       </div>
+      {withEdit && sync.state !== "idle" && sync.state !== "syncing" && (
+        <div className={"today-syncmsg " + sync.state}>{sync.msg}</div>
+      )}
     </header>
   );
 
@@ -464,14 +688,32 @@ export function TodayView({
 
       <div className="today-agenda">
         {rows.map((r, i) => {
+          const idx = blocks.indexOf(r.b);
+          if (idx === editIdx) {
+            return (
+              <ScheduleRowForm
+                key={`edit-${idx}`}
+                init={r.b}
+                busy={rowBusy}
+                onCommit={(b) => commitEdit(idx, b)}
+                onCancel={() => setEditIdx(null)}
+                onDelete={() => deleteBlock(idx)}
+              />
+            );
+          }
           const isNow = i === currentIdx;
           const isPast = !isNow && nowMin >= r.effEnd;
           return (
             <div
               key={i}
-              className={"today-block" + (isNow ? " now" : "") + (isPast ? " past" : "")}
+              className={"today-block editable" + (isNow ? " now" : "") + (isPast ? " past" : "")}
+              onDoubleClick={() => beginEdit(idx)}
+              title="Double-click to edit"
             >
-              <div className="today-time">{fmtRange(r.b.start, r.b.end)}</div>
+              {/* Always show a connected range: each block runs to the next
+                  block's start (or +1h for the last), so no row collapses to a
+                  lone start time. layoutRows already folds in any explicit end. */}
+              <div className="today-time">{fmtRange(r.b.start, minToStr(r.effEnd))}</div>
               <div className="today-rail">
                 <span className="today-dot" />
               </div>
@@ -489,23 +731,64 @@ export function TodayView({
         {untimed.length > 0 && (
           <div className="today-untimed">
             <div className="today-untimed-label">Anytime</div>
-            {untimed.map((b, i) => (
-              <div className="today-block untimed" key={i}>
-                <div className="today-time today-dash">—</div>
-                <div className="today-rail">
-                  <span className="today-dot" />
+            {untimed.map((b) => {
+              const idx = blocks.indexOf(b);
+              if (idx === editIdx) {
+                return (
+                  <ScheduleRowForm
+                    key={`edit-${idx}`}
+                    init={b}
+                    busy={rowBusy}
+                    onCommit={(nb) => commitEdit(idx, nb)}
+                    onCancel={() => setEditIdx(null)}
+                    onDelete={() => deleteBlock(idx)}
+                  />
+                );
+              }
+              return (
+                <div
+                  className="today-block untimed editable"
+                  key={idx}
+                  onDoubleClick={() => beginEdit(idx)}
+                  title="Double-click to edit"
+                >
+                  <div className="today-time today-dash">—</div>
+                  <div className="today-rail">
+                    <span className="today-dot" />
+                  </div>
+                  <div className="today-info">
+                    <span className="today-task">{b.task}</span>
+                    {fmtDur(b.duration_min) && (
+                      <span className="today-dur">{fmtDur(b.duration_min)}</span>
+                    )}
+                  </div>
                 </div>
-                <div className="today-info">
-                  <span className="today-task">{b.task}</span>
-                  {fmtDur(b.duration_min) && (
-                    <span className="today-dur">{fmtDur(b.duration_min)}</span>
-                  )}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
+
+        {adding ? (
+          <ScheduleRowForm
+            init={{ task: "" }}
+            busy={rowBusy}
+            onCommit={commitAdd}
+            onCancel={() => setAdding(false)}
+          />
+        ) : (
+          <button
+            className="today-addrow"
+            onClick={() => {
+              setEditIdx(null);
+              setAdding(true);
+            }}
+          >
+            <Plus size={15} /> Add to schedule
+          </button>
+        )}
       </div>
+
+      {editError && !editing && <div className="error today-rowerror">{editError}</div>}
 
       {note?.raw_text && (
         <details className="today-notes">

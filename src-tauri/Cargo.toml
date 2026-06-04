@@ -40,7 +40,10 @@ base64 = "0.22"
 tokio = { version = "1", features = ["sync"] }
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 regex = "1"
+# PKCE S256 challenge + deterministic Google Calendar event ids.
+sha2 = "0.10"
 
 # Phone capture + full web client: tiny LAN server, now over TLS so mobile
 # browsers grant mic/camera access (a secure context is required for getUserMedia).
@@ -49,6 +52,9 @@ local-ip-address = "0.6"
 rand = "0.8"
 # Self-signed cert for the LAN HTTPS server (pure-Rust, no OpenSSL system dep).
 rcgen = "0.13"
+# SO_REUSEADDR on the LAN listener so the fixed phone port (8787) rebinds
+# immediately across `tauri dev` restarts instead of drifting to 8788.
+socket2 = "0.6"
 
 # Local speech-to-text (whisper.cpp, in-process)
 whisper-rs = "0.16"

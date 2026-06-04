@@ -25,13 +25,32 @@ export class TokenError extends Error {
   }
 }
 
+// Thrown when the Mac server is simply unreachable (connection refused / network
+// drop) — typically while it's restarting mid-rebuild. Distinct from TokenError:
+// the token is fine, the server just isn't up yet, so the app waits and retries
+// instead of asking the user to re-pair.
+export class OfflineError extends Error {
+  constructor() {
+    super("Reconnecting to your Mac…");
+    this.name = "OfflineError";
+  }
+}
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (isDesktop) return tauriInvoke<T>(cmd, args as Record<string, unknown>);
-  const res = await fetch(`/api/${cmd}?t=${encodeURIComponent(webToken())}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(args ?? {}),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`/api/${cmd}?t=${encodeURIComponent(webToken())}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(args ?? {}),
+    });
+  } catch {
+    // fetch rejects (TypeError) on connection refused / DNS / TLS / network drop:
+    // the server is unreachable, not refusing us. Surface as offline so the app
+    // shows a "reconnecting" state and polls, rather than a hard error.
+    throw new OfflineError();
+  }
   if (res.status === 403) {
     // Stale/empty token — drop it so a relaunch from the (tokened) home-screen
     // icon re-captures a fresh one from the URL.
@@ -96,7 +115,7 @@ export type Envelope = {
   entities: EntityCandidate[];
 };
 
-export type NoteEntry = { category: string | null; data: Record<string, unknown> | null };
+export type NoteEntry = { id?: number; category: string | null; data: Record<string, unknown> | null };
 
 export type NoteRow = {
   id: number;
@@ -125,6 +144,22 @@ export type ProviderSettings = {
   gemini_text_model: string;
   gemini_vision_model: string;
   has_gemini_key: boolean;
+};
+
+// Google Calendar sync. noted pushes the day's schedule one-way into a dedicated
+// "noted" calendar; auth is OAuth (tokens live in the macOS Keychain).
+export type GcalStatus = {
+  connected: boolean; // a refresh token is stored
+  has_client: boolean; // the OAuth client id + secret are set
+  account_email: string | null;
+  calendar_id: string | null;
+};
+export type SyncReport = {
+  created: number;
+  updated: number;
+  skipped: number; // untimed ("Anytime") blocks, not pushable as events
+  deleted: number; // events for blocks removed since the last sync
+  errors: string[];
 };
 
 export type AskSource = {
@@ -214,8 +249,24 @@ export const api = {
     gemini_api_key?: string | null;
     gemini_text_model?: string;
     gemini_vision_model?: string;
-  }) => invoke<void>("set_provider_settings", args),
+  }) =>
+    // Tauri maps camelCase JS args → snake_case Rust params, so the payload keys
+    // MUST be camelCase. Sending snake_case silently drops them to None — which
+    // is why the API key never reached the Keychain.
+    invoke<void>("set_provider_settings", {
+      mode: args.mode,
+      geminiApiKey: args.gemini_api_key,
+      geminiTextModel: args.gemini_text_model,
+      geminiVisionModel: args.gemini_vision_model,
+    }),
   testProvider: () => invoke<string>("test_provider"),
   readInboxImage: (path: string) =>
     invoke<{ base64: string; ext: string }>("read_inbox_image", { path }),
+  // Google Calendar sync. camelCase arg keys (Tauri maps them → snake_case).
+  gcalAuthStatus: () => invoke<GcalStatus>("gcal_auth_status"),
+  gcalSetClient: (clientId: string, clientSecret: string) =>
+    invoke<void>("gcal_set_client", { clientId, clientSecret }),
+  gcalBeginAuth: () => invoke<GcalStatus>("gcal_begin_auth"),
+  gcalDisconnect: () => invoke<void>("gcal_disconnect"),
+  gcalSync: (eventDate?: string) => invoke<SyncReport>("gcal_sync", { eventDate }),
 };

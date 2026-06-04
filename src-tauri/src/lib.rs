@@ -1,6 +1,7 @@
 pub mod analytics;
 pub mod db;
 pub mod entities;
+pub mod gcal;
 pub mod ollama;
 pub mod phone;
 pub mod pipeline;
@@ -13,9 +14,19 @@ use serde_json::{json, Value};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
-/// Local calendar date (YYYY-MM-DD) — the user's "today", not UTC.
+/// The app's fixed timezone. "Today" is always an Eastern calendar day, DST-aware
+/// (EST↔EDT handled by the tz database), regardless of the machine's own timezone.
+const APP_TZ: chrono_tz::Tz = chrono_tz::America::New_York;
+
+/// Current instant as Eastern wall-clock time.
+fn now_eastern() -> chrono::DateTime<chrono_tz::Tz> {
+    chrono::Utc::now().with_timezone(&APP_TZ)
+}
+
+/// Eastern calendar date (YYYY-MM-DD) — the user's "today", not UTC, not the
+/// machine's local zone.
 fn today_local() -> String {
-    chrono::Local::now().date_naive().to_string()
+    now_eastern().date_naive().to_string()
 }
 
 /// L2-normalize a vector so the vec0 default L2 distance ranks like cosine.
@@ -335,7 +346,7 @@ async fn list_categories(app: tauri::AppHandle) -> Result<Value, String> {
 #[tauri::command]
 async fn generate_recap(app: tauri::AppHandle, period: String) -> Result<Value, String> {
     let state = app.state::<Db>();
-    let today = chrono::Local::now().date_naive();
+    let today = now_eastern().date_naive();
     let (start, end) = match period.as_str() {
         "week" => ((today - chrono::Duration::days(6)).to_string(), today.to_string()),
         _ => (today.to_string(), today.to_string()),
@@ -466,7 +477,7 @@ pub fn recent_completed_days(today: chrono::NaiveDate, n: i64) -> Vec<String> {
 /// this is lazy catch-up): the last few finished days + the last finished
 /// calendar week (Mon–Sun). Idempotent — `recap_period` skips ones that exist.
 async fn auto_backfill_recaps(app: &tauri::AppHandle) {
-    let today = chrono::Local::now().date_naive();
+    let today = now_eastern().date_naive();
     for d in recent_completed_days(today, 3) {
         let _ = recap_period(app, "day", &d, &d, false).await;
     }
@@ -787,7 +798,7 @@ async fn export_db(app: tauri::AppHandle) -> Result<String, String> {
     if !dest_dir.exists() {
         dest_dir = std::path::PathBuf::from(&home);
     }
-    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let ts = now_eastern().format("%Y%m%d-%H%M%S");
     let dest = dest_dir.join(format!("noted-backup-{ts}.db"));
     std::fs::copy(&db_path, &dest).map_err(|e| e.to_string())?;
     Ok(dest.to_string_lossy().to_string())
@@ -960,6 +971,47 @@ async fn test_provider() -> Result<String, String> {
     provider::test_gemini().await.map_err(|e| e.to_string())
 }
 
+// ── Google Calendar sync (one-way push to a dedicated "noted" calendar) ──────
+#[tauri::command]
+fn gcal_auth_status() -> Value {
+    gcal::auth_status()
+}
+
+/// Store the user's OAuth client (Desktop-app id + secret) before connecting.
+#[tauri::command]
+fn gcal_set_client(app: tauri::AppHandle, client_id: String, client_secret: String) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    gcal::save_client(&dir, client_id.trim(), client_secret.trim()).map_err(|e| e.to_string())
+}
+
+/// Run the OAuth consent flow (opens the browser, catches the loopback redirect).
+#[tauri::command]
+async fn gcal_begin_auth(app: tauri::AppHandle) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    gcal::begin_auth(&dir).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn gcal_disconnect(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    gcal::disconnect(&dir);
+    Ok(())
+}
+
+/// Push a day's schedule to Google Calendar. Defaults to today (Eastern).
+#[tauri::command]
+async fn gcal_sync(app: tauri::AppHandle, event_date: Option<String>) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let date = event_date.filter(|s| !s.trim().is_empty()).unwrap_or_else(today_local);
+    let blocks = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        db::schedule_blocks_for(&conn, &date).map_err(|e| e.to_string())?
+    };
+    let report = gcal::sync(&dir, &date, blocks).await.map_err(|e| e.to_string())?;
+    serde_json::to_value(report).map_err(|e| e.to_string())
+}
+
 // ── Quick-capture background worker ─────────────────────────────────────────
 const PENDING_MAX_ATTEMPTS: i64 = 5;
 static PENDING_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1080,6 +1132,9 @@ pub fn run() {
 
             // Load model-provider config (mode + models from disk, key from Keychain).
             provider::init(&dir);
+            // Load Google Calendar config (client id + calendar id from disk,
+            // client secret + refresh token from Keychain).
+            gcal::init(&dir);
 
             // Phone capture: tiny LAN upload server gated by a random token.
             let inbox = dir.join("inbox");
@@ -1170,6 +1225,11 @@ pub fn run() {
             get_provider_settings,
             set_provider_settings,
             test_provider,
+            gcal_auth_status,
+            gcal_set_client,
+            gcal_begin_auth,
+            gcal_disconnect,
+            gcal_sync,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

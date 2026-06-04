@@ -378,19 +378,19 @@ textarea.json.bad { border-color: var(--bad); }
 
 .today-agenda { display: flex; flex-direction: column; }
 .today-block {
-  display: grid; grid-template-columns: 62px 18px 1fr; align-items: start; gap: 12px;
-  padding: 12px 10px; border-radius: var(--r-md);
+  display: grid; grid-template-columns: 118px 18px 1fr; align-items: baseline; gap: 12px;
+  padding: 11px 10px; border-radius: var(--r-md);
   transition: background 0.18s var(--ease), opacity 0.18s var(--ease);
 }
 .today-time {
-  display: flex; flex-direction: column; align-items: flex-end; gap: 1px; padding-top: 1px; text-align: right;
+  font-size: 13px; font-weight: 560; color: var(--ink); text-align: right;
+  white-space: nowrap; font-variant-numeric: tabular-nums; letter-spacing: -0.01em;
 }
-.today-start { font-size: 13.5px; font-weight: 560; color: var(--ink); font-variant-numeric: tabular-nums; }
-.today-end { font-size: 11.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.today-dash { color: var(--faint); font-weight: 500; }
 
-.today-rail { position: relative; display: flex; justify-content: center; padding-top: 5px; }
+.today-rail { position: relative; display: flex; justify-content: center; align-self: stretch; padding-top: 5px; }
 .today-rail::before {
-  content: ""; position: absolute; top: 6px; bottom: -24px; left: 50%; width: 2px;
+  content: ""; position: absolute; top: 7px; bottom: -22px; left: 50%; width: 2px;
   transform: translateX(-50%); background: var(--line); display: none;
 }
 /* Connector only between consecutive timed blocks — never dangling off the last
@@ -401,17 +401,18 @@ textarea.json.bad { border-color: var(--bad); }
   background: var(--surface); border: 2px solid var(--line-strong);
 }
 
-.today-info { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-.today-task { font-size: 15px; font-weight: 500; color: var(--ink); line-height: 1.35; }
-.today-meta { display: inline-flex; align-items: center; gap: 8px; }
+.today-info { min-width: 0; font-size: 15px; line-height: 1.4; }
+.today-task { color: var(--ink); }
 .today-dur {
   font-size: 11.5px; font-weight: 500; color: var(--muted); background: var(--surface-2);
   border: 1px solid var(--line); padding: 1px 8px; border-radius: 99px;
+  margin-left: 8px; white-space: nowrap;
 }
 .today-nowtag {
   font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--accent); background: var(--accent-tint);
-  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line)); padding: 1px 8px; border-radius: 99px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  padding: 1px 8px; border-radius: 99px; margin-left: 8px; white-space: nowrap;
 }
 
 /* The current block — the only thing rendered in blue. */
@@ -420,7 +421,7 @@ textarea.json.bad { border-color: var(--bad); }
   background: var(--accent); border-color: var(--accent);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 18%, transparent);
 }
-.today-block.now .today-start { color: var(--accent); }
+.today-block.now .today-time { color: var(--accent); }
 .today-block.now .today-task { font-weight: 600; }
 
 /* Blocks whose time has passed recede. */

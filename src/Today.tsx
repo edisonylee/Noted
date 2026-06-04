@@ -40,6 +40,19 @@ function fmtTime(hhmm?: string): string {
   return `${h12}:${String(m).padStart(2, "0")} ${ampm}`;
 }
 
+// A single-line time label: "10:40 AM", "8:30–10:30 AM" (shared meridiem), or
+// "11:40 AM–12:15 PM" when the range crosses noon.
+function fmtRange(start?: string, end?: string): string {
+  const s = toMinutes(start);
+  if (s == null) return "";
+  if (!end) return fmtTime(start);
+  const e = toMinutes(end);
+  if (e == null) return fmtTime(start);
+  const sameHalf = s < 720 === e < 720; // both AM or both PM
+  if (sameHalf) return `${fmtTime(start).replace(/\s?(AM|PM)$/i, "")}–${fmtTime(end)}`;
+  return `${fmtTime(start)}–${fmtTime(end)}`;
+}
+
 // "2h", "45m", "1h 30m"
 function fmtDur(min?: number): string {
   if (!min || min <= 0) return "";
@@ -405,21 +418,16 @@ export function TodayView({
               key={i}
               className={"today-block" + (isNow ? " now" : "") + (isPast ? " past" : "")}
             >
-              <div className="today-time">
-                <span className="today-start">{fmtTime(r.b.start)}</span>
-                {r.b.end && <span className="today-end">{fmtTime(r.b.end)}</span>}
-              </div>
+              <div className="today-time">{fmtRange(r.b.start, r.b.end)}</div>
               <div className="today-rail">
                 <span className="today-dot" />
               </div>
               <div className="today-info">
                 <span className="today-task">{r.b.task}</span>
-                <span className="today-meta">
-                  {fmtDur(r.b.duration_min) && (
-                    <span className="today-dur">{fmtDur(r.b.duration_min)}</span>
-                  )}
-                  {isNow && <span className="today-nowtag">now</span>}
-                </span>
+                {fmtDur(r.b.duration_min) && (
+                  <span className="today-dur">{fmtDur(r.b.duration_min)}</span>
+                )}
+                {isNow && <span className="today-nowtag">now</span>}
               </div>
             </div>
           );
@@ -430,16 +438,14 @@ export function TodayView({
             <div className="today-untimed-label">Anytime</div>
             {untimed.map((b, i) => (
               <div className="today-block untimed" key={i}>
-                <div className="today-time" />
+                <div className="today-time today-dash">—</div>
                 <div className="today-rail">
                   <span className="today-dot" />
                 </div>
                 <div className="today-info">
                   <span className="today-task">{b.task}</span>
                   {fmtDur(b.duration_min) && (
-                    <span className="today-meta">
-                      <span className="today-dur">{fmtDur(b.duration_min)}</span>
-                    </span>
+                    <span className="today-dur">{fmtDur(b.duration_min)}</span>
                   )}
                 </div>
               </div>

@@ -57,7 +57,7 @@ function fmtDur(min?: number): string {
 }
 
 // Pull a clean Block[] out of an entry's `data.blocks`, tolerating missing/odd fields.
-function parseBlocks(data: Record<string, unknown> | null | undefined): Block[] {
+export function parseBlocks(data: Record<string, unknown> | null | undefined): Block[] {
   const raw = data?.blocks;
   if (!Array.isArray(raw)) return [];
   return raw
@@ -75,7 +75,10 @@ function parseBlocks(data: Record<string, unknown> | null | undefined): Block[] 
       end: typeof b.end === "string" ? b.end : undefined,
       duration_min: typeof b.duration_min === "number" ? b.duration_min : undefined,
     }))
-    .filter((b) => b.task);
+    // Drop empties and date-only header blocks. Filtering on load (not just on
+    // parse) also cleans schedules saved before date-stripping existed, so a
+    // stored "June 4, 2026" stops showing up under "Anytime".
+    .filter((b) => b.task && !isDateOnly(b.task));
 }
 
 const isSchedule = (cat: string | null) => cat?.toLowerCase() === "schedule";

@@ -361,7 +361,7 @@ export default function App() {
 
         <main className="mobile-content">
           {mobileTab === "today" && (
-            <TodayView notes={notes} onMakeSchedule={() => setMobileTab("capture")} />
+            <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} />
           )}
           {mobileTab === "capture" && <MobileCapture onCaptured={() => refresh().catch(handleErr)} />}
           {mobileTab === "timeline" && <TimelineView notes={notes} />}
@@ -439,7 +439,7 @@ export default function App() {
 
       <main className="content">
         {view === "today" ? (
-          <TodayView notes={notes} onMakeSchedule={() => setView("log")} />
+          <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} />
         ) : view === "trends" ? (
           <TrendsView cats={cats} theme={theme} />
         ) : view === "recaps" ? (

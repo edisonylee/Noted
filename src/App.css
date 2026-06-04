@@ -348,6 +348,14 @@ textarea.json.bad { border-color: var(--bad); }
 /* ---- Today: the day's schedule, read-only ---- */
 .today { width: 100%; max-width: 620px; margin: 0 auto; padding: 4px 2px 40px; }
 .today-head { margin-bottom: 22px; }
+.today-headrow { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+.today-edit {
+  display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: 99px;
+  color: var(--muted); font-size: 13px; font-weight: 500;
+  transition: color 0.16s var(--ease), border-color 0.16s var(--ease);
+}
+.today-edit:hover { color: var(--ink); border-color: var(--faint); }
 .today-eyebrow {
   font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.09em;
   color: var(--accent); margin-bottom: 4px;
@@ -433,6 +441,50 @@ textarea.json.bad { border-color: var(--bad); }
 }
 .today-make:hover { background: var(--ink-hover); }
 .today-make:active { transform: scale(0.97); }
+
+/* Inline schedule editor */
+.today-editor { display: flex; flex-direction: column; gap: 14px; }
+.today-textarea {
+  width: 100%; min-height: 220px; resize: vertical; padding: 16px 18px;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-lg);
+  color: var(--ink); font-size: 15px; line-height: 1.6; box-shadow: var(--shadow-1);
+  transition: border-color 0.16s var(--ease), box-shadow 0.16s var(--ease);
+}
+.today-textarea::placeholder { color: var(--faint); }
+.today-textarea:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+.today-photo { position: relative; align-self: flex-start; max-width: 260px; }
+.today-photo img { width: 100%; border-radius: var(--r-md); border: 1px solid var(--line); display: block; }
+.today-photo-x {
+  position: absolute; top: 6px; right: 6px; display: inline-flex; padding: 5px;
+  background: color-mix(in srgb, var(--ink) 72%, transparent); color: var(--on-ink);
+  border: none; border-radius: 99px;
+}
+.today-editor-actions { display: flex; align-items: center; gap: 10px; }
+.today-spacer { flex: 1; }
+.today-photo-btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 9px 14px;
+  background: none; border: 1px solid var(--line-strong); border-radius: 99px;
+  color: var(--muted); font-size: 13.5px; font-weight: 500;
+  transition: color 0.16s var(--ease), border-color 0.16s var(--ease);
+}
+.today-photo-btn:hover:not(:disabled) { color: var(--ink); border-color: var(--faint); }
+.today-cancel {
+  padding: 9px 14px; background: none; border: none; border-radius: 99px;
+  color: var(--muted); font-size: 13.5px; font-weight: 500;
+}
+.today-cancel:hover:not(:disabled) { color: var(--ink); }
+.today-save {
+  display: inline-flex; align-items: center; gap: 7px; padding: 9px 18px;
+  background: var(--ink); color: var(--on-ink); border: none; border-radius: 99px;
+  font-size: 14px; font-weight: 540;
+  transition: background 0.16s var(--ease), transform 0.12s var(--ease);
+}
+.today-save:hover:not(:disabled) { background: var(--ink-hover); }
+.today-save:active:not(:disabled) { transform: scale(0.97); }
+.today-save:disabled, .today-photo-btn:disabled, .today-cancel:disabled { opacity: 0.5; cursor: default; }
 
 .raw { margin-top: 12px; }
 .raw summary { color: var(--muted); font-size: 12px; cursor: pointer; list-style: none; }

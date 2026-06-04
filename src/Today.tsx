@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
-import { CalendarDays, Plus } from "lucide-react";
-import type { NoteRow } from "./api";
+import { useEffect, useRef, useState } from "react";
+import { CalendarDays, Camera, Loader, Pencil, Plus, X } from "lucide-react";
+import { api, type NoteRow } from "./api";
+import { fileToImg, type Img } from "./image";
 
 // Local YYYY-MM-DD. NOT toISOString() — that's UTC and would roll the day over
 // late at night, showing tomorrow's (empty) schedule before midnight.
@@ -73,12 +74,20 @@ function parseBlocks(data: Record<string, unknown> | null | undefined): Block[] 
 
 const isSchedule = (cat: string | null) => cat?.toLowerCase() === "schedule";
 
+const PLACEHOLDER = `Lay out your day, however messy:
+
+woke up 7:30, gym 8–9
+deep work on the today view 10–12
+lunch w/ sam 12:30
+errands 2–4, call the dentist sometime
+dinner 7, wind down by 10`;
+
 export function TodayView({
   notes,
-  onMakeSchedule,
+  onSaved,
 }: {
   notes: NoteRow[];
-  onMakeSchedule: () => void;
+  onSaved: () => void | Promise<void>;
 }) {
   // Re-render each minute so the "now" highlight stays accurate through the day.
   const [now, setNow] = useState(() => new Date());
@@ -86,6 +95,14 @@ export function TodayView({
     const id = setInterval(() => setNow(new Date()), 60_000);
     return () => clearInterval(id);
   }, []);
+
+  // Inline create/edit state — the schedule is made right here, not in Log.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [photo, setPhoto] = useState<Img | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const today = localDay(now);
   const dateLine = now.toLocaleDateString(undefined, {
@@ -102,25 +119,183 @@ export function TodayView({
   const entry = note?.entries.find((e) => isSchedule(e.category));
   const blocks = parseBlocks(entry?.data);
 
-  const Head = (
+  function openEditor() {
+    setDraft(note?.raw_text ?? "");
+    setPhoto(null);
+    setEditError(null);
+    setEditing(true);
+  }
+
+  async function attachPhoto(file: File | undefined) {
+    if (!file) return;
+    try {
+      setPhoto(await fileToImg(file));
+      setEditError(null);
+    } catch (e) {
+      setEditError(String(e));
+    }
+  }
+
+  async function saveDraft() {
+    if (busy) return;
+    setBusy(true);
+    setEditError(null);
+    try {
+      let env;
+      let raw_text: string;
+      let source = "text";
+      let image_path: string | null = null;
+
+      if (photo) {
+        env = await api.categorizePhoto(photo.base64);
+        raw_text = env.raw_text ?? draft.trim();
+        source = "photo";
+        image_path = await api.saveImage(photo.base64, photo.ext);
+      } else {
+        const body = draft.trim();
+        if (!body) {
+          setBusy(false);
+          return;
+        }
+        // A "Schedule:" header forces the pipeline's schedule category (PROTOCOL
+        // §2 / pipeline split_sections), so the day reliably lands as time blocks.
+        env = await api.categorize(`Schedule:\n${body}`);
+        raw_text = body;
+      }
+
+      const entries = env.entries.map((e) => ({
+        category: e.category.trim().toLowerCase(),
+        description: e.description,
+        data: e.data,
+      }));
+      // Dedicated schedule flow: guarantee it shows on Today even if the model
+      // labeled the note something else.
+      if (entries.length && !entries.some((e) => e.category === "schedule")) {
+        entries[0].category = "schedule";
+      }
+
+      await api.save({
+        raw_text,
+        source,
+        image_path,
+        event_date: today, // always today's schedule
+        entries,
+        entities: env.entities,
+      });
+
+      setEditing(false);
+      setDraft("");
+      setPhoto(null);
+      await onSaved();
+    } catch (e) {
+      setEditError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const Head = (withEdit: boolean) => (
     <header className="today-head">
-      <div className="today-eyebrow">Today</div>
-      <h1 className="today-date">{dateLine}</h1>
+      <div className="today-headrow">
+        <div>
+          <div className="today-eyebrow">Today</div>
+          <h1 className="today-date">{dateLine}</h1>
+        </div>
+        {withEdit && (
+          <button className="today-edit" onClick={openEditor} aria-label="Edit schedule">
+            <Pencil size={14} /> Edit
+          </button>
+        )}
+      </div>
     </header>
   );
 
+  // ---- Editor ----
+  if (editing) {
+    return (
+      <div className="today">
+        {Head(false)}
+        <div className="today-editor">
+          <textarea
+            className="today-textarea"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={PLACEHOLDER}
+            autoFocus
+            disabled={busy}
+          />
+
+          {photo && (
+            <div className="today-photo">
+              <img src={photo.dataUrl} alt="schedule" />
+              <button className="today-photo-x" onClick={() => setPhoto(null)} aria-label="Remove photo">
+                <X size={14} />
+              </button>
+            </div>
+          )}
+
+          {editError && <div className="error">{editError}</div>}
+
+          <div className="today-editor-actions">
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              hidden
+              onChange={(e) => attachPhoto(e.target.files?.[0])}
+            />
+            <button
+              className="today-photo-btn"
+              onClick={() => fileRef.current?.click()}
+              disabled={busy}
+              title="Snap a handwritten schedule"
+            >
+              <Camera size={16} /> Photo
+            </button>
+            <span className="today-spacer" />
+            <button
+              className="today-cancel"
+              onClick={() => {
+                setEditing(false);
+                setEditError(null);
+              }}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+            <button
+              className="today-save"
+              onClick={saveDraft}
+              disabled={busy || (!draft.trim() && !photo)}
+            >
+              {busy ? (
+                <>
+                  <Loader size={15} className="spin" /> Building…
+                </>
+              ) : (
+                "Save schedule"
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Empty state ----
   if (!blocks.length) {
     return (
       <div className="today">
-        {Head}
+        {Head(false)}
         <div className="today-empty">
           <CalendarDays size={30} className="today-empty-icon" />
           <p className="today-empty-title">No schedule yet for today</p>
           <p className="today-empty-sub">
-            Lay out your plan — type it, speak it, or snap a photo of a handwritten schedule.
-            noted will lay it out here, time by time.
+            Lay out your plan — type it from when you wake up to when you wind down, or snap a
+            photo of a handwritten schedule. noted lays it out here, time by time.
           </p>
-          <button className="today-make" onClick={onMakeSchedule}>
+          <button className="today-make" onClick={openEditor}>
             <Plus size={16} /> Make today&apos;s schedule
           </button>
         </div>
@@ -128,9 +303,9 @@ export function TodayView({
     );
   }
 
+  // ---- Agenda ----
   const nowMin = now.getHours() * 60 + now.getMinutes();
 
-  // Timed blocks sorted by start; untimed kept aside.
   const rows = blocks
     .map((b) => ({ b, start: toMinutes(b.start) }))
     .filter((x): x is { b: Block; start: number } => x.start != null)
@@ -149,7 +324,7 @@ export function TodayView({
 
   return (
     <div className="today">
-      {Head}
+      {Head(true)}
 
       <div className="today-agenda">
         {rows.map((r, i) => {

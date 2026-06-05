@@ -529,6 +529,18 @@ async fn segment_note(
 /// fails we fall back to the deterministic header split. The calendar day is
 /// resolved once for the whole note. A single failing item is skipped rather
 /// than failing the note; zero entries is an error.
+/// Strip a leading list/checkbox marker from each line ("□ ", "- ", "[x] ", …)
+/// before the model parses the note, so checklist glyphs aren't echoed verbatim
+/// into a task instead of having their times extracted. The original note is
+/// still stored as raw_text.
+fn strip_line_markers(text: &str) -> String {
+    let re = regex::Regex::new(
+        r"(?m)^[ \t]*(?:[-*•·▪●□☐▢◻◽◾■☑☒✅✓✔✗✘]|\[[ xX]?\]|\([ xX]?\))[ \t]+",
+    )
+    .unwrap();
+    re.replace_all(text, "").into_owned()
+}
+
 async fn extract_note(
     catalog: &str,
     known: &[String],
@@ -536,6 +548,10 @@ async fn extract_note(
     raw_text: &str,
     today: &str,
 ) -> Result<Value> {
+    // Strip leading checklist/box glyphs so the model parses the content, not the
+    // markers; raw_text (stored + shown in review) keeps the user's original.
+    let text = strip_line_markers(text);
+    let text = text.as_str();
     // Hybrid split: run the deterministic header parser FIRST so a section you
     // explicitly tagged (`Gym:`) routes by code, never by the model — you keep
     // control of routing when you ask for it. Only the UNTAGGED prose (the

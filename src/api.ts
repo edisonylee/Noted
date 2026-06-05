@@ -172,8 +172,18 @@ export type SyncReport = {
   created: number;
   updated: number;
   skipped: number; // untimed ("Anytime") blocks, not pushable as events
+  duplicates: number; // blocks already on another calendar at the same start+end
   deleted: number; // events for blocks removed since the last sync
   errors: string[];
+};
+// One event read back from Google Calendar for the Today empty state. Times are
+// "HH:MM" Eastern wall-clock; all-day events have start/end null and all_day true.
+export type CalEvent = {
+  task: string;
+  start: string | null;
+  end: string | null;
+  all_day: boolean;
+  calendar: string;
 };
 
 export type AskSource = {
@@ -284,5 +294,8 @@ export const api = {
     invoke<void>("gcal_set_client", { clientId, clientSecret }),
   gcalBeginAuth: () => invoke<GcalStatus>("gcal_begin_auth"),
   gcalDisconnect: () => invoke<void>("gcal_disconnect"),
+  // Reset: delete noted's calendar so the next sync starts fresh.
+  gcalReset: () => invoke<void>("gcal_reset"),
   gcalSync: (eventDate?: string) => invoke<SyncReport>("gcal_sync", { eventDate }),
+  gcalListEvents: (eventDate?: string) => invoke<CalEvent[]>("gcal_list_events", { eventDate }),
 };

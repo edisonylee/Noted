@@ -22,7 +22,7 @@
 // `notedDate` extended property so a per-day sync can delete events for blocks
 // that were removed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{OnceLock, RwLock};
@@ -170,6 +170,16 @@ fn set_calendar_id(dir: &Path, id: &str) {
     write_config_file(dir);
 }
 
+/// Forget the dedicated calendar's id (after deleting it, or when it's gone) so
+/// the next sync resolves/recreates a fresh one.
+fn clear_calendar_id(dir: &Path) {
+    {
+        let mut c = cell().write().unwrap();
+        c.calendar_id = None;
+    }
+    write_config_file(dir);
+}
+
 /// Forget the Google session (refresh token gone/expired). Keeps the OAuth
 /// client + calendar id so reconnecting doesn't require re-entering credentials.
 fn clear_tokens(dir: &Path) {
@@ -198,6 +208,39 @@ pub fn auth_status() -> Value {
 /// Disconnect: drop the Google session but keep the OAuth client config.
 pub fn disconnect(dir: &Path) {
     clear_tokens(dir);
+}
+
+/// Reset: wipe everything noted has pushed by deleting its dedicated calendar,
+/// then forget the stored id so the next sync recreates a fresh, empty one.
+/// Only ever touches noted's own calendar; the user's other calendars and the
+/// Google session (refresh token + OAuth client) are left intact. No-op if the
+/// calendar is already gone.
+pub async fn reset_calendar(dir: &Path) -> Result<()> {
+    let token = get_access_token(dir).await?;
+    let client = http_client()?;
+
+    let id = match find_calendar(&client, &token, get().calendar_id).await? {
+        Some(id) => id,
+        // Nothing to delete; just make sure we aren't holding a stale id.
+        None => {
+            clear_calendar_id(dir);
+            return Ok(());
+        }
+    };
+
+    let resp = client
+        .delete(format!("{CAL_BASE}/calendars/{}", enc(&id)))
+        .bearer_auth(&token)
+        .send()
+        .await?;
+    let code = resp.status().as_u16();
+    // 404/410 = already gone — fine for a reset.
+    if !resp.status().is_success() && code != 404 && code != 410 {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("couldn't reset the noted calendar ({code}): {text}"));
+    }
+    clear_calendar_id(dir);
+    Ok(())
 }
 
 // ── OAuth (installed-app loopback + PKCE S256) ──────────────────────────────
@@ -499,28 +542,29 @@ async fn refresh(dir: &Path) -> Result<String> {
 }
 
 // ── Calendar bootstrap ──────────────────────────────────────────────────────
-/// The id of the dedicated "noted" calendar, creating it on first use. Reuses
-/// the stored id, re-verifying it still exists (self-heals if the user deleted
-/// the calendar), else finds one named "noted", else creates it.
-async fn ensure_calendar(dir: &Path) -> Result<String> {
-    let token = get_access_token(dir).await?;
-    let client = http_client()?;
-
-    if let Some(id) = get().calendar_id {
+/// Find the dedicated "noted" calendar's id WITHOUT creating one: the stored id
+/// if it still exists (self-heals if the user deleted it), else one named
+/// "noted" in the account, else None.
+async fn find_calendar(
+    client: &reqwest::Client,
+    token: &str,
+    stored: Option<String>,
+) -> Result<Option<String>> {
+    if let Some(id) = stored {
         let resp = client
             .get(format!("{CAL_BASE}/calendars/{}", enc(&id)))
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .send()
             .await?;
         if resp.status().is_success() {
-            return Ok(id);
+            return Ok(Some(id));
         }
-        // otherwise (404) fall through and re-resolve
+        // otherwise (404) fall through and re-resolve by name
     }
 
     let list = client
         .get(format!("{CAL_BASE}/users/me/calendarList"))
-        .bearer_auth(&token)
+        .bearer_auth(token)
         .send()
         .await?;
     if list.status().is_success() {
@@ -529,12 +573,25 @@ async fn ensure_calendar(dir: &Path) -> Result<String> {
             for it in items {
                 if it.get("summary").and_then(|s| s.as_str()) == Some(CAL_SUMMARY) {
                     if let Some(id) = it.get("id").and_then(|s| s.as_str()) {
-                        set_calendar_id(dir, id);
-                        return Ok(id.to_string());
+                        return Ok(Some(id.to_string()));
                     }
                 }
             }
         }
+    }
+    Ok(None)
+}
+
+/// The id of the dedicated "noted" calendar, creating it on first use. Reuses
+/// the stored id, re-verifying it still exists (self-heals if the user deleted
+/// the calendar), else finds one named "noted", else creates it.
+async fn ensure_calendar(dir: &Path) -> Result<String> {
+    let token = get_access_token(dir).await?;
+    let client = http_client()?;
+
+    if let Some(id) = find_calendar(&client, &token, get().calendar_id).await? {
+        set_calendar_id(dir, &id);
+        return Ok(id);
     }
 
     let resp = client
@@ -563,8 +620,9 @@ async fn ensure_calendar(dir: &Path) -> Result<String> {
 pub struct SyncReport {
     pub created: u32,
     pub updated: u32,
-    pub skipped: u32, // untimed ("Anytime") blocks, which have no clock time
-    pub deleted: u32, // events for blocks that were removed since the last sync
+    pub skipped: u32,    // untimed ("Anytime") blocks, which have no clock time
+    pub duplicates: u32, // blocks already on another calendar at the same start+end
+    pub deleted: u32,    // events for blocks that were removed since the last sync
     pub errors: Vec<String>,
 }
 
@@ -613,11 +671,18 @@ fn rfc3339_from_minutes(event_date: &str, minutes: i64) -> Result<String> {
     Ok(dt.to_rfc3339())
 }
 
-/// One schedule block → a Google Calendar event body with our deterministic id
-/// and the `notedDate` tag used for per-day stale cleanup.
-fn build_event(event_date: &str, task: &str, start: &str, block: &Value, id: &str) -> Result<Value> {
-    let smin = parse_hhmm(start)?;
-    let emin = match block.get("end").and_then(|e| e.as_str()) {
+/// Wall-clock "HH:MM" for a minutes-since-midnight value, wrapping past midnight
+/// so it matches the read-back form from `list_events` for duplicate detection.
+fn hhmm_from_minutes(min: i64) -> String {
+    let m = min.rem_euclid(1440);
+    format!("{:02}:{:02}", m / 60, m % 60)
+}
+
+/// A block's effective end in minutes-since-midnight, mirroring `build_event`:
+/// explicit `end` (rolled past midnight if it's ≤ start), else `duration_min`,
+/// else a default of one hour.
+fn block_end_minutes(smin: i64, block: &Value) -> Result<i64> {
+    Ok(match block.get("end").and_then(|e| e.as_str()) {
         Some(end) => {
             let mut m = parse_hhmm(end)?;
             if m <= smin {
@@ -629,7 +694,14 @@ fn build_event(event_date: &str, task: &str, start: &str, block: &Value, id: &st
             Some(d) if d > 0 => smin + d,
             _ => smin + 60, // default 1h, matching the Today view's effEnd fallback
         },
-    };
+    })
+}
+
+/// One schedule block → a Google Calendar event body with our deterministic id
+/// and the `notedDate` tag used for per-day stale cleanup.
+fn build_event(event_date: &str, task: &str, start: &str, block: &Value, id: &str) -> Result<Value> {
+    let smin = parse_hhmm(start)?;
+    let emin = block_end_minutes(smin, block)?;
     // No `source` field: Google requires source.url to be a valid URL and
     // rejects the event otherwise. The notedDate tag is what we rely on.
     Ok(json!({
@@ -738,12 +810,45 @@ pub async fn sync(dir: &Path, event_date: &str, blocks: Vec<Value>) -> Result<Sy
     let cal = ensure_calendar(dir).await?;
     let client = http_client()?;
 
+    // Time windows already occupied on the user's *other* calendars, so we don't
+    // duplicate a slot they've already booked. Best-effort: if the read-back
+    // fails, fall back to an empty set (push everything) rather than dropping the
+    // schedule, and note the failure in the report.
+    let busy: HashSet<(String, String)> = match list_events(dir, event_date).await {
+        Ok(events) => events
+            .iter()
+            .filter(|e| !e.get("all_day").and_then(|a| a.as_bool()).unwrap_or(false))
+            .filter_map(|e| {
+                let s = e.get("start").and_then(|s| s.as_str())?;
+                let en = e.get("end").and_then(|s| s.as_str())?;
+                Some((s.to_string(), en.to_string()))
+            })
+            .collect(),
+        Err(e) => {
+            report.errors.push(format!("duplicate check skipped: {e}"));
+            HashSet::new()
+        }
+    };
+
     let mut fresh_ids: Vec<String> = Vec::new();
     for (i, block) in blocks.iter().enumerate() {
         let task = block.get("task").and_then(|t| t.as_str()).unwrap_or("").trim();
         let start = block.get("start").and_then(|s| s.as_str());
         match (task.is_empty(), start) {
             (false, Some(start)) => {
+                // Skip blocks that match an existing event's exact start+end on
+                // another calendar (regardless of title). The id is left out of
+                // `fresh_ids`, so the stale-cleanup pass below also removes any
+                // event noted pushed for this slot before the user booked it.
+                if let Ok(smin) = parse_hhmm(start) {
+                    if let Ok(emin) = block_end_minutes(smin, block) {
+                        let window = (hhmm_from_minutes(smin), hhmm_from_minutes(emin));
+                        if busy.contains(&window) {
+                            report.duplicates += 1;
+                            continue;
+                        }
+                    }
+                }
                 let id = event_id(event_date, i);
                 match build_event(event_date, task, start, block, &id) {
                     Ok(body) => {
@@ -778,6 +883,126 @@ pub async fn sync(dir: &Path, event_date: &str, blocks: Vec<Value>) -> Result<Sy
     }
 
     Ok(report)
+}
+
+// ── Read-back (Today empty state) ─────────────────────────────────────────────
+/// "2026-06-05T09:30:00-04:00" → "09:30" in Eastern wall-clock. None if unparseable.
+fn hhmm_from_rfc3339(s: &str) -> Option<String> {
+    let dt = chrono::DateTime::parse_from_rfc3339(s).ok()?;
+    Some(dt.with_timezone(&TZ).format("%H:%M").to_string())
+}
+
+/// True if the signed-in user has declined this event (so we hide it).
+fn is_declined(it: &Value) -> bool {
+    it.get("attendees")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter().any(|a| {
+                a.get("self").and_then(|s| s.as_bool()).unwrap_or(false)
+                    && a.get("responseStatus").and_then(|s| s.as_str()) == Some("declined")
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Pull every (non-noted) calendar's events for `event_date` so the Today view
+/// can show what the user already has planned. Read-only; merges across all
+/// calendars in the account, hides events the user declined, and skips noted's
+/// own pushed calendar. All-day events come back with `start: null, all_day: true`.
+/// Each item: `{ task, start: "HH:MM"|null, end: "HH:MM"|null, all_day, calendar }`.
+pub async fn list_events(dir: &Path, event_date: &str) -> Result<Vec<Value>> {
+    let token = get_access_token(dir).await?;
+    let client = http_client()?;
+
+    // Day window in Eastern wall-clock — matches how blocks are stored/displayed.
+    let time_min = rfc3339_from_minutes(event_date, 0)?;
+    let time_max = rfc3339_from_minutes(event_date, 1440)?;
+
+    // Enumerate the account's calendars (id, display name), skipping noted's own.
+    // A failure here is a real error (not "no events"), so surface it.
+    let list_resp = client
+        .get(format!("{CAL_BASE}/users/me/calendarList"))
+        .bearer_auth(&token)
+        .send()
+        .await?;
+    if !list_resp.status().is_success() {
+        let status = list_resp.status();
+        let text = list_resp.text().await.unwrap_or_default();
+        return Err(anyhow!("calendar list failed ({status}): {text}"));
+    }
+    let list: Value = list_resp.json().await?;
+    let cals: Vec<(String, String)> = list
+        .get("items")
+        .and_then(|i| i.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| {
+                    let id = c.get("id").and_then(|s| s.as_str())?;
+                    let name = c.get("summary").and_then(|s| s.as_str()).unwrap_or(id);
+                    if name == CAL_SUMMARY {
+                        return None; // don't echo back our own schedule
+                    }
+                    Some((id.to_string(), name.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut events: Vec<Value> = Vec::new();
+    for (id, name) in &cals {
+        let url = format!(
+            "{CAL_BASE}/calendars/{}/events?singleEvents=true&orderBy=startTime&timeMin={}&timeMax={}&maxResults=50&showDeleted=false",
+            enc(id),
+            enc(&time_min),
+            enc(&time_max),
+        );
+        let resp = client.get(url).bearer_auth(&token).send().await?;
+        // Skip calendars we can't read rather than failing the whole pull.
+        if !resp.status().is_success() {
+            eprintln!("[noted] gcal events for {name} failed ({})", resp.status());
+            continue;
+        }
+        let v: Value = resp.json().await?;
+        let Some(items) = v.get("items").and_then(|i| i.as_array()) else {
+            continue;
+        };
+        for it in items {
+            if is_declined(it) {
+                continue;
+            }
+            let task = it.get("summary").and_then(|s| s.as_str()).unwrap_or("(busy)").trim();
+            // Timed events carry start.dateTime; all-day events carry start.date.
+            let (start_hhmm, all_day) = match it
+                .get("start")
+                .and_then(|s| s.get("dateTime"))
+                .and_then(|s| s.as_str())
+            {
+                Some(dt) => (hhmm_from_rfc3339(dt), false),
+                None => (None, true),
+            };
+            let end_hhmm = it
+                .get("end")
+                .and_then(|s| s.get("dateTime"))
+                .and_then(|s| s.as_str())
+                .and_then(hhmm_from_rfc3339);
+            events.push(json!({
+                "task": task,
+                "start": start_hhmm,
+                "end": end_hhmm,
+                "all_day": all_day,
+                "calendar": name,
+            }));
+        }
+    }
+
+    // Chronological; all-day / untimed events sort to the end (stable for ties).
+    events.sort_by_key(|e| {
+        e.get("start")
+            .and_then(|s| s.as_str())
+            .and_then(|s| parse_hhmm(s).ok())
+            .unwrap_or(i64::MAX)
+    });
+    Ok(events)
 }
 
 #[cfg(test)]
@@ -831,5 +1056,50 @@ mod tests {
         let ev = build_event("2026-06-04", "sleep", "23:00", &block, "notedxyz").unwrap();
         assert!(ev["start"]["dateTime"].as_str().unwrap().starts_with("2026-06-04T23:00:00"));
         assert!(ev["end"]["dateTime"].as_str().unwrap().starts_with("2026-06-05T06:00:00"));
+    }
+
+    #[test]
+    fn hhmm_from_minutes_formats_and_wraps() {
+        assert_eq!(hhmm_from_minutes(9 * 60), "09:00");
+        assert_eq!(hhmm_from_minutes(14 * 60 + 30), "14:30");
+        // Cross-midnight end (e.g. 06:00 stored as 1800 min) wraps to wall-clock.
+        assert_eq!(hhmm_from_minutes(30 * 60), "06:00");
+    }
+
+    #[test]
+    fn block_end_minutes_matches_build_event_logic() {
+        // Explicit end.
+        let b = json!({ "start": "09:00", "end": "10:30" });
+        assert_eq!(block_end_minutes(9 * 60, &b).unwrap(), 10 * 60 + 30);
+        // duration_min.
+        let b = json!({ "start": "09:00", "duration_min": 45 });
+        assert_eq!(block_end_minutes(9 * 60, &b).unwrap(), 9 * 60 + 45);
+        // Default one hour.
+        let b = json!({ "start": "09:00" });
+        assert_eq!(block_end_minutes(9 * 60, &b).unwrap(), 10 * 60);
+        // End ≤ start rolls past midnight.
+        let b = json!({ "start": "23:00", "end": "06:00" });
+        assert_eq!(block_end_minutes(23 * 60, &b).unwrap(), 30 * 60);
+    }
+
+    #[test]
+    fn hhmm_from_rfc3339_converts_to_eastern() {
+        // 13:30 UTC in June → 09:30 EDT
+        assert_eq!(hhmm_from_rfc3339("2026-06-05T13:30:00Z").as_deref(), Some("09:30"));
+        // Already Eastern → passes through unchanged.
+        assert_eq!(hhmm_from_rfc3339("2026-06-05T09:30:00-04:00").as_deref(), Some("09:30"));
+        assert_eq!(hhmm_from_rfc3339("garbage"), None);
+    }
+
+    #[test]
+    fn is_declined_only_for_self_declined() {
+        let declined = json!({ "attendees": [{ "self": true, "responseStatus": "declined" }] });
+        assert!(is_declined(&declined));
+        let accepted = json!({ "attendees": [{ "self": true, "responseStatus": "accepted" }] });
+        assert!(!is_declined(&accepted));
+        // Someone else declined, not us.
+        let other = json!({ "attendees": [{ "self": false, "responseStatus": "declined" }] });
+        assert!(!is_declined(&other));
+        assert!(!is_declined(&json!({ "summary": "solo" })));
     }
 }

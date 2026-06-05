@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { CalendarCheck, CalendarDays, Camera, Check, Loader, Pencil, Plus, Trash2, X } from "lucide-react";
-import { api, type EntityCandidate, type NoteRow } from "./api";
+import { CalendarCheck, CalendarDays, CalendarX, Camera, Check, Loader, Pencil, Plus, Trash2, X } from "lucide-react";
+import { api, type CalEvent, type EntityCandidate, type NoteRow } from "./api";
 import { fileToImg, type Img } from "./image";
 import { APP_TZ, easternDay, easternMinutes } from "./day";
 
@@ -56,25 +56,72 @@ function fmtDur(min?: number): string {
   return `${m}m`;
 }
 
+// Strip a leading list/checkbox marker so checklist lines parse like plain ones:
+// "- ", "* ", "• ", box/checkbox glyphs (□ ☐ ☑ ☒ ■ ✓ ✗ …), and ASCII [ ] [x] ( ).
+const MARKER_RE =
+  /^\s*(?:[-*•·▪●]|[□☐▢◻◽◾■☑☒✅✓✔✗✘]|\[\s*[xX]?\s*\]|\(\s*[xX]?\s*\))\s+/;
+function stripMarker(line: string): string {
+  return line.replace(MARKER_RE, "");
+}
+
+// If a block lacks a usable start time, treat its task text as a raw schedule
+// line and recover start/end/duration the same way parseSchedule does — the
+// model sometimes fails to split a line, leaving the time inside `task`
+// ("□ 11:30-12:30 : Workout") so the block would otherwise fall to "Anytime".
+// `prev` threads the monotonic cursor across blocks for am/pm inference.
+function salvageBlock(b: Block, prev: number): Block {
+  if (toMinutes(b.start) != null) {
+    // Already timed; just clean any stray marker glyph off the task.
+    const task = stripMarker(b.task.trim());
+    return task === b.task ? b : { ...b, task };
+  }
+  const line = stripMarker(b.task.trim());
+  const m = LINE_RE.exec(line);
+  const start = m?.[1] ? resolveTime(m[1], prev) : null;
+  if (m && start != null) {
+    const task = line.slice(m[0].length).replace(/^[\s:.,–—-]+/, "").trim();
+    if (task) {
+      const end = m[2] ? resolveTime(m[2], start) : null;
+      const out: Block = { task, start: minToStr(start) };
+      if (end != null && end > start) {
+        out.end = minToStr(end);
+        out.duration_min = end - start;
+      }
+      return out;
+    }
+  }
+  // No leading time — keep the task, minus any marker glyph.
+  return line === b.task ? b : { ...b, task: line };
+}
+
 // Pull a clean Block[] out of an entry's `data.blocks`, tolerating missing/odd fields.
 export function parseBlocks(data: Record<string, unknown> | null | undefined): Block[] {
   const raw = data?.blocks;
   if (!Array.isArray(raw)) return [];
+  let prev = -1;
   return raw
     .filter((b): b is Record<string, unknown> => !!b && typeof b === "object")
-    .map((b) => ({
-      task:
-        typeof b.task === "string"
-          ? b.task
-          : typeof b.activity === "string"
-            ? b.activity
-            : typeof b.name === "string"
-              ? b.name
-              : "",
-      start: typeof b.start === "string" ? b.start : undefined,
-      end: typeof b.end === "string" ? b.end : undefined,
-      duration_min: typeof b.duration_min === "number" ? b.duration_min : undefined,
-    }))
+    .map((b) => {
+      const base: Block = {
+        task:
+          typeof b.task === "string"
+            ? b.task
+            : typeof b.activity === "string"
+              ? b.activity
+              : typeof b.name === "string"
+                ? b.name
+                : "",
+        start: typeof b.start === "string" ? b.start : undefined,
+        end: typeof b.end === "string" ? b.end : undefined,
+        duration_min: typeof b.duration_min === "number" ? b.duration_min : undefined,
+      };
+      // Salvage times the model left embedded in the task, then advance the
+      // cursor so a later bare "2:00" reads as 14:00, not 02:00.
+      const block = salvageBlock(base, prev);
+      const at = toMinutes(block.start);
+      if (at != null) prev = toMinutes(block.end) ?? at;
+      return block;
+    })
     // Drop empties and date-only header blocks. Filtering on load (not just on
     // parse) also cleans schedules saved before date-stripping existed, so a
     // stored "June 4, 2026" stops showing up under "Anytime".
@@ -226,7 +273,7 @@ export function parseSchedule(text: string): Block[] {
   const blocks: Block[] = [];
   let prev = -1;
   for (const raw of text.split("\n")) {
-    const line = raw.trim().replace(/^[-*•]\s+/, "");
+    const line = stripMarker(raw.trim());
     if (!line) continue;
     if (isDateOnly(line)) continue;
     const m = LINE_RE.exec(line);
@@ -366,6 +413,7 @@ export function TodayView({
   const [busy, setBusy] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const calWrapRef = useRef<HTMLDivElement>(null); // anchor for the calendar peek popover
 
   // Inline row editing on the agenda: which block index is open, an "add new"
   // flag, and a save-in-flight flag shared by both.
@@ -375,7 +423,15 @@ export function TodayView({
 
   // Google Calendar sync: whether we're connected, and the last sync's outcome.
   const [gcalConnected, setGcalConnected] = useState<boolean | null>(null);
-  const [sync, setSync] = useState<{ state: "idle" | "syncing" | "ok" | "err"; msg: string }>({
+  // Today's events pulled back from Google Calendar — shown in the empty state
+  // as a starting point, and on demand via the header "Calendar" peek button.
+  const [calEvents, setCalEvents] = useState<CalEvent[] | null>(null);
+  const [calLoading, setCalLoading] = useState(false);
+  const [calOpen, setCalOpen] = useState(false); // peek popover open?
+  const [sync, setSync] = useState<{
+    state: "idle" | "syncing" | "clearing" | "ok" | "err";
+    msg: string;
+  }>({
     state: "idle",
     msg: "",
   });
@@ -401,6 +457,72 @@ export function TodayView({
   // Only timed blocks can become calendar events; "Anytime" tasks are skipped.
   const hasTimed = blocks.some((b) => toMinutes(b.start) != null);
 
+  // Self-heal: when parseBlocks salvaged times the model left buried in `task`
+  // (e.g. "□ 11:30-12:30 : Workout" with no start), rewrite the stored row once
+  // so the DB holds clean start/end. This persists the timeline across reloads
+  // and lets Google Calendar sync — which reads the stored times — actually push.
+  const healedRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (entry?.id == null || healedRef.current === entry.id) return;
+    const stored = Array.isArray(entry.data?.blocks) ? (entry.data.blocks as unknown[]) : [];
+    const changed =
+      blocks.length !== stored.length ||
+      blocks.some((b, i) => {
+        const s = (stored[i] ?? {}) as Record<string, unknown>;
+        const sStart = typeof s.start === "string" ? s.start : undefined;
+        const sEnd = typeof s.end === "string" ? s.end : undefined;
+        return b.task !== s.task || b.start !== sStart || b.end !== sEnd;
+      });
+    healedRef.current = entry.id; // claim before the await so it runs at most once
+    if (!changed) return;
+    api
+      .updateEntry(entry.id, { blocks })
+      .then(() => onSaved())
+      .catch(() => {});
+  }, [entry?.id, blocks]);
+
+  // Pull today's real Google Calendar events. Used by both the empty-state card
+  // and the header "Calendar" peek button, so it's a plain loader rather than an
+  // effect. Errors fall back to an empty list (so the UI shows "nothing today").
+  const empty = !blocks.length;
+  async function loadCalEvents() {
+    setCalLoading(true);
+    try {
+      setCalEvents(await api.gcalListEvents(today));
+    } catch {
+      setCalEvents([]);
+    } finally {
+      setCalLoading(false);
+    }
+  }
+
+  // Forget cached events when the day rolls over so we never show yesterday's.
+  useEffect(() => {
+    setCalEvents(null);
+    setCalOpen(false);
+  }, [today]);
+
+  // Dismiss the peek popover on outside-click or Escape.
+  useEffect(() => {
+    if (!calOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (calWrapRef.current && !calWrapRef.current.contains(e.target as Node)) setCalOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setCalOpen(false);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [calOpen]);
+
+  // In the empty state, auto-load so events appear without a tap.
+  useEffect(() => {
+    if (gcalConnected && empty && calEvents == null && !calLoading) loadCalEvents();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gcalConnected, empty, calEvents, calLoading]);
+
   // Push today's schedule to Google Calendar. Not connected → open Settings.
   async function syncToGcal() {
     if (!gcalConnected) {
@@ -414,6 +536,7 @@ export function TodayView({
       const pushed = r.created + r.updated;
       const parts = [`Synced ${pushed} block${pushed === 1 ? "" : "s"}`];
       if (r.skipped) parts.push(`${r.skipped} anytime skipped`);
+      if (r.duplicates) parts.push(`${r.duplicates} already on calendar`);
       if (r.deleted) parts.push(`${r.deleted} removed`);
       if (r.errors.length) {
         setSync({
@@ -423,6 +546,30 @@ export function TodayView({
       } else {
         setSync({ state: "ok", msg: parts.join(" · ") });
       }
+    } catch (e) {
+      setSync({ state: "err", msg: String(e) });
+    }
+  }
+
+  // Wipe everything noted has pushed by deleting its dedicated calendar; the next
+  // sync recreates a fresh, empty one. A quick "start over" for the synced
+  // schedule — other calendars and the connection are left alone.
+  async function clearGcal() {
+    if (!gcalConnected) {
+      onOpenSettings?.();
+      return;
+    }
+    if (sync.state === "syncing" || sync.state === "clearing") return;
+    if (
+      !window.confirm(
+        "Clear the “noted” calendar in Google Calendar? This removes everything noted has synced. Your other calendars aren’t touched, and your next sync starts fresh."
+      )
+    )
+      return;
+    setSync({ state: "clearing", msg: "" });
+    try {
+      await api.gcalReset();
+      setSync({ state: "ok", msg: "Calendar cleared — sync again to repopulate." });
     } catch (e) {
       setSync({ state: "err", msg: String(e) });
     }
@@ -438,7 +585,37 @@ export function TodayView({
     setDraft(diverged ? blocksToText(blocks) : fromRaw);
     setPhoto(null);
     setEditError(null);
+    setSync({ state: "idle", msg: "" }); // clear stale sync/clear feedback
     setEditing(true);
+  }
+
+  // Seed the editor from today's pulled calendar events: timed events become
+  // timed blocks, all-day events become "Anytime" tasks. The user tweaks and
+  // hits Save, which re-parses through the normal saveDraft path.
+  function buildFromEvents(events: CalEvent[]) {
+    const seeded: Block[] = events
+      .filter((e) => e.task.trim())
+      .map((e) =>
+        e.start ? { task: e.task, start: e.start, ...(e.end ? { end: e.end } : {}) } : { task: e.task }
+      );
+    setDraft(blocksToText(seeded));
+    setPhoto(null);
+    setEditError(null);
+    setEditing(true);
+  }
+
+  // One pulled calendar event → a schedule block (all-day → untimed "Anytime").
+  const calEventToBlock = (e: CalEvent): Block =>
+    e.start ? { task: e.task, start: e.start, ...(e.end ? { end: e.end } : {}) } : { task: e.task };
+  // Already on today's schedule? Matched by task + start so re-adds are no-ops.
+  const onSchedule = (e: CalEvent) =>
+    blocks.some((b) => b.task.trim() === e.task.trim() && (b.start ?? "") === (e.start ?? ""));
+
+  // Append calendar events to the existing schedule (peek popover). Skips any
+  // already present, then persists in place via the normal inline-edit path.
+  async function addCalEvents(events: CalEvent[]) {
+    const add = events.filter((e) => e.task.trim() && !onSchedule(e)).map(calEventToBlock);
+    if (add.length) await persistBlocks([...blocks, ...add]);
   }
 
   async function attachPhoto(file: File | undefined) {
@@ -552,10 +729,80 @@ export function TodayView({
         </div>
         {withEdit && (
           <div className="today-headbtns">
+            {gcalConnected && (
+              <div className="today-calwrap" ref={calWrapRef}>
+                <button
+                  className={"today-edit" + (calOpen ? " active" : "")}
+                  onClick={() => {
+                    setCalOpen((o) => !o);
+                    if (calEvents == null && !calLoading) loadCalEvents();
+                  }}
+                  aria-expanded={calOpen}
+                  title="See today's Google Calendar events"
+                >
+                  <CalendarDays size={14} /> Calendar
+                </button>
+                {calOpen && (
+                  <div className="today-calpop" role="dialog" aria-label="Today's calendar events">
+                    <div className="today-calpop-head">
+                      <span>From your calendar</span>
+                      <button
+                        className="today-calpop-x"
+                        onClick={() => setCalOpen(false)}
+                        aria-label="Close"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                    {calLoading && calEvents == null ? (
+                      <div className="today-calpop-msg">
+                        <Loader size={14} className="spin" /> Loading…
+                      </div>
+                    ) : !calEvents || calEvents.length === 0 ? (
+                      <div className="today-calpop-msg">Nothing on your calendar today.</div>
+                    ) : (
+                      <>
+                        <ul className="today-calpop-list">
+                          {calEvents.map((e, i) => {
+                            const added = onSchedule(e);
+                            return (
+                              <li key={i} className="today-calpop-row">
+                                <span className="today-cal-time">
+                                  {e.all_day ? "All day" : fmtTime(e.start ?? undefined)}
+                                </span>
+                                <span className="today-cal-task">{e.task}</span>
+                                <button
+                                  className="today-calpop-add"
+                                  disabled={added || rowBusy}
+                                  onClick={() => addCalEvents([e])}
+                                  title={added ? "Already on schedule" : "Add to schedule"}
+                                  aria-label={added ? "Already on schedule" : "Add to schedule"}
+                                >
+                                  {added ? <Check size={14} /> : <Plus size={14} />}
+                                </button>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                        {calEvents.some((e) => !onSchedule(e)) && (
+                          <button
+                            className="today-make today-calpop-all"
+                            disabled={rowBusy}
+                            onClick={() => addCalEvents(calEvents)}
+                          >
+                            <Plus size={16} /> Add all to schedule
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             <button
               className="today-edit"
               onClick={syncToGcal}
-              disabled={sync.state === "syncing" || (!!gcalConnected && !hasTimed)}
+              disabled={sync.state === "syncing" || sync.state === "clearing" || (!!gcalConnected && !hasTimed)}
               title={
                 gcalConnected
                   ? "Push today's schedule to Google Calendar"
@@ -575,7 +822,7 @@ export function TodayView({
           </div>
         )}
       </div>
-      {withEdit && sync.state !== "idle" && sync.state !== "syncing" && (
+      {withEdit && sync.state !== "idle" && sync.state !== "syncing" && sync.state !== "clearing" && (
         <div className={"today-syncmsg " + sync.state}>{sync.msg}</div>
       )}
     </header>
@@ -607,6 +854,10 @@ export function TodayView({
 
           {editError && <div className="error">{editError}</div>}
 
+          {(sync.state === "ok" || sync.state === "err") && (
+            <div className={"today-syncmsg " + sync.state}>{sync.msg}</div>
+          )}
+
           <div className="today-editor-actions">
             <input
               ref={fileRef}
@@ -624,6 +875,21 @@ export function TodayView({
             >
               <Camera size={16} /> Photo
             </button>
+            {gcalConnected && (
+              <button
+                className="today-photo-btn"
+                onClick={clearGcal}
+                disabled={busy || sync.state === "clearing"}
+                title="Clear the noted calendar — removes everything noted has synced"
+              >
+                {sync.state === "clearing" ? (
+                  <Loader size={16} className="spin" />
+                ) : (
+                  <CalendarX size={16} />
+                )}
+                Clear calendar
+              </button>
+            )}
             <span className="today-spacer" />
             <button
               className="today-cancel"
@@ -656,19 +922,55 @@ export function TodayView({
 
   // ---- Empty state ----
   if (!blocks.length) {
+    const showCal = gcalConnected && calEvents && calEvents.length > 0;
     return (
       <div className="today">
         {Head(false)}
         <div className="today-empty">
-          <CalendarDays size={30} className="today-empty-icon" />
-          <p className="today-empty-title">No schedule yet for today</p>
-          <p className="today-empty-sub">
-            Lay out your plan — type it from when you wake up to when you wind down, or snap a
-            photo of a handwritten schedule. noted lays it out here, time by time.
-          </p>
-          <button className="today-make" onClick={openEditor}>
-            <Plus size={16} /> Make today&apos;s schedule
-          </button>
+          {showCal ? (
+            <>
+              <div className="today-cal">
+                <div className="today-cal-head">
+                  <CalendarDays size={15} /> From your calendar
+                </div>
+                <ul className="today-cal-list">
+                  {calEvents!.map((e, i) => (
+                    <li key={i} className="today-cal-row">
+                      <span className="today-cal-time">
+                        {e.all_day ? "All day" : fmtTime(e.start ?? undefined)}
+                      </span>
+                      <span className="today-cal-task">{e.task}</span>
+                      <span className="today-cal-tag">{e.calendar}</span>
+                    </li>
+                  ))}
+                </ul>
+                <button className="today-make today-cal-build" onClick={() => buildFromEvents(calEvents!)}>
+                  <Plus size={16} /> Build schedule from these
+                </button>
+              </div>
+              <div className="today-or">or</div>
+              <button className="today-empty-link" onClick={openEditor}>
+                Start a schedule from scratch
+              </button>
+            </>
+          ) : (
+            <>
+              <CalendarDays size={30} className="today-empty-icon" />
+              <p className="today-empty-title">No schedule yet for today</p>
+              <p className="today-empty-sub">
+                Lay out your plan — type it from when you wake up to when you wind down, or snap a
+                photo of a handwritten schedule. noted lays it out here, time by time.
+              </p>
+              <button className="today-make" onClick={openEditor}>
+                <Plus size={16} /> Make today&apos;s schedule
+              </button>
+              {gcalConnected === false && (
+                <button className="today-empty-link" onClick={() => onOpenSettings?.()}>
+                  Connect Google Calendar to see today&apos;s events
+                </button>
+              )}
+            </>
+          )}
         </div>
       </div>
     );

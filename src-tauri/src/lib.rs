@@ -1101,6 +1101,14 @@ fn gcal_disconnect(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Reset: delete noted's dedicated calendar (wiping everything it has synced) so
+/// the next sync starts fresh. Leaves other calendars and the session untouched.
+#[tauri::command]
+async fn gcal_reset(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    gcal::reset_calendar(&dir).await.map_err(|e| e.to_string())
+}
+
 /// Push a day's schedule to Google Calendar. Defaults to today (Eastern).
 #[tauri::command]
 async fn gcal_sync(app: tauri::AppHandle, event_date: Option<String>) -> Result<Value, String> {
@@ -1113,6 +1121,16 @@ async fn gcal_sync(app: tauri::AppHandle, event_date: Option<String>) -> Result<
     };
     let report = gcal::sync(&dir, &date, blocks).await.map_err(|e| e.to_string())?;
     serde_json::to_value(report).map_err(|e| e.to_string())
+}
+
+/// Read a day's events back from every (non-noted) Google calendar, so the Today
+/// empty state can show what the user already has planned. Defaults to today.
+#[tauri::command]
+async fn gcal_list_events(app: tauri::AppHandle, event_date: Option<String>) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let date = event_date.filter(|s| !s.trim().is_empty()).unwrap_or_else(today_local);
+    let events = gcal::list_events(&dir, &date).await.map_err(|e| e.to_string())?;
+    serde_json::to_value(events).map_err(|e| e.to_string())
 }
 
 // ── Quick-capture background worker ─────────────────────────────────────────
@@ -1334,7 +1352,9 @@ pub fn run() {
             gcal_set_client,
             gcal_begin_auth,
             gcal_disconnect,
+            gcal_reset,
             gcal_sync,
+            gcal_list_events,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

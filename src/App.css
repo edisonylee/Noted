@@ -511,6 +511,78 @@ textarea.json.bad { border-color: var(--bad); }
 .today-make:hover { background: var(--ink-hover); }
 .today-make:active { transform: scale(0.97); }
 
+/* Empty-state calendar pull: today's real Google Calendar events as a starting point */
+.today-cal {
+  width: 100%; max-width: 380px; text-align: left;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+  padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;
+}
+.today-cal-head {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; font-weight: 580; letter-spacing: 0.02em; text-transform: uppercase;
+  color: var(--muted);
+}
+.today-cal-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.today-cal-row {
+  display: flex; align-items: baseline; gap: 10px; padding: 7px 0;
+  border-top: 1px solid var(--line); font-size: 14px;
+}
+.today-cal-row:first-child { border-top: none; }
+.today-cal-time { flex: 0 0 64px; color: var(--ink-soft); font-variant-numeric: tabular-nums; font-size: 13px; }
+.today-cal-task { flex: 1 1 auto; color: var(--ink); min-width: 0; overflow-wrap: anywhere; }
+.today-cal-tag {
+  flex: 0 0 auto; max-width: 38%; color: var(--muted); font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.today-cal-build { align-self: stretch; justify-content: center; margin-top: 2px; }
+.today-or { color: var(--faint); font-size: 12px; margin: 4px 0; }
+.today-empty-link {
+  background: none; border: none; padding: 4px; color: var(--muted);
+  font-size: 13px; text-decoration: underline; text-underline-offset: 2px;
+  transition: color 0.16s var(--ease);
+}
+.today-empty-link:hover { color: var(--ink); }
+
+/* Header "Calendar" peek button + popover (today's Google events, any time) */
+.today-calwrap { position: relative; display: inline-flex; }
+.today-edit.active { background: var(--surface-2); color: var(--ink); }
+.today-calpop {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 30;
+  width: 300px; max-width: 78vw;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16);
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;
+  text-align: left;
+}
+.today-calpop-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 12px; font-weight: 580; letter-spacing: 0.02em; text-transform: uppercase;
+  color: var(--muted);
+}
+.today-calpop-x {
+  display: inline-flex; background: none; border: none; padding: 2px; color: var(--muted);
+  border-radius: 6px; transition: color 0.16s var(--ease);
+}
+.today-calpop-x:hover { color: var(--ink); }
+.today-calpop-msg {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 13px; color: var(--muted); padding: 6px 2px;
+}
+.today-calpop-list { list-style: none; margin: 0; padding: 0; max-height: 300px; overflow-y: auto; }
+.today-calpop-row {
+  display: flex; align-items: baseline; gap: 9px; padding: 7px 0;
+  border-top: 1px solid var(--line); font-size: 14px;
+}
+.today-calpop-row:first-child { border-top: none; }
+.today-calpop-add {
+  flex: 0 0 auto; align-self: center; display: inline-flex; padding: 4px;
+  background: none; border: 1px solid var(--line-strong); border-radius: 8px;
+  color: var(--ink-soft); transition: background 0.16s var(--ease), color 0.16s var(--ease);
+}
+.today-calpop-add:hover:not(:disabled) { background: var(--surface-2); color: var(--ink); }
+.today-calpop-add:disabled { color: var(--accent); border-color: transparent; opacity: 0.9; }
+.today-calpop-all { align-self: stretch; justify-content: center; padding: 8px 14px; font-size: 13px; }
+
 /* Inline schedule editor */
 .today-editor { display: flex; flex-direction: column; gap: 14px; }
 .today-textarea {

@@ -326,6 +326,25 @@ pub fn category_entries(conn: &Connection, category: &str) -> Result<Vec<(String
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// (note_id, event_date, raw_text, data) for every entry — feeds the entity
+/// backfill, which re-derives people from each entry's data and links them to
+/// their note. Joined to `notes` so the backfill has snippet context.
+pub fn all_entry_data(conn: &Connection) -> Result<Vec<(i64, String, String, Value)>> {
+    let mut stmt = conn.prepare(
+        "SELECT e.note_id, COALESCE(e.event_date, date(e.created_at)), n.raw_text, e.data_json
+         FROM entries e JOIN notes n ON n.id = e.note_id
+         ORDER BY e.note_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let note_id: i64 = r.get(0)?;
+        let date: String = r.get(1)?;
+        let raw: String = r.get(2)?;
+        let data_str: String = r.get(3)?;
+        Ok((note_id, date, raw, serde_json::from_str(&data_str).unwrap_or(Value::Null)))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// The latest `schedule` entry's blocks for one day (`YYYY-MM-DD`). Mirrors the
 /// "newest note wins" selection in Today.tsx (a re-captured schedule supersedes
 /// earlier ones), so this feeds Google Calendar sync the same blocks the UI shows.
@@ -958,6 +977,18 @@ pub fn create_entity(
     Ok(conn.last_insert_rowid())
 }
 
+/// Whether this entity is already linked to this note. `add_mention` has no
+/// dedupe (it always inserts + bumps the count), so the backfill checks this
+/// first to stay idempotent across re-runs.
+pub fn mention_exists(conn: &Connection, entity_id: i64, note_id: i64) -> Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM entity_mentions WHERE entity_id = ?1 AND note_id = ?2",
+        rusqlite::params![entity_id, note_id],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// Record a mention of an entity, bumping its count and extending its date span.
 pub fn add_mention(
     conn: &Connection,
@@ -1082,6 +1113,66 @@ pub fn mentions_for(conn: &Connection, entity_id: i64) -> Result<Vec<PersonMenti
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+#[derive(Serialize)]
+pub struct EntityProfile {
+    pub id: i64,
+    pub name: String,
+    pub r#type: String,
+    pub relationship: Option<String>,
+    pub mention_count: i64,
+    pub first_seen: Option<String>,
+    pub last_seen: Option<String>,
+    pub aliases: Vec<String>,
+    pub mentions: Vec<PersonMention>,
+}
+
+/// Full profile for ANY entity (person/place/topic/…): header fields + every
+/// dated mention, newest-first and uncapped. Unlike `mentions_for`, mention text
+/// falls back to a note snippet when there's no curated `context` (non-person
+/// entities rarely have one), so the per-entity page always shows something.
+pub fn entity_profile(conn: &Connection, entity_id: i64) -> Result<EntityProfile> {
+    let (name, etype, relationship, mention_count, first_seen, last_seen, aliases): (
+        String,
+        String,
+        Option<String>,
+        i64,
+        Option<String>,
+        Option<String>,
+        String,
+    ) = conn.query_row(
+        "SELECT name, type, relationship, mention_count, first_seen, last_seen, aliases
+         FROM entities WHERE id = ?1",
+        [entity_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT m.event_date,
+                COALESCE(NULLIF(m.context, ''), substr(replace(n.raw_text, char(10), ' '), 1, 140)),
+                m.note_id
+         FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+         WHERE m.entity_id = ?1
+         ORDER BY m.event_date DESC, m.id DESC",
+    )?;
+    let mentions = stmt
+        .query_map([entity_id], |r| {
+            Ok(PersonMention { date: r.get(0)?, text: r.get(1)?, note_id: r.get(2)? })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(EntityProfile {
+        id: entity_id,
+        name,
+        r#type: etype,
+        relationship,
+        mention_count,
+        first_seen,
+        last_seen,
+        aliases: serde_json::from_str(&aliases).unwrap_or_default(),
+        mentions,
+    })
 }
 
 /// Every `person` entity with its dated mentions — the People view's data.

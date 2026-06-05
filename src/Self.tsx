@@ -1,26 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
-import { X } from "lucide-react";
+import { ArrowRight, X } from "lucide-react";
 import { api, type EntityMention, type GraphData, type GraphNode } from "./api";
-
-// muted, warm-ish palette per entity type (harmonizes with the app theme)
-const TYPE_COLORS: Record<string, string> = {
-  person: "#3d79bd",
-  place: "#3f7d5b",
-  food: "#c2710c",
-  activity: "#8a5a4a",
-  item: "#7a6c84",
-  org: "#5e7e86",
-  topic: "#9b8b6e",
-};
-const colorForType = (t: string) => TYPE_COLORS[t] ?? "#8c857a";
+import { TYPE_COLORS, colorForType } from "./entityColors";
 
 function cssVar(name: string, fallback: string) {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return v || fallback;
 }
 
-export function SelfView({ theme }: { theme: string }) {
+export function SelfView({
+  theme,
+  onOpenEntity,
+}: {
+  theme: string;
+  onOpenEntity?: (id: number) => void;
+}) {
   const [data, setData] = useState<GraphData | null>(null);
   const [hover, setHover] = useState<number | null>(null);
   const [selected, setSelected] = useState<GraphNode | null>(null);
@@ -161,6 +156,11 @@ export function SelfView({ theme }: { theme: string }) {
               <X size={16} />
             </button>
           </div>
+          {onOpenEntity && (
+            <button className="entity-fullpage" onClick={() => onOpenEntity(selected.id)}>
+              View full timeline <ArrowRight size={13} />
+            </button>
+          )}
           <div className="entity-mentions">
             {detail.length === 0 && <p className="muted small">No notes yet.</p>}
             {detail.map((m, i) => (

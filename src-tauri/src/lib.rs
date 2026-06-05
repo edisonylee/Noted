@@ -217,6 +217,14 @@ async fn save_entry(app: tauri::AppHandle, args: SaveArgs) -> Result<i64, String
         })
         .collect();
 
+    // Deterministic safety net: promote people the model named in a field (e.g.
+    // {"with": "Khai"}) but may have omitted from the `entities` array, so they
+    // still reach the People graph. Computed before `entries` moves into save_note.
+    let field_people: Vec<String> = entries
+        .iter()
+        .flat_map(|e| entities::person_names_from_data(&e.data))
+        .collect();
+
     // Keep a copy of the note text for entity-mention context (raw_text is moved).
     let raw = args.raw_text.clone();
 
@@ -244,53 +252,109 @@ async fn save_entry(app: tauri::AppHandle, args: SaveArgs) -> Result<i64, String
         let _ = db::insert_embedding(&conn, note_id, &v);
     }
 
-    // Persist knowledge-graph entities (best effort — never fails the save). Embed
-    // each off-lock, then resolve (exact/alias or near-neighbor) + create + link
-    // a mention under the lock.
-    if !args.entities.is_empty() {
-        // Carry the curated person details (fact, relationship) alongside each
-        // embedding so they can be stored once the entity is resolved.
-        let mut embedded: Vec<(String, String, Vec<f32>, Option<String>, Option<String>)> = Vec::new();
-        for e in &args.entities {
-            let name = e.name.trim();
-            let etype = e.etype.trim().to_lowercase();
-            if name.is_empty() || etype.is_empty() {
-                continue;
-            }
-            if let Ok(v) = entities::embed_entity(name, &etype).await {
-                let fact = e.fact.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
-                let rel = e.relationship.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
-                embedded.push((name.to_string(), etype, v, fact, rel));
-            }
+    // Persist knowledge-graph entities (best effort — never fails the save).
+    // Candidates = the model's `entities` ∪ people promoted from entry fields,
+    // deduped by (normalized name, type).
+    let mut candidates: Vec<EntityCandidate> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for e in &args.entities {
+        let name = e.name.trim();
+        let etype = e.etype.trim().to_lowercase();
+        if name.is_empty() || etype.is_empty() {
+            continue;
         }
-        let conn = state.0.lock().unwrap();
+        if seen.insert((entities::normalize(name), etype.clone())) {
+            candidates.push(EntityCandidate {
+                name: name.to_string(),
+                etype,
+                fact: e.fact.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from),
+                relationship: e
+                    .relationship
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from),
+            });
+        }
+    }
+    for name in field_people {
+        if seen.insert((entities::normalize(&name), "person".to_string())) {
+            candidates.push(EntityCandidate { name, etype: "person".to_string(), fact: None, relationship: None });
+        }
+    }
+    if !candidates.is_empty() {
         let snippet: String = raw.chars().take(200).collect();
-        for (name, etype, emb, fact, rel) in &embedded {
-            let id = match entities::resolve_with_embedding(&conn, name, etype, emb) {
-                Ok(entities::Resolution::Exact(id)) | Ok(entities::Resolution::Suggest(id, _)) => id,
-                Ok(entities::Resolution::New) => {
-                    let norm = entities::normalize(name);
-                    match db::create_entity(&conn, name, &norm, etype, "[]", &event_date, &now) {
-                        Ok(id) => {
-                            let _ = db::insert_entity_embedding(&conn, id, emb);
-                            id
-                        }
-                        Err(_) => continue,
-                    }
-                }
-                Err(_) => continue,
-            };
-            if let Some(r) = rel {
-                let _ = db::set_entity_relationship(&conn, id, r);
-            }
-            // Prefer the curated per-person fact as the mention context; fall back
-            // to the note snippet when none was extracted.
-            let context = fact.as_deref().unwrap_or(snippet.as_str());
-            let _ = db::add_mention(&conn, id, note_id, None, context, &event_date, &now);
-        }
+        persist_entities(&app, note_id, &event_date, &snippet, &now, candidates, false).await;
     }
 
     Ok(note_id)
+}
+
+/// A resolved entity to attach to a note: a name + type, plus optional curated
+/// person details. Shared by the save path and the backfill command.
+struct EntityCandidate {
+    name: String,
+    etype: String,
+    fact: Option<String>,
+    relationship: Option<String>,
+}
+
+/// Resolve + create + link a batch of entity candidates to a note. Embeds each
+/// off-lock, then resolves (exact/alias or near-neighbor) + creates + links a
+/// mention under the lock — the single entity-write path for both save + backfill.
+/// `guard_existing`: skip a mention if this entity already links to this note
+/// (keeps backfill idempotent). Returns the number of mentions added.
+async fn persist_entities(
+    app: &tauri::AppHandle,
+    note_id: i64,
+    event_date: &str,
+    snippet: &str,
+    now: &str,
+    candidates: Vec<EntityCandidate>,
+    guard_existing: bool,
+) -> i64 {
+    // Embed off-lock (network), carrying curated details to store post-resolve.
+    let mut embedded: Vec<(String, String, Vec<f32>, Option<String>, Option<String>)> = Vec::new();
+    for c in candidates {
+        if c.name.is_empty() || c.etype.is_empty() {
+            continue;
+        }
+        if let Ok(v) = entities::embed_entity(&c.name, &c.etype).await {
+            embedded.push((c.name, c.etype, v, c.fact, c.relationship));
+        }
+    }
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let mut added = 0;
+    for (name, etype, emb, fact, rel) in &embedded {
+        let id = match entities::resolve_with_embedding(&conn, name, etype, emb) {
+            Ok(entities::Resolution::Exact(id)) | Ok(entities::Resolution::Suggest(id, _)) => id,
+            Ok(entities::Resolution::New) => {
+                let norm = entities::normalize(name);
+                match db::create_entity(&conn, name, &norm, etype, "[]", event_date, now) {
+                    Ok(id) => {
+                        let _ = db::insert_entity_embedding(&conn, id, emb);
+                        id
+                    }
+                    Err(_) => continue,
+                }
+            }
+            Err(_) => continue,
+        };
+        if let Some(r) = rel {
+            let _ = db::set_entity_relationship(&conn, id, r);
+        }
+        // Idempotent backfill: don't re-link an entity already mentioned in this note.
+        if guard_existing && db::mention_exists(&conn, id, note_id).unwrap_or(false) {
+            continue;
+        }
+        // Prefer the curated per-person fact as context; fall back to the snippet.
+        let context = fact.as_deref().unwrap_or(snippet);
+        if db::add_mention(&conn, id, note_id, None, context, event_date, now).is_ok() {
+            added += 1;
+        }
+    }
+    added
 }
 
 /// Instant capture: queue the raw note/photo and return its id immediately (no
@@ -782,6 +846,35 @@ async fn reindex(app: tauri::AppHandle) -> Result<i64, String> {
     Ok(n)
 }
 
+/// Backfill people from past notes: re-derive person entities from every entry's
+/// data fields (the `person_names_from_data` heuristic) and link them to their
+/// note, so people the model omitted from the `entities` array appear
+/// retroactively. Idempotent — guarded so re-running adds no duplicate mentions.
+/// Returns the number of mentions added. Modeled on `reindex`.
+#[tauri::command]
+async fn backfill_entities(app: tauri::AppHandle) -> Result<i64, String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let rows = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        db::all_entry_data(&conn).map_err(|e| e.to_string())?
+    };
+    let mut added = 0;
+    for (note_id, event_date, raw, data) in rows {
+        let people = entities::person_names_from_data(&data);
+        if people.is_empty() {
+            continue;
+        }
+        let candidates: Vec<EntityCandidate> = people
+            .into_iter()
+            .map(|name| EntityCandidate { name, etype: "person".to_string(), fact: None, relationship: None })
+            .collect();
+        let snippet: String = raw.chars().take(200).collect();
+        added += persist_entities(&app, note_id, &event_date, &snippet, &now, candidates, true).await;
+    }
+    Ok(added)
+}
+
 /// One-click backup: checkpoint the WAL and copy the DB to a timestamped file
 /// on the Desktop. Returns the destination path.
 #[tauri::command]
@@ -926,6 +1019,16 @@ async fn entity_detail(app: tauri::AppHandle, entity_id: i64) -> Result<Value, S
     let conn = state.0.lock().unwrap();
     let rows = db::entity_detail(&conn, entity_id, 20).map_err(|e| e.to_string())?;
     serde_json::to_value(rows).map_err(|e| e.to_string())
+}
+
+/// Full profile for ANY entity (person/place/topic/…): header fields + the
+/// complete, uncapped mention timeline — backs the per-entity page.
+#[tauri::command]
+async fn entity_profile(app: tauri::AppHandle, entity_id: i64) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let p = db::entity_profile(&conn, entity_id).map_err(|e| e.to_string())?;
+    serde_json::to_value(p).map_err(|e| e.to_string())
 }
 
 /// People view: every `person` entity with its dated, curated-fact mentions.
@@ -1207,6 +1310,7 @@ pub fn run() {
             speak,
             stop_speaking,
             reindex,
+            backfill_entities,
             category_trends,
             generate_recap,
             backfill_recaps,
@@ -1221,6 +1325,7 @@ pub fn run() {
             merge_entities,
             entity_graph,
             entity_detail,
+            entity_profile,
             list_people,
             get_provider_settings,
             set_provider_settings,

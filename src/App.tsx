@@ -464,7 +464,7 @@ export default function App() {
         {view === "today" ? (
           <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} onOpenSettings={() => setShowSettings(true)} />
         ) : view === "knowledge" ? (
-          <KnowledgeView theme={theme} />
+          <KnowledgeView theme={theme} notes={notes} />
         ) : view === "timeline" ? (
           <TimelineView notes={notes} />
         ) : (

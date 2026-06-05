@@ -693,7 +693,11 @@ person|place|activity|food|item|org|topic. Use the name as written (e.g. \"Jake\
 about THEM in this note (e.g. \"got engaged\", \"started a new job at Stripe\"); and \"relationship\" \
 — how they relate to the author IF the note says so (e.g. \"friend\", \"coworker\", \"brother\"). Omit \
 either when the note doesn't provide it. NEVER list the author/narrator (first-person \"I\"/\"me\"/\"my\") \
-as a person.\n\n\
+as a person.\n\
+   CRITICAL: if you put a person's name anywhere inside \"data\" (e.g. a \"with\", \"who\", or \
+\"attendees\" field), that SAME person MUST also appear in \"entities\" as type \"person\". For example \
+the note \"talked to Khai about my trip\" yields data {{\"conversations\":[{{\"with\":\"Khai\",\"topic\":\
+\"my trip\"}}]}} AND entities [{{\"name\":\"Khai\",\"type\":\"person\",\"fact\":\"talked about my trip\"}}].\n\n\
 Existing categories (reuse if the note fits one):\n{catalog}\n\n\
 Rules:\n\
 - When reusing a category, match its existing shape so data stays consistent over time.\n\

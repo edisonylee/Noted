@@ -266,6 +266,7 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
             Ok(Value::Null)
         }
         "reindex" => crate::reindex(a).await.map(|n| json!(n)),
+        "backfill_entities" => crate::backfill_entities(a).await.map(|n| json!(n)),
         "category_trends" => crate::category_trends(a, sarg(b, "category")).await,
         "generate_recap" => crate::generate_recap(a, sarg(b, "period")).await,
         "backfill_recaps" => crate::backfill_recaps(a).await.map(|_| Value::Null),
@@ -286,6 +287,7 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         }
         "entity_graph" => crate::entity_graph(a).await,
         "entity_detail" => crate::entity_detail(a, iarg(b, "entityId")).await,
+        "entity_profile" => crate::entity_profile(a, iarg(b, "entityId")).await,
         "list_people" => crate::list_people(a).await,
         "get_provider_settings" => Ok(crate::get_provider_settings()),
         "set_provider_settings" => crate::set_provider_settings(

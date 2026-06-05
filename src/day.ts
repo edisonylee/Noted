@@ -49,3 +49,18 @@ export function dayDiff(a: string, b: string): number {
 export function formatDay(dateStr: string, opts: Intl.DateTimeFormatOptions): string {
   return new Date(dateStr + "T12:00:00").toLocaleDateString(undefined, opts);
 }
+
+// "Today" / "Yesterday" / "Jun 1" (year only if not the current year). Shared by
+// the People view and the per-entity page.
+export function relativeDay(dateStr: string): string {
+  const today = easternDay();
+  const diff = dayDiff(today, dateStr);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Yesterday";
+  const sameYear = dateStr.slice(0, 4) === today.slice(0, 4);
+  return formatDay(dateStr, {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
+}

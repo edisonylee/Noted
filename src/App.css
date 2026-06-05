@@ -822,6 +822,55 @@ textarea.json.bad { border-color: var(--bad); }
   background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-md);
   color: var(--muted); font-size: 12px; padding: 3px 6px; outline: none; cursor: pointer;
 }
+.person-card.clickable { cursor: pointer; transition: border-color 0.16s var(--ease), box-shadow 0.16s var(--ease); }
+.person-card.clickable:hover { border-color: var(--line-strong); box-shadow: var(--shadow-2); }
+.people-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.people-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; }
+
+/* ── Knowledge search + per-entity page ───────────────────────────────────── */
+.kn-search { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; }
+.kn-search-icon { color: var(--faint); flex-shrink: 0; }
+.kn-search input {
+  flex: 1; min-width: 0; font: inherit; font-size: 14px; color: var(--ink);
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 9px 12px;
+}
+.kn-search input:focus { outline: none; border-color: var(--accent); }
+.kn-search select {
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-sm);
+  color: var(--muted); font-size: 12.5px; padding: 8px 8px; outline: none; cursor: pointer;
+}
+.kn-results { display: flex; flex-direction: column; gap: 2px; }
+.kn-result {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  background: none; border: none; border-radius: var(--r-sm); padding: 10px 12px;
+  color: var(--ink); transition: background 0.14s var(--ease);
+}
+.kn-result:hover { background: var(--hover-soft); }
+.kn-result-name { font-size: 14px; font-weight: 500; }
+.kn-result-type { font-size: 12px; color: var(--muted); text-transform: capitalize; }
+.kn-result-count { margin-left: auto; font-size: 12px; color: var(--faint); }
+
+.entity-page { display: flex; flex-direction: column; gap: 16px; }
+.entity-back { align-self: flex-start; }
+.entity-page-head { display: flex; align-items: flex-start; gap: 12px; }
+.entity-page-head .entity-name { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
+.entity-page-head .ldot.big { margin-top: 8px; }
+.entity-timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.entity-tl-item { border-bottom: 1px solid var(--line); }
+.entity-tl-row {
+  display: flex; gap: 12px; width: 100%; text-align: left; background: none; border: none;
+  padding: 12px 4px; font-size: 13px; line-height: 1.5; color: var(--ink-soft);
+}
+.entity-tl-row.has-note { cursor: pointer; border-radius: var(--r-sm); }
+.entity-tl-row.has-note:hover { background: var(--hover-soft); }
+.entity-tl-row .fact-date { flex-shrink: 0; min-width: 9ch; color: var(--accent); font-weight: 540; font-size: 12px; }
+.entity-tl-note { padding: 4px 4px 14px; }
+
+.entity-fullpage {
+  display: inline-flex; align-items: center; gap: 6px; margin: 10px 16px 0;
+  background: none; border: none; color: var(--accent); font-size: 12.5px; font-weight: 540;
+}
+.entity-fullpage:hover { text-decoration: underline; }
 
 /* ─────────────────────────────────────────────────────────────────────────
    Mobile-first layout (phone). These classes only render in the mobile shell

@@ -104,6 +104,20 @@ export type PersonProfile = {
   mentions: PersonMention[];
 };
 
+// Full profile for ANY entity (person/place/topic/…): header + the complete,
+// uncapped mention timeline. Backs the per-entity page.
+export type EntityProfile = {
+  id: number;
+  name: string;
+  type: string;
+  relationship: string | null;
+  mention_count: number;
+  first_seen: string | null;
+  last_seen: string | null;
+  aliases: string[];
+  mentions: PersonMention[]; // {date, text, note_id}, newest-first, uncapped
+};
+
 // What categorize/categorizePhoto return: the note-level envelope wrapping one
 // or more entries (a single note can fill several categories) plus the entities
 // the note refers to.
@@ -221,6 +235,8 @@ export const api = {
   mergeEntities: (keep: number, drop: number) => invoke<void>("merge_entities", { keep, drop }),
   entityGraph: () => invoke<GraphData>("entity_graph"),
   entityDetail: (entityId: number) => invoke<EntityMention[]>("entity_detail", { entityId }),
+  entityProfile: (entityId: number) => invoke<EntityProfile>("entity_profile", { entityId }),
+  backfillEntities: () => invoke<number>("backfill_entities"),
   listPeople: () => invoke<PersonProfile[]>("list_people"),
   listNotes: () => invoke<NoteRow[]>("list_notes"),
   listCategories: () => invoke<CategoryInfo[]>("list_categories"),

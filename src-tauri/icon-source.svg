@@ -1,0 +1,26 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Muted editorial blue from the app's accent, deepened for icon contrast. -->
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4a86c9"/>
+      <stop offset="1" stop-color="#2d5d93"/>
+    </linearGradient>
+    <!-- Soft top highlight so the tile reads with depth at small sizes. -->
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- macOS-style squircle with margin (≈824 on a 1024 canvas). -->
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#sheen)"/>
+
+  <!-- Geometric "N" as filled shapes (two stems + a diagonal band) so corners
+       stay crisp and it needs no font at render time. -->
+  <g fill="#f7f5f1">
+    <rect x="302" y="314" width="98" height="396"/>
+    <rect x="624" y="314" width="98" height="396"/>
+    <polygon points="302,314 400,314 722,710 624,710"/>
+  </g>
+</svg>

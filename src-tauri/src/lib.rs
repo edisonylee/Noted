@@ -93,6 +93,15 @@ async fn categorize_note(
         .map_err(|e| e.to_string())
 }
 
+/// Transcribe a photo to text only — the vision/OCR step, skipping the extract
+/// pipeline. The Today schedule flow uses this: it re-parses the text itself
+/// (parseSchedule), so running extraction would be wasted work and could fail on
+/// a pure schedule that has no structured data to pull.
+#[tauri::command]
+async fn ocr_photo(image_base64: String) -> Result<String, String> {
+    pipeline::transcribe_photo(&image_base64).await.map_err(|e| e.to_string())
+}
+
 /// One-shot vision path: a photo (base64, no data: prefix) is transcribed +
 /// categorized + extracted by the local vision model. Returns a proposal that
 /// also includes `raw_text` (the transcription) for review.
@@ -1101,12 +1110,14 @@ fn gcal_disconnect(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Reset: delete noted's dedicated calendar (wiping everything it has synced) so
-/// the next sync starts fresh. Leaves other calendars and the session untouched.
+/// Clear one day: delete only the events noted pushed for that date from its own
+/// calendar. Defaults to today (Eastern). Returns the count deleted. Leaves the
+/// calendar, other days, other calendars, and the session untouched.
 #[tauri::command]
-async fn gcal_reset(app: tauri::AppHandle) -> Result<(), String> {
+async fn gcal_clear_day(app: tauri::AppHandle, event_date: Option<String>) -> Result<u32, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    gcal::reset_calendar(&dir).await.map_err(|e| e.to_string())
+    let date = event_date.filter(|s| !s.trim().is_empty()).unwrap_or_else(today_local);
+    gcal::clear_day(&dir, &date).await.map_err(|e| e.to_string())
 }
 
 /// Push a day's schedule to Google Calendar. Defaults to today (Eastern).
@@ -1316,6 +1327,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             health,
             categorize_note,
+            ocr_photo,
             categorize_photo,
             save_image,
             save_entry,
@@ -1352,7 +1364,7 @@ pub fn run() {
             gcal_set_client,
             gcal_begin_auth,
             gcal_disconnect,
-            gcal_reset,
+            gcal_clear_day,
             gcal_sync,
             gcal_list_events,
         ])

@@ -607,8 +607,22 @@ async fn extract_note(
             }
         }
     }
+    // We read text fine but the structurer found nothing to extract (common for
+    // pure schedules, which are handled deterministically elsewhere, or terse
+    // notes). Never throw a good transcription away: land it in the reserved
+    // `misc` catch-all so the note is preserved and the review UI always has at
+    // least one entry to act on. Callers that only want the transcription (the
+    // Today schedule flow) ignore entries and re-parse raw_text, so this is inert
+    // there.
     if entries.is_empty() {
-        return Err(anyhow!("could not extract any entries from the note"));
+        entries.push(json!({
+            "category": "misc",
+            "is_new_category": !known.iter().any(|k| k.eq_ignore_ascii_case("misc")),
+            "description": "uncategorized note",
+            "routed_by": "classifier",
+            "data": { "text": text.trim() },
+        }));
+        model_dates.push(None);
     }
 
     // One calendar day for the whole note: first model date that parses, else a
@@ -641,7 +655,7 @@ async fn extract_note(
 /// Transcribe a photo of a note (handwritten/printed) to text, preserving the
 /// user's words, line breaks, and any section headers, so the shared text path
 /// can route + extract it the same way a typed note is handled.
-async fn transcribe_photo(image_b64: &str) -> Result<String> {
+pub async fn transcribe_photo(image_b64: &str) -> Result<String> {
     let system = "You transcribe a photo of a personal note as faithfully as you can. Preserve the \
         user's exact words, line breaks, and any section headers (lines like \"Food:\" or \"Gym —\"). \
         Do not summarize, translate, or add anything. Return JSON only: {\"raw_text\": string}.";

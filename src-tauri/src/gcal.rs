@@ -170,16 +170,6 @@ fn set_calendar_id(dir: &Path, id: &str) {
     write_config_file(dir);
 }
 
-/// Forget the dedicated calendar's id (after deleting it, or when it's gone) so
-/// the next sync resolves/recreates a fresh one.
-fn clear_calendar_id(dir: &Path) {
-    {
-        let mut c = cell().write().unwrap();
-        c.calendar_id = None;
-    }
-    write_config_file(dir);
-}
-
 /// Forget the Google session (refresh token gone/expired). Keeps the OAuth
 /// client + calendar id so reconnecting doesn't require re-entering credentials.
 fn clear_tokens(dir: &Path) {
@@ -210,37 +200,31 @@ pub fn disconnect(dir: &Path) {
     clear_tokens(dir);
 }
 
-/// Reset: wipe everything noted has pushed by deleting its dedicated calendar,
-/// then forget the stored id so the next sync recreates a fresh, empty one.
-/// Only ever touches noted's own calendar; the user's other calendars and the
-/// Google session (refresh token + OAuth client) are left intact. No-op if the
-/// calendar is already gone.
-pub async fn reset_calendar(dir: &Path) -> Result<()> {
+/// Clear one day: delete only the events noted pushed for `event_date` (matched
+/// by the private `notedDate` tag) from noted's own calendar. The calendar
+/// itself, other days, every other calendar, and the Google session are all left
+/// intact. Returns the number of events deleted. No-op (Ok(0)) if there's no
+/// noted calendar yet — we never create one just to clear it.
+pub async fn clear_day(dir: &Path, event_date: &str) -> Result<u32> {
     let token = get_access_token(dir).await?;
     let client = http_client()?;
 
-    let id = match find_calendar(&client, &token, get().calendar_id).await? {
-        Some(id) => id,
-        // Nothing to delete; just make sure we aren't holding a stale id.
-        None => {
-            clear_calendar_id(dir);
-            return Ok(());
+    let cal = match find_calendar(&client, &token, get().calendar_id).await? {
+        Some(id) => {
+            // Re-pin the resolved id (self-heal) so a later sync reuses it.
+            set_calendar_id(dir, &id);
+            id
         }
+        None => return Ok(0),
     };
 
-    let resp = client
-        .delete(format!("{CAL_BASE}/calendars/{}", enc(&id)))
-        .bearer_auth(&token)
-        .send()
-        .await?;
-    let code = resp.status().as_u16();
-    // 404/410 = already gone — fine for a reset.
-    if !resp.status().is_success() && code != 404 && code != 410 {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("couldn't reset the noted calendar ({code}): {text}"));
+    let mut deleted = 0u32;
+    for id in list_day_event_ids(&client, &token, &cal, event_date).await? {
+        // delete_event treats 404/410 as success, so a concurrent delete is fine.
+        delete_event(&client, &token, &cal, &id).await?;
+        deleted += 1;
     }
-    clear_calendar_id(dir);
-    Ok(())
+    Ok(deleted)
 }
 
 // ── OAuth (installed-app loopback + PKCE S256) ──────────────────────────────

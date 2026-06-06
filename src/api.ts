@@ -227,6 +227,9 @@ export const api = {
   categorize: (text: string) => invoke<Envelope>("categorize_note", { text }),
   categorizePhoto: (imageBase64: string) =>
     invoke<Envelope>("categorize_photo", { imageBase64 }),
+  // Transcription only (no extraction) — for flows that re-parse the text
+  // themselves, like the Today schedule editor.
+  ocrPhoto: (imageBase64: string) => invoke<string>("ocr_photo", { imageBase64 }),
   saveImage: (imageBase64: string, ext: string) =>
     invoke<string>("save_image", { imageBase64, ext }),
   save: (args: {
@@ -294,8 +297,9 @@ export const api = {
     invoke<void>("gcal_set_client", { clientId, clientSecret }),
   gcalBeginAuth: () => invoke<GcalStatus>("gcal_begin_auth"),
   gcalDisconnect: () => invoke<void>("gcal_disconnect"),
-  // Reset: delete noted's calendar so the next sync starts fresh.
-  gcalReset: () => invoke<void>("gcal_reset"),
+  // Clear one day: delete only noted's events for that date (defaults to today).
+  // Returns the number deleted. Other days/calendars are untouched.
+  gcalClearDay: (eventDate?: string) => invoke<number>("gcal_clear_day", { eventDate }),
   gcalSync: (eventDate?: string) => invoke<SyncReport>("gcal_sync", { eventDate }),
   gcalListEvents: (eventDate?: string) => invoke<CalEvent[]>("gcal_list_events", { eventDate }),
 };

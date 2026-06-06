@@ -409,6 +409,9 @@ export function TodayView({
   // Inline create/edit state — the schedule is made right here, not in Log.
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  // Two-step inline confirm for "Clear today" — WKWebView silently swallows
+  // window.confirm() (returns false), so we arm/confirm in-app instead.
+  const [clearArmed, setClearArmed] = useState(false);
   const [photo, setPhoto] = useState<Img | null>(null);
   const [busy, setBusy] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
@@ -554,22 +557,38 @@ export function TodayView({
   // Wipe everything noted has pushed by deleting its dedicated calendar; the next
   // sync recreates a fresh, empty one. A quick "start over" for the synced
   // schedule — other calendars and the connection are left alone.
-  async function clearGcal() {
-    if (!gcalConnected) {
-      onOpenSettings?.();
+  // Clear today: empty today's schedule in noted (the editor text box + the
+  // stored blocks) and, when Google is connected, also remove today's events
+  // from the noted calendar. Events that live only in the user's *other*
+  // calendars are never deleted from Google — clearing them here just drops
+  // noted's local copy of the day.
+  async function clearToday() {
+    if (sync.state === "syncing" || sync.state === "clearing") return;
+    // First click arms; second click (while armed) actually clears. The button
+    // label flips to "Confirm clear" and disarms after a few seconds.
+    if (!clearArmed) {
+      setClearArmed(true);
+      window.setTimeout(() => setClearArmed(false), 4000);
       return;
     }
-    if (sync.state === "syncing" || sync.state === "clearing") return;
-    if (
-      !window.confirm(
-        "Clear the “noted” calendar in Google Calendar? This removes everything noted has synced. Your other calendars aren’t touched, and your next sync starts fresh."
-      )
-    )
-      return;
+    setClearArmed(false);
     setSync({ state: "clearing", msg: "" });
     try {
-      await api.gcalReset();
-      setSync({ state: "ok", msg: "Calendar cleared — sync again to repopulate." });
+      // Local: blank the editor box and persist an empty schedule. (Saving an
+      // empty textarea via saveDraft is a no-op, so clear the stored blocks here.)
+      setDraft("");
+      if (entry?.id != null) await api.updateEntry(entry.id, { blocks: [] });
+      // Google: drop today's noted-calendar events, if connected.
+      let removed = 0;
+      if (gcalConnected) removed = await api.gcalClearDay(today);
+      await onSaved();
+      setSync({
+        state: "ok",
+        msg:
+          gcalConnected && removed > 0
+            ? `Schedule cleared · ${removed} calendar event${removed === 1 ? "" : "s"} removed.`
+            : "Schedule cleared.",
+      });
     } catch (e) {
       setSync({ state: "err", msg: String(e) });
     }
@@ -638,14 +657,16 @@ export function TodayView({
       let image_path: string | null = null;
       let entities: EntityCandidate[] = [];
 
-      // Photo: use the vision model ONLY to transcribe the handwriting to text,
-      // then parse it the same deterministic way as typed input.
+      // Photo: transcription only (ocrPhoto), then parse it the same
+      // deterministic way as typed input. We deliberately skip the extract
+      // pipeline here — the schedule is parsed by parseSchedule below, so
+      // extraction would be wasted work (and used to hard-fail on a pure
+      // schedule that yields no structured entries). Matches typed-input
+      // behavior, which also surfaces no entities.
       if (photo) {
-        const env = await api.categorizePhoto(photo.base64);
-        body = (env.raw_text ?? "").trim() || body;
+        body = (await api.ocrPhoto(photo.base64)).trim() || body;
         source = "photo";
         image_path = await api.saveImage(photo.base64, photo.ext);
-        entities = env.entities; // keep any people the photo surfaced
       }
 
       if (!body) {
@@ -875,21 +896,23 @@ export function TodayView({
             >
               <Camera size={16} /> Photo
             </button>
-            {gcalConnected && (
-              <button
-                className="today-photo-btn"
-                onClick={clearGcal}
-                disabled={busy || sync.state === "clearing"}
-                title="Clear the noted calendar — removes everything noted has synced"
-              >
-                {sync.state === "clearing" ? (
-                  <Loader size={16} className="spin" />
-                ) : (
-                  <CalendarX size={16} />
-                )}
-                Clear calendar
-              </button>
-            )}
+            <button
+              className={"today-photo-btn" + (clearArmed ? " armed" : "")}
+              onClick={clearToday}
+              disabled={busy || sync.state === "clearing"}
+              title={
+                gcalConnected
+                  ? "Clear today's schedule in noted, and today's events from the noted calendar"
+                  : "Clear today's schedule in noted"
+              }
+            >
+              {sync.state === "clearing" ? (
+                <Loader size={16} className="spin" />
+              ) : (
+                <CalendarX size={16} />
+              )}
+              {clearArmed ? "Confirm clear" : "Clear today"}
+            </button>
             <span className="today-spacer" />
             <button
               className="today-cancel"

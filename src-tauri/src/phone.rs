@@ -231,6 +231,7 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
     match cmd {
         "health" => crate::health(a).await,
         "categorize_note" => crate::categorize_note(a, sarg(b, "text")).await,
+        "ocr_photo" => crate::ocr_photo(sarg(b, "imageBase64")).await.map(|s| json!(s)),
         "categorize_photo" => crate::categorize_photo(a, sarg(b, "imageBase64")).await,
         "save_image" => crate::save_image(a, sarg(b, "imageBase64"), sarg(b, "ext")).await.map(|s| json!(s)),
         "save_entry" => {
@@ -306,6 +307,8 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "gcal_begin_auth" => crate::gcal_begin_auth(a).await,
         "gcal_disconnect" => crate::gcal_disconnect(a).map(|_| Value::Null),
         "gcal_sync" => crate::gcal_sync(a, oarg(b, "eventDate")).await,
+        "gcal_clear_day" => crate::gcal_clear_day(a, oarg(b, "eventDate")).await.map(|n| json!(n)),
+        "gcal_list_events" => crate::gcal_list_events(a, oarg(b, "eventDate")).await,
         other => Err(format!("unknown command: {other}")),
     }
 }

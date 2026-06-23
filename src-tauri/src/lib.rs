@@ -1,4 +1,5 @@
 pub mod analytics;
+pub mod brain;
 pub mod db;
 pub mod entities;
 pub mod gcal;
@@ -1050,6 +1051,262 @@ async fn list_people(app: tauri::AppHandle) -> Result<Value, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Brain sync (Phase 1: Obsidian -> noted, read path). Mirror brain vault files
+// into the KG: each file becomes a brain-origin note, its subject an entity, its
+// [[wikilinks]] mentions (= co-mention edges). Idempotent via content hash.
+// ---------------------------------------------------------------------------
+
+/// People auto-merge into a near-duplicate above this cosine sim (e.g. "Yi" the
+/// capture and "yi" the brain note). Higher than the suggest threshold (0.86) so
+/// only high-confidence same-person matches fold together automatically.
+const BRAIN_AUTO_MERGE_SIM: f32 = 0.92;
+
+#[derive(Default, serde::Serialize)]
+struct BrainSyncReport {
+    vault: String,
+    scanned: usize,
+    imported: usize,   // notes (re)processed this run
+    unchanged: usize,  // skipped — content hash matched
+    entities_created: usize,
+    mentions_added: usize,
+    errors: Vec<String>,
+}
+
+/// Resolve a brain entity by its vault-scoped norm, creating + embedding it when
+/// new. People (only) auto-merge into a very close same-type neighbor so the same
+/// person unifies across vaults and captures; artifacts dedup by exact norm only
+/// (identical embed text across vaults would otherwise wrongly merge them).
+/// Returns (entity_id, created_now). Never holds the DB lock across an await.
+async fn resolve_or_create_brain_entity(
+    app: &tauri::AppHandle,
+    vault: &str,
+    etype: &str,
+    display_name: &str,
+    aliases: &[String],
+    event_date: &str,
+    now: &str,
+) -> Option<(i64, bool)> {
+    let norm = brain::vault_norm(vault, etype, display_name);
+    // Fast path: exact norm/alias hit needs no embedding (keeps re-syncs cheap).
+    {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        if let Ok(Some(id)) = db::entity_exact(&conn, &norm, etype) {
+            return Some((id, false));
+        }
+    }
+    // Embed off-lock to index a new entity (and, for people, find a near match).
+    let emb = entities::embed_entity(display_name, etype).await.ok()?;
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    if let Ok(Some(id)) = db::entity_exact(&conn, &norm, etype) {
+        return Some((id, false));
+    }
+    if etype == "person" {
+        if let Ok(Some((id, dist))) = db::nearest_entity(&conn, &emb, etype) {
+            let sim = 1.0 - dist * dist / 2.0;
+            if sim >= BRAIN_AUTO_MERGE_SIM {
+                return Some((id, false));
+            }
+        }
+    }
+    let aliases_json = serde_json::to_string(aliases).unwrap_or_else(|_| "[]".into());
+    match db::create_entity(&conn, display_name, &norm, etype, &aliases_json, event_date, now) {
+        Ok(id) => {
+            let _ = db::insert_entity_embedding(&conn, id, &emb);
+            Some((id, true))
+        }
+        Err(_) => None,
+    }
+}
+
+/// Sync one vault into the KG. Two passes: parse every file first (so wikilinks
+/// can resolve to any note's type/name), then mirror each changed file.
+async fn sync_brain_vault(app: &tauri::AppHandle, vault: &str, root: &std::path::Path) -> BrainSyncReport {
+    let mut report = BrainSyncReport { vault: vault.to_string(), ..Default::default() };
+    let origin = format!("brain:{vault}");
+    let now = chrono::Utc::now().to_rfc3339();
+    let today = today_local();
+
+    let files = brain::collect_markdown_files(root);
+    report.scanned = files.len();
+    let parsed: Vec<(String, brain::ParsedNote)> = files
+        .into_iter()
+        .map(|(rel, raw)| {
+            let p = brain::parse_note(vault, &rel, &raw);
+            (raw, p)
+        })
+        .collect();
+    // slug -> (type, display name) for resolving [[wikilink]] targets.
+    let mut home: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+    for (_, p) in &parsed {
+        home.entry(p.slug.clone()).or_insert((p.etype.clone(), p.display_name.clone()));
+    }
+
+    for (raw, p) in &parsed {
+        let event_date = p.event_date.clone().unwrap_or_else(|| today.clone());
+
+        // Change detection + note upsert (unchanged files cost one hash compare).
+        let note_id = {
+            let state = app.state::<Db>();
+            let conn = state.0.lock().unwrap();
+            let prev = db::brain_note_hash(&conn, &origin, &p.rel_path).ok().flatten();
+            if prev.as_deref() == Some(p.hash.as_str()) {
+                report.unchanged += 1;
+                continue;
+            }
+            match db::upsert_brain_note(&conn, &origin, &p.rel_path, raw, &p.hash, &now) {
+                Ok(id) => id,
+                Err(e) => {
+                    report.errors.push(format!("{}: {e}", p.rel_path));
+                    continue;
+                }
+            }
+        };
+        report.imported += 1;
+
+        // The note's own subject entity.
+        let home_id = match resolve_or_create_brain_entity(
+            app, vault, &p.etype, &p.display_name, &p.aliases, &event_date, &now,
+        )
+        .await
+        {
+            Some((id, created)) => {
+                if created {
+                    report.entities_created += 1;
+                }
+                id
+            }
+            None => {
+                report.errors.push(format!("{}: entity embed failed (is Ollama running?)", p.rel_path));
+                continue;
+            }
+        };
+
+        {
+            let state = app.state::<Db>();
+            let conn = state.0.lock().unwrap();
+            let _ = db::set_entity_home(&conn, home_id, note_id);
+            // Rebuild this note's links from scratch so a removed [[link]] drops its edge.
+            let _ = db::clear_note_mentions(&conn, note_id);
+            if db::add_mention(&conn, home_id, note_id, None, &p.display_name, &event_date, &now).is_ok() {
+                report.mentions_added += 1;
+            }
+        }
+
+        // Each [[wikilink]] -> a mention of the target in this note (co-mention edge).
+        for target in &p.wikilinks {
+            let Some((tetype, tname)) = home.get(target).cloned() else {
+                continue; // unresolved link (target note not in the vault) — skip
+            };
+            if let Some((tid, created)) =
+                resolve_or_create_brain_entity(app, vault, &tetype, &tname, &[], &event_date, &now).await
+            {
+                if created {
+                    report.entities_created += 1;
+                }
+                let state = app.state::<Db>();
+                let conn = state.0.lock().unwrap();
+                if db::add_mention(&conn, tid, note_id, None, &p.display_name, &event_date, &now).is_ok() {
+                    report.mentions_added += 1;
+                }
+            }
+        }
+    }
+
+    // Record the git checkpoint for future diff-based syncs.
+    {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        let sha = brain::git_head(root);
+        let _ = db::set_vault_synced(&conn, vault, sha.as_deref(), &now);
+    }
+    report
+}
+
+/// Sync every enabled, on-disk vault. Best-effort; missing roots are skipped.
+async fn sync_all_brains(app: &tauri::AppHandle) -> Vec<BrainSyncReport> {
+    let vaults = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        db::list_brain_vaults(&conn).unwrap_or_default()
+    };
+    let mut reports = Vec::new();
+    for v in vaults {
+        if !v.enabled {
+            continue;
+        }
+        let root = std::path::PathBuf::from(&v.root_path);
+        if root.is_dir() {
+            reports.push(sync_brain_vault(app, &v.vault, &root).await);
+        }
+    }
+    reports
+}
+
+/// Registered brain vaults + live counts (for Settings / the Work tab).
+#[tauri::command]
+async fn brain_list_vaults(app: tauri::AppHandle) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let v = db::list_brain_vaults(&conn).map_err(|e| e.to_string())?;
+    serde_json::to_value(v).map_err(|e| e.to_string())
+}
+
+/// Register a vault by path (its folder name becomes the vault id). `direction`
+/// defaults to "import" (the only direction wired in Phase 1).
+#[tauri::command]
+async fn brain_add_vault(app: tauri::AppHandle, path: String, direction: Option<String>) -> Result<Value, String> {
+    let root = std::path::PathBuf::from(&path);
+    if !root.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    let vault = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("vault")
+        .to_lowercase();
+    let dir = direction.unwrap_or_else(|| "import".to_string());
+    {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        db::upsert_brain_vault(&conn, &vault, &path, &dir).map_err(|e| e.to_string())?;
+    }
+    brain_list_vaults(app).await
+}
+
+#[tauri::command]
+async fn brain_remove_vault(app: tauri::AppHandle, vault: String) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    db::remove_brain_vault(&conn, &vault).map_err(|e| e.to_string())
+}
+
+/// Sync one vault (by name) or all of them; returns a per-vault report.
+#[tauri::command]
+async fn brain_sync(app: tauri::AppHandle, vault: Option<String>) -> Result<Value, String> {
+    let reports = match vault {
+        Some(v) => {
+            let root = {
+                let state = app.state::<Db>();
+                let conn = state.0.lock().unwrap();
+                db::list_brain_vaults(&conn)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .find(|x| x.vault == v)
+                    .map(|x| x.root_path)
+            };
+            match root {
+                Some(rp) => vec![sync_brain_vault(&app, &v, &std::path::PathBuf::from(rp)).await],
+                None => return Err(format!("unknown vault: {v}")),
+            }
+        }
+        None => sync_all_brains(&app).await,
+    };
+    serde_json::to_value(reports).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
 // App setup
 // ---------------------------------------------------------------------------
 
@@ -1268,6 +1525,32 @@ pub fn run() {
             // client secret + refresh token from Keychain).
             gcal::init(&dir);
 
+            // Brain vaults: auto-register the default ~/Brain/* vaults (idempotent),
+            // then mirror them into the KG in the background so they're up to date
+            // shortly after launch (Phase 1 = read-only import; never writes vaults).
+            {
+                let state = app.state::<Db>();
+                let conn = state.0.lock().unwrap();
+                for (vault, root) in brain::default_vault_roots() {
+                    let _ = db::upsert_brain_vault(&conn, &vault, &root.to_string_lossy(), "import");
+                }
+            }
+            let hb = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let reports = sync_all_brains(&hb).await;
+                for r in &reports {
+                    println!(
+                        "[noted] brain '{}': {} files, {} imported, {} entities, {} mentions{}",
+                        r.vault,
+                        r.scanned,
+                        r.imported,
+                        r.entities_created,
+                        r.mentions_added,
+                        if r.errors.is_empty() { String::new() } else { format!(", {} errors", r.errors.len()) },
+                    );
+                }
+            });
+
             // Phone capture: tiny LAN upload server gated by a random token.
             let inbox = dir.join("inbox");
             std::fs::create_dir_all(&inbox)?;
@@ -1367,6 +1650,10 @@ pub fn run() {
             gcal_clear_day,
             gcal_sync,
             gcal_list_events,
+            brain_list_vaults,
+            brain_add_vault,
+            brain_remove_vault,
+            brain_sync,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

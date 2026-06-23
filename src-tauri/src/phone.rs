@@ -309,6 +309,10 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "gcal_sync" => crate::gcal_sync(a, oarg(b, "eventDate")).await,
         "gcal_clear_day" => crate::gcal_clear_day(a, oarg(b, "eventDate")).await.map(|n| json!(n)),
         "gcal_list_events" => crate::gcal_list_events(a, oarg(b, "eventDate")).await,
+        "brain_list_vaults" => crate::brain_list_vaults(a).await,
+        "brain_add_vault" => crate::brain_add_vault(a, sarg(b, "path"), oarg(b, "direction")).await,
+        "brain_remove_vault" => crate::brain_remove_vault(a, sarg(b, "vault")).await.map(|_| Value::Null),
+        "brain_sync" => crate::brain_sync(a, oarg(b, "vault")).await,
         other => Err(format!("unknown command: {other}")),
     }
 }

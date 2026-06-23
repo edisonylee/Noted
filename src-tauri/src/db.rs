@@ -27,12 +27,19 @@ CREATE TABLE IF NOT EXISTS categories (
 );
 
 CREATE TABLE IF NOT EXISTS notes (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  raw_text    TEXT NOT NULL,
-  source      TEXT NOT NULL DEFAULT 'text',
-  image_path  TEXT,
-  category_id INTEGER REFERENCES categories(id),
-  created_at  TEXT NOT NULL
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  raw_text     TEXT NOT NULL,
+  source       TEXT NOT NULL DEFAULT 'text',
+  image_path   TEXT,
+  category_id  INTEGER REFERENCES categories(id),
+  created_at   TEXT NOT NULL,
+  -- Provenance: 'capture' for notes the user logged; 'brain:<vault>' for notes
+  -- mirrored from an Obsidian brain vault. Capture-listing views filter to
+  -- capture-origin so imported brain notes never pollute the daily log/trends.
+  origin       TEXT NOT NULL DEFAULT 'capture',
+  source_path  TEXT,   -- vault-relative file path (brain notes); sync key
+  content_hash TEXT,   -- last-synced content hash (change detection + echo suppression)
+  synced_at    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS entries (
@@ -73,6 +80,7 @@ CREATE TABLE IF NOT EXISTS entities (
   last_seen     TEXT,
   mention_count INTEGER NOT NULL DEFAULT 0,
   created_at    TEXT NOT NULL,
+  home_note_id  INTEGER REFERENCES notes(id), -- the brain note that DEFINES this entity (NULL for capture-only)
   UNIQUE(norm, type)
 );
 
@@ -106,6 +114,17 @@ CREATE TABLE IF NOT EXISTS pending_captures (
   error       TEXT,
   attempts    INTEGER NOT NULL DEFAULT 0
 );
+
+-- Registered Obsidian "brain" vaults synced into the knowledge graph. Each is a
+-- git repo on disk; `last_git_sha` lets a re-sync diff only what changed.
+CREATE TABLE IF NOT EXISTS brain_vaults (
+  vault          TEXT PRIMARY KEY,        -- "baro" | "profound" | "personal"
+  root_path      TEXT NOT NULL,           -- absolute path to the vault
+  direction      TEXT NOT NULL DEFAULT 'import', -- 'import' | 'export' | 'bidi'
+  last_git_sha   TEXT,
+  last_synced_at TEXT,
+  enabled        INTEGER NOT NULL DEFAULT 1
+);
 "#;
 
 /// Register sqlite-vec as an auto extension (process-wide, must happen before
@@ -123,6 +142,12 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     // Migrations for DBs created before a column existed (additive only).
     ensure_column(&conn, "entries", "event_date", "TEXT")?;
     ensure_column(&conn, "entities", "relationship", "TEXT")?;
+    // Brain-sync columns (additive; legacy rows read as capture-origin via COALESCE).
+    ensure_column(&conn, "notes", "origin", "TEXT")?;
+    ensure_column(&conn, "notes", "source_path", "TEXT")?;
+    ensure_column(&conn, "notes", "content_hash", "TEXT")?;
+    ensure_column(&conn, "notes", "synced_at", "TEXT")?;
+    ensure_column(&conn, "entities", "home_note_id", "INTEGER")?;
     // Note: the reserved catch-all "misc" is not pre-seeded — the classifier is
     // told about it by name in the prompt, and it's created on first real use
     // (so an unused misc never clutters the catalog/UI).
@@ -244,6 +269,7 @@ pub fn list_notes(conn: &Connection) -> Result<Vec<NoteRow>> {
          FROM notes n
          LEFT JOIN entries e ON e.note_id = n.id
          LEFT JOIN categories c ON c.id = e.category_id
+         WHERE (n.origin = 'capture' OR n.origin IS NULL)
          GROUP BY n.id
          ORDER BY event_date DESC, n.id DESC",
     )?;
@@ -286,6 +312,7 @@ pub fn notes_missing_embeddings(conn: &Connection) -> Result<Vec<(i64, String)>>
          LEFT JOIN entries e ON e.note_id = n.id
          LEFT JOIN categories c ON c.id = e.category_id
          WHERE n.id NOT IN (SELECT note_id FROM embeddings)
+           AND (n.origin = 'capture' OR n.origin IS NULL)
          GROUP BY n.id",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -415,6 +442,7 @@ pub fn recent_entries(conn: &Connection, limit: i64) -> Result<Vec<SearchHit>> {
          FROM notes n
          LEFT JOIN categories pc ON pc.id = n.category_id
          LEFT JOIN entries e ON e.note_id = n.id
+         WHERE (n.origin = 'capture' OR n.origin IS NULL)
          GROUP BY n.id
          ORDER BY d DESC, n.id DESC
          LIMIT ?1",
@@ -1212,4 +1240,170 @@ pub fn person_profiles(conn: &Connection) -> Result<Vec<PersonProfile>> {
         });
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Brain sync: registered Obsidian vaults + storage for the notes they mirror.
+// A brain note is a `notes` row with origin = 'brain:<vault>', category_id NULL,
+// and NO entries (its content lives in raw_text; its links become mentions).
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct BrainVaultStatus {
+    pub vault: String,
+    pub root_path: String,
+    pub direction: String,
+    pub last_git_sha: Option<String>,
+    pub last_synced_at: Option<String>,
+    pub enabled: bool,
+    pub note_count: i64,   // brain notes mirrored from this vault
+    pub entity_count: i64, // distinct entities mentioned by this vault's notes
+}
+
+/// Registered vaults with live counts (notes mirrored + entities touched).
+pub fn list_brain_vaults(conn: &Connection) -> Result<Vec<BrainVaultStatus>> {
+    let mut stmt = conn.prepare(
+        "SELECT vault, root_path, direction, last_git_sha, last_synced_at, enabled
+         FROM brain_vaults ORDER BY vault",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, i64>(5)? != 0,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for (vault, root_path, direction, last_git_sha, last_synced_at, enabled) in rows {
+        let origin = format!("brain:{vault}");
+        let note_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM notes WHERE origin = ?1", [&origin], |r| r.get(0))?;
+        let entity_count: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT m.entity_id) FROM entity_mentions m
+             JOIN notes n ON n.id = m.note_id WHERE n.origin = ?1",
+            [&origin],
+            |r| r.get(0),
+        )?;
+        out.push(BrainVaultStatus {
+            vault,
+            root_path,
+            direction,
+            last_git_sha,
+            last_synced_at,
+            enabled,
+            note_count,
+            entity_count,
+        });
+    }
+    Ok(out)
+}
+
+/// Register a vault (or update its root/direction). Idempotent on `vault`.
+pub fn upsert_brain_vault(conn: &Connection, vault: &str, root_path: &str, direction: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO brain_vaults (vault, root_path, direction) VALUES (?1, ?2, ?3)
+         ON CONFLICT(vault) DO UPDATE SET root_path = ?2, direction = ?3",
+        rusqlite::params![vault, root_path, direction],
+    )?;
+    Ok(())
+}
+
+pub fn remove_brain_vault(conn: &Connection, vault: &str) -> Result<()> {
+    conn.execute("DELETE FROM brain_vaults WHERE vault = ?1", [vault])?;
+    Ok(())
+}
+
+/// Record a completed sync (advances the git checkpoint for next-time diffing).
+pub fn set_vault_synced(conn: &Connection, vault: &str, git_sha: Option<&str>, now: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE brain_vaults SET last_git_sha = ?2, last_synced_at = ?3 WHERE vault = ?1",
+        rusqlite::params![vault, git_sha, now],
+    )?;
+    Ok(())
+}
+
+/// The stored content hash for a brain note, if we've mirrored this file before.
+/// Lets a sync skip files whose content is unchanged.
+pub fn brain_note_hash(conn: &Connection, origin: &str, source_path: &str) -> Result<Option<String>> {
+    let h: Option<Option<String>> = conn
+        .query_row(
+            "SELECT content_hash FROM notes WHERE origin = ?1 AND source_path = ?2",
+            rusqlite::params![origin, source_path],
+            |r| r.get(0),
+        )
+        .ok();
+    Ok(h.flatten())
+}
+
+/// Insert or refresh the `notes` row mirroring one brain file. Keyed by
+/// (origin, source_path). Returns the note id.
+pub fn upsert_brain_note(
+    conn: &Connection,
+    origin: &str,
+    source_path: &str,
+    raw_text: &str,
+    hash: &str,
+    now: &str,
+) -> Result<i64> {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM notes WHERE origin = ?1 AND source_path = ?2",
+            rusqlite::params![origin, source_path],
+            |r| r.get(0),
+        )
+        .ok();
+    match existing {
+        Some(id) => {
+            conn.execute(
+                "UPDATE notes SET raw_text = ?1, content_hash = ?2, synced_at = ?3 WHERE id = ?4",
+                rusqlite::params![raw_text, hash, now, id],
+            )?;
+            Ok(id)
+        }
+        None => {
+            conn.execute(
+                "INSERT INTO notes (raw_text, source, image_path, category_id, created_at, origin, source_path, content_hash, synced_at)
+                 VALUES (?1, 'brain', NULL, NULL, ?2, ?3, ?4, ?5, ?2)",
+                rusqlite::params![raw_text, now, origin, source_path, hash],
+            )?;
+            Ok(conn.last_insert_rowid())
+        }
+    }
+}
+
+/// Drop all mentions for a note and fix the affected entities' counts — used
+/// before re-inserting a changed brain note's links so removed `[[wikilinks]]`
+/// don't leave stale edges.
+pub fn clear_note_mentions(conn: &Connection, note_id: i64) -> Result<()> {
+    let ids: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT DISTINCT entity_id FROM entity_mentions WHERE note_id = ?1")?;
+        let v = stmt
+            .query_map([note_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        v
+    };
+    conn.execute("DELETE FROM entity_mentions WHERE note_id = ?1", [note_id])?;
+    for id in ids {
+        conn.execute(
+            "UPDATE entities SET mention_count = (SELECT COUNT(*) FROM entity_mentions WHERE entity_id = ?1) WHERE id = ?1",
+            [id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Mark which brain note DEFINES an entity (first definition wins; a later note
+/// or a capture never steals an entity's home).
+pub fn set_entity_home(conn: &Connection, entity_id: i64, note_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE entities SET home_note_id = ?2 WHERE id = ?1 AND home_note_id IS NULL",
+        rusqlite::params![entity_id, note_id],
+    )?;
+    Ok(())
 }

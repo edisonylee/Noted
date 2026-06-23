@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, UploadCloud } from "lucide-react";
 import { SelfView } from "./Self";
-import { api, type BrainVaultStatus, type GraphData } from "./api";
+import {
+  api,
+  type BrainVaultStatus,
+  type BrainWritePreview,
+  type BrainWriteReport,
+  type GraphData,
+} from "./api";
 import { colorForType } from "./entityColors";
 
 // The "Work" lens: the same knowledge graph, scoped to a brain vault (BARO /
@@ -13,6 +19,11 @@ export function WorkView({ theme, onOpenEntity }: { theme: string; onOpenEntity?
   const [graph, setGraph] = useState<GraphData | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  // Write-back (noted -> Obsidian): preview is a dry run; null = panel closed.
+  const [preview, setPreview] = useState<BrainWritePreview[] | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [writing, setWriting] = useState(false);
+  const [writeMsg, setWriteMsg] = useState<string | null>(null);
 
   function loadVaults() {
     api.brainListVaults().then(setVaults).catch(() => {});
@@ -40,6 +51,39 @@ export function WorkView({ theme, onOpenEntity }: { theme: string; onOpenEntity?
       setRefreshKey((k) => k + 1);
     } finally {
       setSyncing(false);
+    }
+  }
+
+  async function openPreview() {
+    setPreviewing(true);
+    setWriteMsg(null);
+    try {
+      setPreview(await api.brainWritePreview(vault ?? undefined));
+    } catch (e) {
+      setWriteMsg(String(e));
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
+  async function confirmWrite() {
+    setWriting(true);
+    try {
+      const r: BrainWriteReport = await api.brainWriteBack(vault ?? undefined);
+      const commits = r.commits.map((c) => `${c.vault}@${c.sha}`).join(", ");
+      setWriteMsg(
+        r.files_written === 0
+          ? "Nothing written."
+          : `Wrote ${r.files_written} note(s)${commits ? ` · committed ${commits}` : ""}.` +
+              (r.errors.length ? ` ${r.errors.length} error(s).` : "")
+      );
+      setPreview(null);
+      loadVaults();
+      setRefreshKey((k) => k + 1);
+    } catch (e) {
+      setWriteMsg(String(e));
+    } finally {
+      setWriting(false);
     }
   }
 
@@ -76,10 +120,65 @@ export function WorkView({ theme, onOpenEntity }: { theme: string; onOpenEntity?
             {v.vault}
           </button>
         ))}
-        <button className="ghost-btn work-sync" onClick={sync} disabled={syncing} title="Re-sync from Obsidian">
+        <button className="ghost-btn work-sync" onClick={sync} disabled={syncing} title="Re-import from Obsidian">
           <RefreshCw size={14} className={syncing ? "spin" : ""} /> {syncing ? "Syncing…" : "Sync"}
         </button>
+        <button
+          className="ghost-btn"
+          onClick={openPreview}
+          disabled={previewing}
+          title="Preview what noted would write back into your Obsidian vault"
+        >
+          <UploadCloud size={14} /> {previewing ? "Checking…" : "Push to brain…"}
+        </button>
       </div>
+
+      {writeMsg && <div className="work-status">{writeMsg}</div>}
+
+      {preview && (
+        <div className="work-preview">
+          {preview.length === 0 ? (
+            <>
+              <p className="muted small">
+                Nothing to push — no captures mention these notes yet. As you log notes that mention
+                people or topics from your brain, they'll show up here to write back.
+              </p>
+              <button className="ghost-btn" onClick={() => setPreview(null)}>
+                Close
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="work-preview-head">
+                <strong>{preview.length}</strong> note{preview.length === 1 ? "" : "s"} would get an
+                updated <code>noted</code> block (your hand-written text is untouched; each write is a
+                git commit you can revert):
+              </div>
+              <div className="work-preview-list">
+                {preview.map((p) => (
+                  <div className="work-preview-item" key={`${p.vault}/${p.path}`}>
+                    <div className="work-preview-title">
+                      <span className="kn-result-name">{p.entity}</span>
+                      <span className="kn-result-type">
+                        {p.vault}/{p.path}
+                      </span>
+                    </div>
+                    <pre className="work-preview-diff">{p.after}</pre>
+                  </div>
+                ))}
+              </div>
+              <div className="field-row">
+                <button className="ghost-btn" onClick={() => setPreview(null)} disabled={writing}>
+                  Cancel
+                </button>
+                <button className="primary" onClick={confirmWrite} disabled={writing}>
+                  {writing ? "Writing…" : "Write & commit"}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       <div className="work-status">
         {active ? (

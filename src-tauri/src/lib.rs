@@ -1319,6 +1319,135 @@ async fn work_graph(app: tauri::AppHandle, vault: Option<String>) -> Result<Valu
     }))
 }
 
+// ── Write-back (Phase 2: noted -> Obsidian) ──────────────────────────────────
+// Mirror each brain entity's capture mentions into the managed region of its
+// home note. noted writes ONLY between the markers (hand-written prose is never
+// touched), updates the mirror row's hash (echo suppression), and commits only
+// the files it wrote (the git ledger). `brain_write_preview` is the dry run.
+
+struct PlannedWrite {
+    vault: String,
+    rel_path: String,
+    full_path: std::path::PathBuf,
+    entity_name: String,
+    note_id: i64,
+    before: Option<String>, // current managed-region content
+    after: String,          // what it would become
+    new_raw: String,        // full file after the rewrite
+    new_hash: String,
+    changed: bool,
+}
+
+/// Map of vault name -> root path.
+fn vault_roots(app: &tauri::AppHandle) -> std::collections::HashMap<String, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    db::list_brain_vaults(&conn)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|v| (v.vault, v.root_path))
+        .collect()
+}
+
+/// Compute (without writing) the managed-region rewrite for every brain note
+/// whose subject has capture mentions. Reads files; never mutates anything.
+fn compute_writes(app: &tauri::AppHandle, vault: Option<&str>) -> Result<Vec<PlannedWrite>, String> {
+    let targets = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        db::write_targets(&conn, vault).map_err(|e| e.to_string())?
+    };
+    let roots = vault_roots(app);
+    let mut out = Vec::new();
+    for t in targets {
+        let v = t.origin.strip_prefix("brain:").unwrap_or("").to_string();
+        let Some(root) = roots.get(&v) else { continue };
+        let full = std::path::PathBuf::from(root).join(&t.source_path);
+        let Ok(raw) = std::fs::read_to_string(&full) else { continue };
+        let before = brain::extract_managed(&raw);
+        let after = brain::render_managed_block(&t.captures);
+        let new_raw = brain::apply_managed(&raw, &after);
+        let new_hash = brain::content_hash(&new_raw);
+        let after = after.trim().to_string();
+        let changed = before.as_deref() != Some(after.as_str());
+        out.push(PlannedWrite {
+            vault: v,
+            rel_path: t.source_path,
+            full_path: full,
+            entity_name: t.entity_name,
+            note_id: t.home_note_id,
+            before,
+            after,
+            new_raw,
+            new_hash,
+            changed,
+        });
+    }
+    Ok(out)
+}
+
+/// Dry run: what write-back would change, per file. Reads only — writes nothing.
+#[tauri::command]
+async fn brain_write_preview(app: tauri::AppHandle, vault: Option<String>) -> Result<Value, String> {
+    let writes = compute_writes(&app, vault.as_deref())?;
+    let preview: Vec<Value> = writes
+        .iter()
+        .filter(|w| w.changed)
+        .map(|w| {
+            json!({
+                "vault": w.vault,
+                "path": w.rel_path,
+                "entity": w.entity_name,
+                "before": w.before,
+                "after": w.after,
+            })
+        })
+        .collect();
+    Ok(json!(preview))
+}
+
+/// Apply write-back: rewrite each changed note's managed region, sync the mirror
+/// row (echo suppression), and commit only the touched files per vault.
+#[tauri::command]
+async fn brain_write_back(app: tauri::AppHandle, vault: Option<String>) -> Result<Value, String> {
+    let changed: Vec<PlannedWrite> = compute_writes(&app, vault.as_deref())?
+        .into_iter()
+        .filter(|w| w.changed)
+        .collect();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let mut by_vault: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut files_written = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+    for w in &changed {
+        if let Err(e) = std::fs::write(&w.full_path, &w.new_raw) {
+            errors.push(format!("{}: {e}", w.rel_path));
+            continue;
+        }
+        {
+            let state = app.state::<Db>();
+            let conn = state.0.lock().unwrap();
+            let _ = db::update_brain_note_content(&conn, w.note_id, &w.new_raw, &w.new_hash, &now);
+        }
+        files_written += 1;
+        by_vault.entry(w.vault.clone()).or_default().push(w.rel_path.clone());
+    }
+
+    // Commit only the files noted wrote, per vault — the git ledger.
+    let roots = vault_roots(&app);
+    let mut commits: Vec<Value> = Vec::new();
+    for (v, paths) in &by_vault {
+        if let Some(root) = roots.get(v) {
+            let msg = format!("noted: sync capture mentions into {} note(s)", paths.len());
+            if let Some(sha) = brain::git_commit_paths(std::path::Path::new(root), paths, &msg) {
+                commits.push(json!({ "vault": v, "sha": sha, "files": paths.len() }));
+            }
+        }
+    }
+
+    Ok(json!({ "files_written": files_written, "commits": commits, "errors": errors }))
+}
+
 // ---------------------------------------------------------------------------
 // App setup
 // ---------------------------------------------------------------------------
@@ -1668,6 +1797,8 @@ pub fn run() {
             brain_remove_vault,
             brain_sync,
             work_graph,
+            brain_write_preview,
+            brain_write_back,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

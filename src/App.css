@@ -1048,3 +1048,9 @@ textarea.json.bad { border-color: var(--bad); }
 .work-status { color: var(--muted); font-size: 12px; margin: -10px 0 12px; }
 .work-decisions { margin-top: 20px; }
 .work-decisions-title { font-size: 13px; font-weight: 560; color: var(--muted); margin: 0 0 8px; text-transform: capitalize; }
+.work-preview { border: 1px solid var(--line); border-radius: var(--r-sm); padding: 14px 16px; margin-bottom: 16px; }
+.work-preview-head { font-size: 13px; line-height: 1.5; margin-bottom: 10px; }
+.work-preview-list { display: flex; flex-direction: column; gap: 12px; max-height: 320px; overflow: auto; margin-bottom: 12px; }
+.work-preview-item { border-left: 2px solid var(--line-strong); padding-left: 10px; }
+.work-preview-title { display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px; }
+.work-preview-diff { font-size: 12px; color: var(--muted); white-space: pre-wrap; margin: 0; font-family: ui-monospace, "SF Mono", monospace; }

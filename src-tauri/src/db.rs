@@ -1419,6 +1419,76 @@ pub struct WorkNode {
     pub vault: String, // defining vault ("" if the entity has no brain home)
 }
 
+/// A brain note that write-back would touch: its defining entity has ≥1 capture
+/// mention, which we mirror into the note's managed region.
+pub struct WriteTarget {
+    pub entity_id: i64,
+    pub entity_name: String,
+    pub home_note_id: i64,
+    pub source_path: String, // vault-relative path of the home note
+    pub origin: String,      // "brain:<vault>"
+    pub captures: Vec<(String, String)>, // (event_date, fact/snippet), newest first
+}
+
+/// Entities defined by a brain note (have a `home_note_id`) that also carry
+/// capture-origin mentions — i.e. the daily-capture stream noted should write
+/// back into each one's brain note. Optionally scoped to one vault.
+pub fn write_targets(conn: &Connection, vault: Option<&str>) -> Result<Vec<WriteTarget>> {
+    let bases = {
+        let mut stmt = conn.prepare(
+            "SELECT e.id, e.name, e.home_note_id, n.source_path, n.origin
+             FROM entities e JOIN notes n ON n.id = e.home_note_id
+             WHERE n.origin LIKE 'brain:%' AND (?1 IS NULL OR n.origin = 'brain:' || ?1)
+               AND n.source_path IS NOT NULL
+               AND EXISTS (
+                 SELECT 1 FROM entity_mentions m JOIN notes cn ON cn.id = m.note_id
+                 WHERE m.entity_id = e.id AND (cn.origin = 'capture' OR cn.origin IS NULL)
+               )
+             ORDER BY e.name",
+        )?;
+        let v = stmt
+            .query_map(rusqlite::params![vault], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        v
+    };
+    let mut out = Vec::with_capacity(bases.len());
+    for (entity_id, entity_name, home_note_id, source_path, origin) in bases {
+        let captures = {
+            let mut stmt = conn.prepare(
+                "SELECT m.event_date,
+                        COALESCE(NULLIF(m.context, ''), substr(replace(cn.raw_text, char(10), ' '), 1, 160))
+                 FROM entity_mentions m JOIN notes cn ON cn.id = m.note_id
+                 WHERE m.entity_id = ?1 AND (cn.origin = 'capture' OR cn.origin IS NULL)
+                 ORDER BY m.event_date DESC, m.id DESC",
+            )?;
+            let v = stmt
+                .query_map([entity_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            v
+        };
+        out.push(WriteTarget { entity_id, entity_name, home_note_id, source_path, origin, captures });
+    }
+    Ok(out)
+}
+
+/// After a write-back rewrites a brain file, sync the mirror row to the new
+/// content + hash so the next import sees it unchanged (echo suppression).
+pub fn update_brain_note_content(conn: &Connection, note_id: i64, raw_text: &str, hash: &str, now: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE notes SET raw_text = ?1, content_hash = ?2, synced_at = ?3 WHERE id = ?4",
+        rusqlite::params![raw_text, hash, now, note_id],
+    )?;
+    Ok(())
+}
+
 /// The Work-tab graph: a lens over the same KG, scoped to entities a brain vault
 /// touches (optionally one vault) plus the co-mention edges among them that come
 /// from brain notes. Capture-only entities are excluded; people who appear in

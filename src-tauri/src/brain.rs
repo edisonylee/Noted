@@ -317,6 +317,89 @@ pub fn collect_markdown_files(root: &Path) -> Vec<(String, String)> {
     }
 }
 
+// ── Write-back (Phase 2: noted -> Obsidian) ──────────────────────────────────
+// noted only ever writes BETWEEN the managed markers; everything else in the
+// file is hand-owned. The block holds capture mentions of the note's subject —
+// the daily-capture stream feeding the curated brain profile.
+
+/// Render the inner content of a managed region from an entity's capture
+/// mentions (date + curated fact/snippet), newest first.
+pub fn render_managed_block(captures: &[(String, String)]) -> String {
+    let mut s = String::from(
+        "_Captured via noted — auto-generated on sync; edits inside this block are overwritten._\n",
+    );
+    for (date, text) in captures {
+        let one = text.replace('\n', " ");
+        s.push_str(&format!("\n- {date} — {}", one.trim()));
+    }
+    s
+}
+
+/// Return `raw` with the managed region's inner content set to `inner`. Replaces
+/// the span between the markers if present; otherwise appends a fresh fenced
+/// block at the end. Hand-written content outside the markers is never touched.
+pub fn apply_managed(raw: &str, inner: &str) -> String {
+    let block = format!("{MANAGED_BEGIN}\n{}\n{MANAGED_END}", inner.trim());
+    match (raw.find(MANAGED_BEGIN), raw.find(MANAGED_END)) {
+        (Some(bs), Some(es)) if es > bs => {
+            let end = es + MANAGED_END.len();
+            let mut out = String::with_capacity(raw.len());
+            out.push_str(&raw[..bs]);
+            out.push_str(&block);
+            out.push_str(&raw[end..]);
+            out
+        }
+        _ => {
+            let mut out = raw.trim_end().to_string();
+            out.push_str("\n\n");
+            out.push_str(&block);
+            out.push('\n');
+            out
+        }
+    }
+}
+
+/// True if `root` is inside a git work tree.
+pub fn git_is_repo(root: &Path) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Stage exactly `paths` (vault-relative) and commit them with `message`. Commits
+/// ONLY those files, so any unrelated uncommitted edits the user has stay
+/// untouched. Returns the new short sha, or None if nothing was committed.
+pub fn git_commit_paths(root: &Path, paths: &[String], message: &str) -> Option<String> {
+    if paths.is_empty() || !git_is_repo(root) {
+        return None;
+    }
+    let mut add = Command::new("git");
+    add.arg("-C").arg(root).arg("add").arg("--");
+    for p in paths {
+        add.arg(p);
+    }
+    if !add.status().ok()?.success() {
+        return None;
+    }
+    let committed = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["commit", "-m", message, "--"])
+        .args(paths)
+        .output()
+        .ok()?;
+    if !committed.status.success() {
+        return None; // e.g. nothing staged changed
+    }
+    let sha = Command::new("git").arg("-C").arg(root).args(["rev-parse", "--short", "HEAD"]).output().ok()?;
+    let sha = String::from_utf8_lossy(&sha.stdout).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
+}
+
 /// Current git HEAD sha of a vault (recorded as the sync checkpoint). None if the
 /// path isn't a git repo or git is unavailable.
 pub fn git_head(root: &Path) -> Option<String> {
@@ -416,6 +499,41 @@ mod tests {
         let body = format!("hand-written\n{MANAGED_BEGIN}\ncaptured stuff\n{MANAGED_END}\nmore");
         assert_eq!(extract_managed(&body).as_deref(), Some("captured stuff"));
         assert_eq!(extract_managed("no region here"), None);
+    }
+
+    #[test]
+    fn apply_managed_replaces_in_place_and_preserves_handwritten() {
+        let raw = format!(
+            "# Yi\nHand-written profile.\n\n{MANAGED_BEGIN}\nold\n{MANAGED_END}\n\n## Footer kept"
+        );
+        let out = apply_managed(&raw, "new line");
+        assert!(out.contains("Hand-written profile."));
+        assert!(out.contains("## Footer kept"));
+        assert!(out.contains("new line"));
+        assert!(!out.contains("old"));
+        assert_eq!(extract_managed(&out).as_deref(), Some("new line"));
+        // exactly one managed region after a rewrite
+        assert_eq!(out.matches(MANAGED_BEGIN).count(), 1);
+    }
+
+    #[test]
+    fn apply_managed_appends_when_absent() {
+        let out = apply_managed("# Note\nbody", "captured");
+        assert!(out.starts_with("# Note\nbody"));
+        assert_eq!(extract_managed(&out).as_deref(), Some("captured"));
+    }
+
+    #[test]
+    fn render_block_lists_captures_newest_first() {
+        let block = render_managed_block(&[
+            ("2026-06-22".into(), "talked to Yi about feature stores".into()),
+            ("2026-06-20".into(), "lunch".into()),
+        ]);
+        assert!(block.contains("- 2026-06-22 — talked to Yi about feature stores"));
+        assert!(block.contains("- 2026-06-20 — lunch"));
+        // round-trips through apply/extract unchanged
+        let raw = apply_managed("body", &block);
+        assert_eq!(extract_managed(&raw).as_deref(), Some(block.trim()));
     }
 
     #[test]

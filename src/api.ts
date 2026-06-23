@@ -108,6 +108,19 @@ export type BrainSyncReport = {
   mentions_added: number;
   errors: string[];
 };
+// One brain note write-back would change (managed region: before -> after).
+export type BrainWritePreview = {
+  vault: string;
+  path: string;
+  entity: string;
+  before: string | null;
+  after: string;
+};
+export type BrainWriteReport = {
+  files_written: number;
+  commits: { vault: string; sha: string; files: number }[];
+  errors: string[];
+};
 export type EntityMention = { note_id: number; event_date: string; snippet: string };
 
 // A dated, curated fact about a person, drawn from one note mention.
@@ -331,4 +344,7 @@ export const api = {
   brainSync: (vault?: string) => invoke<BrainSyncReport[]>("brain_sync", { vault }),
   // The Work-tab graph — entities a brain vault touches; omit `vault` for all.
   workGraph: (vault?: string) => invoke<GraphData>("work_graph", { vault }),
+  // Write-back (noted -> Obsidian). Preview is a dry run; writeBack commits.
+  brainWritePreview: (vault?: string) => invoke<BrainWritePreview[]>("brain_write_preview", { vault }),
+  brainWriteBack: (vault?: string) => invoke<BrainWriteReport>("brain_write_back", { vault }),
 };

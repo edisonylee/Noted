@@ -12,9 +12,17 @@ function cssVar(name: string, fallback: string) {
 export function SelfView({
   theme,
   onOpenEntity,
+  // The graph source defaults to the full entity graph; the Work lens passes a
+  // vault-scoped loader. Remount (via `key`) to reload when the source changes.
+  fetchGraph,
+  emptyTitle = "Your graph is empty",
+  emptyBody = "It grows as you log people, places, foods and activities. Capture a few notes through the app and watch yourself take shape.",
 }: {
   theme: string;
   onOpenEntity?: (id: number) => void;
+  fetchGraph?: () => Promise<GraphData>;
+  emptyTitle?: string;
+  emptyBody?: string;
 }) {
   const [data, setData] = useState<GraphData | null>(null);
   const [hover, setHover] = useState<number | null>(null);
@@ -25,7 +33,8 @@ export function SelfView({
   const [size, setSize] = useState({ w: 800, h: 600 });
 
   useEffect(() => {
-    api.entityGraph().then(setData).catch(() => setData({ nodes: [], edges: [] }));
+    (fetchGraph ?? api.entityGraph)().then(setData).catch(() => setData({ nodes: [], edges: [] }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -80,11 +89,8 @@ export function SelfView({
       <div className="self-graph" ref={wrapRef}>
         {empty ? (
           <div className="self-empty">
-            <h2>Your graph is empty</h2>
-            <p>
-              It grows as you log people, places, foods and activities. Capture a few notes through the
-              app and watch yourself take shape.
-            </p>
+            <h2>{emptyTitle}</h2>
+            <p>{emptyBody}</p>
           </div>
         ) : data ? (
           <ForceGraph2D

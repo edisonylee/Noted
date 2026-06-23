@@ -1306,6 +1306,19 @@ async fn brain_sync(app: tauri::AppHandle, vault: Option<String>) -> Result<Valu
     serde_json::to_value(reports).map_err(|e| e.to_string())
 }
 
+/// The Work-tab graph: entities a brain vault touches + their brain co-mention
+/// edges. `vault` = None for all vaults combined.
+#[tauri::command]
+async fn work_graph(app: tauri::AppHandle, vault: Option<String>) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let (nodes, edges) = db::work_graph(&conn, vault.as_deref()).map_err(|e| e.to_string())?;
+    Ok(json!({
+        "nodes": serde_json::to_value(nodes).map_err(|e| e.to_string())?,
+        "edges": serde_json::to_value(edges).map_err(|e| e.to_string())?,
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // App setup
 // ---------------------------------------------------------------------------
@@ -1654,6 +1667,7 @@ pub fn run() {
             brain_add_vault,
             brain_remove_vault,
             brain_sync,
+            work_graph,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

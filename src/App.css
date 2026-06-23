@@ -1039,3 +1039,12 @@ textarea.json.bad { border-color: var(--bad); }
   z-index: 60;
 }
 .chat-panel.chat-sheet .chat-input-row { padding-bottom: calc(env(safe-area-inset-bottom) + 10px); }
+
+/* Work lens (imported brain vaults) — a scoped view over the same graph. */
+.work { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.work-vault-tabs { align-items: center; }
+.work-vault-tabs .kn-tab { text-transform: capitalize; }
+.work-sync { margin-left: auto; }
+.work-status { color: var(--muted); font-size: 12px; margin: -10px 0 12px; }
+.work-decisions { margin-top: 20px; }
+.work-decisions-title { font-size: 13px; font-weight: 560; color: var(--muted); margin: 0 0 8px; text-transform: capitalize; }

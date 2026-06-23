@@ -83,10 +83,31 @@ export type EntityCandidate = {
 // A stored entity node (for the graph view / management).
 export type EntityRow = { id: number; name: string; type: string; mention_count: number };
 
-// Knowledge-graph ("Self" view) shapes.
-export type GraphNode = { id: number; name: string; type: string; mention_count: number };
+// Knowledge-graph ("Self" view) shapes. Work-graph nodes also carry `vault`.
+export type GraphNode = { id: number; name: string; type: string; mention_count: number; vault?: string };
 export type GraphEdge = { source: number; target: number; weight: number };
 export type GraphData = { nodes: GraphNode[]; edges: GraphEdge[] };
+
+// A registered Obsidian "brain" vault mirrored into the KG, with live counts.
+export type BrainVaultStatus = {
+  vault: string;
+  root_path: string;
+  direction: string;
+  last_git_sha: string | null;
+  last_synced_at: string | null;
+  enabled: boolean;
+  note_count: number;
+  entity_count: number;
+};
+export type BrainSyncReport = {
+  vault: string;
+  scanned: number;
+  imported: number;
+  unchanged: number;
+  entities_created: number;
+  mentions_added: number;
+  errors: string[];
+};
 export type EntityMention = { note_id: number; event_date: string; snippet: string };
 
 // A dated, curated fact about a person, drawn from one note mention.
@@ -302,4 +323,12 @@ export const api = {
   gcalClearDay: (eventDate?: string) => invoke<number>("gcal_clear_day", { eventDate }),
   gcalSync: (eventDate?: string) => invoke<SyncReport>("gcal_sync", { eventDate }),
   gcalListEvents: (eventDate?: string) => invoke<CalEvent[]>("gcal_list_events", { eventDate }),
+  // Brain-vault sync (Obsidian ↔ noted). camelCase arg keys (Tauri → snake_case).
+  brainListVaults: () => invoke<BrainVaultStatus[]>("brain_list_vaults"),
+  brainAddVault: (path: string, direction?: string) =>
+    invoke<BrainVaultStatus[]>("brain_add_vault", { path, direction }),
+  brainRemoveVault: (vault: string) => invoke<void>("brain_remove_vault", { vault }),
+  brainSync: (vault?: string) => invoke<BrainSyncReport[]>("brain_sync", { vault }),
+  // The Work-tab graph — entities a brain vault touches; omit `vault` for all.
+  workGraph: (vault?: string) => invoke<GraphData>("work_graph", { vault }),
 };

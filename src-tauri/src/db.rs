@@ -1407,3 +1407,63 @@ pub fn set_entity_home(conn: &Connection, entity_id: i64, note_id: i64) -> Resul
     )?;
     Ok(())
 }
+
+/// A node in the Work graph — an entity touched by a brain vault, tagged with the
+/// vault that defines it (its home note's vault).
+#[derive(Serialize)]
+pub struct WorkNode {
+    pub id: i64,
+    pub name: String,
+    pub r#type: String,
+    pub mention_count: i64,
+    pub vault: String, // defining vault ("" if the entity has no brain home)
+}
+
+/// The Work-tab graph: a lens over the same KG, scoped to entities a brain vault
+/// touches (optionally one vault) plus the co-mention edges among them that come
+/// from brain notes. Capture-only entities are excluded; people who appear in
+/// both a brain and daily captures are included (they carry a brain mention).
+pub fn work_graph(conn: &Connection, vault: Option<&str>) -> Result<(Vec<WorkNode>, Vec<GraphEdge>)> {
+    let nodes = {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT e.id, e.name, e.type, e.mention_count,
+                    COALESCE((SELECT substr(n2.origin, 7) FROM notes n2 WHERE n2.id = e.home_note_id), '') AS vault
+             FROM entities e
+             JOIN entity_mentions m ON m.entity_id = e.id
+             JOIN notes n ON n.id = m.note_id
+             WHERE n.origin LIKE 'brain:%'
+               AND (?1 IS NULL OR n.origin = 'brain:' || ?1)
+             ORDER BY e.mention_count DESC, e.name",
+        )?;
+        let v = stmt
+            .query_map(rusqlite::params![vault], |r| {
+                Ok(WorkNode {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    r#type: r.get(2)?,
+                    mention_count: r.get(3)?,
+                    vault: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        v
+    };
+    let edges = {
+        let mut stmt = conn.prepare(
+            "SELECT a.entity_id, b.entity_id, COUNT(DISTINCT a.note_id) AS w
+             FROM entity_mentions a
+             JOIN entity_mentions b ON a.note_id = b.note_id AND a.entity_id < b.entity_id
+             JOIN notes n ON n.id = a.note_id
+             WHERE n.origin LIKE 'brain:%'
+               AND (?1 IS NULL OR n.origin = 'brain:' || ?1)
+             GROUP BY a.entity_id, b.entity_id",
+        )?;
+        let v = stmt
+            .query_map(rusqlite::params![vault], |r| {
+                Ok(GraphEdge { source: r.get(0)?, target: r.get(1)?, weight: r.get(2)? })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        v
+    };
+    Ok((nodes, edges))
+}

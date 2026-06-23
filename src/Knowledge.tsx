@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
-import { Users, Network, Search } from "lucide-react";
+import { Users, Network, Briefcase, Search } from "lucide-react";
 import { PeopleView } from "./PeopleView";
 import { SelfView } from "./Self";
+import { WorkView } from "./Work";
 import { EntityPage } from "./EntityPage";
 import { api, type EntityRow, type NoteRow, type PersonProfile } from "./api";
 import { colorForType } from "./entityColors";
 
-// "Knowledge" groups the two "what noted knows about me" surfaces — People and
-// the Self entity graph — behind one destination with a section toggle, plus a
-// search bar and a per-entity page reachable from anywhere.
-type Section = "people" | "self";
+// "Knowledge" groups the "what noted knows" surfaces — People, the Self entity
+// graph, and the Work lens over imported brain vaults — behind one destination
+// with a section toggle, plus a search bar and a per-entity page reachable from
+// anywhere.
+type Section = "people" | "self" | "work";
 
-const TYPES = ["person", "place", "activity", "food", "item", "org", "topic"];
+const TYPES = ["person", "place", "activity", "food", "item", "org", "topic", "project", "decision", "reference", "doc"];
 
 export function KnowledgeView({ theme, notes }: { theme: string; notes: NoteRow[] }) {
   const [section, setSection] = useState<Section>("people");
@@ -125,11 +127,19 @@ export function KnowledgeView({ theme, notes }: { theme: string; notes: NoteRow[
             >
               <Network size={15} /> Self
             </button>
+            <button
+              className={"kn-tab" + (section === "work" ? " on" : "")}
+              onClick={() => setSection("work")}
+            >
+              <Briefcase size={15} /> Work
+            </button>
           </div>
           {section === "people" ? (
             <PeopleView onOpenPerson={setSelectedEntityId} />
-          ) : (
+          ) : section === "self" ? (
             <SelfView theme={theme} onOpenEntity={setSelectedEntityId} />
+          ) : (
+            <WorkView theme={theme} onOpenEntity={setSelectedEntityId} />
           )}
         </>
       )}

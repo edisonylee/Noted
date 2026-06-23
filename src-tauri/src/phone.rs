@@ -313,6 +313,7 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "brain_add_vault" => crate::brain_add_vault(a, sarg(b, "path"), oarg(b, "direction")).await,
         "brain_remove_vault" => crate::brain_remove_vault(a, sarg(b, "vault")).await.map(|_| Value::Null),
         "brain_sync" => crate::brain_sync(a, oarg(b, "vault")).await,
+        "work_graph" => crate::work_graph(a, oarg(b, "vault")).await,
         other => Err(format!("unknown command: {other}")),
     }
 }

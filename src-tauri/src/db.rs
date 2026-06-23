@@ -462,6 +462,42 @@ pub fn recent_entries(conn: &Connection, limit: i64) -> Result<Vec<SearchHit>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Semantic search restricted to a single origin (e.g. 'brain:baro') — backs
+/// vault-scoped chat. Pulls a wide KNN candidate pool, then filters to the
+/// origin and ranks. (Fine at personal-KB scale; widen the pool if it grows.)
+pub fn search_notes_scoped(conn: &Connection, qvec: &[f32], k: i64, origin: &str) -> Result<Vec<SearchHit>> {
+    let json = serde_json::to_string(qvec)?;
+    let mut stmt = conn.prepare(
+        "SELECT e.note_id, e.distance, pc.name,
+                COALESCE(MAX(en.event_date), date(n.created_at)), n.raw_text,
+                json_group_array(json(en.data_json)) AS data, n.origin
+         FROM (
+            SELECT note_id, distance FROM embeddings
+            WHERE embedding MATCH ?1 ORDER BY distance LIMIT 200
+         ) e
+         JOIN notes n ON n.id = e.note_id
+         LEFT JOIN categories pc ON pc.id = n.category_id
+         LEFT JOIN entries en ON en.note_id = n.id
+         WHERE n.origin = ?3
+         GROUP BY e.note_id
+         ORDER BY e.distance
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![json, k, origin], |r| {
+        let data_str: Option<String> = r.get(5)?;
+        Ok(SearchHit {
+            note_id: r.get(0)?,
+            distance: r.get(1)?,
+            category: r.get(2)?,
+            event_date: r.get(3)?,
+            raw_text: r.get(4)?,
+            data: data_str.and_then(|s| serde_json::from_str(&s).ok()),
+            origin: r.get(6)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 pub fn search_notes(conn: &Connection, qvec: &[f32], k: i64) -> Result<Vec<SearchHit>> {
     let json = serde_json::to_string(qvec)?;
     let mut stmt = conn.prepare(

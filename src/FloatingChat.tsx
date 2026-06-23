@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowUp, Check, Mic, Sparkles, Square, Volume2, VolumeX, X } from "lucide-react";
-import { api, isDesktop, type AskSource, type ChatProposal } from "./api";
+import { api, isDesktop, type AskSource, type BrainVaultStatus, type ChatProposal } from "./api";
 import { startRecording, type Recorder } from "./audio";
 import { DataView } from "./DataView";
 
@@ -32,11 +32,15 @@ export function FloatingChat({
   const [muted, setMuted] = useState(false);
   const [recording, setRecording] = useState(false);
   const [voiceReady, setVoiceReady] = useState(false);
+  // Ask scope: "all" (everything) or a brain vault name (answers from that brain only).
+  const [scope, setScope] = useState("all");
+  const [vaults, setVaults] = useState<BrainVaultStatus[]>([]);
   const recorderRef = useRef<Recorder | null>(null);
   const threadRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     api.voiceStatus().then((s) => setVoiceReady(s.ready)).catch(() => {});
+    api.brainListVaults().then(setVaults).catch(() => {});
   }, []);
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" });
@@ -61,7 +65,7 @@ export function FloatingChat({
     setMessages((p) => [...p, { role: "user", content: q }]);
     setAsking(true);
     try {
-      const res = await api.chat(q, history);
+      const res = await api.chat(q, history, scope === "all" ? undefined : scope);
       if (res.kind === "proposal") {
         setMessages((p) => [
           ...p,
@@ -162,6 +166,21 @@ export function FloatingChat({
         <span className="title">
           Assistant<span className="sub">your log, answered</span>
         </span>
+        {vaults.length > 0 && (
+          <select
+            className="chat-scope"
+            value={scope}
+            onChange={(e) => setScope(e.target.value)}
+            title="Limit answers to one knowledge base"
+          >
+            <option value="all">All</option>
+            {vaults.map((v) => (
+              <option key={v.vault} value={v.vault}>
+                {v.vault}
+              </option>
+            ))}
+          </select>
+        )}
         <div className="tools">
           {isDesktop && (
             <button className="icon-btn" onClick={toggleMute} title={muted ? "Unmute" : "Mute voice"}>

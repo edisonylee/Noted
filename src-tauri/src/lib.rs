@@ -610,6 +610,7 @@ async fn chat(
     app: tauri::AppHandle,
     question: String,
     history: Vec<ChatMsg>,
+    scope: Option<String>,
 ) -> Result<Value, String> {
     use std::collections::{HashMap, HashSet};
     let state = app.state::<Db>();
@@ -617,6 +618,49 @@ async fn chat(
         return Err("empty question".into());
     }
     let qv = normalize(ollama::embed(&question).await.map_err(|e| e.to_string())?);
+
+    // Vault-scoped ask: restrict retrieval to ONE brain so answers about specific
+    // work don't bleed across vaults. Read-only (no edit/create routing).
+    if let Some(vault) = scope.as_deref().map(str::trim).filter(|s| !s.is_empty() && *s != "all") {
+        let origin = format!("brain:{vault}");
+        let hits = {
+            let conn = state.0.lock().unwrap();
+            db::search_notes_scoped(&conn, &qv, 12, &origin).map_err(|e| e.to_string())?
+        };
+        if hits.is_empty() {
+            return Ok(json!({
+                "kind": "answer",
+                "answer": format!("I don't have anything about that in your {vault} brain."),
+                "sources": [],
+            }));
+        }
+        let sources: Vec<Value> = hits
+            .iter()
+            .take(6)
+            .map(|h| {
+                json!({
+                    "note_id": h.note_id,
+                    "category": vault,
+                    "event_date": h.event_date,
+                    "snippet": note_snippet(&h.raw_text),
+                })
+            })
+            .collect();
+        let context = pipeline::qa_context(&hits);
+        let mut messages = vec![json!({ "role": "system", "content": pipeline::qa_system(&today_local()) })];
+        for m in &history {
+            let role = if m.role == "assistant" { "assistant" } else { "user" };
+            messages.push(json!({ "role": role, "content": m.content }));
+        }
+        messages.push(json!({
+            "role": "user",
+            "content": format!("Entries (from the {vault} knowledge base only):\n{context}\nQuestion: {question}")
+        }));
+        let answer = ollama::chat_messages(ollama::TEXT_MODEL, messages, 0.2)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(json!({ "kind": "answer", "answer": answer.trim(), "sources": sources }));
+    }
 
     // Two retrieval sets: recent-by-date (recency questions) and semantic
     // (relevance — this is what surfaces brain/reference notes). Context is

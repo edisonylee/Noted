@@ -287,8 +287,9 @@ export const api = {
   listPeople: () => invoke<PersonProfile[]>("list_people"),
   listNotes: () => invoke<NoteRow[]>("list_notes"),
   listCategories: () => invoke<CategoryInfo[]>("list_categories"),
-  chat: (question: string, history: { role: string; content: string }[]) =>
-    invoke<AskResult>("chat", { question, history }),
+  // `scope` (a brain vault name) restricts retrieval to that vault; omit for all.
+  chat: (question: string, history: { role: string; content: string }[], scope?: string) =>
+    invoke<AskResult>("chat", { question, history, scope }),
   createCategory: (name: string, description: string) =>
     invoke<number>("create_category", { name, description }),
   updateEntry: (entryId: number, data: Record<string, unknown>) =>

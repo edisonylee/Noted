@@ -253,7 +253,7 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "chat" => {
             let history: Vec<crate::ChatMsg> =
                 serde_json::from_value(varg(b, "history")).unwrap_or_default();
-            crate::chat(a, sarg(b, "question"), history).await
+            crate::chat(a, sarg(b, "question"), history, oarg(b, "scope")).await
         }
         "create_category" => {
             crate::create_category(a, sarg(b, "name"), sarg(b, "description")).await.map(|n| json!(n))

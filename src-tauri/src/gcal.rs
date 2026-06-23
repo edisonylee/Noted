@@ -60,7 +60,7 @@ pub struct GcalConfig {
     #[serde(default)]
     pub calendar_id: Option<String>, // the dedicated "noted" calendar, set on bootstrap
     #[serde(default)]
-    pub account_email: Option<String>, // display only (currently unused)
+    pub account_email: Option<String>, // display only; the connected account's email
     // Loaded from the Keychain / minted at runtime; never serialized to JSON.
     #[serde(skip)]
     pub client_secret: Option<String>,
@@ -179,6 +179,7 @@ fn clear_tokens(dir: &Path) {
         c.refresh_token = None;
         c.access_token = None;
         c.access_expires_at = None;
+        c.account_email = None; // so a stale email never lingers after disconnect
     }
     write_config_file(dir);
 }
@@ -457,11 +458,17 @@ pub async fn begin_auth(dir: &Path) -> Result<Value> {
     })?;
 
     keychain_write(ACCT_REFRESH, &refresh)?;
+    let access = tokens.access_token;
     {
         let mut c = cell().write().unwrap();
         c.refresh_token = Some(refresh);
-        c.access_token = Some(tokens.access_token);
+        c.access_token = Some(access.clone());
         c.access_expires_at = Some(now_unix() + tokens.expires_in.unwrap_or(3600) - 60);
+    }
+    // Record which account just connected (the primary calendar's id is its
+    // email) so Settings can show it. Best-effort — never fails the connect.
+    if let Some(email) = fetch_account_email(&http_client()?, &access).await {
+        cell().write().unwrap().account_email = Some(email);
     }
     write_config_file(dir);
     Ok(auth_status())
@@ -523,6 +530,29 @@ async fn refresh(dir: &Path) -> Result<String> {
         c.access_expires_at = Some(now_unix() + t.expires_in.unwrap_or(3600) - 60);
     }
     Ok(access)
+}
+
+/// The connected account's email — the id of the `primary` calendar in the
+/// account's calendar list. Best-effort: returns None on any failure, since
+/// it's a display-only nicety and not worth failing the connect over. Uses only
+/// the calendar scope we already hold (no userinfo/email scope needed).
+async fn fetch_account_email(client: &reqwest::Client, token: &str) -> Option<String> {
+    let resp = client
+        .get(format!("{CAL_BASE}/users/me/calendarList"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: Value = resp.json().await.ok()?;
+    v.get("items")?
+        .as_array()?
+        .iter()
+        .find(|c| c.get("primary").and_then(|p| p.as_bool()).unwrap_or(false))
+        .and_then(|c| c.get("id").and_then(|s| s.as_str()))
+        .map(String::from)
 }
 
 // ── Calendar bootstrap ──────────────────────────────────────────────────────

@@ -231,7 +231,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           <div className={"conn-status " + (gcal?.connected ? "ok" : "idle")}>
             {gcal?.connected ? <CalendarCheck size={13} /> : <CalendarX size={13} />}
             <span className="conn-label">
-              {gcal?.connected ? "Connected to Google Calendar" : "Not connected"}
+              {gcal?.connected
+                ? gcal.account_email
+                  ? `Connected as ${gcal.account_email}`
+                  : "Connected to Google Calendar"
+                : "Not connected"}
             </span>
           </div>
           {gcalMsg && (

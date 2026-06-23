@@ -18,7 +18,9 @@ use crate::ollama;
 /// System prompt for the conversational Q&A assistant.
 pub fn qa_system(today: &str) -> String {
     format!(
-        "You are the user's personal assistant, answering questions about their own life log. \
+        "You are the user's personal assistant, answering questions about their own life log AND \
+their reference knowledge — notes, people, projects, and decisions imported from their knowledge \
+base (\"brain\"). \
 Today is {today}. You are given the user's recent and most-relevant entries, each tagged with its \
 DATE (YYYY-MM-DD) and CATEGORY. Answer using ONLY these entries.\n\
 - Resolve relative dates yourself: \"yesterday\" is the day before today; \"last workout\" is the \
@@ -36,11 +38,17 @@ pub fn qa_context(hits: &[SearchHit]) -> String {
     let mut s = String::new();
     for h in hits {
         let data = h.data.as_ref().map(|d| format!(" | {d}")).unwrap_or_default();
+        // Cap each note's text so a long imported brain note can't crowd the
+        // context window; captures are short so this rarely touches them.
+        let mut text = h.raw_text.replace('\n', " ");
+        if text.chars().count() > 1200 {
+            text = text.chars().take(1200).collect::<String>() + "…";
+        }
         s.push_str(&format!(
             "- {} [{}]: {}{}\n",
             h.event_date,
             h.category.as_deref().unwrap_or("uncategorized"),
-            h.raw_text.replace('\n', " "),
+            text,
             data
         ));
     }

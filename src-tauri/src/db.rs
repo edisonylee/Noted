@@ -312,7 +312,6 @@ pub fn notes_missing_embeddings(conn: &Connection) -> Result<Vec<(i64, String)>>
          LEFT JOIN entries e ON e.note_id = n.id
          LEFT JOIN categories c ON c.id = e.category_id
          WHERE n.id NOT IN (SELECT note_id FROM embeddings)
-           AND (n.origin = 'capture' OR n.origin IS NULL)
          GROUP BY n.id",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -431,6 +430,7 @@ pub struct SearchHit {
     pub event_date: String,
     pub raw_text: String,
     pub data: Option<Value>,
+    pub origin: Option<String>, // 'capture' | 'brain:<vault>' — for source provenance
 }
 
 /// Most-recent entries by event date — complements semantic search so the Q&A
@@ -438,7 +438,7 @@ pub struct SearchHit {
 pub fn recent_entries(conn: &Connection, limit: i64) -> Result<Vec<SearchHit>> {
     let mut stmt = conn.prepare(
         "SELECT n.id, COALESCE(MAX(e.event_date), date(n.created_at)) AS d, pc.name, n.raw_text,
-                json_group_array(json(e.data_json)) AS data
+                json_group_array(json(e.data_json)) AS data, n.origin
          FROM notes n
          LEFT JOIN categories pc ON pc.id = n.category_id
          LEFT JOIN entries e ON e.note_id = n.id
@@ -456,6 +456,7 @@ pub fn recent_entries(conn: &Connection, limit: i64) -> Result<Vec<SearchHit>> {
             category: r.get(2)?,
             raw_text: r.get(3)?,
             data: data_str.and_then(|s| serde_json::from_str(&s).ok()),
+            origin: r.get(5)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -466,7 +467,7 @@ pub fn search_notes(conn: &Connection, qvec: &[f32], k: i64) -> Result<Vec<Searc
     let mut stmt = conn.prepare(
         "SELECT e.note_id, e.distance, pc.name,
                 COALESCE(MAX(en.event_date), date(n.created_at)), n.raw_text,
-                json_group_array(json(en.data_json)) AS data
+                json_group_array(json(en.data_json)) AS data, n.origin
          FROM (
             SELECT note_id, distance FROM embeddings
             WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2
@@ -486,6 +487,7 @@ pub fn search_notes(conn: &Connection, qvec: &[f32], k: i64) -> Result<Vec<Searc
             event_date: r.get(3)?,
             raw_text: r.get(4)?,
             data: data_str.and_then(|s| serde_json::from_str(&s).ok()),
+            origin: r.get(6)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

@@ -300,6 +300,17 @@ async fn save_entry(app: tauri::AppHandle, args: SaveArgs) -> Result<i64, String
     Ok(note_id)
 }
 
+/// A short source snippet for the chat sources list. For an imported brain note
+/// the text starts with a YAML frontmatter block — skip it so the snippet shows
+/// real content, not `---\nname: …`.
+fn note_snippet(raw: &str) -> String {
+    let body = match raw.strip_prefix("---\n") {
+        Some(rest) => rest.split_once("\n---").map(|(_, b)| b).unwrap_or(rest),
+        None => raw,
+    };
+    body.replace('\n', " ").trim().chars().take(140).collect()
+}
+
 /// A resolved entity to attach to a note: a name + type, plus optional curated
 /// person details. Shared by the save path and the backfill command.
 struct EntityCandidate {
@@ -607,11 +618,36 @@ async fn chat(
     }
     let qv = normalize(ollama::embed(&question).await.map_err(|e| e.to_string())?);
 
-    // recent-by-date ∪ semantic, deduped by note_id (recent first).
-    let hits = {
+    // Two retrieval sets: recent-by-date (recency questions) and semantic
+    // (relevance — this is what surfaces brain/reference notes). Context is
+    // recent-first; the SOURCES we attribute are relevance-first, so the note
+    // that actually answered (often a brain note) is credited, not the latest
+    // bagel.
+    let (hits, sources) = {
         let conn = state.0.lock().unwrap();
         let recent = db::recent_entries(&conn, 15).map_err(|e| e.to_string())?;
         let semantic = db::search_notes(&conn, &qv, 8).map_err(|e| e.to_string())?;
+        let mut src_seen = HashSet::new();
+        let sources: Vec<Value> = semantic
+            .iter()
+            .chain(recent.iter())
+            .filter(|h| src_seen.insert(h.note_id))
+            .take(6)
+            .map(|h| {
+                // Label brain notes by their vault ("baro"/"profound") for clear
+                // provenance; capture notes keep their category.
+                let label = match h.origin.as_deref() {
+                    Some(o) if o.starts_with("brain:") => Some(o.trim_start_matches("brain:").to_string()),
+                    _ => h.category.clone(),
+                };
+                json!({
+                    "note_id": h.note_id,
+                    "category": label,
+                    "event_date": h.event_date,
+                    "snippet": note_snippet(&h.raw_text),
+                })
+            })
+            .collect();
         let mut seen = HashSet::new();
         let mut hits = Vec::new();
         for h in recent.into_iter().chain(semantic.into_iter()) {
@@ -619,7 +655,7 @@ async fn chat(
                 hits.push(h);
             }
         }
-        hits
+        (hits, sources)
     };
     if hits.is_empty() {
         return Ok(json!({
@@ -649,20 +685,6 @@ async fn chat(
             .collect();
         (ctx, ids, cur, known)
     };
-
-    // sources block for the answer path
-    let sources: Vec<Value> = hits
-        .iter()
-        .take(6)
-        .map(|h| {
-            json!({
-                "note_id": h.note_id,
-                "category": h.category,
-                "event_date": h.event_date,
-                "snippet": h.raw_text.chars().take(140).collect::<String>(),
-            })
-        })
-        .collect();
 
     // 1) Route the message: answer | create_category | edit_entry.
     let mut convo = String::new();
@@ -836,24 +858,32 @@ fn stop_speaking() {
 
 /// Backfill embeddings for any notes that don't have one (e.g. saved while the
 /// embed model was unavailable). Returns how many were indexed.
-#[tauri::command]
-async fn reindex(app: tauri::AppHandle) -> Result<i64, String> {
-    let state = app.state::<Db>();
+/// Embed every note lacking an embedding (captures AND imported brain notes), so
+/// semantic search / chat can retrieve them. Best-effort, idempotent. Shared by
+/// the `reindex` command and the post-sync / periodic background passes.
+async fn embed_missing(app: &tauri::AppHandle) -> i64 {
     let todo = {
+        let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
-        db::notes_missing_embeddings(&conn).map_err(|e| e.to_string())?
+        db::notes_missing_embeddings(&conn).unwrap_or_default()
     };
     let mut n = 0;
     for (id, text) in todo {
         if let Ok(v) = ollama::embed(&text).await {
             let v = normalize(v);
+            let state = app.state::<Db>();
             let conn = state.0.lock().unwrap();
             if db::insert_embedding(&conn, id, &v).is_ok() {
                 n += 1;
             }
         }
     }
-    Ok(n)
+    n
+}
+
+#[tauri::command]
+async fn reindex(app: tauri::AppHandle) -> Result<i64, String> {
+    Ok(embed_missing(&app).await)
 }
 
 /// Backfill people from past notes: re-derive person entities from every entry's
@@ -1815,6 +1845,23 @@ pub fn run() {
                         if r.errors.is_empty() { String::new() } else { format!(", {} errors", r.errors.len()) },
                     );
                 }
+                // Embed any notes (incl. freshly imported brain notes) so chat /
+                // semantic search can answer questions about them.
+                let n = embed_missing(&hb).await;
+                if n > 0 {
+                    println!("[noted] embedded {n} note(s) for search");
+                }
+            });
+            // Keep the brain current automatically: re-import + re-embed every 10
+            // minutes (read-only; write-back/export stay manual + confirmed).
+            let hbp = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(600));
+                let h = hbp.clone();
+                tauri::async_runtime::spawn(async move {
+                    sync_all_brains(&h).await;
+                    embed_missing(&h).await;
+                });
             });
 
             // Phone capture: tiny LAN upload server gated by a random token.

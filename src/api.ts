@@ -347,4 +347,7 @@ export const api = {
   // Write-back (noted -> Obsidian). Preview is a dry run; writeBack commits.
   brainWritePreview: (vault?: string) => invoke<BrainWritePreview[]>("brain_write_preview", { vault }),
   brainWriteBack: (vault?: string) => invoke<BrainWriteReport>("brain_write_back", { vault }),
+  // Personal-brain export (noted -> ~/Brain/personal). Preview is a dry run.
+  personalExportPreview: () => invoke<BrainWritePreview[]>("personal_export_preview"),
+  personalExport: () => invoke<BrainWriteReport>("personal_export"),
 };

@@ -19,11 +19,14 @@ export function WorkView({ theme, onOpenEntity }: { theme: string; onOpenEntity?
   const [graph, setGraph] = useState<GraphData | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
-  // Write-back (noted -> Obsidian): preview is a dry run; null = panel closed.
+  // Write-back / export: preview is a dry run; null = panel closed. `mode`
+  // distinguishes push-to-brain (work vaults) from export (personal vault).
   const [preview, setPreview] = useState<BrainWritePreview[] | null>(null);
+  const [previewMode, setPreviewMode] = useState<"push" | "export">("push");
   const [previewing, setPreviewing] = useState(false);
   const [writing, setWriting] = useState(false);
   const [writeMsg, setWriteMsg] = useState<string | null>(null);
+  const isPersonal = vault === "personal";
 
   function loadVaults() {
     api.brainListVaults().then(setVaults).catch(() => {});
@@ -54,11 +57,14 @@ export function WorkView({ theme, onOpenEntity }: { theme: string; onOpenEntity?
     }
   }
 
-  async function openPreview() {
+  async function openPreview(mode: "push" | "export") {
+    setPreviewMode(mode);
     setPreviewing(true);
     setWriteMsg(null);
     try {
-      setPreview(await api.brainWritePreview(vault ?? undefined));
+      setPreview(
+        mode === "export" ? await api.personalExportPreview() : await api.brainWritePreview(vault ?? undefined)
+      );
     } catch (e) {
       setWriteMsg(String(e));
     } finally {
@@ -69,7 +75,8 @@ export function WorkView({ theme, onOpenEntity }: { theme: string; onOpenEntity?
   async function confirmWrite() {
     setWriting(true);
     try {
-      const r: BrainWriteReport = await api.brainWriteBack(vault ?? undefined);
+      const r: BrainWriteReport =
+        previewMode === "export" ? await api.personalExport() : await api.brainWriteBack(vault ?? undefined);
       const commits = r.commits.map((c) => `${c.vault}@${c.sha}`).join(", ");
       setWriteMsg(
         r.files_written === 0
@@ -125,11 +132,16 @@ export function WorkView({ theme, onOpenEntity }: { theme: string; onOpenEntity?
         </button>
         <button
           className="ghost-btn"
-          onClick={openPreview}
+          onClick={() => openPreview(isPersonal ? "export" : "push")}
           disabled={previewing}
-          title="Preview what noted would write back into your Obsidian vault"
+          title={
+            isPersonal
+              ? "Preview the person notes noted would write into your personal vault"
+              : "Preview what noted would write back into your Obsidian vault"
+          }
         >
-          <UploadCloud size={14} /> {previewing ? "Checking…" : "Push to brain…"}
+          <UploadCloud size={14} />{" "}
+          {previewing ? "Checking…" : isPersonal ? "Export to personal…" : "Push to brain…"}
         </button>
       </div>
 
@@ -140,8 +152,9 @@ export function WorkView({ theme, onOpenEntity }: { theme: string; onOpenEntity?
           {preview.length === 0 ? (
             <>
               <p className="muted small">
-                Nothing to push — no captures mention these notes yet. As you log notes that mention
-                people or topics from your brain, they'll show up here to write back.
+                {previewMode === "export"
+                  ? "Nothing to export yet — no capture-only people seen often enough. As you log notes naming the same person a few times, they'll appear here to write into your personal vault."
+                  : "Nothing to push — no captures mention these notes yet. As you log notes that mention people or topics from your brain, they'll show up here to write back."}
               </p>
               <button className="ghost-btn" onClick={() => setPreview(null)}>
                 Close
@@ -150,9 +163,11 @@ export function WorkView({ theme, onOpenEntity }: { theme: string; onOpenEntity?
           ) : (
             <>
               <div className="work-preview-head">
-                <strong>{preview.length}</strong> note{preview.length === 1 ? "" : "s"} would get an
-                updated <code>noted</code> block (your hand-written text is untouched; each write is a
-                git commit you can revert):
+                <strong>{preview.length}</strong>{" "}
+                {previewMode === "export" ? "person note" : "note"}
+                {preview.length === 1 ? "" : "s"} would be{" "}
+                {previewMode === "export" ? "written to your personal vault" : "updated"} (hand-written
+                text is untouched; each write is a git commit you can revert):
               </div>
               <div className="work-preview-list">
                 {preview.map((p) => (

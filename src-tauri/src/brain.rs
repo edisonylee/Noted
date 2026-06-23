@@ -359,6 +359,43 @@ pub fn apply_managed(raw: &str, inner: &str) -> String {
     }
 }
 
+/// Kebab a display name into a filename slug ("Brian Cho" -> "brian-cho").
+pub fn slugify(name: &str) -> String {
+    let mut s = String::new();
+    let mut prev_dash = false;
+    for c in name.trim().to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            s.push(c);
+            prev_dash = false;
+        } else if !prev_dash && !s.is_empty() {
+            s.push('-');
+            prev_dash = true;
+        }
+    }
+    s.trim_matches('-').to_string()
+}
+
+/// A fresh personal-vault person note: frontmatter + heading + the managed
+/// region holding their captured mentions. Used by export when the file doesn't
+/// exist yet; existing files only get their managed region updated.
+pub fn render_new_person_file(
+    name: &str,
+    slug: &str,
+    relationship: Option<&str>,
+    today: &str,
+    inner: &str,
+) -> String {
+    let rel = relationship
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(|r| format!("_{r}_\n"))
+        .unwrap_or_default();
+    let header = format!(
+        "---\nname: {slug}\ntitle: {name}\ntype: person\ntags: [personal]\ncreated: {today}\nupdated: {today}\n---\n\n# {name}\n{rel}"
+    );
+    apply_managed(&header, inner)
+}
+
 /// True if `root` is inside a git work tree.
 pub fn git_is_repo(root: &Path) -> bool {
     Command::new("git")
@@ -534,6 +571,26 @@ mod tests {
         // round-trips through apply/extract unchanged
         let raw = apply_managed("body", &block);
         assert_eq!(extract_managed(&raw).as_deref(), Some(block.trim()));
+    }
+
+    #[test]
+    fn slugify_kebabs_names() {
+        assert_eq!(slugify("Brian Cho"), "brian-cho");
+        assert_eq!(slugify("  Dr. Smith  "), "dr-smith");
+        assert_eq!(slugify("José—Luis"), "jos-luis");
+    }
+
+    #[test]
+    fn new_person_file_has_frontmatter_and_managed_block() {
+        let inner = render_managed_block(&[("2026-06-22".into(), "coffee".into())]);
+        let f = render_new_person_file("Brian Cho", "brian-cho", Some("CEO"), "2026-06-23", &inner);
+        // round-trips: parses back to a person note with the captured mention
+        let p = parse_note("personal", "people/brian-cho.md", &f);
+        assert_eq!(p.etype, "person");
+        assert_eq!(p.slug, "brian-cho");
+        assert_eq!(p.display_name, "Brian Cho");
+        assert!(f.contains("_CEO_"));
+        assert!(extract_managed(&f).unwrap().contains("2026-06-22 — coffee"));
     }
 
     #[test]

@@ -1479,6 +1479,39 @@ pub fn write_targets(conn: &Connection, vault: Option<&str>) -> Result<Vec<Write
     Ok(out)
 }
 
+/// A capture-derived person to export into the personal vault.
+pub struct PersonExport {
+    pub id: i64,
+    pub name: String,
+    pub relationship: Option<String>,
+    pub mentions: Vec<(String, String)>, // (event_date, fact/snippet), newest first
+}
+
+/// People worth exporting to the personal vault: person entities NOT already
+/// defined by a brain note (so work contacts owned by a work vault stay there),
+/// seen at least `min_mentions` times (filters one-off noise).
+pub fn people_for_export(conn: &Connection, min_mentions: i64) -> Result<Vec<PersonExport>> {
+    let ids = {
+        let mut stmt = conn.prepare(
+            "SELECT id, name, relationship FROM entities
+             WHERE type = 'person' AND home_note_id IS NULL AND mention_count >= ?1
+             ORDER BY mention_count DESC, name",
+        )?;
+        let v = stmt
+            .query_map([min_mentions], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        v
+    };
+    let mut out = Vec::with_capacity(ids.len());
+    for (id, name, relationship) in ids {
+        let mentions = mentions_for(conn, id)?.into_iter().map(|m| (m.date, m.text)).collect();
+        out.push(PersonExport { id, name, relationship, mentions });
+    }
+    Ok(out)
+}
+
 /// After a write-back rewrites a brain file, sync the mirror row to the new
 /// content + hash so the next import sees it unchanged (echo suppression).
 pub fn update_brain_note_content(conn: &Connection, note_id: i64, raw_text: &str, hash: &str, now: &str) -> Result<()> {

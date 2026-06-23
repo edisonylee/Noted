@@ -1233,7 +1233,9 @@ async fn sync_all_brains(app: &tauri::AppHandle) -> Vec<BrainSyncReport> {
     };
     let mut reports = Vec::new();
     for v in vaults {
-        if !v.enabled {
+        // Export-direction vaults (personal) are noted-canonical — never import
+        // them, or we'd re-ingest our own generated notes.
+        if !v.enabled || v.direction == "export" {
             continue;
         }
         let root = std::path::PathBuf::from(&v.root_path);
@@ -1445,6 +1447,125 @@ async fn brain_write_back(app: tauri::AppHandle, vault: Option<String>) -> Resul
         }
     }
 
+    Ok(json!({ "files_written": files_written, "commits": commits, "errors": errors }))
+}
+
+// ── Personal-brain export (Phase 3: noted -> ~/Brain/personal) ───────────────
+// The personal vault is noted-canonical: export each capture-derived person
+// (not already owned by a work vault, seen >= a few times) into people/<slug>.md.
+// New files are generated whole; existing files only get their managed region
+// updated (so hand-written prose survives). Same git-ledger + dry-run model.
+
+/// Don't export one-off people — only those seen at least this many times.
+const PERSONAL_MIN_MENTIONS: i64 = 2;
+
+/// The configured export-direction vault (name, root), if any.
+fn personal_vault(app: &tauri::AppHandle) -> Option<(String, String)> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    db::list_brain_vaults(&conn)
+        .ok()?
+        .into_iter()
+        .find(|v| v.direction == "export")
+        .map(|v| (v.vault, v.root_path))
+}
+
+/// Compute (without writing) the person notes export would create/update.
+fn compute_personal_writes(app: &tauri::AppHandle) -> Result<Vec<PlannedWrite>, String> {
+    let (vault, root) = personal_vault(app).ok_or("no personal (export) vault configured")?;
+    let people = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        db::people_for_export(&conn, PERSONAL_MIN_MENTIONS).map_err(|e| e.to_string())?
+    };
+    let today = today_local();
+    let mut out = Vec::new();
+    for p in people {
+        let slug = brain::slugify(&p.name);
+        if slug.is_empty() {
+            continue;
+        }
+        let rel_path = format!("people/{slug}.md");
+        let full = std::path::PathBuf::from(&root).join(&rel_path);
+        let inner = brain::render_managed_block(&p.mentions);
+        let (before, new_raw, changed) = match std::fs::read_to_string(&full) {
+            Ok(raw) => {
+                let before = brain::extract_managed(&raw);
+                let new_raw = brain::apply_managed(&raw, &inner);
+                let changed = before.as_deref() != Some(inner.trim());
+                (before, new_raw, changed)
+            }
+            Err(_) => (
+                None,
+                brain::render_new_person_file(&p.name, &slug, p.relationship.as_deref(), &today, &inner),
+                true,
+            ),
+        };
+        out.push(PlannedWrite {
+            vault: vault.clone(),
+            rel_path,
+            full_path: full,
+            entity_name: p.name,
+            note_id: 0, // export files aren't mirror rows (the vault isn't imported)
+            before,
+            after: inner.trim().to_string(),
+            new_raw,
+            new_hash: String::new(),
+            changed,
+        });
+    }
+    Ok(out)
+}
+
+/// Dry run for personal export — what would be created/updated. Writes nothing.
+#[tauri::command]
+async fn personal_export_preview(app: tauri::AppHandle) -> Result<Value, String> {
+    let writes = compute_personal_writes(&app)?;
+    let preview: Vec<Value> = writes
+        .iter()
+        .filter(|w| w.changed)
+        .map(|w| {
+            json!({
+                "vault": w.vault,
+                "path": w.rel_path,
+                "entity": w.entity_name,
+                "before": w.before,
+                "after": w.after,
+            })
+        })
+        .collect();
+    Ok(json!(preview))
+}
+
+/// Apply personal export: write each person note and commit them as one batch.
+#[tauri::command]
+async fn personal_export(app: tauri::AppHandle) -> Result<Value, String> {
+    let changed: Vec<PlannedWrite> =
+        compute_personal_writes(&app)?.into_iter().filter(|w| w.changed).collect();
+    let mut files_written = 0usize;
+    let mut paths: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for w in &changed {
+        if let Some(parent) = w.full_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(&w.full_path, &w.new_raw) {
+            Ok(()) => {
+                files_written += 1;
+                paths.push(w.rel_path.clone());
+            }
+            Err(e) => errors.push(format!("{}: {e}", w.rel_path)),
+        }
+    }
+    let commits = match personal_vault(&app) {
+        Some((v, root)) => {
+            let msg = format!("noted: export {} person note(s)", paths.len());
+            brain::git_commit_paths(std::path::Path::new(&root), &paths, &msg)
+                .map(|sha| vec![json!({ "vault": v, "sha": sha, "files": paths.len() })])
+                .unwrap_or_default()
+        }
+        None => vec![],
+    };
     Ok(json!({ "files_written": files_written, "commits": commits, "errors": errors }))
 }
 
@@ -1674,7 +1795,10 @@ pub fn run() {
                 let state = app.state::<Db>();
                 let conn = state.0.lock().unwrap();
                 for (vault, root) in brain::default_vault_roots() {
-                    let _ = db::upsert_brain_vault(&conn, &vault, &root.to_string_lossy(), "import");
+                    // The personal vault is noted-canonical (export target); work
+                    // vaults are Obsidian-canonical (import source).
+                    let dir = if vault == "personal" { "export" } else { "import" };
+                    let _ = db::upsert_brain_vault(&conn, &vault, &root.to_string_lossy(), dir);
                 }
             }
             let hb = app.handle().clone();
@@ -1799,6 +1923,8 @@ pub fn run() {
             work_graph,
             brain_write_preview,
             brain_write_back,
+            personal_export_preview,
+            personal_export,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

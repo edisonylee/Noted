@@ -316,6 +316,8 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "work_graph" => crate::work_graph(a, oarg(b, "vault")).await,
         "brain_write_preview" => crate::brain_write_preview(a, oarg(b, "vault")).await,
         "brain_write_back" => crate::brain_write_back(a, oarg(b, "vault")).await,
+        "personal_export_preview" => crate::personal_export_preview(a).await,
+        "personal_export" => crate::personal_export(a).await,
         other => Err(format!("unknown command: {other}")),
     }
 }

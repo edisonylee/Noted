@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronLeft } from "lucide-react";
+import { ChevronLeft, Sparkles, ArrowUp } from "lucide-react";
 import { api, type EntityProfile, type NoteRow } from "./api";
 import { relativeDay } from "./day";
 import { colorForType } from "./entityColors";
@@ -20,13 +20,34 @@ export function EntityPage({
   const [profile, setProfile] = useState<EntityProfile | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [openNoteId, setOpenNoteId] = useState<number | null>(null);
+  // Item-scoped ask: answers pinned to this entity (its brain note + captures).
+  const [askQ, setAskQ] = useState("");
+  const [asking, setAsking] = useState(false);
+  const [answer, setAnswer] = useState<string | null>(null);
 
   useEffect(() => {
     setProfile(null);
     setErr(null);
     setOpenNoteId(null);
+    setAskQ("");
+    setAnswer(null);
     api.entityProfile(entityId).then(setProfile).catch((e) => setErr(String(e)));
   }, [entityId]);
+
+  async function ask() {
+    const q = askQ.trim();
+    if (!q || asking) return;
+    setAsking(true);
+    setAnswer(null);
+    try {
+      const res = await api.chat(q, [], undefined, entityId);
+      setAnswer(res.kind === "answer" ? res.answer : "…");
+    } catch (e) {
+      setAnswer(`Sorry — ${e}`);
+    } finally {
+      setAsking(false);
+    }
+  }
 
   const span =
     profile?.first_seen && profile.last_seen && profile.first_seen !== profile.last_seen
@@ -61,6 +82,26 @@ export function EntityPage({
               )}
             </div>
           </header>
+
+          <div className="entity-ask">
+            <div className="entity-ask-row">
+              <Sparkles size={14} className="entity-ask-mark" />
+              <input
+                value={askQ}
+                placeholder={`Ask about ${profile.name}…`}
+                onChange={(e) => setAskQ(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") ask();
+                }}
+                disabled={asking}
+              />
+              <button className="send-btn" onClick={ask} disabled={asking || !askQ.trim()}>
+                <ArrowUp size={16} strokeWidth={2.5} />
+              </button>
+            </div>
+            {asking && <p className="muted small entity-ask-answer">thinking…</p>}
+            {answer && !asking && <p className="entity-ask-answer">{answer}</p>}
+          </div>
 
           <ul className="entity-timeline">
             {profile.mentions.length === 0 && <li className="muted small">No mentions yet.</li>}

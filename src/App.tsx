@@ -9,7 +9,7 @@ import { useConnection } from "./useConnection";
 import { MobileCapture } from "./MobileCapture";
 import { BottomNav, type MobileTab } from "./BottomNav";
 import { useTheme } from "./useTheme";
-import { api, TokenError, OfflineError, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow } from "./api";
+import { api, TokenError, OfflineError, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow, type RelatedBrain } from "./api";
 import { DataView } from "./DataView";
 import { TimelineView } from "./Timeline";
 import { PhonePanel } from "./PhonePanel";
@@ -54,6 +54,8 @@ export default function App() {
   const { theme, toggle } = useTheme();
   const [view, setView] = useState<View>("today");
   const [text, setText] = useState("");
+  // Proactive surfacing: brain notes related to what's being typed.
+  const [related, setRelated] = useState<RelatedBrain[]>([]);
   const [img, setImg] = useState<Img | null>(null);
   const [source, setSource] = useState<Source>("text");
   const [phase, setPhase] = useState<Phase>("idle");
@@ -115,6 +117,18 @@ export default function App() {
       refresh().catch(handleErr);
     },
   });
+
+  // Debounced "related in your brain" while composing (idle, text only).
+  useEffect(() => {
+    if (phase !== "idle" || img || text.trim().length < 12) {
+      setRelated([]);
+      return;
+    }
+    const t = setTimeout(() => {
+      api.relatedBrain(text).then(setRelated).catch(() => {});
+    }, 600);
+    return () => clearTimeout(t);
+  }, [text, phase, img]);
 
   useEffect(() => {
     api.health().then(setHealth).catch(handleErr);
@@ -552,6 +566,24 @@ export default function App() {
               </button>
             )}
           </div>
+
+          {phase === "idle" && related.length > 0 && (
+            <div className="related-brain">
+              <span className="related-brain-label">Related in your brain</span>
+              <div className="related-brain-chips">
+                {related.map((r) => (
+                  <span
+                    className="related-brain-chip"
+                    key={r.note_id}
+                    title={r.snippet}
+                  >
+                    {r.name ?? r.snippet.slice(0, 30)}
+                    {r.vault && <em>{r.vault}</em>}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
 
         {error && <div className="error">{error}</div>}

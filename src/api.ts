@@ -121,6 +121,14 @@ export type BrainWriteReport = {
   commits: { vault: string; sha: string; files: number }[];
   errors: string[];
 };
+// A brain note related to in-progress capture text (proactive surfacing).
+export type RelatedBrain = {
+  note_id: number;
+  vault: string;
+  entity_id: number | null;
+  name: string | null;
+  snippet: string;
+};
 export type EntityMention = { note_id: number; event_date: string; snippet: string };
 
 // A dated, curated fact about a person, drawn from one note mention.
@@ -287,9 +295,16 @@ export const api = {
   listPeople: () => invoke<PersonProfile[]>("list_people"),
   listNotes: () => invoke<NoteRow[]>("list_notes"),
   listCategories: () => invoke<CategoryInfo[]>("list_categories"),
-  // `scope` (a brain vault name) restricts retrieval to that vault; omit for all.
-  chat: (question: string, history: { role: string; content: string }[], scope?: string) =>
-    invoke<AskResult>("chat", { question, history, scope }),
+  // `scope` (a brain vault name) restricts retrieval to that vault; `entityId`
+  // pins the answer to one item (its brain note + every capture mentioning it).
+  chat: (
+    question: string,
+    history: { role: string; content: string }[],
+    scope?: string,
+    entityId?: number
+  ) => invoke<AskResult>("chat", { question, history, scope, entityId }),
+  // Proactive surfacing: brain notes related to in-progress capture text.
+  relatedBrain: (text: string) => invoke<RelatedBrain[]>("related_brain", { text }),
   createCategory: (name: string, description: string) =>
     invoke<number>("create_category", { name, description }),
   updateEntry: (entryId: number, data: Record<string, unknown>) =>

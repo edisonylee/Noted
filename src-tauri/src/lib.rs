@@ -611,12 +611,61 @@ async fn chat(
     question: String,
     history: Vec<ChatMsg>,
     scope: Option<String>,
+    entity_id: Option<i64>,
 ) -> Result<Value, String> {
     use std::collections::{HashMap, HashSet};
     let state = app.state::<Db>();
     if question.trim().is_empty() {
         return Err("empty question".into());
     }
+
+    // Item-scoped ask: pin the answer to ONE entity (project/person/decision) —
+    // its curated brain note PLUS every capture that mentions it. No embedding
+    // needed (mention-based), read-only.
+    if let Some(eid) = entity_id {
+        let (name, hits) = {
+            let conn = state.0.lock().unwrap();
+            let name = db::entity_name_type(&conn, eid)
+                .map_err(|e| e.to_string())?
+                .map(|(n, _)| n)
+                .unwrap_or_else(|| "that".to_string());
+            let hits = db::notes_for_entity(&conn, eid, 15).map_err(|e| e.to_string())?;
+            (name, hits)
+        };
+        if hits.is_empty() {
+            return Ok(json!({
+                "kind": "answer",
+                "answer": format!("I don't have any notes about {name} yet."),
+                "sources": [],
+            }));
+        }
+        let sources: Vec<Value> = hits
+            .iter()
+            .take(6)
+            .map(|h| {
+                let lbl = match h.origin.as_deref() {
+                    Some(o) if o.starts_with("brain:") => o.trim_start_matches("brain:").to_string(),
+                    _ => h.category.clone().unwrap_or_else(|| "note".to_string()),
+                };
+                json!({ "note_id": h.note_id, "category": lbl, "event_date": h.event_date, "snippet": note_snippet(&h.raw_text) })
+            })
+            .collect();
+        let context = pipeline::qa_context(&hits);
+        let mut messages = vec![json!({ "role": "system", "content": pipeline::qa_system(&today_local()) })];
+        for m in &history {
+            let role = if m.role == "assistant" { "assistant" } else { "user" };
+            messages.push(json!({ "role": role, "content": m.content }));
+        }
+        messages.push(json!({
+            "role": "user",
+            "content": format!("Everything I know about \"{name}\":\n{context}\nQuestion: {question}")
+        }));
+        let answer = ollama::chat_messages(ollama::TEXT_MODEL, messages, 0.2)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(json!({ "kind": "answer", "answer": answer.trim(), "sources": sources }));
+    }
+
     let qv = normalize(ollama::embed(&question).await.map_err(|e| e.to_string())?);
 
     // Vault-scoped ask: restrict retrieval to ONE brain so answers about specific
@@ -834,6 +883,47 @@ async fn chat(
         .map_err(|e| e.to_string())?;
 
     Ok(json!({ "kind": "answer", "answer": answer.trim(), "sources": sources }))
+}
+
+/// Proactive surfacing: given in-progress capture text, return related brain
+/// notes (subject entity + vault + snippet) so the UI can show "related in your
+/// brain" as you write. Best-effort; empty until brain notes are embedded.
+#[tauri::command]
+async fn related_brain(app: tauri::AppHandle, text: String) -> Result<Value, String> {
+    let t = text.trim();
+    if t.chars().count() < 4 {
+        return Ok(json!([]));
+    }
+    let qv = normalize(ollama::embed(t).await.map_err(|e| e.to_string())?);
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let hits = db::search_notes_brain(&conn, &qv, 5).map_err(|e| e.to_string())?;
+    let out: Vec<Value> = hits
+        .iter()
+        .map(|h| {
+            let vault = h
+                .origin
+                .as_deref()
+                .map(|o| o.trim_start_matches("brain:").to_string())
+                .unwrap_or_default();
+            // The note's subject entity (its brain home), if any.
+            let ent: Option<(i64, String)> = conn
+                .query_row(
+                    "SELECT id, name FROM entities WHERE home_note_id = ?1 LIMIT 1",
+                    [h.note_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok();
+            json!({
+                "note_id": h.note_id,
+                "vault": vault,
+                "entity_id": ent.as_ref().map(|(id, _)| *id),
+                "name": ent.as_ref().map(|(_, n)| n.clone()),
+                "snippet": note_snippet(&h.raw_text),
+            })
+        })
+        .collect();
+    Ok(json!(out))
 }
 
 /// Create a new category by name — the chat agent's confirmed `create_category`
@@ -1905,6 +1995,11 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     sync_all_brains(&h).await;
                     embed_missing(&h).await;
+                    // Automated propagation: mirror captures into work-vault notes
+                    // and refresh the personal vault. Each is git-committed and a
+                    // no-op when nothing changed, so this is safe to run on a loop.
+                    let _ = brain_write_back(h.clone(), None).await;
+                    let _ = personal_export(h.clone()).await;
                 });
             });
 
@@ -2016,6 +2111,7 @@ pub fn run() {
             brain_write_back,
             personal_export_preview,
             personal_export,
+            related_brain,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

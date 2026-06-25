@@ -498,6 +498,83 @@ pub fn search_notes_scoped(conn: &Connection, qvec: &[f32], k: i64, origin: &str
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Semantic search across ALL brain notes (any vault) — backs proactive
+/// surfacing ("related in your brain" as you capture).
+pub fn search_notes_brain(conn: &Connection, qvec: &[f32], k: i64) -> Result<Vec<SearchHit>> {
+    let json = serde_json::to_string(qvec)?;
+    let mut stmt = conn.prepare(
+        "SELECT e.note_id, e.distance, pc.name,
+                COALESCE(MAX(en.event_date), date(n.created_at)), n.raw_text,
+                json_group_array(json(en.data_json)) AS data, n.origin
+         FROM (
+            SELECT note_id, distance FROM embeddings
+            WHERE embedding MATCH ?1 ORDER BY distance LIMIT 200
+         ) e
+         JOIN notes n ON n.id = e.note_id
+         LEFT JOIN categories pc ON pc.id = n.category_id
+         LEFT JOIN entries en ON en.note_id = n.id
+         WHERE n.origin LIKE 'brain:%'
+         GROUP BY e.note_id
+         ORDER BY e.distance
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![json, k], |r| {
+        let data_str: Option<String> = r.get(5)?;
+        Ok(SearchHit {
+            note_id: r.get(0)?,
+            distance: r.get(1)?,
+            category: r.get(2)?,
+            event_date: r.get(3)?,
+            raw_text: r.get(4)?,
+            data: data_str.and_then(|s| serde_json::from_str(&s).ok()),
+            origin: r.get(6)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Every note that mentions an entity (brain home note + capture mentions),
+/// newest first — backs entity/item-scoped asking. Combines the curated brain
+/// profile with the live capture stream for that one item.
+pub fn notes_for_entity(conn: &Connection, entity_id: i64, limit: i64) -> Result<Vec<SearchHit>> {
+    let mut stmt = conn.prepare(
+        "SELECT n.id, COALESCE(MAX(en.event_date), date(n.created_at)) AS d, pc.name, n.raw_text,
+                json_group_array(json(en.data_json)) AS data, n.origin
+         FROM entity_mentions m
+         JOIN notes n ON n.id = m.note_id
+         LEFT JOIN categories pc ON pc.id = n.category_id
+         LEFT JOIN entries en ON en.note_id = n.id
+         WHERE m.entity_id = ?1
+         GROUP BY n.id
+         ORDER BY d DESC, n.id DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![entity_id, limit], |r| {
+        let data_str: Option<String> = r.get(4)?;
+        Ok(SearchHit {
+            note_id: r.get(0)?,
+            distance: 0.0,
+            category: r.get(2)?,
+            event_date: r.get(1)?,
+            raw_text: r.get(3)?,
+            data: data_str.and_then(|s| serde_json::from_str(&s).ok()),
+            origin: r.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// An entity's display name + type, for labeling a scoped answer.
+pub fn entity_name_type(conn: &Connection, entity_id: i64) -> Result<Option<(String, String)>> {
+    Ok(conn
+        .query_row(
+            "SELECT name, type FROM entities WHERE id = ?1",
+            [entity_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .ok())
+}
+
 pub fn search_notes(conn: &Connection, qvec: &[f32], k: i64) -> Result<Vec<SearchHit>> {
     let json = serde_json::to_string(qvec)?;
     let mut stmt = conn.prepare(

@@ -1060,3 +1060,17 @@ textarea.json.bad { border-color: var(--bad); }
 .vault-name { font-size: 14px; font-weight: 500; text-transform: capitalize; }
 .vault-meta { font-size: 12px; color: var(--muted); }
 .vault-sync { padding: 6px 10px; }
+
+/* Item-scoped ask on the entity page */
+.entity-ask { margin: 14px 0 22px; }
+.entity-ask-row { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 6px 8px 6px 10px; }
+.entity-ask-mark { color: var(--accent); flex: none; }
+.entity-ask-row input { flex: 1; border: none; background: transparent; font: inherit; font-size: 14px; outline: none; }
+.entity-ask-answer { margin: 10px 2px 0; font-size: 14px; line-height: 1.55; }
+
+/* Proactive surfacing under the compose box */
+.related-brain { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.related-brain-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
+.related-brain-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.related-brain-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-soft); background: var(--accent-tint); border-radius: 999px; padding: 3px 10px; cursor: default; }
+.related-brain-chip em { font-style: normal; font-size: 10px; color: var(--accent); text-transform: capitalize; opacity: 0.8; }

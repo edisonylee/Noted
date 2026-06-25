@@ -253,7 +253,8 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "chat" => {
             let history: Vec<crate::ChatMsg> =
                 serde_json::from_value(varg(b, "history")).unwrap_or_default();
-            crate::chat(a, sarg(b, "question"), history, oarg(b, "scope")).await
+            let entity_id = b.get("entityId").and_then(|v| v.as_i64());
+            crate::chat(a, sarg(b, "question"), history, oarg(b, "scope"), entity_id).await
         }
         "create_category" => {
             crate::create_category(a, sarg(b, "name"), sarg(b, "description")).await.map(|n| json!(n))
@@ -318,6 +319,7 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "brain_write_back" => crate::brain_write_back(a, oarg(b, "vault")).await,
         "personal_export_preview" => crate::personal_export_preview(a).await,
         "personal_export" => crate::personal_export(a).await,
+        "related_brain" => crate::related_brain(a, sarg(b, "text")).await,
         other => Err(format!("unknown command: {other}")),
     }
 }

@@ -24,6 +24,27 @@ use crate::entities;
 pub const MANAGED_BEGIN: &str = "<!-- noted:begin -->";
 pub const MANAGED_END: &str = "<!-- noted:end -->";
 
+// ── Auto-propagation flag ────────────────────────────────────────────────────
+// Whether the background timer writes captures back into the vaults + refreshes
+// the personal vault. On by default; persisted as a "1"/"0" file in app data so
+// the choice survives restarts. Import + embed always run; this gates the WRITES.
+static AUTO_PROPAGATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+const AUTO_FILE: &str = "brain_auto";
+
+pub fn auto_propagate() -> bool {
+    AUTO_PROPAGATE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn init_auto(dir: &Path) {
+    let on = std::fs::read_to_string(dir.join(AUTO_FILE)).map(|s| s.trim() != "0").unwrap_or(true);
+    AUTO_PROPAGATE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn set_auto_propagate(dir: &Path, on: bool) {
+    AUTO_PROPAGATE.store(on, std::sync::atomic::Ordering::Relaxed);
+    let _ = std::fs::write(dir.join(AUTO_FILE), if on { "1" } else { "0" });
+}
+
 /// A brain note parsed into the pieces noted needs. Pure data — no DB ids yet.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedNote {

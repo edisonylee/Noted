@@ -305,6 +305,9 @@ export const api = {
   ) => invoke<AskResult>("chat", { question, history, scope, entityId }),
   // Proactive surfacing: brain notes related to in-progress capture text.
   relatedBrain: (text: string) => invoke<RelatedBrain[]>("related_brain", { text }),
+  // Auto-propagation (timed write-back + export). Import + embed always run.
+  brainGetAuto: () => invoke<boolean>("brain_get_auto"),
+  brainSetAuto: (enabled: boolean) => invoke<void>("brain_set_auto", { enabled }),
   createCategory: (name: string, description: string) =>
     invoke<number>("create_category", { name, description }),
   updateEntry: (entryId: number, data: Record<string, unknown>) =>

@@ -34,6 +34,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [vaultPath, setVaultPath] = useState("");
   const [vaultBusy, setVaultBusy] = useState(""); // "" | "adding" | "sync:<vault>" | "sync:all" | "rm:<vault>"
   const [vaultMsg, setVaultMsg] = useState<string | null>(null);
+  const [autoProp, setAutoProp] = useState(true);
 
   useEffect(() => {
     api.getProviderSettings().then((cfg) => {
@@ -47,8 +48,18 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     });
     api.gcalAuthStatus().then(setGcal);
     api.brainListVaults().then(setVaults).catch(() => {});
+    api.brainGetAuto().then(setAutoProp).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function toggleAutoProp(on: boolean) {
+    setAutoProp(on);
+    try {
+      await api.brainSetAuto(on);
+    } catch {
+      /* revert handled by next open */
+    }
+  }
 
   function reloadVaults() {
     api.brainListVaults().then(setVaults).catch(() => {});
@@ -365,6 +376,20 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         </p>
 
         <div className="settings-fields">
+          <label className="vault-auto">
+            <input
+              type="checkbox"
+              checked={autoProp}
+              onChange={(e) => toggleAutoProp(e.target.checked)}
+            />
+            <span>
+              Auto-propagate
+              <em>
+                Every 10 min, write captures back into your vaults and refresh the personal vault
+                (git-committed). Import + embed always run regardless.
+              </em>
+            </span>
+          </label>
           {vaults.length === 0 && <div className="field-hint">No vaults registered.</div>}
           {vaults.map((v) => (
             <div className="vault-row" key={v.vault}>

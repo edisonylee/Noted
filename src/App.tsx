@@ -53,6 +53,8 @@ function homeGreeting(): { dateLine: string; title: string } {
 export default function App() {
   const { theme, toggle } = useTheme();
   const [view, setView] = useState<View>("today");
+  // Entity to open in Knowledge (set when a related-brain chip is clicked).
+  const [knowledgeEntity, setKnowledgeEntity] = useState<number | null>(null);
   const [text, setText] = useState("");
   // Proactive surfacing: brain notes related to what's being typed.
   const [related, setRelated] = useState<RelatedBrain[]>([]);
@@ -478,7 +480,12 @@ export default function App() {
         {view === "today" ? (
           <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} onOpenSettings={() => setShowSettings(true)} />
         ) : view === "knowledge" ? (
-          <KnowledgeView theme={theme} notes={notes} />
+          <KnowledgeView
+            theme={theme}
+            notes={notes}
+            openEntityId={knowledgeEntity}
+            onOpenedEntity={() => setKnowledgeEntity(null)}
+          />
         ) : view === "timeline" ? (
           <TimelineView notes={notes} />
         ) : (
@@ -571,16 +578,27 @@ export default function App() {
             <div className="related-brain">
               <span className="related-brain-label">Related in your brain</span>
               <div className="related-brain-chips">
-                {related.map((r) => (
-                  <span
-                    className="related-brain-chip"
-                    key={r.note_id}
-                    title={r.snippet}
-                  >
-                    {r.name ?? r.snippet.slice(0, 30)}
-                    {r.vault && <em>{r.vault}</em>}
-                  </span>
-                ))}
+                {related.map((r) =>
+                  r.entity_id != null ? (
+                    <button
+                      className="related-brain-chip clickable"
+                      key={r.note_id}
+                      title={r.snippet}
+                      onClick={() => {
+                        setKnowledgeEntity(r.entity_id);
+                        setView("knowledge");
+                      }}
+                    >
+                      {r.name ?? r.snippet.slice(0, 30)}
+                      {r.vault && <em>{r.vault}</em>}
+                    </button>
+                  ) : (
+                    <span className="related-brain-chip" key={r.note_id} title={r.snippet}>
+                      {r.name ?? r.snippet.slice(0, 30)}
+                      {r.vault && <em>{r.vault}</em>}
+                    </span>
+                  )
+                )}
               </div>
             </div>
           )}

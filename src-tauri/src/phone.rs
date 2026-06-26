@@ -320,6 +320,8 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "personal_export_preview" => crate::personal_export_preview(a).await,
         "personal_export" => crate::personal_export(a).await,
         "related_brain" => crate::related_brain(a, sarg(b, "text")).await,
+        "brain_get_auto" => Ok(json!(crate::brain_get_auto())),
+        "brain_set_auto" => crate::brain_set_auto(a, b.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true)).map(|_| Value::Null),
         other => Err(format!("unknown command: {other}")),
     }
 }

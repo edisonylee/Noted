@@ -926,6 +926,20 @@ async fn related_brain(app: tauri::AppHandle, text: String) -> Result<Value, Str
     Ok(json!(out))
 }
 
+/// Whether auto-propagation (timed write-back + export) is on.
+#[tauri::command]
+fn brain_get_auto() -> bool {
+    brain::auto_propagate()
+}
+
+/// Turn auto-propagation on/off (persisted). Import + embed always run regardless.
+#[tauri::command]
+fn brain_set_auto(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    brain::set_auto_propagate(&dir, enabled);
+    Ok(())
+}
+
 /// Create a new category by name — the chat agent's confirmed `create_category`
 /// action. Idempotent: returns the existing id if the name already exists.
 #[tauri::command]
@@ -1951,6 +1965,7 @@ pub fn run() {
             // Load Google Calendar config (client id + calendar id from disk,
             // client secret + refresh token from Keychain).
             gcal::init(&dir);
+            brain::init_auto(&dir); // load the auto-propagation preference
 
             // Brain vaults: auto-register the default ~/Brain/* vaults (idempotent),
             // then mirror them into the KG in the background so they're up to date
@@ -1995,11 +2010,14 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     sync_all_brains(&h).await;
                     embed_missing(&h).await;
-                    // Automated propagation: mirror captures into work-vault notes
-                    // and refresh the personal vault. Each is git-committed and a
-                    // no-op when nothing changed, so this is safe to run on a loop.
-                    let _ = brain_write_back(h.clone(), None).await;
-                    let _ = personal_export(h.clone()).await;
+                    // Automated propagation (toggleable in Settings): mirror
+                    // captures into work-vault notes and refresh the personal
+                    // vault. Each is git-committed and a no-op when nothing
+                    // changed, so this is safe to run on a loop.
+                    if brain::auto_propagate() {
+                        let _ = brain_write_back(h.clone(), None).await;
+                        let _ = personal_export(h.clone()).await;
+                    }
                 });
             });
 
@@ -2112,6 +2130,8 @@ pub fn run() {
             personal_export_preview,
             personal_export,
             related_brain,
+            brain_get_auto,
+            brain_set_auto,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

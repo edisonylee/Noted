@@ -1074,3 +1074,12 @@ textarea.json.bad { border-color: var(--bad); }
 .related-brain-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .related-brain-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-soft); background: var(--accent-tint); border-radius: 999px; padding: 3px 10px; cursor: default; }
 .related-brain-chip em { font-style: normal; font-size: 10px; color: var(--accent); text-transform: capitalize; opacity: 0.8; }
+.related-brain-chip.clickable { cursor: pointer; border: none; font: inherit; font-size: 12px; transition: background 0.12s var(--ease), color 0.12s var(--ease); }
+.related-brain-chip.clickable:hover { background: var(--accent); color: #fff; }
+.related-brain-chip.clickable:hover em { color: #fff; opacity: 0.9; }
+
+/* Auto-propagation toggle (Brain vaults) */
+.vault-auto { display: flex; gap: 9px; align-items: flex-start; padding: 2px 0 10px; cursor: pointer; }
+.vault-auto input { margin-top: 3px; flex: none; }
+.vault-auto > span { font-size: 14px; display: flex; flex-direction: column; gap: 3px; }
+.vault-auto em { font-style: normal; font-size: 12px; color: var(--muted); line-height: 1.45; }

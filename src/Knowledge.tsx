@@ -15,9 +15,28 @@ type Section = "people" | "self" | "work";
 
 const TYPES = ["person", "place", "activity", "food", "item", "org", "topic", "project", "decision", "reference", "doc"];
 
-export function KnowledgeView({ theme, notes }: { theme: string; notes: NoteRow[] }) {
+export function KnowledgeView({
+  theme,
+  notes,
+  openEntityId,
+  onOpenedEntity,
+}: {
+  theme: string;
+  notes: NoteRow[];
+  openEntityId?: number | null; // jump straight to an entity page (e.g. from a related chip)
+  onOpenedEntity?: () => void;
+}) {
   const [section, setSection] = useState<Section>("people");
   const [selectedEntityId, setSelectedEntityId] = useState<number | null>(null);
+
+  // External request to open a specific entity (consumed once, then cleared).
+  useEffect(() => {
+    if (openEntityId != null) {
+      setSelectedEntityId(openEntityId);
+      onOpenedEntity?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openEntityId]);
 
   // Search/filter state + the data it filters (loaded once, lazily on first use).
   const [query, setQuery] = useState("");

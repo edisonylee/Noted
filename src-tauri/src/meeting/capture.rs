@@ -203,6 +203,8 @@ mod macos {
         buf: Arc<ChannelBuf>,
         format: arc::R<av::AudioFormat>,
         channels: usize,
+        callbacks: u64,
+        pushed: u64,
     }
 
     extern "C" fn io_proc(
@@ -217,14 +219,19 @@ mod macos {
         let Some(ctx) = ctx else {
             return Default::default();
         };
+        ctx.callbacks += 1;
         if let Some(view) = av::AudioPcmBuf::with_buf_list_no_copy(&ctx.format, input_data, None) {
             if let Some(data) = view.data_f32_at(0) {
                 // Mono tap → channel 0 is the whole signal. (If the format ever
                 // comes back interleaved multi-channel, downmix.)
+                ctx.pushed += data.len() as u64;
                 if ctx.channels <= 1 {
                     ctx.buf.push(data);
                 } else {
                     ctx.buf.push(&downmix_mono(data, ctx.channels));
+                }
+                if ctx.callbacks == 1 {
+                    eprintln!("[noted] tap: first callback, {} samples", data.len());
                 }
                 return Default::default();
             }
@@ -234,7 +241,14 @@ mod macos {
         let n = b.data_bytes_size as usize / std::mem::size_of::<f32>();
         if n > 0 && !b.data.is_null() {
             let data = unsafe { std::slice::from_raw_parts(b.data as *const f32, n) };
+            ctx.pushed += n as u64;
             ctx.buf.push(&downmix_mono(data, ctx.channels.max(1)));
+        }
+        if ctx.callbacks == 1 {
+            eprintln!(
+                "[noted] tap: first callback via fallback path, {} bytes",
+                b.data_bytes_size
+            );
         }
         Default::default()
     }
@@ -262,6 +276,10 @@ mod macos {
         buf.sample_rate
             .store(asbd.sample_rate as u32, Ordering::Relaxed);
         let channels = asbd.channels_per_frame as usize;
+        eprintln!(
+            "[noted] tap created: {} Hz, {} ch, {} bits",
+            asbd.sample_rate, channels, asbd.bits_per_channel
+        );
         let format =
             av::AudioFormat::with_asbd(&asbd).ok_or_else(|| anyhow!("bad tap format"))?;
 
@@ -303,6 +321,8 @@ mod macos {
             buf: buf.clone(),
             format,
             channels,
+            callbacks: 0,
+            pushed: 0,
         };
         let proc_id = agg_device
             .create_io_proc_id(io_proc, Some(&mut ctx))
@@ -334,6 +354,12 @@ mod macos {
         // Teardown on this thread, in order: stop IO, then guards drop
         // (StartedDevice → proc id → aggregate device → tap).
         let _ = started.stop();
+        eprintln!(
+            "[noted] tap session ended: {} callbacks, {} samples pushed ({})",
+            ctx.callbacks,
+            ctx.pushed,
+            if result.is_ok() { "clean stop" } else { "rebuilding" }
+        );
         result
     }
 }

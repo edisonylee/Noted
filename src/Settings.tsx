@@ -42,6 +42,32 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [mTemplates, setMTemplates] = useState<MeetingTemplate[]>([]);
   const [ignoreText, setIgnoreText] = useState("");
   const [mDownloading, setMDownloading] = useState(false);
+  const [probeMsg, setProbeMsg] = useState<string | null>(null);
+  const [probing, setProbing] = useState(false);
+
+  async function runCaptureProbe() {
+    setProbing(true);
+    setProbeMsg("Recording 8 seconds — talk, and play some audio…");
+    try {
+      const r = (await api.meetingCaptureProbe(8)) as unknown as {
+        me?: { seconds: number; rms: number };
+        them?: { seconds: number; rms: number };
+        tap_supported?: boolean;
+      };
+      const fmt = (c?: { seconds: number; rms: number }) =>
+        !c || c.seconds < 0.5 ? "no audio ✗" : c.rms > 0.002 ? "signal ✓" : "captured, but silent";
+      setProbeMsg(
+        `Mic: ${fmt(r.me)} · System audio: ${fmt(r.them)}` +
+          (r.them && r.them.seconds < 0.5
+            ? " — check System Settings → Privacy & Security → Screen & System Audio Recording"
+            : "")
+      );
+    } catch (e) {
+      setProbeMsg(String(e));
+    } finally {
+      setProbing(false);
+    }
+  }
 
   async function saveMcfg(next: MeetingsCfg) {
     setMcfg(next);
@@ -630,12 +656,14 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             )}
             <button
               className="ghost-btn"
-              onClick={() => api.meetingCaptureProbe(8).then(() => setVaultMsg(null)).catch(() => {})}
-              title="Record 8s of mic + system audio to app data/probe — triggers the macOS permission prompts on first use"
+              onClick={runCaptureProbe}
+              disabled={probing}
+              title="Record 8s of mic + system audio — triggers the macOS permission prompts on first use"
             >
-              <Mic size={14} /> Test capture
+              {probing ? <Loader2 size={14} className="spin" /> : <Mic size={14} />} Test capture
             </button>
           </div>
+          {probeMsg && <div className="field-hint">{probeMsg}</div>}
         </div>
 
         <div className="settings-actions">

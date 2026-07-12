@@ -573,6 +573,8 @@ export const api = {
   meetingsSettingsGet: () => invoke<MeetingsCfg>("meetings_settings_get"),
   meetingsSettingsSet: (settings: MeetingsCfg) =>
     invoke<void>("meetings_settings_set", { settings }),
+  // Native window chrome (vibrancy material + NSAppearance) follows the theme.
+  setChromeTheme: (dark: boolean) => invoke<void>("set_chrome_theme", { dark }),
   meetingStop: () => invoke<number | null>("meeting_stop"),
   meetingState: () => invoke<MeetingLiveState>("meeting_state"),
   meetingList: () => invoke<MeetingListRow[]>("meeting_list"),

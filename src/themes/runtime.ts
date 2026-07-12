@@ -6,6 +6,7 @@ import {
   type ThemePack,
   type ThemeValidationResult,
 } from "./types";
+import { BUILT_IN_THEME_MAP } from "./presets";
 
 const COLOR_TO_CSS: Record<(typeof THEME_COLOR_KEYS)[number], string> = {
   canvas: "--canvas",
@@ -274,10 +275,9 @@ export function validateThemePack(value: unknown): ThemeValidationResult {
   }
 
   const source = asRecord(pack.source);
-  const builtinIds = new Set(["noted-warm", "cupertino", "linear-midnight", "paper", "editorial", "terminal", "soft-glass", "high-contrast"]);
   const sourceKinds = new Set(["imported", "assistant", "custom"]);
   const validSource = source
-    && (sourceKinds.has(String(source.kind)) || (source.kind === "builtin" && builtinIds.has(String(pack.id))));
+    && (sourceKinds.has(String(source.kind)) || (source.kind === "builtin" && BUILT_IN_THEME_MAP.has(String(pack.id))));
   if (!validSource) errors.push("source.kind is invalid for this theme id.");
   if (source?.label !== undefined && !safeString(source.label, 120)) errors.push("source.label is invalid.");
 

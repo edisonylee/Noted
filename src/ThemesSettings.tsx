@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, FileText, Loader2, Palette, RotateCcw, Sparkles, Trash2, Upload } from "lucide-react";
+import { Check, FileText, Loader2, Palette, RotateCcw, Search, Sparkles, Trash2, Upload } from "lucide-react";
 import { api } from "./api";
 import { useTheme, validateThemePack, type ThemeMode, type ThemeModePreference, type ThemePack } from "./useTheme";
 
@@ -36,12 +36,17 @@ export function ThemesSettings() {
   const [designMd, setDesignMd] = useState("");
   const [themeName, setThemeName] = useState("");
   const [pendingPack, setPendingPack] = useState<ThemePack | null>(null);
+  const [search, setSearch] = useState("");
   const [compiling, setCompiling] = useState(false);
   const [applying, setApplying] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const mode = resolvedMode(modePreference);
   const displayThemes = pendingPack ? [...themes, pendingPack] : themes;
+  const normalizedSearch = search.trim().toLowerCase();
+  const visibleThemes = normalizedSearch
+    ? displayThemes.filter((theme) => `${theme.name} ${theme.description ?? ""}`.toLowerCase().includes(normalizedSearch))
+    : displayThemes;
 
   useEffect(() => {
     setSelectedId(activeThemeId);
@@ -107,6 +112,7 @@ export function ThemesSettings() {
         ? { ...checked.value, id: `${checked.value.id.slice(0, 34)}-${Date.now().toString(36)}` }
         : checked.value;
       setPendingPack(pack);
+      setSearch("");
       setSelectedId(pack.id);
       previewTheme(pack, mode);
       setMessage("Local preview ready. Nothing has been saved yet.");
@@ -176,8 +182,26 @@ export function ThemesSettings() {
         ))}
       </div>
 
+      <div className="theme-catalog-toolbar">
+        <label className="theme-search">
+          <Search size={14} aria-hidden="true" />
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search themes…"
+            aria-label="Search themes"
+          />
+        </label>
+        <span className="theme-catalog-count">
+          {visibleThemes.length === displayThemes.length
+            ? `${displayThemes.length} themes`
+            : `${visibleThemes.length} of ${displayThemes.length}`}
+        </span>
+      </div>
+
       <div className="theme-gallery" role="group" aria-label="Installed themes">
-        {displayThemes.map((pack) => {
+        {visibleThemes.map((pack) => {
           const selected = selectedId === pack.id;
           const active = activeThemeId === pack.id && !isPreviewing;
           return (
@@ -199,6 +223,9 @@ export function ThemesSettings() {
           );
         })}
       </div>
+      {visibleThemes.length === 0 && (
+        <p className="theme-empty">No themes match “{search.trim()}”.</p>
+      )}
 
       {(isPreviewing || selectedId !== activeThemeId) && (
         <div className="theme-preview-bar">

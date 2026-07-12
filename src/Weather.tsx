@@ -1,4 +1,10 @@
-import { useEffect, useState, type ComponentType, type ReactNode } from "react";
+import {
+  useEffect,
+  useState,
+  type ComponentType,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import {
   Cloud,
   CloudDrizzle,
@@ -43,6 +49,10 @@ type WeatherSnapshot = {
     weatherCode: number;
     cloudCover: number;
     windSpeed: number;
+    windDirection: number;
+    precipitation: number;
+    rain: number;
+    showers: number;
     isDay: boolean;
   };
   today: {
@@ -59,7 +69,7 @@ type CacheEntry = {
   snapshot: WeatherSnapshot;
 };
 
-const CACHE_KEY = "noted-weather-v1";
+const CACHE_KEY = "noted-weather-v2";
 const FRESH_FOR_MS = 15 * 60_000;
 const MAX_CACHE_AGE_MS = 12 * 60 * 60_000;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -91,6 +101,10 @@ function isSnapshot(value: unknown): value is WeatherSnapshot {
     !!candidate.current &&
     typeof candidate.current.temperature === "number" &&
     typeof candidate.current.weatherCode === "number" &&
+    typeof candidate.current.windDirection === "number" &&
+    typeof candidate.current.precipitation === "number" &&
+    typeof candidate.current.rain === "number" &&
+    typeof candidate.current.showers === "number" &&
     !!candidate.today &&
     typeof candidate.today.date === "string" &&
     typeof candidate.today.high === "number" &&
@@ -143,7 +157,7 @@ function buildForecastUrl(location: WeatherLocation): string {
     latitude: String(location.latitude),
     longitude: String(location.longitude),
     current:
-      "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,cloud_cover,wind_speed_10m,is_day",
+      "temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,cloud_cover,wind_speed_10m,wind_direction_10m,precipitation,rain,showers,is_day",
     daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
     temperature_unit: "fahrenheit",
     wind_speed_unit: "mph",
@@ -198,6 +212,10 @@ async function fetchForecast(location: WeatherLocation): Promise<WeatherSnapshot
         weatherCode: numberValue(body.current.weather_code, "current weather code"),
         cloudCover: numberValue(body.current.cloud_cover, "cloud cover"),
         windSpeed: numberValue(body.current.wind_speed_10m, "wind speed"),
+        windDirection: numberValue(body.current.wind_direction_10m, "wind direction"),
+        precipitation: numberValue(body.current.precipitation, "current precipitation"),
+        rain: numberValue(body.current.rain, "current rain"),
+        showers: numberValue(body.current.showers, "current showers"),
         isDay: numberValue(body.current.is_day, "daylight status") === 1,
       },
       today: {
@@ -279,6 +297,145 @@ function weatherDate(date: string): string {
   }).format(new Date(Date.UTC(year, month - 1, day)));
 }
 
+type RainKind = Extract<WeatherKind, "drizzle" | "rain" | "storm">;
+
+type RainDrop = {
+  x: number;
+  delay: number;
+  duration: number;
+  length: number;
+  width: number;
+  alpha: number;
+  drift: number;
+  near: boolean;
+};
+
+const RAIN_CONFIG: Record<
+  RainKind,
+  { count: number; seed: number; duration: [number, number]; length: [number, number]; alpha: [number, number] }
+> = {
+  drizzle: { count: 26, seed: 5101, duration: [1.7, 2.55], length: [4, 10], alpha: [0.2, 0.42] },
+  rain: { count: 40, seed: 6103, duration: [0.9, 1.4], length: [10, 22], alpha: [0.28, 0.56] },
+  storm: { count: 50, seed: 9503, duration: [0.58, 0.96], length: [16, 32], alpha: [0.34, 0.66] },
+};
+
+function seededUnit(index: number, salt: number): number {
+  const value = Math.sin((index + 1) * 12.9898 + salt * 78.233) * 43758.5453;
+  return value - Math.floor(value);
+}
+
+function makeRainDrops(kind: RainKind): RainDrop[] {
+  const config = RAIN_CONFIG[kind];
+  return Array.from({ length: config.count }, (_, index) => {
+    const near = seededUnit(index, config.seed + 1) > 0.68;
+    const duration =
+      config.duration[0] +
+      seededUnit(index, config.seed + 2) * (config.duration[1] - config.duration[0]);
+    const depthScale = near ? 1.18 : 0.78;
+    return {
+      x: -4 + seededUnit(index, config.seed + 3) * 108,
+      delay: -duration * seededUnit(index, config.seed + 4),
+      duration,
+      length:
+        (config.length[0] +
+          seededUnit(index, config.seed + 5) * (config.length[1] - config.length[0])) *
+        depthScale,
+      width: (0.65 + seededUnit(index, config.seed + 6) * 0.7) * depthScale,
+      alpha:
+        (config.alpha[0] +
+          seededUnit(index, config.seed + 7) * (config.alpha[1] - config.alpha[0])) *
+        (near ? 1 : 0.68),
+      drift: -8 + seededUnit(index, config.seed + 8) * 16,
+      near,
+    };
+  });
+}
+
+const RAIN_DROPS: Record<RainKind, RainDrop[]> = {
+  drizzle: makeRainDrops("drizzle"),
+  rain: makeRainDrops("rain"),
+  storm: makeRainDrops("storm"),
+};
+
+function RainParticles({ kind }: { kind: RainKind }) {
+  return (
+    <span className={`weather-rain weather-rain-${kind}`}>
+      {RAIN_DROPS[kind].map((drop, index) => (
+        <i
+          key={index}
+          className={`weather-rain-drop${drop.near ? " weather-rain-drop-near" : ""}`}
+          style={
+            {
+              "--rain-x": `${drop.x}%`,
+              "--rain-delay": `${drop.delay}s`,
+              "--rain-duration": `${drop.duration}s`,
+              "--rain-length": `${drop.length}px`,
+              "--rain-width": `${drop.width}px`,
+              "--rain-alpha": String(drop.alpha),
+              "--rain-drop-drift": `${drop.drift}px`,
+            } as CSSProperties
+          }
+        />
+      ))}
+    </span>
+  );
+}
+
+function WeatherAtmosphere({
+  kind,
+  cloudCover,
+  windSpeed,
+  windDirection,
+  precipitation,
+}: {
+  kind: WeatherKind | "loading";
+  cloudCover: number;
+  windSpeed: number;
+  windDirection: number;
+  precipitation: number;
+}) {
+  const density = Math.min(1, Math.max(0, cloudCover / 100));
+  const driftSeconds = Math.min(52, Math.max(18, 48 - windSpeed * 1.25));
+  const rainKind: RainKind | null =
+    kind === "drizzle" || kind === "rain" || kind === "storm" ? kind : null;
+  const rainIntensity = Math.min(1, Math.max(0, precipitation / 0.12));
+  const windAcrossScreen = -Math.sin((windDirection * Math.PI) / 180);
+  const rainDrift = windAcrossScreen * Math.min(16, 2 + windSpeed * 0.55);
+  const rainOpacity =
+    kind === "drizzle"
+      ? 0.32 + rainIntensity * 0.16
+      : kind === "rain"
+        ? 0.44 + rainIntensity * 0.18
+        : 0.54 + rainIntensity * 0.18;
+  const sceneStyle = {
+    "--weather-cloud-far-opacity": String(0.1 + density * 0.34),
+    "--weather-cloud-mid-opacity": String(0.14 + density * 0.48),
+    "--weather-cloud-near-opacity": String(0.08 + density * 0.3),
+    "--weather-drift-duration": `${driftSeconds}s`,
+    "--weather-rain-opacity": String(rainOpacity),
+    "--weather-rain-drift": `${rainDrift.toFixed(1)}vw`,
+    "--weather-rain-angle": `${(-rainDrift * 0.7).toFixed(1)}deg`,
+  } as CSSProperties;
+
+  return (
+    <div className="weather-atmosphere" style={sceneStyle} aria-hidden="true">
+      <span className="weather-orb" />
+      <span className="weather-cloud weather-cloud-one" />
+      <span className="weather-cloud weather-cloud-two" />
+      <span className="weather-cloud weather-cloud-three" />
+      {rainKind && <RainParticles kind={rainKind} />}
+      {kind === "snow" && (
+        <>
+          <span className="weather-precip weather-precip-far" />
+          <span className="weather-precip weather-precip-near" />
+        </>
+      )}
+      <span className="weather-haze" />
+      <span className="weather-storm-light" />
+    </div>
+  );
+}
+
 export function WeatherHome({
   location = ATLANTA_WEATHER_LOCATION,
   children,
@@ -334,11 +491,13 @@ export function WeatherHome({
   if (!snapshot) {
     return (
       <section className="weather-home weather-home-loading">
-        <div className="weather-atmosphere" aria-hidden="true">
-          <span className="weather-orb" />
-          <span className="weather-cloud weather-cloud-one" />
-          <span className="weather-cloud weather-cloud-two" />
-        </div>
+        <WeatherAtmosphere
+          kind="loading"
+          cloudCover={55}
+          windSpeed={5}
+          windDirection={0}
+          precipitation={0}
+        />
         <header className="weather-bar" aria-live="polite">
           <span className="weather-bar-place">
             <MapPin size={14} /> {location.name}
@@ -365,13 +524,16 @@ export function WeatherHome({
 
   return (
     <section className={`weather-home weather-home-${condition.kind} weather-home-${time}`}>
-      <div className="weather-atmosphere" aria-hidden="true">
-        <span className="weather-orb" />
-        <span className="weather-cloud weather-cloud-one" />
-        <span className="weather-cloud weather-cloud-two" />
-        <span className="weather-precip" />
-        <span className="weather-haze" />
-      </div>
+      <WeatherAtmosphere
+        kind={condition.kind}
+        cloudCover={snapshot.current.cloudCover}
+        windSpeed={snapshot.current.windSpeed}
+        windDirection={snapshot.current.windDirection}
+        precipitation={Math.max(
+          snapshot.current.precipitation,
+          snapshot.current.rain + snapshot.current.showers,
+        )}
+      />
       <header
         className="weather-bar"
         aria-label={`${weatherDate(snapshot.today.date)}. ${location.name} weather: ${rounded(snapshot.current.temperature)} degrees, ${condition.label}. High ${rounded(snapshot.today.high)}, low ${rounded(snapshot.today.low)}.`}

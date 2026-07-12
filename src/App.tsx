@@ -94,6 +94,18 @@ export default function App() {
   const isMobile = useIsMobile();
   const [mobileTab, setMobileTab] = useState<MobileTab>("today");
 
+  // Keep the native glass in step with the in-app theme: the theme runtime
+  // stamps data-theme on <html>; we watch it and switch the vibrancy material
+  // (dark HUD vs light sidebar glass) so light mode stays readable.
+  useEffect(() => {
+    const sync = () =>
+      api.setChromeTheme(document.documentElement.dataset.theme === "dark").catch(() => {});
+    sync();
+    const mo = new MutationObserver(sync);
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => mo.disconnect();
+  }, []);
+
   // Sidebar collapse (one click or ⌘B), remembered across launches.
   const [sideOpen, setSideOpenState] = useState(
     () => localStorage.getItem("noted-sidebar") !== "closed"

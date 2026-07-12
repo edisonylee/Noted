@@ -1520,6 +1520,34 @@ fn meetings_settings_set(app: tauri::AppHandle, settings: meeting::MeetingsCfg) 
     meeting::cfg_update(&dir, settings).map_err(|e| e.to_string())
 }
 
+/// Match the native window chrome to the in-app theme: dark themes get the
+/// deep HUD glass, light themes the standard (light) sidebar material — and
+/// the window's NSAppearance follows, so the vibrancy renders correctly.
+#[tauri::command]
+fn set_chrome_theme(app: tauri::AppHandle, dark: bool) {
+    #[cfg(target_os = "macos")]
+    if let Some(win) = app.get_webview_window("main") {
+        use window_vibrancy::{apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+        let _ = win.set_theme(Some(if dark { tauri::Theme::Dark } else { tauri::Theme::Light }));
+        let _ = clear_vibrancy(&win);
+        let material = if dark {
+            NSVisualEffectMaterial::HudWindow
+        } else {
+            NSVisualEffectMaterial::Sidebar
+        };
+        if let Err(e) = apply_vibrancy(
+            &win,
+            material,
+            Some(NSVisualEffectState::FollowsWindowActiveState),
+            None,
+        ) {
+            eprintln!("[noted] vibrancy update failed: {e}");
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, dark);
+}
+
 #[tauri::command]
 async fn meeting_stop(app: tauri::AppHandle) -> Result<Option<i64>, String> {
     meeting::stop(app).await.map_err(|e| e.to_string())
@@ -2825,6 +2853,7 @@ pub fn run() {
             meeting_dismiss_prompt,
             meetings_settings_get,
             meetings_settings_set,
+            set_chrome_theme,
             list_entities,
             merge_entities,
             suggest_entity_merges,

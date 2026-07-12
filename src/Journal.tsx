@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
   Check,
+  ChevronLeft,
+  ChevronRight,
   Loader,
   LockKeyhole,
   NotebookPen,
@@ -52,6 +54,18 @@ function pageDate(day: string): { weekday: string; date: string } {
     weekday: formatDay(day, { weekday: "long" }),
     date: formatDay(day, { month: "long", day: "numeric", year: "numeric" }),
   };
+}
+
+// Calendar-day movement anchored in UTC, so stepping across a daylight-saving
+// boundary still lands on the immediately previous or next YYYY-MM-DD.
+function shiftDay(day: string, amount: number): string {
+  const [year, month, date] = day.split("-").map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, date + amount, 12));
+  return [
+    shifted.getUTCFullYear(),
+    String(shifted.getUTCMonth() + 1).padStart(2, "0"),
+    String(shifted.getUTCDate()).padStart(2, "0"),
+  ].join("-");
 }
 
 function entryTime(createdAt?: string): string {
@@ -213,7 +227,7 @@ export function JournalView({
           <NotebookPen size={14} />
         </button>
 
-        <div className="journal-index-label">Pages</div>
+        <div className="journal-index-label">Written pages</div>
         <nav className="journal-index-list">
           {archiveDays.map(({ day, notes: dayNotes }) => (
             <button
@@ -241,9 +255,35 @@ export function JournalView({
         <header className="journal-page-head">
           <div className="journal-page-overline">
             <time dateTime={selectedDay}>{selectedDate.weekday}</time>
-            <span>
-              <LockKeyhole size={11} /> Private entry
-            </span>
+            <div className="journal-page-tools">
+              <span className="journal-page-privacy">
+                <LockKeyhole size={11} /> Private entry
+              </span>
+              <div className="journal-day-nav" aria-label="Move between journal days">
+                <button
+                  type="button"
+                  onClick={() => setSelectedDay((day) => shiftDay(day, -1))}
+                  title="Previous day"
+                  aria-label="Previous day"
+                >
+                  <ChevronLeft size={14} />
+                </button>
+                {!isToday && (
+                  <button type="button" className="journal-today" onClick={() => beginToday()}>
+                    Today
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setSelectedDay((day) => shiftDay(day, 1))}
+                  disabled={selectedDay >= today}
+                  title="Next day"
+                  aria-label="Next day"
+                >
+                  <ChevronRight size={14} />
+                </button>
+              </div>
+            </div>
           </div>
           <h2>{selectedDate.date}</h2>
           <p>{isToday ? journalPrompt() : "A page from your journal."}</p>

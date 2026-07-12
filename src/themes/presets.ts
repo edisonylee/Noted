@@ -7,6 +7,7 @@ import type {
   ThemeShape,
   ThemeTypography,
 } from "./types";
+import { ADDITIONAL_THEMES } from "./catalog";
 
 const geist = '"Geist Variable", ui-sans-serif, system-ui, sans-serif';
 const system = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif';
@@ -368,6 +369,7 @@ export const BUILT_IN_THEMES: readonly ThemePack[] = [
   TERMINAL,
   SOFT_GLASS,
   HIGH_CONTRAST,
+  ...ADDITIONAL_THEMES,
 ];
 
 export const BUILT_IN_THEME_MAP = new Map(BUILT_IN_THEMES.map((theme) => [theme.id, theme]));

@@ -576,9 +576,12 @@ export default function App() {
       >
         <PanelLeft size={17} />
       </button>
-      <aside className="sidebar">
-        <div className="side-head">
-          <div className="brand">
+      {/* The whole sidebar background drags the window (like a native app's
+          source list) — buttons still click because the drag region only
+          engages when the grabbed element is the one carrying the attribute. */}
+      <aside className="sidebar" data-tauri-drag-region>
+        <div className="side-head" data-tauri-drag-region>
+          <div className="brand" data-tauri-drag-region>
             noted<span className="dot">.</span>
           </div>
         </div>
@@ -612,7 +615,7 @@ export default function App() {
             <Network size={16} /> Knowledge
           </button>
         </nav>
-        <span className="spacer" />
+        <span className="spacer" data-tauri-drag-region />
         {recMeeting && (
           <button
             className="rec-pill"

@@ -49,16 +49,28 @@ pub async fn chat_json_local(
     images: Option<Vec<String>>,
     format: Option<Value>,
 ) -> Result<Value> {
+    // Ollama defaults num_ctx to 2048, which a single photo's image tokens blow
+    // straight past (llama.cpp then 400s with "exceeds the available context
+    // size"). Give vision OCR generous headroom; text extraction needs less.
     let has_images = images.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
+    let num_ctx = if has_images { 16384 } else { 8192 };
+    chat_json_local_ctx(model, system, user, images, format, num_ctx).await
+}
+
+/// `chat_json_local` with an explicit context budget — meeting-transcript
+/// summarization needs far more than the default 8k tokens.
+pub async fn chat_json_local_ctx(
+    model: &str,
+    system: &str,
+    user: &str,
+    images: Option<Vec<String>>,
+    format: Option<Value>,
+    num_ctx: u32,
+) -> Result<Value> {
     let mut user_msg = json!({ "role": "user", "content": user });
     if let Some(imgs) = images {
         user_msg["images"] = json!(imgs);
     }
-
-    // Ollama defaults num_ctx to 2048, which a single photo's image tokens blow
-    // straight past (llama.cpp then 400s with "exceeds the available context
-    // size"). Give vision OCR generous headroom; text extraction needs less.
-    let num_ctx = if has_images { 16384 } else { 8192 };
 
     let mut body = json!({
         "model": model,

@@ -60,3 +60,13 @@ socket2 = "0.6"
 # Local speech-to-text (whisper.cpp, in-process)
 whisper-rs = "0.16"
 
+# Meeting recorder: native mic capture (kept separate from system audio so
+# speaker attribution is a deterministic mic="me" / system="them").
+cpal = "0.17"
+# WAV retention for meeting audio (transcript verifiability — audio stays local).
+hound = "3"
+
+# System audio via Core Audio process taps (macOS 14.4+, gated at runtime).
+[target.'cfg(target_os = "macos")'.dependencies]
+cidre = "0.16"
+

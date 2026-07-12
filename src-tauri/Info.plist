@@ -4,5 +4,7 @@
 <dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>noted transcribes what you say into your daily log, fully on your device.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>During meetings, noted transcribes your system audio output locally on this Mac.</string>
 </dict>
 </plist>

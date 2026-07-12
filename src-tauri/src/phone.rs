@@ -283,6 +283,20 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
                 .await
                 .map(|s| json!(s))
         }
+        // Meetings: reads + notes work from the phone; capture/summarize need
+        // the desktop's audio devices and model — clean error, never a 404.
+        "meeting_model_status" => Ok(crate::meeting_model_status(a)),
+        "meeting_state" => Ok(crate::meeting_state(a)),
+        "meeting_list" => crate::meeting_list(a).await,
+        "meeting_get" => crate::meeting_get(a, iarg(b, "id")).await,
+        "meeting_set_notes" => crate::meeting_set_notes(a, iarg(b, "id"), sarg(b, "notes"))
+            .await
+            .map(|_| Value::Null),
+        "meeting_templates" => crate::meeting_templates(a).await,
+        "meeting_start" | "meeting_stop" | "meeting_summarize" | "meeting_template_save"
+        | "meeting_template_delete" | "meeting_capture_probe" | "download_meeting_model" => {
+            Err("this action runs on the desktop app only".into())
+        }
         "list_entities" => crate::list_entities(a).await,
         "merge_entities" => {
             crate::merge_entities(a, iarg(b, "keep"), iarg(b, "drop")).await.map(|_| Value::Null)

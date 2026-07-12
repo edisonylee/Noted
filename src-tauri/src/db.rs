@@ -133,6 +133,55 @@ CREATE TABLE IF NOT EXISTS brain_vaults (
   last_synced_at TEXT,
   enabled        INTEGER NOT NULL DEFAULT 1
 );
+
+-- Meeting recorder. A meeting is a capture session (mic + system audio, two
+-- streams); its transcript lives in meeting_segments (large, append-heavy —
+-- deliberately NOT in entries.data_json). The AI summary is ALSO filed as a
+-- regular note under the 'meetings' category so search/embeddings/KG see it;
+-- note_id links back to that note.
+CREATE TABLE IF NOT EXISTS meetings (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  title          TEXT NOT NULL,
+  event_id       TEXT,                    -- gcal event id when calendar-matched
+  event_json     TEXT,                    -- event snapshot: attendees, meet_link, times
+  started_at     TEXT,
+  ended_at       TEXT,
+  status         TEXT NOT NULL DEFAULT 'recording', -- recording|summarizing|done|failed
+  raw_notes      TEXT NOT NULL DEFAULT '',-- typed during the meeting; always preserved
+  audio_me_path  TEXT,                    -- retained WAVs (verifiability); NULL if off
+  audio_them_path TEXT,
+  note_id        INTEGER REFERENCES notes(id),
+  created_at     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS meeting_segments (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  meeting_id INTEGER NOT NULL REFERENCES meetings(id),
+  channel    TEXT NOT NULL,               -- 'me' (mic) | 'them' (system audio)
+  t0_ms      INTEGER NOT NULL,
+  t1_ms      INTEGER NOT NULL,
+  text       TEXT NOT NULL,
+  speaker    TEXT                         -- NULL = channel default; diarization fills later
+);
+CREATE INDEX IF NOT EXISTS idx_segment_meeting ON meeting_segments(meeting_id, t0_ms);
+
+-- One row per generated summary tab (PLAUD-style multidimensional summaries:
+-- regenerating with another template adds a tab, never overwrites).
+CREATE TABLE IF NOT EXISTS meeting_summaries (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  meeting_id INTEGER NOT NULL REFERENCES meetings(id),
+  template   TEXT NOT NULL,
+  content_md TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- A template is a name + one free-text prompt (PLAUD's model): the prompt
+-- describes the sections to extract. builtin rows are re-seeded on startup.
+CREATE TABLE IF NOT EXISTS meeting_templates (
+  name    TEXT PRIMARY KEY,
+  prompt  TEXT NOT NULL,
+  builtin INTEGER NOT NULL DEFAULT 0
+);
 "#;
 
 /// Register sqlite-vec as an auto extension (process-wide, must happen before

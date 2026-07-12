@@ -3,6 +3,7 @@ pub mod brain;
 pub mod db;
 pub mod entities;
 pub mod gcal;
+pub mod meeting;
 pub mod ollama;
 pub mod phone;
 pub mod pipeline;
@@ -1293,6 +1294,218 @@ async fn transcribe(
         .map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Meetings (local Granola: record mic + system audio → live whisper →
+// template summarize). Capture commands are desktop-only; reads work anywhere.
+// ---------------------------------------------------------------------------
+
+const MEETING_MODEL_URL: &str =
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin";
+
+#[tauri::command]
+fn meeting_model_status(app: tauri::AppHandle) -> Value {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map(|d| d.join("models"))
+        .unwrap_or_default();
+    json!({
+        "turbo": dir.join("ggml-large-v3-turbo.bin").exists(),
+        "base": dir.join("ggml-base.en.bin").exists(),
+        "tap_supported": meeting::capture::tap_supported(),
+    })
+}
+
+/// Download the meeting model (large-v3-turbo, ~1.6GB) — streamed to disk.
+#[tauri::command]
+async fn download_meeting_model(app: tauri::AppHandle) -> Result<bool, String> {
+    use std::io::Write;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("models");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("ggml-large-v3-turbo.bin");
+    if path.exists() {
+        return Ok(true);
+    }
+    let tmp = dir.join("ggml-large-v3-turbo.bin.part");
+    let mut resp = reqwest::get(MEETING_MODEL_URL).await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("model download failed: {}", resp.status()));
+    }
+    let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+    while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+        file.write_all(&chunk).map_err(|e| e.to_string())?;
+    }
+    file.flush().map_err(|e| e.to_string())?;
+    drop(file);
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+#[tauri::command]
+async fn meeting_start(
+    app: tauri::AppHandle,
+    title: Option<String>,
+    event_id: Option<String>,
+    event_json: Option<Value>,
+    retain_audio: Option<bool>,
+) -> Result<i64, String> {
+    let title = title
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| "Meeting".to_string());
+    meeting::start(&app, title, event_id, event_json, retain_audio.unwrap_or(true))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn meeting_stop(app: tauri::AppHandle) -> Result<Option<i64>, String> {
+    meeting::stop(app).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn meeting_state(app: tauri::AppHandle) -> Value {
+    meeting::state_json(&app)
+}
+
+#[tauri::command]
+async fn meeting_list(app: tauri::AppHandle) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let rows = meeting::store::list_meetings(&conn, 200).map_err(|e| e.to_string())?;
+    Ok(json!(rows))
+}
+
+#[tauri::command]
+async fn meeting_get(app: tauri::AppHandle, id: i64) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    meeting::store::get_meeting(&conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn meeting_set_notes(app: tauri::AppHandle, id: i64, notes: String) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    meeting::store::set_notes(&conn, id, &notes).map_err(|e| e.to_string())
+}
+
+/// Generate a summary tab with the given (or default) template. PLAUD-style:
+/// each run adds a tab; the first one also files the meeting note.
+#[tauri::command]
+async fn meeting_summarize(
+    app: tauri::AppHandle,
+    id: i64,
+    template: Option<String>,
+) -> Result<String, String> {
+    meeting::summarize::run(&app, id, template)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn meeting_templates(app: tauri::AppHandle) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let rows = meeting::store::list_templates(&conn).map_err(|e| e.to_string())?;
+    Ok(json!(rows))
+}
+
+#[tauri::command]
+async fn meeting_template_save(
+    app: tauri::AppHandle,
+    name: String,
+    prompt: String,
+) -> Result<(), String> {
+    if name.trim().is_empty() || prompt.trim().is_empty() {
+        return Err("template needs a name and a prompt".into());
+    }
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    meeting::store::save_template(&conn, name.trim(), prompt.trim()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn meeting_template_delete(app: tauri::AppHandle, name: String) -> Result<bool, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    meeting::store::delete_template(&conn, &name).map_err(|e| e.to_string())
+}
+
+/// Phase-0 spike: record N seconds of system-audio tap + mic to WAVs so the
+/// permission flow and capture path can be verified end to end.
+#[tauri::command]
+async fn meeting_capture_probe(app: tauri::AppHandle, seconds: Option<u64>) -> Result<Value, String> {
+    use std::sync::atomic::Ordering;
+    let secs = seconds.unwrap_or(10).clamp(2, 30);
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("probe");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let me = meeting::capture::ChannelBuf::new();
+    let them = meeting::capture::ChannelBuf::new();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let mut threads = Vec::new();
+    if meeting::capture::tap_supported() {
+        let (b, s) = (them.clone(), stop.clone());
+        threads.push(std::thread::spawn(move || meeting::capture::run_system_tap(b, s)));
+    }
+    {
+        let (b, s) = (me.clone(), stop.clone());
+        threads.push(std::thread::spawn(move || meeting::capture::run_mic(b, s)));
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+    stop.store(true, Ordering::Relaxed);
+    let joined = tauri::async_runtime::spawn_blocking(move || {
+        for t in threads {
+            let _ = t.join();
+        }
+    })
+    .await;
+    joined.map_err(|e| e.to_string())?;
+
+    let mut report = serde_json::Map::new();
+    for (name, buf) in [("me", &me), ("them", &them)] {
+        let (raw, rate) = buf.drain();
+        let pcm = if rate == 0 { Vec::new() } else { voice::resample_to_16k(&raw, rate) };
+        let rms = if pcm.is_empty() {
+            0.0
+        } else {
+            (pcm.iter().map(|s| s * s).sum::<f32>() / pcm.len() as f32).sqrt()
+        };
+        let path = dir.join(format!("probe-{name}.wav"));
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::create(&path, spec).map_err(|e| e.to_string())?;
+        for s in &pcm {
+            w.write_sample((s.clamp(-1.0, 1.0) * 32767.0) as i16)
+                .map_err(|e| e.to_string())?;
+        }
+        w.finalize().map_err(|e| e.to_string())?;
+        report.insert(
+            name.to_string(),
+            json!({
+                "path": path.to_string_lossy(),
+                "seconds": pcm.len() as f32 / 16_000.0,
+                "native_rate": rate,
+                "rms": rms,
+            }),
+        );
+    }
+    report.insert("tap_supported".into(), json!(meeting::capture::tap_supported()));
+    Ok(Value::Object(report))
+}
+
 /// Knowledge-graph entities, most-mentioned first (for the graph view + management).
 #[tauri::command]
 async fn list_entities(app: tauri::AppHandle) -> Result<Value, String> {
@@ -2248,6 +2461,15 @@ pub fn run() {
             std::fs::create_dir_all(&dir)?;
             let conn = db::init(&dir.join("noted.db"))?;
             app.manage(Db(Mutex::new(conn)));
+            // Meeting recorder: one-at-a-time session state + builtin templates.
+            app.manage(meeting::MeetingState(Mutex::new(None)));
+            {
+                let state = app.state::<Db>();
+                let conn = state.0.lock().unwrap();
+                if let Err(e) = meeting::store::seed_templates(&conn) {
+                    eprintln!("[noted] template seed failed: {e}");
+                }
+            }
 
             // Load model-provider config (mode + models from disk, key from Keychain).
             provider::init(&dir);
@@ -2393,6 +2615,19 @@ pub fn run() {
             voice_status,
             download_voice_model,
             transcribe,
+            meeting_model_status,
+            download_meeting_model,
+            meeting_start,
+            meeting_stop,
+            meeting_state,
+            meeting_list,
+            meeting_get,
+            meeting_set_notes,
+            meeting_summarize,
+            meeting_templates,
+            meeting_template_save,
+            meeting_template_delete,
+            meeting_capture_probe,
             list_entities,
             merge_entities,
             suggest_entity_merges,

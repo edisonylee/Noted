@@ -406,7 +406,10 @@ function EventForm({
               <optgroup key={g.email} label={g.email}>
                 {g.cals.map((c) => (
                   <option key={c.id} value={calKey(g.email, c.id)}>
-                    {c.name}
+                    {/* Carry the account in the label: the collapsed select
+                        only shows the picked option, and "work" and "personal"
+                        calendars can share names across accounts. */}
+                    {groups.length > 1 ? `${c.name} — ${g.email}` : c.name}
                   </option>
                 ))}
               </optgroup>
@@ -568,14 +571,18 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form, days, today]);
 
-  // Default calendar for new events: the first account's primary.
+  // Default calendar for new events: whatever you used last (so creating from
+  // the work account sticks), else the first account's primary.
   const defaultCalKey = () => {
     const groups = writableCals(status);
+    const all = groups.flatMap((g) => g.cals.map((c) => calKey(g.email, c.id)));
+    const last = localStorage.getItem("cal.lastCal");
+    if (last && all.includes(last)) return last;
     for (const g of groups) {
       const primary = g.cals.find((c) => c.primary);
       if (primary) return calKey(g.email, primary.id);
     }
-    return groups.length ? calKey(groups[0].email, groups[0].cals[0].id) : "";
+    return all[0] ?? "";
   };
 
   function openCreate(date: string, startMin: number | null) {
@@ -667,6 +674,7 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
           meet
         );
       }
+      localStorage.setItem("cal.lastCal", f.calKey); // next event defaults here
       setForm(null);
       await load(true);
     } catch (e) {

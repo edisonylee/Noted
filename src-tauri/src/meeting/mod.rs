@@ -7,11 +7,12 @@
 
 pub mod asr;
 pub mod capture;
+pub mod detect;
 pub mod store;
 pub mod summarize;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
@@ -31,6 +32,107 @@ pub struct Active {
     pub me: Arc<ChannelBuf>,
     pub them: Arc<ChannelBuf>,
     audio_dir: Option<std::path::PathBuf>,
+    /// Bundle id of the app whose mic use triggered this recording (mic-detect
+    /// starts only) — auto-stop watches for it releasing the mic.
+    pub source_bundle: Option<String>,
+    /// Scheduled end (minutes from Eastern midnight) + day, when calendar-born.
+    pub event_end_min: Option<i64>,
+    pub event_date: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Config: meetings.json in app data (provider.json pattern — no secrets).
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct MeetingsCfg {
+    /// Master switch for both detection prompts (calendar + mic).
+    #[serde(default = "d_true")]
+    pub auto_prompt: bool,
+    /// Keep per-channel WAVs (transcript verifiability — Granola's top
+    /// complaint is that you can't check what was actually said).
+    #[serde(default = "d_true")]
+    pub retain_audio: bool,
+    /// Mic-detect ignore list — matched as case-insensitive substrings of the
+    /// bundle id, so "superwhisper" covers any vendor prefix.
+    #[serde(default = "default_ignore")]
+    pub ignore_bundles: Vec<String>,
+    #[serde(default = "d_template")]
+    pub default_template: String,
+}
+
+fn d_true() -> bool {
+    true
+}
+fn d_template() -> String {
+    store::DEFAULT_TEMPLATE.to_string()
+}
+
+/// Dictation, recording, and voice-assistant apps that hold the mic without
+/// being a meeting (the superwhisper class of false positives).
+pub fn default_ignore() -> Vec<String> {
+    [
+        "superwhisper",
+        "wispr",
+        "voiceink",
+        "com.noted.app",
+        "obsproject",
+        "loom",
+        "quicktime",
+        "voicememos",
+        "com.openai.chat",
+        "anthropic",
+        "vscode",
+        "cursor",
+        "dev.warp",
+        "raycast",
+        "krisp",
+        "dictation",
+        "controlcenter",
+        "systempreferences",
+        "com.apple.systemsettings",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+impl Default for MeetingsCfg {
+    fn default() -> Self {
+        Self {
+            auto_prompt: true,
+            retain_audio: true,
+            ignore_bundles: default_ignore(),
+            default_template: d_template(),
+        }
+    }
+}
+
+static CFG: OnceLock<RwLock<MeetingsCfg>> = OnceLock::new();
+
+fn cfg_cell() -> &'static RwLock<MeetingsCfg> {
+    CFG.get_or_init(|| RwLock::new(MeetingsCfg::default()))
+}
+
+pub fn cfg() -> MeetingsCfg {
+    cfg_cell().read().unwrap().clone()
+}
+
+pub fn cfg_init(dir: &std::path::Path) {
+    if let Ok(text) = std::fs::read_to_string(dir.join("meetings.json")) {
+        if let Ok(loaded) = serde_json::from_str::<MeetingsCfg>(&text) {
+            *cfg_cell().write().unwrap() = loaded;
+        }
+    }
+}
+
+pub fn cfg_update(dir: &std::path::Path, new_cfg: MeetingsCfg) -> Result<()> {
+    std::fs::write(
+        dir.join("meetings.json"),
+        serde_json::to_string_pretty(&new_cfg)?,
+    )?;
+    *cfg_cell().write().unwrap() = new_cfg;
+    Ok(())
 }
 
 fn epoch_ms() -> u64 {
@@ -62,13 +164,15 @@ pub fn model_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf> {
 }
 
 /// Begin recording. `event_json` is the calendar-event snapshot when started
-/// from Coming Up / a calendar prompt.
+/// from Coming Up / a calendar prompt; `source_bundle` is the mic-holding app
+/// when started from a mic-detection prompt (drives auto-stop).
 pub fn start(
     app: &tauri::AppHandle,
     title: String,
     event_id: Option<String>,
     event_json: Option<Value>,
     retain_audio: bool,
+    source_bundle: Option<String>,
 ) -> Result<i64> {
     let model = model_path(app)?; // fail fast before any DB writes
     let state = app.state::<MeetingState>();
@@ -76,6 +180,11 @@ pub fn start(
     if guard.is_some() {
         return Err(anyhow!("a meeting is already recording"));
     }
+    let event_end_min = event_json.as_ref().and_then(|e| e["end_min"].as_i64());
+    let event_date = event_json
+        .as_ref()
+        .and_then(|e| e["date"].as_str())
+        .map(String::from);
 
     let now = chrono::Utc::now().to_rfc3339();
     let id = {
@@ -139,7 +248,11 @@ pub fn start(
         me,
         them,
         audio_dir,
+        source_bundle,
+        event_end_min,
+        event_date,
     });
+    detect::close_prompt(app); // an accepted (or now-moot) prompt goes away
     let _ = app.emit("meeting-started", json!({ "meetingId": id, "title": title }));
     Ok(id)
 }

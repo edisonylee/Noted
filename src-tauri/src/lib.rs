@@ -1352,12 +1352,48 @@ async fn meeting_start(
     event_id: Option<String>,
     event_json: Option<Value>,
     retain_audio: Option<bool>,
+    source_bundle: Option<String>,
 ) -> Result<i64, String> {
     let title = title
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| "Meeting".to_string());
-    meeting::start(&app, title, event_id, event_json, retain_audio.unwrap_or(true))
+    let retain = retain_audio.unwrap_or_else(|| meeting::cfg().retain_audio);
+    meeting::start(&app, title, event_id, event_json, retain, source_bundle)
         .map_err(|e| e.to_string())
+}
+
+/// What the record-prompt window should show (it fetches on mount — a fresh
+/// webview can't catch an event emitted before it loaded).
+#[tauri::command]
+fn meeting_prompt_payload(app: tauri::AppHandle) -> Value {
+    let pending = app.state::<meeting::detect::PendingPrompt>();
+    let v = pending.0.lock().unwrap().clone();
+    v.unwrap_or(Value::Null)
+}
+
+/// "Not now": close the prompt; the dismissed app stays quiet for 10 minutes.
+#[tauri::command]
+fn meeting_dismiss_prompt(app: tauri::AppHandle, bundle_id: Option<String>) {
+    if let Some(b) = bundle_id {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let state = app.state::<meeting::detect::DetectState>();
+        state.0.lock().unwrap().insert(b, now);
+    }
+    meeting::detect::close_prompt(&app);
+}
+
+#[tauri::command]
+fn meetings_settings_get() -> Value {
+    serde_json::to_value(meeting::cfg()).unwrap_or(Value::Null)
+}
+
+#[tauri::command]
+fn meetings_settings_set(app: tauri::AppHandle, settings: meeting::MeetingsCfg) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    meeting::cfg_update(&dir, settings).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2461,8 +2497,14 @@ pub fn run() {
             std::fs::create_dir_all(&dir)?;
             let conn = db::init(&dir.join("noted.db"))?;
             app.manage(Db(Mutex::new(conn)));
-            // Meeting recorder: one-at-a-time session state + builtin templates.
+            // Meeting recorder: one-at-a-time session state + builtin templates
+            // + detection (mic-in-use watcher, calendar T-60s prompt, auto-stop).
             app.manage(meeting::MeetingState(Mutex::new(None)));
+            app.manage(meeting::detect::PendingPrompt(Mutex::new(None)));
+            app.manage(meeting::detect::DetectState(Mutex::new(
+                std::collections::HashMap::new(),
+            )));
+            meeting::cfg_init(&dir);
             {
                 let state = app.state::<Db>();
                 let conn = state.0.lock().unwrap();
@@ -2470,6 +2512,7 @@ pub fn run() {
                     eprintln!("[noted] template seed failed: {e}");
                 }
             }
+            meeting::detect::spawn(app.handle().clone());
 
             // Load model-provider config (mode + models from disk, key from Keychain).
             provider::init(&dir);
@@ -2628,6 +2671,10 @@ pub fn run() {
             meeting_template_save,
             meeting_template_delete,
             meeting_capture_probe,
+            meeting_prompt_payload,
+            meeting_dismiss_prompt,
+            meetings_settings_get,
+            meetings_settings_set,
             list_entities,
             merge_entities,
             suggest_entity_merges,

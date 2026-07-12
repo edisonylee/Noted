@@ -219,7 +219,7 @@ pub async fn run(app: &tauri::AppHandle, meeting_id: i64, template_name: Option<
         let conn = state.0.lock().unwrap();
         let meeting = store::get_meeting(&conn, meeting_id)?;
         let segments = store::list_segments(&conn, meeting_id)?;
-        let name = template_name.unwrap_or_else(|| store::DEFAULT_TEMPLATE.to_string());
+        let name = template_name.unwrap_or_else(|| super::cfg().default_template);
         let prompt = store::get_template(&conn, &name)?
             .ok_or_else(|| anyhow!("unknown template '{name}'"))?;
         (meeting, segments, name, prompt)

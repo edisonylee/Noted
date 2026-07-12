@@ -65,6 +65,11 @@ export function ComingUp({
     const today = easternDay();
     return events
       .filter((e) => !e.declined && !e.all_day && e.start_min != null)
+      // Meetings only — a call link or other people. Plain calendar blocks
+      // (including noted's own pushed schedule/tasks) stay in the schedule
+      // below; this strip is for things that get recorded.
+      .filter((e) => e.calendar.toLowerCase() !== "noted")
+      .filter((e) => e.meet_link != null || e.attendee_count >= 2)
       .filter((e) => {
         // Still relevant: hasn't ended yet (with 5 min grace) or is tomorrow.
         if (e.date !== today) return true;

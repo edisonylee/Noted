@@ -1,15 +1,19 @@
-// Google Calendar one-way sync. noted pushes the day's schedule (the timed
-// `blocks` the Today view shows) into a dedicated "noted" calendar in the user's
-// Google account. It never pulls events back and never touches the primary
-// calendar.
+// Google Calendar integration. Two directions:
+// - Push: noted pushes the day's schedule (the timed `blocks` the Today view
+//   shows) into a dedicated "noted" calendar in the *first* connected account.
+// - Pull: the Calendar view reads events across EVERY connected account's
+//   enabled calendars (multi-account, so work + personal consolidate in one
+//   grid), and can create/edit/delete events on any of them.
 //
 // Design mirrors provider.rs deliberately so there's one secret-handling story:
-// - The OAuth client id + the synced calendar id live in a small JSON file in
-//   the app data dir (gcal.json). Non-secret.
-// - The OAuth *client secret* and the *refresh token* live in the macOS Keychain
-//   (via the `security` CLI — no new crate), never on disk, never in the JSON.
-// - The short-lived access token is cached in a process-global and refreshed on
-//   demand; it's never persisted.
+// - The OAuth client id, the synced calendar id, and each account's calendar
+//   list (names/colors/visibility) live in a small JSON file in the app data
+//   dir (gcal.json). Non-secret.
+// - The OAuth *client secret* and each account's *refresh token* live in the
+//   macOS Keychain (via the `security` CLI — no new crate), never on disk,
+//   never in the JSON. Refresh tokens are keyed per account email.
+// - Short-lived access tokens are cached per account in a process-global and
+//   refreshed on demand; never persisted.
 //
 // Auth is the OAuth 2.0 "installed app" loopback flow: we bind an ephemeral
 // 127.0.0.1 port with tiny_http, open the consent page in the browser, and catch
@@ -30,15 +34,20 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use base64::Engine;
-use chrono::{NaiveDate, TimeZone};
+use chrono::{NaiveDate, TimeZone, Timelike};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 const KEYCHAIN_SERVICE: &str = "com.noted.app"; // shared with provider.rs
-const ACCT_REFRESH: &str = "gcal_refresh_token";
+const ACCT_REFRESH: &str = "gcal_refresh_token"; // legacy single-account key (migrated at init)
 const ACCT_SECRET: &str = "gcal_client_secret";
 const CONFIG_FILE: &str = "gcal.json";
+
+/// Keychain account name for one Google account's refresh token.
+fn refresh_key(email: &str) -> String {
+    format!("{ACCT_REFRESH}:{email}")
+}
 
 const AUTH_BASE: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -53,23 +62,56 @@ const CAL_SUMMARY: &str = "noted"; // the dedicated calendar's title
 const TZ: chrono_tz::Tz = chrono_tz::America::New_York;
 
 // ── Config ──────────────────────────────────────────────────────────────────
+fn default_true() -> bool {
+    true
+}
+
+/// One calendar inside an account, as cached in gcal.json. `enabled` is the
+/// user's show/hide choice for the Calendar view; names/colors refresh from
+/// Google, the enabled flag is ours and survives refreshes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GcalCalendar {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub color: String, // Google's backgroundColor hex
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub primary: bool,
+    #[serde(default)]
+    pub access: String, // Google accessRole: owner/writer/reader/freeBusyReader
+}
+
+/// One connected Google account. The email doubles as the identity key: it
+/// names the Keychain entry holding the refresh token and is what commands
+/// pass to pick an account. Tokens never serialize to JSON.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct GcalConfig {
+pub struct GcalAccount {
+    pub email: String,
     #[serde(default)]
-    pub client_id: String, // non-secret OAuth client id
-    #[serde(default)]
-    pub calendar_id: Option<String>, // the dedicated "noted" calendar, set on bootstrap
-    #[serde(default)]
-    pub account_email: Option<String>, // display only; the connected account's email
-    // Loaded from the Keychain / minted at runtime; never serialized to JSON.
-    #[serde(skip)]
-    pub client_secret: Option<String>,
+    pub calendars: Vec<GcalCalendar>,
     #[serde(skip)]
     pub refresh_token: Option<String>,
     #[serde(skip)]
     pub access_token: Option<String>,
     #[serde(skip)]
     pub access_expires_at: Option<i64>, // unix secs
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct GcalConfig {
+    #[serde(default)]
+    pub client_id: String, // non-secret OAuth client id, shared by every account
+    #[serde(default)]
+    pub calendar_id: Option<String>, // the dedicated "noted" calendar, set on bootstrap
+    #[serde(default)]
+    pub account_email: Option<String>, // legacy pre-multi-account field; migrated at init
+    #[serde(default)]
+    pub accounts: Vec<GcalAccount>, // accounts[0] hosts the "noted" push calendar
+    // Loaded from the Keychain / minted at runtime; never serialized to JSON.
+    #[serde(skip)]
+    pub client_secret: Option<String>,
 }
 
 static CONFIG: OnceLock<RwLock<GcalConfig>> = OnceLock::new();
@@ -135,15 +177,40 @@ fn write_config_file(dir: &Path) {
 }
 
 /// Load config from disk + secrets from the Keychain into the process global.
-/// Called once at startup, beside `provider::init`.
+/// Called once at startup, beside `provider::init`. Migrates the legacy
+/// single-account layout (one un-keyed refresh token) into accounts[0].
 pub fn init(dir: &Path) {
     let mut c = std::fs::read_to_string(config_path(dir))
         .ok()
         .and_then(|s| serde_json::from_str::<GcalConfig>(&s).ok())
         .unwrap_or_default();
     c.client_secret = keychain_read(ACCT_SECRET);
-    c.refresh_token = keychain_read(ACCT_REFRESH);
+
+    // Legacy → multi-account: move the un-keyed refresh token under an
+    // email-keyed entry so it behaves like any other account from here on.
+    let mut migrated = false;
+    if c.accounts.is_empty() {
+        if let Some(tok) = keychain_read(ACCT_REFRESH) {
+            let email = c
+                .account_email
+                .clone()
+                .filter(|e| !e.is_empty())
+                .unwrap_or_else(|| "google-account".to_string());
+            if keychain_write(&refresh_key(&email), &tok).is_ok() {
+                keychain_delete(ACCT_REFRESH);
+                c.accounts.push(GcalAccount { email, ..Default::default() });
+                migrated = true;
+            }
+        }
+    }
+
+    for a in &mut c.accounts {
+        a.refresh_token = keychain_read(&refresh_key(&a.email));
+    }
     *cell().write().unwrap() = c;
+    if migrated {
+        write_config_file(dir);
+    }
 }
 
 /// Store the user's OAuth client (id + secret) before they connect. Secret →
@@ -170,35 +237,74 @@ fn set_calendar_id(dir: &Path, id: &str) {
     write_config_file(dir);
 }
 
-/// Forget the Google session (refresh token gone/expired). Keeps the OAuth
-/// client + calendar id so reconnecting doesn't require re-entering credentials.
-fn clear_tokens(dir: &Path) {
-    keychain_delete(ACCT_REFRESH);
+/// Forget ONE account's Google session (refresh token gone/expired). The
+/// account entry and its calendar list stay, so the UI can offer "reconnect"
+/// and the user's visibility choices survive.
+fn clear_account_session(dir: &Path, email: &str) {
+    keychain_delete(&refresh_key(email));
     {
         let mut c = cell().write().unwrap();
-        c.refresh_token = None;
-        c.access_token = None;
-        c.access_expires_at = None;
-        c.account_email = None; // so a stale email never lingers after disconnect
+        if let Some(a) = c.accounts.iter_mut().find(|a| a.email == email) {
+            a.refresh_token = None;
+            a.access_token = None;
+            a.access_expires_at = None;
+        }
     }
     write_config_file(dir);
 }
 
-/// Connection status for the Settings UI — no network calls.
+/// Remove an account entirely: token out of the Keychain, entry out of the
+/// config. The OAuth client (id + secret) stays so re-adding is one click.
+pub fn remove_account(dir: &Path, email: &str) -> Result<Value> {
+    keychain_delete(&refresh_key(email));
+    {
+        let mut c = cell().write().unwrap();
+        c.accounts.retain(|a| a.email != email);
+        c.account_email = c.accounts.first().map(|a| a.email.clone());
+    }
+    write_config_file(dir);
+    Ok(auth_status())
+}
+
+/// Connection status for Settings + the Calendar view — no network calls.
 pub fn auth_status() -> Value {
     let c = get();
+    let connected = |a: &GcalAccount| a.refresh_token.as_deref().map(|r| !r.is_empty()).unwrap_or(false);
     json!({
-        "connected": c.refresh_token.as_deref().map(|r| !r.is_empty()).unwrap_or(false),
+        "connected": c.accounts.iter().any(connected),
         "has_client": !c.client_id.is_empty()
             && c.client_secret.as_deref().map(|s| !s.is_empty()).unwrap_or(false),
-        "account_email": c.account_email,
+        "account_email": c.accounts.first().map(|a| a.email.clone()),
         "calendar_id": c.calendar_id,
+        "accounts": c.accounts.iter().map(|a| json!({
+            "email": a.email,
+            "connected": connected(a),
+            "calendars": a.calendars.iter().map(|k| json!({
+                "id": k.id,
+                "name": k.name,
+                "color": k.color,
+                "enabled": k.enabled,
+                "primary": k.primary,
+                "access": k.access,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
     })
 }
 
-/// Disconnect: drop the Google session but keep the OAuth client config.
+/// Disconnect everything: every account's session and entry. Keeps the OAuth
+/// client config so reconnecting doesn't require re-entering credentials.
 pub fn disconnect(dir: &Path) {
-    clear_tokens(dir);
+    let emails: Vec<String> = get().accounts.iter().map(|a| a.email.clone()).collect();
+    for e in emails {
+        keychain_delete(&refresh_key(&e));
+    }
+    keychain_delete(ACCT_REFRESH); // legacy key, in case migration never ran
+    {
+        let mut c = cell().write().unwrap();
+        c.accounts.clear();
+        c.account_email = None;
+    }
+    write_config_file(dir);
 }
 
 /// Clear one day: delete only the events noted pushed for `event_date` (matched
@@ -305,13 +411,16 @@ fn parse_query(url: &str) -> HashMap<String, String> {
 }
 
 fn build_auth_url(client_id: &str, redirect: &str, challenge: &str, state: &str) -> String {
+    // `select_account` keeps Google from silently reusing the last session, so
+    // adding a second (work) account actually shows the account picker.
     format!(
         "{AUTH_BASE}?client_id={}&redirect_uri={}&response_type=code&scope={}\
-         &code_challenge={}&code_challenge_method=S256&access_type=offline&prompt=consent&state={}",
+         &code_challenge={}&code_challenge_method=S256&access_type=offline&prompt={}&state={}",
         enc(client_id),
         enc(redirect),
         enc(SCOPE),
         enc(challenge),
+        enc("consent select_account"),
         enc(state),
     )
 }
@@ -414,8 +523,10 @@ async fn exchange_code(
 }
 
 /// Run the full consent flow: PKCE + loopback + code exchange, then persist the
-/// refresh token. Returns the new auth status. Desktop-only (opens a browser on
-/// the machine running noted).
+/// account. This IS the "add account" flow — each run connects (or reconnects)
+/// whichever Google account the user picks in the browser, keyed by its email.
+/// Returns the new auth status. Desktop-only (opens a browser on the machine
+/// running noted).
 pub async fn begin_auth(dir: &Path) -> Result<Value> {
     let (client_id, client_secret) = {
         let c = get();
@@ -456,50 +567,89 @@ pub async fn begin_auth(dir: &Path) -> Result<Value> {
     let refresh = tokens.refresh_token.ok_or_else(|| {
         anyhow!("Google didn't return a refresh token — revoke noted's access in your Google account, then reconnect")
     })?;
-
-    keychain_write(ACCT_REFRESH, &refresh)?;
     let access = tokens.access_token;
+    let expires_at = now_unix() + tokens.expires_in.unwrap_or(3600) - 60;
+
+    // The account's email is its identity key (Keychain entry, command arg), so
+    // resolving it is a hard requirement of the add — it's the id of the
+    // `primary` calendar in the calendar list we need anyway.
+    let cals = fetch_calendars(&http_client()?, &access).await?;
+    let email = cals
+        .iter()
+        .find(|c| c.primary)
+        .map(|c| c.id.clone())
+        .ok_or_else(|| anyhow!("couldn't identify the Google account (no primary calendar)"))?;
+
+    keychain_write(&refresh_key(&email), &refresh)?;
     {
         let mut c = cell().write().unwrap();
-        c.refresh_token = Some(refresh);
-        c.access_token = Some(access.clone());
-        c.access_expires_at = Some(now_unix() + tokens.expires_in.unwrap_or(3600) - 60);
-    }
-    // Record which account just connected (the primary calendar's id is its
-    // email) so Settings can show it. Best-effort — never fails the connect.
-    if let Some(email) = fetch_account_email(&http_client()?, &access).await {
-        cell().write().unwrap().account_email = Some(email);
+        match c.accounts.iter_mut().find(|a| a.email == email) {
+            // Reconnect: new tokens, refreshed calendar list, visibility kept.
+            Some(a) => {
+                a.refresh_token = Some(refresh);
+                a.access_token = Some(access);
+                a.access_expires_at = Some(expires_at);
+                a.calendars = merge_calendars(std::mem::take(&mut a.calendars), cals);
+            }
+            None => c.accounts.push(GcalAccount {
+                email: email.clone(),
+                calendars: cals,
+                refresh_token: Some(refresh),
+                access_token: Some(access),
+                access_expires_at: Some(expires_at),
+            }),
+        }
+        c.account_email = c.accounts.first().map(|a| a.email.clone());
     }
     write_config_file(dir);
     Ok(auth_status())
 }
 
-/// A valid access token, refreshing via the stored refresh token when the cached
-/// one is missing/expired. On `invalid_grant` (revoked/expired refresh token) it
-/// clears the session and returns a "reconnect" error.
+/// The account hosting the "noted" push calendar — the first one connected.
+/// Everything the one-way schedule sync does goes through this account.
+fn sync_account() -> Result<String> {
+    get()
+        .accounts
+        .first()
+        .map(|a| a.email.clone())
+        .ok_or_else(|| anyhow!("not connected to Google Calendar"))
+}
+
+/// A valid access token for the sync account (schedule push / clear).
 async fn get_access_token(dir: &Path) -> Result<String> {
+    let email = sync_account()?;
+    access_token_for(dir, &email).await
+}
+
+/// A valid access token for one account, refreshing via its stored refresh
+/// token when the cached one is missing/expired. On `invalid_grant`
+/// (revoked/expired refresh token) it clears that account's session — others
+/// keep working — and returns a "reconnect" error.
+async fn access_token_for(dir: &Path, email: &str) -> Result<String> {
     {
         let c = cell().read().unwrap();
-        if let (Some(tok), Some(exp)) = (&c.access_token, c.access_expires_at) {
-            if now_unix() < exp {
-                return Ok(tok.clone());
+        if let Some(a) = c.accounts.iter().find(|a| a.email == email) {
+            if let (Some(tok), Some(exp)) = (&a.access_token, a.access_expires_at) {
+                if now_unix() < exp {
+                    return Ok(tok.clone());
+                }
             }
         }
     }
-    refresh(dir).await
+    refresh_access(dir, email).await
 }
 
-async fn refresh(dir: &Path) -> Result<String> {
+async fn refresh_access(dir: &Path, email: &str) -> Result<String> {
     let (client_id, client_secret, refresh_token) = {
         let c = cell().read().unwrap();
         (
             c.client_id.clone(),
             c.client_secret.clone().unwrap_or_default(),
-            c.refresh_token.clone(),
+            c.accounts.iter().find(|a| a.email == email).and_then(|a| a.refresh_token.clone()),
         )
     };
-    let refresh_token =
-        refresh_token.ok_or_else(|| anyhow!("not connected to Google Calendar"))?;
+    let refresh_token = refresh_token
+        .ok_or_else(|| anyhow!("{email} isn't connected — add the account again in Settings"))?;
 
     let resp = http_client()?
         .post(TOKEN_URL)
@@ -515,44 +665,158 @@ async fn refresh(dir: &Path) -> Result<String> {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if text.contains("invalid_grant") {
-            clear_tokens(dir);
+            clear_account_session(dir, email);
             return Err(anyhow!(
-                "Google Calendar disconnected — please reconnect (the authorization expired)."
+                "{email} disconnected — please reconnect it (the authorization expired)."
             ));
         }
-        return Err(anyhow!("token refresh failed ({status}): {text}"));
+        return Err(anyhow!("token refresh failed for {email} ({status}): {text}"));
     }
     let t: TokenResponse = resp.json().await?;
     let access = t.access_token.clone();
     {
         let mut c = cell().write().unwrap();
-        c.access_token = Some(access.clone());
-        c.access_expires_at = Some(now_unix() + t.expires_in.unwrap_or(3600) - 60);
+        if let Some(a) = c.accounts.iter_mut().find(|a| a.email == email) {
+            a.access_token = Some(access.clone());
+            a.access_expires_at = Some(now_unix() + t.expires_in.unwrap_or(3600) - 60);
+        }
     }
     Ok(access)
 }
 
-/// The connected account's email — the id of the `primary` calendar in the
-/// account's calendar list. Best-effort: returns None on any failure, since
-/// it's a display-only nicety and not worth failing the connect over. Uses only
-/// the calendar scope we already hold (no userinfo/email scope needed).
-async fn fetch_account_email(client: &reqwest::Client, token: &str) -> Option<String> {
+// ── Calendar lists (per account) ────────────────────────────────────────────
+/// Fetch an account's calendar list from Google: id, display name, color,
+/// primary flag. Everything starts `enabled`; merge_calendars re-applies the
+/// user's hide choices.
+async fn fetch_calendars(client: &reqwest::Client, token: &str) -> Result<Vec<GcalCalendar>> {
     let resp = client
-        .get(format!("{CAL_BASE}/users/me/calendarList"))
+        .get(format!("{CAL_BASE}/users/me/calendarList?maxResults=250"))
         .bearer_auth(token)
         .send()
-        .await
-        .ok()?;
+        .await?;
     if !resp.status().is_success() {
-        return None;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("calendar list failed ({status}): {text}"));
     }
-    let v: Value = resp.json().await.ok()?;
-    v.get("items")?
-        .as_array()?
+    let v: Value = resp.json().await?;
+    Ok(v.get("items")
+        .and_then(|i| i.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| {
+                    let id = c.get("id").and_then(|s| s.as_str())?;
+                    // summaryOverride is the user's own rename of a shared calendar.
+                    let name = c
+                        .get("summaryOverride")
+                        .or_else(|| c.get("summary"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or(id);
+                    Some(GcalCalendar {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        color: c
+                            .get("backgroundColor")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("#039be5")
+                            .to_string(),
+                        enabled: true,
+                        primary: c.get("primary").and_then(|p| p.as_bool()).unwrap_or(false),
+                        access: c
+                            .get("accessRole")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("reader")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// Refresh a calendar list from Google while keeping the user's hide choices:
+/// names/colors/membership come from `fresh`, `enabled=false` carries over by id.
+fn merge_calendars(old: Vec<GcalCalendar>, fresh: Vec<GcalCalendar>) -> Vec<GcalCalendar> {
+    let hidden: HashSet<String> =
+        old.iter().filter(|c| !c.enabled).map(|c| c.id.clone()).collect();
+    fresh
+        .into_iter()
+        .map(|mut c| {
+            if hidden.contains(&c.id) {
+                c.enabled = false;
+            }
+            c
+        })
+        .collect()
+}
+
+/// An account's calendars — cached list if present, else fetched from Google
+/// and persisted (first use after the legacy migration lands here).
+async fn ensure_calendars(dir: &Path, email: &str) -> Result<Vec<GcalCalendar>> {
+    let cached: Vec<GcalCalendar> = {
+        let c = cell().read().unwrap();
+        c.accounts
+            .iter()
+            .find(|a| a.email == email)
+            .map(|a| a.calendars.clone())
+            .unwrap_or_default()
+    };
+    if !cached.is_empty() {
+        return Ok(cached);
+    }
+    let token = access_token_for(dir, email).await?;
+    let cals = fetch_calendars(&http_client()?, &token).await?;
+    {
+        let mut c = cell().write().unwrap();
+        if let Some(a) = c.accounts.iter_mut().find(|a| a.email == email) {
+            a.calendars = cals.clone();
+        }
+    }
+    write_config_file(dir);
+    Ok(cals)
+}
+
+/// Show/hide one calendar in the Calendar view. Persisted, survives refreshes.
+pub fn set_calendar_enabled(dir: &Path, email: &str, calendar_id: &str, enabled: bool) -> Result<Value> {
+    {
+        let mut c = cell().write().unwrap();
+        let a = c
+            .accounts
+            .iter_mut()
+            .find(|a| a.email == email)
+            .ok_or_else(|| anyhow!("no such account: {email}"))?;
+        let k = a
+            .calendars
+            .iter_mut()
+            .find(|k| k.id == calendar_id)
+            .ok_or_else(|| anyhow!("no such calendar on {email}"))?;
+        k.enabled = enabled;
+    }
+    write_config_file(dir);
+    Ok(auth_status())
+}
+
+/// Re-pull every connected account's calendar list (new calendars, renames,
+/// color changes). Best-effort per account: one broken session doesn't block
+/// the rest — its `connected` flag flips in the returned status instead.
+pub async fn refresh_calendars(dir: &Path) -> Result<Value> {
+    let emails: Vec<String> = get()
+        .accounts
         .iter()
-        .find(|c| c.get("primary").and_then(|p| p.as_bool()).unwrap_or(false))
-        .and_then(|c| c.get("id").and_then(|s| s.as_str()))
-        .map(String::from)
+        .filter(|a| a.refresh_token.is_some())
+        .map(|a| a.email.clone())
+        .collect();
+    let client = http_client()?;
+    for email in emails {
+        let Ok(token) = access_token_for(dir, &email).await else { continue };
+        let Ok(fresh) = fetch_calendars(&client, &token).await else { continue };
+        let mut c = cell().write().unwrap();
+        if let Some(a) = c.accounts.iter_mut().find(|a| a.email == email) {
+            a.calendars = merge_calendars(std::mem::take(&mut a.calendars), fresh);
+        }
+    }
+    write_config_file(dir);
+    Ok(auth_status())
 }
 
 // ── Calendar bootstrap ──────────────────────────────────────────────────────
@@ -903,6 +1167,319 @@ pub async fn sync(dir: &Path, event_date: &str, blocks: Vec<Value>) -> Result<Sy
     Ok(report)
 }
 
+// ── Range read (Calendar view) ──────────────────────────────────────────────
+/// One Google event → the Calendar view's shape. Timed events carry `date`
+/// (start day, Eastern) plus `start_min`/`end_min` in minutes from that day's
+/// midnight — `end_min` exceeds 1440 when the event crosses midnight. All-day
+/// events instead carry `end_date`, Google's EXCLUSIVE end day. Returns None
+/// for cancelled ghosts.
+fn map_event(it: &Value, cal: &GcalCalendar, account: &str) -> Option<Value> {
+    if it.get("status").and_then(|s| s.as_str()) == Some("cancelled") {
+        return None;
+    }
+    let title = it
+        .get("summary")
+        .and_then(|s| s.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("(untitled)");
+    let mut ev = json!({
+        "id": it.get("id").and_then(|s| s.as_str()).unwrap_or_default(),
+        "title": title,
+        "calendar": cal.name,
+        "calendar_id": cal.id,
+        "color": cal.color,
+        "account": account,
+        "location": it.get("location").and_then(|s| s.as_str()),
+        // Descriptions can be huge HTML blobs; cap what rides over IPC.
+        "description": it
+            .get("description")
+            .and_then(|s| s.as_str())
+            .map(|s| s.chars().take(600).collect::<String>()),
+        "declined": is_declined(it),
+    });
+    match it.get("start").and_then(|s| s.get("dateTime")).and_then(|s| s.as_str()) {
+        Some(sdt) => {
+            let s = chrono::DateTime::parse_from_rfc3339(sdt).ok()?.with_timezone(&TZ);
+            let start_min = (s.hour() * 60 + s.minute()) as i64;
+            let end_min = it
+                .get("end")
+                .and_then(|e| e.get("dateTime"))
+                .and_then(|e| e.as_str())
+                .and_then(|edt| chrono::DateTime::parse_from_rfc3339(edt).ok())
+                .map(|e| {
+                    let e = e.with_timezone(&TZ);
+                    let days = (e.date_naive() - s.date_naive()).num_days();
+                    days * 1440 + (e.hour() * 60 + e.minute()) as i64
+                })
+                .unwrap_or(start_min + 60)
+                // Zero/negative spans still get a visible, clickable block.
+                .max(start_min + 15);
+            ev["date"] = json!(s.format("%Y-%m-%d").to_string());
+            ev["end_date"] = Value::Null;
+            ev["start_min"] = json!(start_min);
+            ev["end_min"] = json!(end_min);
+            ev["all_day"] = json!(false);
+        }
+        None => {
+            let date = it.get("start").and_then(|s| s.get("date")).and_then(|s| s.as_str())?;
+            let end_date = it
+                .get("end")
+                .and_then(|e| e.get("date"))
+                .and_then(|e| e.as_str())
+                .unwrap_or(date);
+            ev["date"] = json!(date);
+            ev["end_date"] = json!(end_date);
+            ev["start_min"] = Value::Null;
+            ev["end_min"] = Value::Null;
+            ev["all_day"] = json!(true);
+        }
+    }
+    Some(ev)
+}
+
+async fn fetch_calendar_events(
+    client: &reqwest::Client,
+    token: &str,
+    cal: &GcalCalendar,
+    account: &str,
+    time_min: &str,
+    time_max: &str,
+) -> Result<Vec<Value>> {
+    let url = format!(
+        "{CAL_BASE}/calendars/{}/events?singleEvents=true&orderBy=startTime&timeMin={}&timeMax={}&maxResults=250&showDeleted=false",
+        enc(&cal.id),
+        enc(time_min),
+        enc(time_max),
+    );
+    let resp = client.get(url).bearer_auth(token).send().await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("events for {} failed ({})", cal.name, resp.status()));
+    }
+    let v: Value = resp.json().await?;
+    Ok(v.get("items")
+        .and_then(|i| i.as_array())
+        .map(|arr| arr.iter().filter_map(|it| map_event(it, cal, account)).collect())
+        .unwrap_or_default())
+}
+
+/// Every enabled calendar's events across every connected account for the
+/// inclusive day range [start_date, end_date] — the Calendar view's feed.
+/// Per-calendar fetches fan out concurrently; a broken account session or an
+/// unreadable calendar is skipped rather than blanking the whole grid.
+pub async fn events_range(dir: &Path, start_date: &str, end_date: &str) -> Result<Vec<Value>> {
+    let s = NaiveDate::parse_from_str(start_date, "%Y-%m-%d")?;
+    let e = NaiveDate::parse_from_str(end_date, "%Y-%m-%d")?;
+    let days = (e - s).num_days() + 1;
+    if !(1..=62).contains(&days) {
+        return Err(anyhow!("bad range {start_date}..{end_date}"));
+    }
+    let time_min = rfc3339_from_minutes(start_date, 0)?;
+    let time_max = rfc3339_from_minutes(start_date, days * 1440)?;
+
+    let emails: Vec<String> = get()
+        .accounts
+        .iter()
+        .filter(|a| a.refresh_token.is_some())
+        .map(|a| a.email.clone())
+        .collect();
+    if emails.is_empty() {
+        return Err(anyhow!("not connected to Google Calendar"));
+    }
+
+    let client = http_client()?;
+    let mut set = tokio::task::JoinSet::new();
+    for email in emails {
+        // Tokens refresh serially (once per account); event reads fan out.
+        let Ok(token) = access_token_for(dir, &email).await else { continue };
+        let cals = ensure_calendars(dir, &email).await.unwrap_or_default();
+        for cal in cals.into_iter().filter(|c| c.enabled) {
+            let (client, token, email) = (client.clone(), token.clone(), email.clone());
+            let (time_min, time_max) = (time_min.clone(), time_max.clone());
+            set.spawn(async move {
+                fetch_calendar_events(&client, &token, &cal, &email, &time_min, &time_max).await
+            });
+        }
+    }
+
+    let mut events: Vec<Value> = Vec::new();
+    while let Some(res) = set.join_next().await {
+        if let Ok(Ok(batch)) = res {
+            events.extend(batch);
+        }
+    }
+    // Day order; all-day first within a day (they render in the banner row).
+    events.sort_by(|a, b| {
+        let key = |v: &Value| {
+            (
+                v.get("date").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                v.get("start_min").and_then(|m| m.as_i64()).unwrap_or(-1),
+            )
+        };
+        key(a).cmp(&key(b))
+    });
+    Ok(events)
+}
+
+// ── Event CRUD (Calendar view) ──────────────────────────────────────────────
+/// Request body for a user-authored event. `start`/`end` are "HH:MM"; an
+/// absent start means all-day, with `end_date` the INCLUSIVE last day
+/// (defaults to `date`). With `patch`, the unused date/dateTime representation
+/// is explicitly nulled — PATCH keeps whatever it isn't told to clear, and
+/// Google rejects an event carrying both.
+fn user_event_body(
+    title: &str,
+    date: &str,
+    start: Option<&str>,
+    end: Option<&str>,
+    end_date: Option<&str>,
+    location: Option<&str>,
+    description: Option<&str>,
+    patch: bool,
+) -> Result<Value> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(anyhow!("the event needs a title"));
+    }
+    NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| anyhow!("bad date {date}"))?;
+    let mut body = json!({ "summary": title });
+    match start.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(start) => {
+            let smin = parse_hhmm(start)?;
+            let emin = match end.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(end) => {
+                    let mut m = parse_hhmm(end)?;
+                    if m <= smin {
+                        m += 1440; // crosses midnight
+                    }
+                    m
+                }
+                None => smin + 60,
+            };
+            body["start"] = json!({ "dateTime": rfc3339_from_minutes(date, smin)? });
+            body["end"] = json!({ "dateTime": rfc3339_from_minutes(date, emin)? });
+        }
+        None => {
+            let start_d = NaiveDate::parse_from_str(date, "%Y-%m-%d")?;
+            let last = match end_date.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(d) => NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                    .map_err(|_| anyhow!("bad date {d}"))?
+                    .max(start_d),
+                None => start_d,
+            };
+            let excl = last + chrono::Duration::days(1);
+            body["start"] = json!({ "date": date });
+            body["end"] = json!({ "date": excl.format("%Y-%m-%d").to_string() });
+        }
+    }
+    if patch {
+        for k in ["start", "end"] {
+            for f in ["dateTime", "date"] {
+                if body[k].get(f).is_none() {
+                    body[k][f] = Value::Null;
+                }
+            }
+        }
+    }
+    if let Some(l) = location {
+        body["location"] = json!(l.trim());
+    }
+    if let Some(d) = description {
+        body["description"] = json!(d);
+    }
+    Ok(body)
+}
+
+/// Create an event on any connected account's calendar. Returns `{ id }`.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_event(
+    dir: &Path,
+    account: &str,
+    calendar_id: &str,
+    title: &str,
+    date: &str,
+    start: Option<&str>,
+    end: Option<&str>,
+    end_date: Option<&str>,
+    location: Option<&str>,
+    description: Option<&str>,
+) -> Result<Value> {
+    let token = access_token_for(dir, account).await?;
+    let body = user_event_body(title, date, start, end, end_date, location, description, false)?;
+    let resp = http_client()?
+        .post(format!("{CAL_BASE}/calendars/{}/events", enc(calendar_id)))
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("create failed ({status}): {text}"));
+    }
+    let v: Value = resp.json().await?;
+    Ok(json!({ "id": v.get("id").cloned().unwrap_or(Value::Null) }))
+}
+
+/// Edit an event in place. `move_to` first relocates it to another calendar in
+/// the SAME account (Google can't move events across accounts).
+#[allow(clippy::too_many_arguments)]
+pub async fn update_event(
+    dir: &Path,
+    account: &str,
+    calendar_id: &str,
+    event_id: &str,
+    title: &str,
+    date: &str,
+    start: Option<&str>,
+    end: Option<&str>,
+    end_date: Option<&str>,
+    location: Option<&str>,
+    description: Option<&str>,
+    move_to: Option<&str>,
+) -> Result<()> {
+    let token = access_token_for(dir, account).await?;
+    let client = http_client()?;
+    let mut cal = calendar_id.to_string();
+    if let Some(dest) = move_to.filter(|d| !d.is_empty() && *d != calendar_id) {
+        let resp = client
+            .post(format!(
+                "{CAL_BASE}/calendars/{}/events/{}/move?destination={}",
+                enc(&cal),
+                enc(event_id),
+                enc(dest),
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("move failed ({status}): {text}"));
+        }
+        cal = dest.to_string();
+    }
+    let body = user_event_body(title, date, start, end, end_date, location, description, true)?;
+    let resp = client
+        .patch(format!("{CAL_BASE}/calendars/{}/events/{}", enc(&cal), enc(event_id)))
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("update failed ({status}): {text}"));
+    }
+    Ok(())
+}
+
+/// Delete an event from any connected account's calendar (already-gone is fine).
+pub async fn remove_event(dir: &Path, account: &str, calendar_id: &str, event_id: &str) -> Result<()> {
+    let token = access_token_for(dir, account).await?;
+    delete_event(&http_client()?, &token, calendar_id, event_id).await
+}
+
 // ── Read-back (Today empty state) ─────────────────────────────────────────────
 /// "2026-06-05T09:30:00-04:00" → "09:30" in Eastern wall-clock. None if unparseable.
 fn hhmm_from_rfc3339(s: &str) -> Option<String> {
@@ -924,92 +1501,82 @@ fn is_declined(it: &Value) -> bool {
 }
 
 /// Pull every (non-noted) calendar's events for `event_date` so the Today view
-/// can show what the user already has planned. Read-only; merges across all
-/// calendars in the account, hides events the user declined, and skips noted's
-/// own pushed calendar. All-day events come back with `start: null, all_day: true`.
+/// can show what the user already has planned. Read-only; merges across EVERY
+/// connected account's enabled calendars, hides events the user declined, and
+/// skips noted's own pushed calendar. All-day events come back with
+/// `start: null, all_day: true`.
 /// Each item: `{ task, start: "HH:MM"|null, end: "HH:MM"|null, all_day, calendar }`.
 pub async fn list_events(dir: &Path, event_date: &str) -> Result<Vec<Value>> {
-    let token = get_access_token(dir).await?;
-    let client = http_client()?;
-
     // Day window in Eastern wall-clock — matches how blocks are stored/displayed.
     let time_min = rfc3339_from_minutes(event_date, 0)?;
     let time_max = rfc3339_from_minutes(event_date, 1440)?;
 
-    // Enumerate the account's calendars (id, display name), skipping noted's own.
-    // A failure here is a real error (not "no events"), so surface it.
-    let list_resp = client
-        .get(format!("{CAL_BASE}/users/me/calendarList"))
-        .bearer_auth(&token)
-        .send()
-        .await?;
-    if !list_resp.status().is_success() {
-        let status = list_resp.status();
-        let text = list_resp.text().await.unwrap_or_default();
-        return Err(anyhow!("calendar list failed ({status}): {text}"));
+    let emails: Vec<String> = get()
+        .accounts
+        .iter()
+        .filter(|a| a.refresh_token.is_some())
+        .map(|a| a.email.clone())
+        .collect();
+    if emails.is_empty() {
+        return Err(anyhow!("not connected to Google Calendar"));
     }
-    let list: Value = list_resp.json().await?;
-    let cals: Vec<(String, String)> = list
-        .get("items")
-        .and_then(|i| i.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|c| {
-                    let id = c.get("id").and_then(|s| s.as_str())?;
-                    let name = c.get("summary").and_then(|s| s.as_str()).unwrap_or(id);
-                    if name == CAL_SUMMARY {
-                        return None; // don't echo back our own schedule
-                    }
-                    Some((id.to_string(), name.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
 
+    let client = http_client()?;
     let mut events: Vec<Value> = Vec::new();
-    for (id, name) in &cals {
-        let url = format!(
-            "{CAL_BASE}/calendars/{}/events?singleEvents=true&orderBy=startTime&timeMin={}&timeMax={}&maxResults=50&showDeleted=false",
-            enc(id),
-            enc(&time_min),
-            enc(&time_max),
-        );
-        let resp = client.get(url).bearer_auth(&token).send().await?;
-        // Skip calendars we can't read rather than failing the whole pull.
-        if !resp.status().is_success() {
-            eprintln!("[noted] gcal events for {name} failed ({})", resp.status());
-            continue;
-        }
-        let v: Value = resp.json().await?;
-        let Some(items) = v.get("items").and_then(|i| i.as_array()) else {
-            continue;
-        };
-        for it in items {
-            if is_declined(it) {
+    for email in &emails {
+        // One dead account session shouldn't blank the whole day.
+        let token = match access_token_for(dir, email).await {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[noted] gcal token for {email} failed: {e}");
                 continue;
             }
-            let task = it.get("summary").and_then(|s| s.as_str()).unwrap_or("(busy)").trim();
-            // Timed events carry start.dateTime; all-day events carry start.date.
-            let (start_hhmm, all_day) = match it
-                .get("start")
-                .and_then(|s| s.get("dateTime"))
-                .and_then(|s| s.as_str())
-            {
-                Some(dt) => (hhmm_from_rfc3339(dt), false),
-                None => (None, true),
+        };
+        let cals = ensure_calendars(dir, email).await.unwrap_or_default();
+        for cal in cals.iter().filter(|c| c.enabled && c.name != CAL_SUMMARY) {
+            let url = format!(
+                "{CAL_BASE}/calendars/{}/events?singleEvents=true&orderBy=startTime&timeMin={}&timeMax={}&maxResults=50&showDeleted=false",
+                enc(&cal.id),
+                enc(&time_min),
+                enc(&time_max),
+            );
+            let resp = client.get(url).bearer_auth(&token).send().await?;
+            // Skip calendars we can't read rather than failing the whole pull.
+            if !resp.status().is_success() {
+                eprintln!("[noted] gcal events for {} failed ({})", cal.name, resp.status());
+                continue;
+            }
+            let v: Value = resp.json().await?;
+            let Some(items) = v.get("items").and_then(|i| i.as_array()) else {
+                continue;
             };
-            let end_hhmm = it
-                .get("end")
-                .and_then(|s| s.get("dateTime"))
-                .and_then(|s| s.as_str())
-                .and_then(hhmm_from_rfc3339);
-            events.push(json!({
-                "task": task,
-                "start": start_hhmm,
-                "end": end_hhmm,
-                "all_day": all_day,
-                "calendar": name,
-            }));
+            for it in items {
+                if is_declined(it) {
+                    continue;
+                }
+                let task = it.get("summary").and_then(|s| s.as_str()).unwrap_or("(busy)").trim();
+                // Timed events carry start.dateTime; all-day events carry start.date.
+                let (start_hhmm, all_day) = match it
+                    .get("start")
+                    .and_then(|s| s.get("dateTime"))
+                    .and_then(|s| s.as_str())
+                {
+                    Some(dt) => (hhmm_from_rfc3339(dt), false),
+                    None => (None, true),
+                };
+                let end_hhmm = it
+                    .get("end")
+                    .and_then(|s| s.get("dateTime"))
+                    .and_then(|s| s.as_str())
+                    .and_then(hhmm_from_rfc3339);
+                events.push(json!({
+                    "task": task,
+                    "start": start_hhmm,
+                    "end": end_hhmm,
+                    "all_day": all_day,
+                    "calendar": cal.name,
+                }));
+            }
         }
     }
 
@@ -1120,6 +1687,120 @@ mod tests {
         // Already Eastern → passes through unchanged.
         assert_eq!(hhmm_from_rfc3339("2026-06-05T09:30:00-04:00").as_deref(), Some("09:30"));
         assert_eq!(hhmm_from_rfc3339("garbage"), None);
+    }
+
+    fn cal(id: &str) -> GcalCalendar {
+        GcalCalendar {
+            id: id.into(),
+            name: id.into(),
+            color: "#039be5".into(),
+            enabled: true,
+            primary: false,
+            access: "owner".into(),
+        }
+    }
+
+    #[test]
+    fn merge_calendars_keeps_hidden_choices() {
+        let mut old_work = cal("work");
+        old_work.enabled = false;
+        let old = vec![old_work, cal("home"), cal("gone")];
+        // Fresh list: "gone" was deleted upstream, "new" appeared, colors refresh.
+        let merged = merge_calendars(old, vec![cal("work"), cal("home"), cal("new")]);
+        let by_id = |id: &str| merged.iter().find(|c| c.id == id);
+        assert!(!by_id("work").unwrap().enabled, "hide choice must survive refresh");
+        assert!(by_id("home").unwrap().enabled);
+        assert!(by_id("new").unwrap().enabled, "new calendars start visible");
+        assert!(by_id("gone").is_none(), "deleted calendars drop out");
+    }
+
+    #[test]
+    fn map_event_timed_converts_to_eastern_minutes() {
+        let it = json!({
+            "id": "abc",
+            "summary": "standup",
+            "start": { "dateTime": "2026-06-05T13:30:00Z" }, // 09:30 EDT
+            "end": { "dateTime": "2026-06-05T14:00:00Z" },
+            "location": "zoom",
+        });
+        let ev = map_event(&it, &cal("work"), "me@x.com").unwrap();
+        assert_eq!(ev["date"], "2026-06-05");
+        assert_eq!(ev["start_min"], 9 * 60 + 30);
+        assert_eq!(ev["end_min"], 10 * 60);
+        assert_eq!(ev["all_day"], false);
+        assert_eq!(ev["account"], "me@x.com");
+        assert_eq!(ev["calendar"], "work");
+        assert_eq!(ev["location"], "zoom");
+    }
+
+    #[test]
+    fn map_event_cross_midnight_end_exceeds_1440() {
+        let it = json!({
+            "summary": "redeye",
+            "start": { "dateTime": "2026-06-05T23:00:00-04:00" },
+            "end": { "dateTime": "2026-06-06T01:00:00-04:00" },
+        });
+        let ev = map_event(&it, &cal("c"), "a").unwrap();
+        assert_eq!(ev["start_min"], 23 * 60);
+        assert_eq!(ev["end_min"], 25 * 60);
+    }
+
+    #[test]
+    fn map_event_all_day_keeps_exclusive_end_date() {
+        let it = json!({
+            "summary": "conference",
+            "start": { "date": "2026-06-05" },
+            "end": { "date": "2026-06-08" }, // Google end is exclusive: 3 days
+        });
+        let ev = map_event(&it, &cal("c"), "a").unwrap();
+        assert_eq!(ev["all_day"], true);
+        assert_eq!(ev["date"], "2026-06-05");
+        assert_eq!(ev["end_date"], "2026-06-08");
+        assert_eq!(ev["start_min"], Value::Null);
+    }
+
+    #[test]
+    fn map_event_skips_cancelled_and_titles_untitled() {
+        let gone = json!({ "status": "cancelled", "start": { "date": "2026-06-05" } });
+        assert!(map_event(&gone, &cal("c"), "a").is_none());
+        let untitled = json!({ "start": { "date": "2026-06-05" }, "end": { "date": "2026-06-06" } });
+        assert_eq!(map_event(&untitled, &cal("c"), "a").unwrap()["title"], "(untitled)");
+    }
+
+    #[test]
+    fn user_event_body_timed_and_all_day() {
+        let b = user_event_body("lunch", "2026-06-05", Some("12:00"), Some("13:00"), None, None, None, false)
+            .unwrap();
+        assert!(b["start"]["dateTime"].as_str().unwrap().starts_with("2026-06-05T12:00:00"));
+        assert!(b["end"]["dateTime"].as_str().unwrap().starts_with("2026-06-05T13:00:00"));
+        assert!(b["start"].get("date").is_none(), "no null padding on create");
+
+        // All-day: inclusive last day → Google's exclusive end.
+        let b = user_event_body("offsite", "2026-06-05", None, None, Some("2026-06-06"), None, None, false)
+            .unwrap();
+        assert_eq!(b["start"]["date"], "2026-06-05");
+        assert_eq!(b["end"]["date"], "2026-06-07");
+    }
+
+    #[test]
+    fn user_event_body_patch_nulls_the_other_shape() {
+        let b = user_event_body("x", "2026-06-05", Some("09:00"), None, None, None, None, true).unwrap();
+        assert_eq!(b["start"]["date"], Value::Null, "patch must clear the all-day shape");
+        assert!(b["start"]["dateTime"].is_string());
+        // Default end: one hour.
+        assert!(b["end"]["dateTime"].as_str().unwrap().starts_with("2026-06-05T10:00:00"));
+
+        let b = user_event_body("x", "2026-06-05", None, None, None, None, None, true).unwrap();
+        assert_eq!(b["start"]["dateTime"], Value::Null, "patch must clear the timed shape");
+        assert_eq!(b["end"]["date"], "2026-06-06");
+    }
+
+    #[test]
+    fn user_event_body_rolls_end_past_midnight_and_rejects_empty_title() {
+        let b = user_event_body("late", "2026-06-05", Some("23:00"), Some("01:00"), None, None, None, false)
+            .unwrap();
+        assert!(b["end"]["dateTime"].as_str().unwrap().starts_with("2026-06-06T01:00:00"));
+        assert!(user_event_body("  ", "2026-06-05", None, None, None, None, None, false).is_err());
     }
 
     #[test]

@@ -83,6 +83,18 @@ export type EntityCandidate = {
 // A stored entity node (for the graph view / management).
 export type EntityRow = { id: number; name: string; type: string; mention_count: number };
 
+// A likely-duplicate entity pair from the retro merge scan (People view panel).
+export type MergeSuggestion = {
+  a_id: number;
+  a_name: string;
+  a_mentions: number;
+  b_id: number;
+  b_name: string;
+  b_mentions: number;
+  etype: string;
+  similarity: number;
+};
+
 // Knowledge-graph ("Self" view) shapes. Work-graph nodes also carry `vault`.
 export type GraphNode = { id: number; name: string; type: string; mention_count: number; vault?: string };
 export type GraphEdge = { source: number; target: number; weight: number };
@@ -202,13 +214,29 @@ export type ProviderSettings = {
   has_gemini_key: boolean;
 };
 
-// Google Calendar sync. noted pushes the day's schedule one-way into a dedicated
-// "noted" calendar; auth is OAuth (tokens live in the macOS Keychain).
+// Google Calendar. noted pushes the day's schedule one-way into a dedicated
+// "noted" calendar in the first account, and the Calendar view reads/writes
+// events across every connected account; auth is OAuth (tokens live in the
+// macOS Keychain, one refresh token per account).
+export type GcalCalendarInfo = {
+  id: string;
+  name: string;
+  color: string; // Google's calendar hex
+  enabled: boolean; // shown in the Calendar view
+  primary: boolean;
+  access: string; // owner/writer = event create/edit allowed
+};
+export type GcalAccountInfo = {
+  email: string;
+  connected: boolean; // false = session expired, needs a reconnect
+  calendars: GcalCalendarInfo[];
+};
 export type GcalStatus = {
-  connected: boolean; // a refresh token is stored
+  connected: boolean; // at least one account has a refresh token
   has_client: boolean; // the OAuth client id + secret are set
-  account_email: string | null;
+  account_email: string | null; // first account (hosts the "noted" push calendar)
   calendar_id: string | null;
+  accounts: GcalAccountInfo[];
 };
 export type SyncReport = {
   created: number;
@@ -226,6 +254,47 @@ export type CalEvent = {
   end: string | null;
   all_day: boolean;
   calendar: string;
+};
+// One event in the Calendar view's range feed. Timed events position by
+// start_min/end_min — minutes from `date`'s Eastern midnight, where end_min
+// > 1440 means it crosses midnight. All-day events carry `end_date` instead
+// (Google's EXCLUSIVE end day).
+export type RangeEvent = {
+  id: string;
+  title: string;
+  date: string; // YYYY-MM-DD start day (Eastern)
+  end_date: string | null;
+  start_min: number | null;
+  end_min: number | null;
+  all_day: boolean;
+  calendar: string;
+  calendar_id: string;
+  color: string;
+  account: string;
+  location: string | null;
+  description: string | null;
+  declined: boolean;
+};
+// Fields the Calendar view's create/edit forms submit.
+export type EventInput = {
+  account: string;
+  calendarId: string;
+  title: string;
+  date: string; // YYYY-MM-DD
+  start?: string; // "HH:MM"; absent = all-day
+  end?: string;
+  endDate?: string; // all-day only: inclusive last day
+  location?: string;
+  description?: string;
+};
+
+// The Journal agent's response: a companion reply (null if the local model was
+// unreachable — the reflection is saved regardless) + how many knowledge-graph
+// entities the reflection fed.
+export type JournalReply = {
+  reply: string | null;
+  note_id: number;
+  entity_count: number;
 };
 
 export type AskSource = {
@@ -288,6 +357,9 @@ export const api = {
     invoke<number>("quick_capture", { rawText, source, imagePath, eventDate }),
   listEntities: () => invoke<EntityRow[]>("list_entities"),
   mergeEntities: (keep: number, drop: number) => invoke<void>("merge_entities", { keep, drop }),
+  suggestEntityMerges: () => invoke<MergeSuggestion[]>("suggest_entity_merges"),
+  dismissMergeSuggestion: (a: number, b: number) =>
+    invoke<void>("dismiss_merge_suggestion", { a, b }),
   entityGraph: () => invoke<GraphData>("entity_graph"),
   entityDetail: (entityId: number) => invoke<EntityMention[]>("entity_detail", { entityId }),
   entityProfile: (entityId: number) => invoke<EntityProfile>("entity_profile", { entityId }),
@@ -305,6 +377,10 @@ export const api = {
   ) => invoke<AskResult>("chat", { question, history, scope, entityId }),
   // Proactive surfacing: brain notes related to in-progress capture text.
   relatedBrain: (text: string) => invoke<RelatedBrain[]>("related_brain", { text }),
+  // Journal: save a reflection (always) + get a companion reply and KG entities
+  // (local model only — reflections never take the Balanced cloud path).
+  journalReflect: (text: string, history: { role: string; content: string }[]) =>
+    invoke<JournalReply>("journal_reflect", { text, history }),
   // Auto-propagation (timed write-back + export). Import + embed always run.
   brainGetAuto: () => invoke<boolean>("brain_get_auto"),
   brainSetAuto: (enabled: boolean) => invoke<void>("brain_set_auto", { enabled }),
@@ -355,6 +431,19 @@ export const api = {
   gcalClearDay: (eventDate?: string) => invoke<number>("gcal_clear_day", { eventDate }),
   gcalSync: (eventDate?: string) => invoke<SyncReport>("gcal_sync", { eventDate }),
   gcalListEvents: (eventDate?: string) => invoke<CalEvent[]>("gcal_list_events", { eventDate }),
+  // Multi-account management + the Calendar view's feed.
+  gcalRemoveAccount: (email: string) => invoke<GcalStatus>("gcal_remove_account", { email }),
+  gcalSetCalendarEnabled: (account: string, calendarId: string, enabled: boolean) =>
+    invoke<GcalStatus>("gcal_set_calendar_enabled", { account, calendarId, enabled }),
+  gcalRefreshCalendars: () => invoke<GcalStatus>("gcal_refresh_calendars"),
+  gcalEventsRange: (startDate: string, endDate: string) =>
+    invoke<RangeEvent[]>("gcal_events_range", { startDate, endDate }),
+  gcalCreateEvent: (ev: EventInput) =>
+    invoke<{ id: string | null }>("gcal_create_event", { ...ev }),
+  gcalUpdateEvent: (eventId: string, ev: EventInput, moveTo?: string) =>
+    invoke<void>("gcal_update_event", { eventId, moveTo, ...ev }),
+  gcalDeleteEvent: (account: string, calendarId: string, eventId: string) =>
+    invoke<void>("gcal_delete_event", { account, calendarId, eventId }),
   // Brain-vault sync (Obsidian ↔ noted). camelCase arg keys (Tauri → snake_case).
   brainListVaults: () => invoke<BrainVaultStatus[]>("brain_list_vaults"),
   brainAddVault: (path: string, direction?: string) =>

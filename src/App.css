@@ -89,13 +89,18 @@ button { font-family: inherit; cursor: pointer; }
 input, textarea { font-family: inherit; }
 
 .app {
-  max-width: 760px;
+  /* One shell width for every view (sized for the calendar grid) so the
+     topbar/nav never stretches when switching tabs. Narrow views center
+     their own content (composer 600, schedule/journal 620, knowledge 704). */
+  max-width: 1400px;
   margin: 0 auto;
   min-height: 100%;
   display: flex;
   flex-direction: column;
   padding: 0 28px;
 }
+
+.knowledge { width: 100%; max-width: 704px; margin: 0 auto; }
 
 /* ── top bar ───────────────────────────────────────────── */
 .topbar {
@@ -850,6 +855,13 @@ textarea.json.bad { border-color: var(--bad); }
   border: 1px solid var(--line); border-radius: var(--r-md); padding: 9px 12px; max-width: 320px;
 }
 .legend-item { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); text-transform: capitalize; }
+/* One-off visibility toggle, mirroring the legend chip's surface. */
+.graph-filter {
+  position: absolute; right: 14px; bottom: 14px; font: inherit; font-size: 11.5px; color: var(--muted);
+  background: color-mix(in srgb, var(--surface) 82%, transparent); backdrop-filter: blur(8px);
+  border: 1px solid var(--line); border-radius: var(--r-md); padding: 9px 12px; cursor: pointer;
+}
+.graph-filter:hover { color: var(--ink); border-color: var(--line-strong); }
 .ldot { width: 8px; height: 8px; border-radius: 99px; flex-shrink: 0; }
 .ldot.big { width: 12px; height: 12px; }
 
@@ -879,6 +891,26 @@ textarea.json.bad { border-color: var(--bad); }
 .people-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px;
 }
+/* Likely-duplicate panel: the retro merge scan's confirm/dismiss queue. */
+.merge-suggest {
+  border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-2);
+  padding: 12px 14px; margin-bottom: 18px; display: flex; flex-direction: column; gap: 8px;
+}
+.merge-suggest-label {
+  display: inline-flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 540;
+  color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em;
+}
+.merge-suggest-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.ms-names { font-size: 13.5px; }
+.ms-actions { display: inline-flex; gap: 14px; flex-shrink: 0; }
+
+/* Collapsed drawer for people mentioned exactly once. */
+.people-oneoffs { margin-top: 22px; }
+.people-oneoffs > summary {
+  cursor: pointer; font-size: 13px; color: var(--muted); padding: 6px 0; user-select: none;
+}
+.people-oneoffs > summary:hover { color: var(--ink); }
+.people-oneoffs[open] > summary { margin-bottom: 12px; }
 .person-card { display: flex; flex-direction: column; gap: 0; }
 .person-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .person-name { margin: 0; font-size: 15.5px; font-weight: 600; color: var(--ink); }
@@ -1090,3 +1122,211 @@ textarea.json.bad { border-color: var(--bad); }
 .vault-auto input { margin-top: 3px; flex: none; }
 .vault-auto > span { font-size: 14px; display: flex; flex-direction: column; gap: 3px; }
 .vault-auto em { font-style: normal; font-size: 12px; color: var(--muted); line-height: 1.45; }
+
+/* ── Calendar view (multi-account Google Calendar grid) ─────────── */
+/* The shell is already calendar-wide; calmode only pins the height so the
+   time grid scrolls internally instead of the page. */
+.app.calmode { height: 100%; }
+.app.calmode .content { padding-bottom: 14px; min-height: 0; }
+
+.cal { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+
+.cal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 2px 12px; flex-wrap: wrap; }
+.cal-head-left { display: flex; align-items: center; gap: 14px; }
+.cal-title { font-size: 20px; font-weight: 600; letter-spacing: -0.02em; margin: 0; }
+.cal-nav { display: flex; align-items: center; gap: 4px; }
+.cal-loading { color: var(--muted); }
+.cal-head-right { display: flex; align-items: center; gap: 8px; }
+
+.cal-btn {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500;
+  color: var(--ink-soft); background: var(--surface); border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm); padding: 5px 11px; transition: 0.14s var(--ease);
+}
+.cal-btn:hover { background: var(--hover-soft); color: var(--ink); }
+.cal-btn:disabled { opacity: 0.5; cursor: default; }
+.cal-btn.primary { background: var(--ink); color: var(--on-ink); border-color: var(--ink); }
+.cal-btn.primary:hover { background: var(--ink-hover); }
+.cal-btn.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, var(--line)); }
+.cal-btn.danger:hover { background: var(--error-bg); }
+.cal-btn.danger.armed { background: var(--bad); color: #fff; border-color: var(--bad); }
+
+.cal-icon {
+  display: inline-grid; place-items: center; width: 30px; height: 30px; color: var(--muted);
+  background: none; border: 1px solid transparent; border-radius: var(--r-sm); transition: 0.14s var(--ease);
+}
+.cal-icon:hover, .cal-icon.active { color: var(--ink); background: var(--hover-soft); }
+
+.cal-seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: var(--r-sm); overflow: hidden; }
+.cal-seg button {
+  border: none; background: var(--surface); color: var(--muted); font-size: 12.5px; font-weight: 500;
+  padding: 5px 12px; transition: 0.14s var(--ease);
+}
+.cal-seg button + button { border-left: 1px solid var(--line); }
+.cal-seg button:hover { color: var(--ink); }
+.cal-seg button.on { background: var(--accent-tint); color: var(--accent); }
+
+.cal-notice { font-size: 13px; color: var(--ink-soft); background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 7px 12px; margin-bottom: 10px; }
+.cal-notice.err { background: var(--error-bg); border-color: var(--error-border); color: var(--error-ink); }
+.cal-notice button { border: none; background: none; color: inherit; text-decoration: underline; font: inherit; padding: 0; }
+
+/* Day headers + all-day banner share the grid template with the time grid. */
+.cal-dayheads { display: grid; border-bottom: 1px solid var(--line); padding-right: 9px; }
+.cal-dayhead { display: flex; align-items: baseline; gap: 7px; padding: 4px 8px 7px; border-left: 1px solid var(--line); }
+.cal-dow { font-size: 11px; font-weight: 560; text-transform: uppercase; letter-spacing: 0.07em; color: var(--faint); }
+.cal-dom { font-size: 17px; font-weight: 580; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+.cal-dayhead.today .cal-dow { color: var(--accent); }
+.cal-dayhead.today .cal-dom {
+  color: #fff; background: var(--accent); border-radius: 999px; min-width: 26px; height: 26px;
+  display: inline-grid; place-items: center; font-size: 14px; padding: 0 4px;
+}
+
+.cal-allday { display: grid; border-bottom: 1px solid var(--line); padding: 4px 9px 4px 0; }
+.cal-allday-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); align-self: center; text-align: right; padding-right: 8px; }
+.cal-allday-lanes { display: grid; gap: 2px 4px; }
+.cal-chip {
+  border: none; text-align: left; font-size: 12px; font-weight: 520; color: var(--ink);
+  background: color-mix(in srgb, var(--ev-color) 26%, var(--surface));
+  border-left: 3px solid var(--ev-color); border-radius: 5px; padding: 2px 8px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: filter 0.12s var(--ease);
+}
+.cal-chip:hover { filter: brightness(0.96); }
+.cal-chip.declined { opacity: 0.55; text-decoration: line-through; }
+
+/* The scrolling day grid */
+.cal-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.cal-grid { display: grid; }
+/* Heights + the hour-line gradient are inline styles: the hour height adapts
+   so the default 8 AM – 9 PM window fits the viewport. */
+.cal-gutter { position: relative; }
+.cal-hourlabel {
+  position: absolute; right: 8px; transform: translateY(-50%);
+  font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; background: var(--canvas); padding: 0 2px;
+}
+.cal-col { position: relative; border-left: 1px solid var(--line); cursor: copy; }
+.cal-ev {
+  position: absolute; display: flex; flex-direction: column; gap: 1px; align-items: flex-start;
+  text-align: left; border: none; border-left: 3px solid var(--ev-color); border-radius: 6px;
+  background: color-mix(in srgb, var(--ev-color) 24%, var(--surface));
+  padding: 3px 7px; overflow: hidden; cursor: pointer; box-shadow: var(--shadow-1);
+  transition: filter 0.12s var(--ease), box-shadow 0.12s var(--ease); z-index: 1;
+}
+.cal-ev:hover { filter: brightness(0.97); box-shadow: var(--shadow-2); z-index: 2; }
+.cal-ev.declined { opacity: 0.55; }
+.cal-ev.declined .cal-ev-title { text-decoration: line-through; }
+.cal-ev-title { font-size: 12px; font-weight: 540; color: var(--ink); line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.cal-ev-time { font-size: 11px; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+
+.cal-now { position: absolute; left: 0; right: 0; height: 2px; background: var(--accent); z-index: 3; pointer-events: none; }
+.cal-now-dot { position: absolute; left: -4px; top: -3px; width: 8px; height: 8px; border-radius: 999px; background: var(--accent); }
+
+/* Floating cards (event details, calendar filter) */
+.cal-pop {
+  position: fixed; z-index: 60; width: 340px; max-height: 70vh; overflow-y: auto;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  box-shadow: var(--shadow-3); padding: 12px 14px;
+}
+.cal-filterwrap { position: relative; }
+.cal-filter { position: absolute; top: 36px; right: 0; width: 300px; }
+.cal-pop-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 560; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); margin-bottom: 8px; }
+.cal-pop-x { display: inline-grid; place-items: center; width: 24px; height: 24px; border: none; background: none; color: var(--muted); border-radius: 6px; }
+.cal-pop-x:hover { background: var(--hover-soft); color: var(--ink); }
+
+.cal-filter-acct { padding: 6px 0; }
+.cal-filter-acct + .cal-filter-acct { border-top: 1px solid var(--line); }
+.cal-filter-email { font-size: 12px; font-weight: 560; color: var(--ink-soft); margin-bottom: 4px; overflow-wrap: anywhere; }
+.cal-filter-warn { margin-left: 8px; font-weight: 480; color: var(--bad); font-size: 11px; }
+.cal-filter-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; cursor: pointer; }
+.cal-filter-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cal-filter-add { display: flex; align-items: center; gap: 6px; width: 100%; border: none; background: none; color: var(--accent); font-size: 13px; font-weight: 520; padding: 8px 0 2px; border-top: 1px solid var(--line); margin-top: 6px; }
+.cal-dot { flex: none; width: 10px; height: 10px; border-radius: 999px; }
+
+.cal-evcard-head { display: flex; align-items: center; gap: 9px; }
+.cal-evcard-head .cal-pop-x { margin-left: auto; }
+.cal-evcard-title { font-size: 15px; font-weight: 580; color: var(--ink); overflow-wrap: anywhere; }
+.cal-evcard-title.declined { text-decoration: line-through; color: var(--muted); }
+.cal-evcard-when { font-size: 13px; color: var(--ink-soft); margin: 6px 2px 2px; }
+.cal-evcard-meta { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); margin: 6px 2px 0; overflow-wrap: anywhere; }
+.cal-evcard-desc { font-size: 12.5px; color: var(--ink-soft); margin: 8px 2px 0; max-height: 108px; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cal-evcard-actions { display: flex; gap: 8px; margin-top: 12px; }
+
+/* Create/edit form overlay */
+.cal-overlay { position: fixed; inset: 0; z-index: 70; background: color-mix(in srgb, var(--ink) 18%, transparent); display: grid; place-items: center; }
+.cal-form { width: 400px; max-width: calc(100vw - 40px); background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-lg); box-shadow: var(--shadow-3); padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; }
+.cal-form-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 560; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); }
+.cal-form-title { border: none; border-bottom: 2px solid var(--line-strong); background: transparent; font-size: 18px; font-weight: 560; color: var(--ink); padding: 4px 2px 8px; outline: none; }
+.cal-form-title:focus { border-bottom-color: var(--accent); }
+.cal-form-row { display: flex; align-items: center; gap: 8px; }
+.cal-form-row input, .cal-form-row select { border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--ink); border-radius: var(--r-sm); padding: 6px 9px; font-size: 13.5px; }
+.cal-form-dash { color: var(--faint); }
+.cal-form-ic { color: var(--muted); flex: none; }
+.cal-form-grow { flex: 1; min-width: 0; }
+.cal-form-allday { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-soft); cursor: pointer; }
+.cal-form-err { font-size: 12.5px; color: var(--error-ink); background: var(--error-bg); border: 1px solid var(--error-border); border-radius: var(--r-sm); padding: 7px 10px; }
+.cal-form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+/* Not-connected empty state */
+.cal-connect { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 40px 20px; gap: 6px; }
+.cal-connect-icon { color: var(--faint); margin-bottom: 6px; }
+.cal-connect-title { font-size: 17px; font-weight: 580; margin: 0; }
+.cal-connect-sub { font-size: 14px; color: var(--muted); max-width: 420px; line-height: 1.55; margin: 0 0 14px; }
+
+/* ── merged home: today's schedule on top, composer below ───────── */
+.home { flex: 1; display: flex; flex-direction: column; }
+.home .today { padding-top: 10px; }
+.home .log-hero { flex: none; justify-content: flex-start; padding: 30px 0 10px; }
+/* Below the schedule the greeting is a section heading, not the page hero. */
+.home .greet-title { font-size: clamp(19px, 2.2vw, 23px); }
+
+/* Google accounts list (Settings) */
+.gcal-accounts { display: flex; flex-direction: column; gap: 6px; }
+.gcal-account { display: flex; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: var(--r-sm); padding: 7px 10px; font-size: 13.5px; }
+.gcal-acct-ok { color: var(--good); flex: none; }
+.gcal-acct-bad { color: var(--bad); flex: none; }
+.gcal-acct-email { overflow-wrap: anywhere; }
+.gcal-acct-warn { font-size: 11.5px; color: var(--bad); }
+.gcal-acct-x { margin-left: auto; display: inline-grid; place-items: center; width: 24px; height: 24px; border: none; background: none; color: var(--muted); border-radius: 6px; flex: none; }
+.gcal-acct-x:hover { background: var(--hover-soft); color: var(--bad); }
+
+/* ── Journal: private reflection agent ──────────────────────────── */
+.journal { flex: 1; min-height: 0; display: flex; flex-direction: column; width: 100%; max-width: 620px; margin: 0 auto; padding: 4px 2px 8px; }
+.journal-head { padding: 14px 2px 10px; }
+.journal-eyebrow { font-size: 11px; font-weight: 560; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); margin-bottom: 6px; }
+.journal-title { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 6px; }
+.journal-sub { font-size: 13.5px; color: var(--muted); line-height: 1.5; margin: 0; }
+
+.journal-thread { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 12px 2px; }
+.journal-empty { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; color: var(--muted); font-size: 14px; line-height: 1.55; padding: 44px 30px; }
+.journal-empty-icon { color: var(--faint); }
+.journal-empty p { margin: 0; max-width: 380px; }
+
+.journal-msg { display: flex; flex-direction: column; max-width: 85%; }
+.journal-msg.you { align-self: flex-end; align-items: flex-end; }
+.journal-msg.agent { align-self: flex-start; align-items: flex-start; }
+.journal-bubble { font-size: 14.5px; line-height: 1.55; padding: 10px 14px; border-radius: var(--r-md); white-space: pre-wrap; overflow-wrap: anywhere; }
+.journal-msg.you .journal-bubble { background: var(--ink); color: var(--on-ink); border-bottom-right-radius: 5px; }
+.journal-msg.agent .journal-bubble { background: var(--surface); border: 1px solid var(--line); border-bottom-left-radius: 5px; box-shadow: var(--shadow-1); }
+.journal-bubble.thinking { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.journal-meta { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--faint); margin: 4px 4px 0; }
+
+.journal-error { margin: 0 2px 8px; }
+
+.journal-composer { display: flex; align-items: flex-end; gap: 8px; border: 1px solid var(--line-strong); border-radius: var(--r-lg); background: var(--surface); padding: 10px 10px 10px 14px; box-shadow: var(--shadow-1); }
+.journal-composer:focus-within { border-color: var(--accent); }
+.journal-composer textarea { flex: 1; border: none; background: transparent; resize: none; outline: none; font-size: 14.5px; line-height: 1.5; min-height: 44px; max-height: 160px; color: var(--ink); }
+.journal-send { display: inline-grid; place-items: center; width: 36px; height: 36px; flex: none; border: none; border-radius: 10px; background: var(--ink); color: var(--on-ink); transition: 0.14s var(--ease); }
+.journal-send:hover { background: var(--ink-hover); }
+.journal-send:disabled { opacity: 0.4; cursor: default; }
+
+/* Journal fills the window height like the calendar (internal thread scroll). */
+.app.journalmode { height: 100%; }
+.app.journalmode .content { padding-bottom: 14px; min-height: 0; }
+
+/* Collapsed composer: once today's schedule exists the big capture box folds
+   into this pill; anything can still be captured on demand. */
+.home-capturebtn {
+  display: inline-flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 520;
+  color: var(--muted); background: var(--surface); border: 1px dashed var(--line-strong);
+  border-radius: 999px; padding: 9px 20px; transition: 0.15s var(--ease);
+}
+.home-capturebtn:hover { color: var(--ink); border-style: solid; background: var(--hover-soft); }

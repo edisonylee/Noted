@@ -101,6 +101,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS entity_embeddings USING vec0(
   embedding FLOAT[768]
 );
 
+-- Merge suggestions the user rejected ("not the same"): (lo, hi) entity-id
+-- pairs excluded from future suggest_merges passes so a dismissal sticks.
+CREATE TABLE IF NOT EXISTS dismissed_merges (
+  a INTEGER NOT NULL,
+  b INTEGER NOT NULL,
+  PRIMARY KEY (a, b)
+);
+
 -- Quick-capture queue: a note captured (e.g. from the phone) that hasn't been
 -- categorized yet. A background worker runs extraction, writes it as a real
 -- note + entries, then deletes the row. `attempts` caps retries on poison rows.
@@ -1163,6 +1171,114 @@ pub fn insert_entity_embedding(conn: &Connection, entity_id: i64, vec: &[f32]) -
     conn.execute(
         "INSERT OR REPLACE INTO entity_embeddings(entity_id, embedding) VALUES (?1, ?2)",
         rusqlite::params![entity_id, json],
+    )?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct MergeSuggestionRow {
+    pub a_id: i64,
+    pub a_name: String,
+    pub a_mentions: i64,
+    pub b_id: i64,
+    pub b_name: String,
+    pub b_mentions: i64,
+    pub etype: String,
+    pub similarity: f32,
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let (mut dot, mut na, mut nb) = (0f32, 0f32, 0f32);
+    for (x, y) in a.iter().zip(b) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+/// Same-type entity pairs whose embeddings sit at/above `threshold` cosine
+/// similarity — likely duplicates ("Sara" / "Sarah") accumulated before the
+/// capture-time resolver could catch them. Pairs the user dismissed are
+/// excluded. Brute-force over in-memory vectors: a personal KB has hundreds of
+/// entities, not millions, so O(n²) here beats plumbing a KNN index query per
+/// entity.
+pub fn suggest_merges(
+    conn: &Connection,
+    threshold: f32,
+    limit: usize,
+) -> Result<Vec<MergeSuggestionRow>> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut meta_stmt = conn.prepare("SELECT id, name, type, mention_count FROM entities")?;
+    let meta: HashMap<i64, (String, String, i64)> = meta_stmt
+        .query_map([], |r| {
+            Ok((r.get::<_, i64>(0)?, (r.get(1)?, r.get(2)?, r.get(3)?)))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    // vec0 hands vectors back as little-endian f32 blobs.
+    let mut emb_stmt = conn.prepare("SELECT entity_id, embedding FROM entity_embeddings")?;
+    let embs: Vec<(i64, Vec<f32>)> = emb_stmt
+        .query_map([], |r| {
+            let id: i64 = r.get(0)?;
+            let blob: Vec<u8> = r.get(1)?;
+            let vec = blob
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            Ok((id, vec))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    let dismissed: HashSet<(i64, i64)> = conn
+        .prepare("SELECT a, b FROM dismissed_merges")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    let mut out: Vec<MergeSuggestionRow> = Vec::new();
+    for i in 0..embs.len() {
+        for j in (i + 1)..embs.len() {
+            let (ia, va) = &embs[i];
+            let (ib, vb) = &embs[j];
+            let (Some(ma), Some(mb)) = (meta.get(ia), meta.get(ib)) else {
+                continue; // embedding row orphaned from its entity
+            };
+            if ma.1 != mb.1 {
+                continue; // different types never merge
+            }
+            if dismissed.contains(&((*ia).min(*ib), (*ia).max(*ib))) {
+                continue;
+            }
+            let sim = cosine(va, vb);
+            if sim >= threshold {
+                out.push(MergeSuggestionRow {
+                    a_id: *ia,
+                    a_name: ma.0.clone(),
+                    a_mentions: ma.2,
+                    b_id: *ib,
+                    b_name: mb.0.clone(),
+                    b_mentions: mb.2,
+                    etype: ma.1.clone(),
+                    similarity: sim,
+                });
+            }
+        }
+    }
+    out.sort_by(|x, y| y.similarity.total_cmp(&x.similarity));
+    out.truncate(limit);
+    Ok(out)
+}
+
+/// "Not the same" — remember the pair (order-normalized) so it stops being
+/// suggested.
+pub fn dismiss_merge(conn: &Connection, a: i64, b: i64) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO dismissed_merges(a, b) VALUES (?1, ?2)",
+        rusqlite::params![a.min(b), a.max(b)],
     )?;
     Ok(())
 }

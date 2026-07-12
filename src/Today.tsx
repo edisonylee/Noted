@@ -781,7 +781,7 @@ export function TodayView({
     <header className="today-head">
       <div className="today-headrow">
         <div>
-          <div className="today-eyebrow">Today</div>
+          <div className="today-eyebrow">Daily schedule</div>
           <h1 className="today-date">{dateLine}</h1>
         </div>
         {withEdit && (
@@ -980,57 +980,38 @@ export function TodayView({
   }
 
   // ---- Empty state ----
+  // Deliberately quiet: the composer above this view is how a schedule gets
+  // made (type/speak/photo your day and it files here), so there's no
+  // "make today's schedule" CTA anymore. The only extra we offer is the
+  // calendar seed card, when Google has events worth pulling in.
   if (!blocks.length) {
     const showCal = gcalConnected && calEvents && calEvents.length > 0;
     return (
       <div className="today">
-        {Head(false)}
-        <div className="today-empty">
-          {showCal ? (
-            <>
-              <div className="today-cal">
-                <div className="today-cal-head">
-                  <CalendarDays size={15} /> From your calendar
-                </div>
-                <ul className="today-cal-list">
-                  {calEvents!.map((e, i) => (
-                    <li key={i} className="today-cal-row">
-                      <span className="today-cal-time">
-                        {e.all_day ? "All day" : fmtTime(e.start ?? undefined)}
-                      </span>
-                      <span className="today-cal-task">{e.task}</span>
-                      <span className="today-cal-tag">{e.calendar}</span>
-                    </li>
-                  ))}
-                </ul>
-                <button className="today-make today-cal-build" onClick={() => buildFromEvents(calEvents!)}>
-                  <Plus size={16} /> Build schedule from these
-                </button>
+        {Head(true)}
+        {showCal && (
+          <div className="today-empty">
+            <div className="today-cal">
+              <div className="today-cal-head">
+                <CalendarDays size={15} /> From your calendar
               </div>
-              <div className="today-or">or</div>
-              <button className="today-empty-link" onClick={openEditor}>
-                Start a schedule from scratch
+              <ul className="today-cal-list">
+                {calEvents!.map((e, i) => (
+                  <li key={i} className="today-cal-row">
+                    <span className="today-cal-time">
+                      {e.all_day ? "All day" : fmtTime(e.start ?? undefined)}
+                    </span>
+                    <span className="today-cal-task">{e.task}</span>
+                    <span className="today-cal-tag">{e.calendar}</span>
+                  </li>
+                ))}
+              </ul>
+              <button className="today-make today-cal-build" onClick={() => buildFromEvents(calEvents!)}>
+                <Plus size={16} /> Build schedule from these
               </button>
-            </>
-          ) : (
-            <>
-              <CalendarDays size={30} className="today-empty-icon" />
-              <p className="today-empty-title">No schedule yet for today</p>
-              <p className="today-empty-sub">
-                Lay out your plan — type it from when you wake up to when you wind down, or snap a
-                photo of a handwritten schedule. noted lays it out here, time by time.
-              </p>
-              <button className="today-make" onClick={openEditor}>
-                <Plus size={16} /> Make today&apos;s schedule
-              </button>
-              {gcalConnected === false && (
-                <button className="today-empty-link" onClick={() => onOpenSettings?.()}>
-                  Connect Google Calendar to see today&apos;s events
-                </button>
-              )}
-            </>
-          )}
-        </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }

@@ -81,3 +81,42 @@ fn vec_loads_and_schema_evolves() {
 
     let _ = std::fs::remove_file(&tmp);
 }
+
+#[test]
+fn suggest_merges_finds_near_duplicates_and_respects_dismissals() {
+    let tmp = std::env::temp_dir().join(format!("noted_merge_test_{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::init(&tmp).expect("db init");
+    let now = "2026-06-01T00:00:00Z";
+
+    // Two near-identical people + one unrelated place.
+    let a = db::create_entity(&conn, "Sarah", "sarah", "person", "[]", "2026-06-01", now).unwrap();
+    let b = db::create_entity(&conn, "Sara", "sara", "person", "[]", "2026-06-01", now).unwrap();
+    let c = db::create_entity(&conn, "Gym", "gym", "place", "[]", "2026-06-01", now).unwrap();
+
+    // Hand-built embeddings: a≈b (cosine ~0.98), c orthogonal.
+    let mut va = vec![0.0f32; 768];
+    va[0] = 1.0;
+    let mut vb = vec![0.0f32; 768];
+    vb[0] = 0.98;
+    vb[1] = 0.2;
+    let mut vc = vec![0.0f32; 768];
+    vc[1] = 1.0;
+    db::insert_entity_embedding(&conn, a, &va).unwrap();
+    db::insert_entity_embedding(&conn, b, &vb).unwrap();
+    db::insert_entity_embedding(&conn, c, &vc).unwrap();
+
+    let sugg = db::suggest_merges(&conn, 0.82, 20).unwrap();
+    assert_eq!(sugg.len(), 1, "only the near-identical same-type pair should surface");
+    let pair = (sugg[0].a_id.min(sugg[0].b_id), sugg[0].a_id.max(sugg[0].b_id));
+    assert_eq!(pair, (a.min(b), a.max(b)));
+    assert!(sugg[0].similarity > 0.9, "cosine should be ~0.98, got {}", sugg[0].similarity);
+    assert_eq!(sugg[0].etype, "person");
+
+    // Dismiss (ids deliberately reversed — pair key is order-normalized) → gone.
+    db::dismiss_merge(&conn, b, a).unwrap();
+    let sugg2 = db::suggest_merges(&conn, 0.82, 20).unwrap();
+    assert!(sugg2.is_empty(), "dismissed pair must never resurface");
+
+    let _ = std::fs::remove_file(&tmp);
+}

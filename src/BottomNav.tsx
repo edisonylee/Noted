@@ -1,11 +1,10 @@
-import { CalendarDays, PenLine, Clock, MessageCircle } from "lucide-react";
+import { CalendarDays, PenLine, MessageCircle } from "lucide-react";
 
-export type MobileTab = "today" | "capture" | "timeline" | "ask";
+export type MobileTab = "today" | "capture" | "ask";
 
 const TABS = [
-  { id: "today", label: "Today", Icon: CalendarDays },
+  { id: "today", label: "Schedule", Icon: CalendarDays },
   { id: "capture", label: "Capture", Icon: PenLine },
-  { id: "timeline", label: "Timeline", Icon: Clock },
   { id: "ask", label: "Ask", Icon: MessageCircle },
 ] as const;
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Loader2, Users } from "lucide-react";
-import { api, type PersonProfile } from "./api";
+import { GitMerge, Loader2, Users } from "lucide-react";
+import { api, type MergeSuggestion, type PersonProfile } from "./api";
 import { relativeDay } from "./day";
 
 export function PeopleView({ onOpenPerson }: { onOpenPerson?: (id: number) => void }) {
@@ -9,6 +9,9 @@ export function PeopleView({ onOpenPerson }: { onOpenPerson?: (id: number) => vo
   const [loading, setLoading] = useState(true);
   const [backfilling, setBackfilling] = useState(false);
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
+  // Likely-duplicate pairs from the retro embedding scan; merging or dismissing
+  // each one is how the catalog cleans itself up over time.
+  const [suggestions, setSuggestions] = useState<MergeSuggestion[]>([]);
 
   const refresh = () =>
     api
@@ -16,9 +19,11 @@ export function PeopleView({ onOpenPerson }: { onOpenPerson?: (id: number) => vo
       .then(setPeople)
       .catch((e) => setErr(String(e)))
       .finally(() => setLoading(false));
+  const loadSuggestions = () => api.suggestEntityMerges().then(setSuggestions).catch(() => {});
 
   useEffect(() => {
     refresh();
+    loadSuggestions();
   }, []);
 
   async function mergeInto(dropId: number, keepId: number) {
@@ -27,6 +32,31 @@ export function PeopleView({ onOpenPerson }: { onOpenPerson?: (id: number) => vo
     try {
       await api.mergeEntities(keepId, dropId);
       await refresh();
+      await loadSuggestions();
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
+  // Accept a suggestion: keep the better-established side. (The dropdown on a
+  // card still covers merging the other direction.)
+  async function acceptSuggestion(s: MergeSuggestion) {
+    const [keep, drop] = s.a_mentions >= s.b_mentions ? [s.a_id, s.b_id] : [s.b_id, s.a_id];
+    setErr(null);
+    try {
+      await api.mergeEntities(keep, drop);
+      await refresh();
+      await loadSuggestions();
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
+  async function dismissSuggestion(s: MergeSuggestion) {
+    setErr(null);
+    try {
+      await api.dismissMergeSuggestion(s.a_id, s.b_id);
+      setSuggestions((all) => all.filter((o) => !(o.a_id === s.a_id && o.b_id === s.b_id)));
     } catch (e) {
       setErr(String(e));
     }
@@ -58,31 +88,14 @@ export function PeopleView({ onOpenPerson }: { onOpenPerson?: (id: number) => vo
     </button>
   );
 
-  return (
-    <div className="people">
-      <div className="people-head">
-        <p className="muted">
-          Everyone you mention is gathered here — what they&rsquo;re up to, how you know them, and when you last
-          crossed paths.
-        </p>
-        {people.length > 0 && rebuildBtn}
-      </div>
-      {backfillMsg && <div className="muted small">{backfillMsg}</div>}
+  // People you've mentioned once ride in a collapsed drawer below the grid so
+  // the main view is the people who actually recur. If *everyone* is a one-off
+  // (young graph), the split would just hide the whole view — show them all.
+  const recurring = people.filter((p) => p.mention_count >= 2);
+  const oneOffs = recurring.length > 0 ? people.filter((p) => p.mention_count < 2) : [];
+  const mainList = recurring.length > 0 ? recurring : people;
 
-      {err && <div className="error">{err}</div>}
-
-      {!loading && people.length === 0 && (
-        <div className="people-empty">
-          <p className="muted">
-            No people yet — mention someone by name in a note (&ldquo;coffee with Sarah, she just got engaged&rdquo;)
-            and they&rsquo;ll show up here.
-          </p>
-          {rebuildBtn}
-        </div>
-      )}
-
-      <div className="people-grid">
-        {people.map((p) => (
+  const personCard = (p: PersonProfile) => (
           <div
             className="entry-card person-card clickable"
             key={p.id}
@@ -110,12 +123,15 @@ export function PeopleView({ onOpenPerson }: { onOpenPerson?: (id: number) => vo
             )}
 
             <ul className="person-facts">
-              {p.mentions.map((m, i) => (
+              {p.mentions.slice(0, 4).map((m, i) => (
                 <li key={i}>
                   <span className="fact-date">{relativeDay(m.date)}</span>
                   <span className="fact-text">{m.text}</span>
                 </li>
               ))}
+              {p.mentions.length > 4 && (
+                <li className="muted small">+{p.mentions.length - 4} more — open for the full story</li>
+              )}
             </ul>
 
             {people.length > 1 && (
@@ -140,8 +156,73 @@ export function PeopleView({ onOpenPerson }: { onOpenPerson?: (id: number) => vo
               </div>
             )}
           </div>
-        ))}
+  );
+
+  return (
+    <div className="people">
+      <div className="people-head">
+        <p className="muted">
+          Everyone you mention is gathered here — what they&rsquo;re up to, how you know them, and when you last
+          crossed paths.
+        </p>
+        {people.length > 0 && rebuildBtn}
       </div>
+      {backfillMsg && <div className="muted small">{backfillMsg}</div>}
+
+      {err && <div className="error">{err}</div>}
+
+      {suggestions.length > 0 && (
+        <div className="merge-suggest">
+          <div className="merge-suggest-label">
+            <GitMerge size={13} /> These might be the same — merge or dismiss
+          </div>
+          {suggestions.map((s) => {
+            const aKeeps = s.a_mentions >= s.b_mentions;
+            return (
+              <div className="merge-suggest-row" key={`${s.a_id}-${s.b_id}`}>
+                <span className="ms-names">
+                  <strong>{aKeeps ? s.b_name : s.a_name}</strong>
+                  {" → "}
+                  <strong>{aKeeps ? s.a_name : s.b_name}</strong>
+                  <span className="muted">
+                    {" "}
+                    {s.etype} · {Math.round(s.similarity * 100)}% match
+                  </span>
+                </span>
+                <span className="ms-actions">
+                  <button className="link" onClick={() => acceptSuggestion(s)}>
+                    merge
+                  </button>
+                  <button className="link" onClick={() => dismissSuggestion(s)}>
+                    not the same
+                  </button>
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {!loading && people.length === 0 && (
+        <div className="people-empty">
+          <p className="muted">
+            No people yet — mention someone by name in a note (&ldquo;coffee with Sarah, she just got engaged&rdquo;)
+            and they&rsquo;ll show up here.
+          </p>
+          {rebuildBtn}
+        </div>
+      )}
+
+      <div className="people-grid">{mainList.map(personCard)}</div>
+
+      {oneOffs.length > 0 && (
+        <details className="people-oneoffs">
+          <summary>
+            {oneOffs.length} {oneOffs.length === 1 ? "person" : "people"} mentioned once
+          </summary>
+          <div className="people-grid">{oneOffs.map(personCard)}</div>
+        </details>
+      )}
     </div>
   );
 }

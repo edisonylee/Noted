@@ -300,6 +300,129 @@ async fn save_entry(app: tauri::AppHandle, args: SaveArgs) -> Result<i64, String
     Ok(note_id)
 }
 
+/// The Journal's reflection agent. One structured model call — strictly LOCAL,
+/// never the Balanced-mode cloud path: reflections are the most private text in
+/// the app — both writes a short companion reply and pulls out knowledge-graph
+/// entities. The reflection is then persisted as a `journal` note through the
+/// normal save path (embedding + entities → the personal graph). A dead model
+/// costs the reply and the entities, never the entry.
+#[tauri::command]
+async fn journal_reflect(
+    app: tauri::AppHandle,
+    text: String,
+    history: Vec<ChatMsg>,
+) -> Result<Value, String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("write a reflection first".into());
+    }
+
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "reply": { "type": "string" },
+            "entities": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "type": { "type": "string" },
+                        "fact": { "type": ["string", "null"] },
+                        "relationship": { "type": ["string", "null"] }
+                    },
+                    "required": ["name", "type"]
+                }
+            }
+        },
+        "required": ["reply", "entities"]
+    });
+    let system = "You are the journal inside noted, a private local note-taking app. \
+The user writes personal reflections; you respond as a warm, grounded journaling companion.\n\
+Return JSON only:\n\
+- reply: 2-4 sentences. Be specific to what they actually wrote — mirror the people, places \
+and feelings they named. No generic advice. End with at most one gentle follow-up question.\n\
+- entities: the people, places, activities, foods, items, orgs and topics the reflection \
+mentions (type = person|place|activity|food|item|org|topic). For a person include a short \
+fact the reflection reveals about them, and the relationship when stated. [] if none.";
+
+    // A little session context so consecutive reflections read as one sitting.
+    let recent: Vec<&ChatMsg> = history.iter().rev().take(6).collect();
+    let mut convo = String::new();
+    for m in recent.into_iter().rev() {
+        let who = if m.role == "assistant" { "journal" } else { "user" };
+        convo.push_str(&format!("{who}: {}\n", m.content));
+    }
+    let user_msg = if convo.is_empty() {
+        format!("Reflection:\n{text}")
+    } else {
+        format!("Earlier this session:\n{convo}\nNew reflection:\n{text}")
+    };
+
+    let model_out =
+        ollama::chat_json_local(ollama::TEXT_MODEL, system, &user_msg, None, Some(schema)).await;
+
+    let (reply, entities): (Option<String>, Vec<EntityArg>) = match &model_out {
+        Ok(v) => (
+            v.get("reply")
+                .and_then(|r| r.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            v.get("entities")
+                .and_then(|e| e.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|e| {
+                            Some(EntityArg {
+                                name: e.get("name")?.as_str()?.trim().to_string(),
+                                etype: e
+                                    .get("type")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("topic")
+                                    .trim()
+                                    .to_lowercase(),
+                                fact: e.get("fact").and_then(|f| f.as_str()).map(String::from),
+                                relationship: e
+                                    .get("relationship")
+                                    .and_then(|r| r.as_str())
+                                    .map(String::from),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
+        Err(e) => {
+            eprintln!("[noted] journal reflect model failed: {e}");
+            (None, Vec::new())
+        }
+    };
+
+    let entity_count = entities.len();
+    let note_id = save_entry(
+        app.clone(),
+        SaveArgs {
+            raw_text: text.clone(),
+            source: "journal".to_string(),
+            image_path: None,
+            event_date: today_local(),
+            entries: vec![EntryArg {
+                category: "journal".to_string(),
+                description: "personal reflection".to_string(),
+                data: serde_json::json!({ "reflection": text }),
+            }],
+            entities,
+        },
+    )
+    .await?;
+
+    Ok(serde_json::json!({
+        "reply": reply,
+        "note_id": note_id,
+        "entity_count": entity_count,
+    }))
+}
+
 /// A short source snippet for the chat sources list. For an imported brain note
 /// the text starts with a YAML frontmatter block — skip it so the snippet shows
 /// real content, not `---\nname: …`.
@@ -1187,6 +1310,27 @@ async fn merge_entities(app: tauri::AppHandle, keep: i64, drop: i64) -> Result<(
     db::merge_entities(&mut conn, keep, drop).map_err(|e| e.to_string())
 }
 
+/// Same-type entity pairs that look like duplicates, for the People view's
+/// "possible duplicates" panel. The capture-time resolver treats ≥0.86 as the
+/// same entity going forward; this retro pass casts slightly wider (0.82) to
+/// surface near-misses already sitting in the catalog. Dismissed pairs stay
+/// out (dismissed_merges).
+#[tauri::command]
+async fn suggest_entity_merges(app: tauri::AppHandle) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let rows = db::suggest_merges(&conn, 0.82, 20).map_err(|e| e.to_string())?;
+    serde_json::to_value(rows).map_err(|e| e.to_string())
+}
+
+/// "Not the same" — persist the rejection so the pair is never re-suggested.
+#[tauri::command]
+async fn dismiss_merge_suggestion(app: tauri::AppHandle, a: i64, b: i64) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    db::dismiss_merge(&conn, a, b).map_err(|e| e.to_string())
+}
+
 /// The whole knowledge graph for the "Self" view: entity nodes + co-mention edges.
 #[tauri::command]
 async fn entity_graph(app: tauri::AppHandle) -> Result<Value, String> {
@@ -1842,6 +1986,132 @@ async fn gcal_list_events(app: tauri::AppHandle, event_date: Option<String>) -> 
     serde_json::to_value(events).map_err(|e| e.to_string())
 }
 
+/// Remove one connected Google account (its refresh token leaves the Keychain;
+/// other accounts are untouched). Returns the new auth status.
+#[tauri::command]
+fn gcal_remove_account(app: tauri::AppHandle, email: String) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    gcal::remove_account(&dir, email.trim()).map_err(|e| e.to_string())
+}
+
+/// Show/hide one calendar in the Calendar view. Returns the new auth status.
+#[tauri::command]
+fn gcal_set_calendar_enabled(
+    app: tauri::AppHandle,
+    account: String,
+    calendar_id: String,
+    enabled: bool,
+) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    gcal::set_calendar_enabled(&dir, account.trim(), &calendar_id, enabled).map_err(|e| e.to_string())
+}
+
+/// Re-pull every connected account's calendar list (new calendars, renames,
+/// color changes). Returns the new auth status.
+#[tauri::command]
+async fn gcal_refresh_calendars(app: tauri::AppHandle) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    gcal::refresh_calendars(&dir).await.map_err(|e| e.to_string())
+}
+
+/// Events across every connected account's enabled calendars for the inclusive
+/// day range [startDate, endDate] — the Calendar view's feed.
+#[tauri::command]
+async fn gcal_events_range(
+    app: tauri::AppHandle,
+    start_date: String,
+    end_date: String,
+) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let events = gcal::events_range(&dir, start_date.trim(), end_date.trim())
+        .await
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(events).map_err(|e| e.to_string())
+}
+
+/// Create an event on any connected account's calendar. `start`/`end` are
+/// "HH:MM"; no start means all-day (endDate = inclusive last day).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn gcal_create_event(
+    app: tauri::AppHandle,
+    account: String,
+    calendar_id: String,
+    title: String,
+    date: String,
+    start: Option<String>,
+    end: Option<String>,
+    end_date: Option<String>,
+    location: Option<String>,
+    description: Option<String>,
+) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    gcal::create_event(
+        &dir,
+        account.trim(),
+        &calendar_id,
+        &title,
+        date.trim(),
+        start.as_deref(),
+        end.as_deref(),
+        end_date.as_deref(),
+        location.as_deref(),
+        description.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Edit an event in place; `moveTo` relocates it to another calendar in the
+/// same account first.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn gcal_update_event(
+    app: tauri::AppHandle,
+    account: String,
+    calendar_id: String,
+    event_id: String,
+    title: String,
+    date: String,
+    start: Option<String>,
+    end: Option<String>,
+    end_date: Option<String>,
+    location: Option<String>,
+    description: Option<String>,
+    move_to: Option<String>,
+) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    gcal::update_event(
+        &dir,
+        account.trim(),
+        &calendar_id,
+        &event_id,
+        &title,
+        date.trim(),
+        start.as_deref(),
+        end.as_deref(),
+        end_date.as_deref(),
+        location.as_deref(),
+        description.as_deref(),
+        move_to.as_deref(),
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn gcal_delete_event(
+    app: tauri::AppHandle,
+    account: String,
+    calendar_id: String,
+    event_id: String,
+) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    gcal::remove_event(&dir, account.trim(), &calendar_id, &event_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ── Quick-capture background worker ─────────────────────────────────────────
 const PENDING_MAX_ATTEMPTS: i64 = 5;
 static PENDING_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -2106,6 +2376,8 @@ pub fn run() {
             transcribe,
             list_entities,
             merge_entities,
+            suggest_entity_merges,
+            dismiss_merge_suggestion,
             entity_graph,
             entity_detail,
             entity_profile,
@@ -2120,6 +2392,14 @@ pub fn run() {
             gcal_clear_day,
             gcal_sync,
             gcal_list_events,
+            gcal_remove_account,
+            gcal_set_calendar_enabled,
+            gcal_refresh_calendars,
+            gcal_events_range,
+            gcal_create_event,
+            gcal_update_event,
+            gcal_delete_event,
+            journal_reflect,
             brain_list_vaults,
             brain_add_vault,
             brain_remove_vault,

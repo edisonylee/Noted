@@ -37,7 +37,18 @@ pub async fn chat_json(
             Err(e) => eprintln!("[noted] gemini extract failed, falling back to local: {e}"),
         }
     }
+    chat_json_local(model, system, user, images, format).await
+}
 
+/// Structured chat that NEVER leaves the machine, even in Balanced mode — for
+/// text the cloud must not see (the Journal's reflections).
+pub async fn chat_json_local(
+    model: &str,
+    system: &str,
+    user: &str,
+    images: Option<Vec<String>>,
+    format: Option<Value>,
+) -> Result<Value> {
     let has_images = images.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
     let mut user_msg = json!({ "role": "user", "content": user });
     if let Some(imgs) = images {

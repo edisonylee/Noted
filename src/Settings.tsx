@@ -119,6 +119,8 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   }
 
   // Run the OAuth consent flow (opens the browser, catches the loopback redirect).
+  // One OAuth run per account: each click opens Google's account picker, so
+  // adding a second (work) account is just running this again.
   async function connectGcal() {
     setGcalBusy("connecting");
     setGcalMsg(null);
@@ -137,10 +139,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     }
   }
 
-  async function disconnectGcal() {
-    await api.gcalDisconnect();
-    setGcal(await api.gcalAuthStatus());
-    setGcalMsg(null);
+  async function removeGcalAccount(email: string) {
+    try {
+      setGcal(await api.gcalRemoveAccount(email));
+      setGcalMsg(null);
+    } catch (e) {
+      setGcalMsg({ kind: "err", text: String(e) });
+    }
   }
 
   // Persist the current fields, then hit Gemini and reflect the real result in
@@ -280,31 +285,45 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
 
         <h3 className="settings-section">Google Calendar</h3>
         <p className="settings-sub">
-          Push your daily schedule one-way into a dedicated “noted” calendar in Google Calendar.
-          Timed blocks become events; re-syncing updates them in place. Your other calendars are
-          never touched.
+          Connect one or more Google accounts (work + personal) and the Calendar view consolidates
+          every calendar in one place. Your daily schedule also pushes one-way into a dedicated
+          “noted” calendar in the first account — other calendars are never touched by the sync.
         </p>
 
         <div className="settings-fields">
-          <div className={"conn-status " + (gcal?.connected ? "ok" : "idle")}>
-            {gcal?.connected ? <CalendarCheck size={13} /> : <CalendarX size={13} />}
-            <span className="conn-label">
-              {gcal?.connected
-                ? gcal.account_email
-                  ? `Connected as ${gcal.account_email}`
-                  : "Connected to Google Calendar"
-                : "Not connected"}
-            </span>
-          </div>
           {gcalMsg && (
             <div className={gcalMsg.kind === "err" ? "conn-detail" : "field-hint"}>{gcalMsg.text}</div>
           )}
 
-          {gcal?.connected ? (
-            <button className="ghost-btn test-btn" onClick={disconnectGcal}>
-              <X size={14} /> Disconnect
-            </button>
-          ) : (
+          {(gcal?.accounts ?? []).length > 0 && (
+            <div className="gcal-accounts">
+              {gcal!.accounts.map((a) => (
+                <div className="gcal-account" key={a.email}>
+                  {a.connected ? (
+                    <CalendarCheck size={14} className="gcal-acct-ok" />
+                  ) : (
+                    <CalendarX size={14} className="gcal-acct-bad" />
+                  )}
+                  <span className="gcal-acct-email">{a.email}</span>
+                  {!a.connected && <span className="gcal-acct-warn">reconnect needed</span>}
+                  <button
+                    className="gcal-acct-x"
+                    onClick={() => removeGcalAccount(a.email)}
+                    title={`Remove ${a.email}`}
+                    aria-label={`Remove ${a.email}`}
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              ))}
+              <span className="field-hint">
+                Choose which calendars show up from the filter inside the Calendar view. To
+                reconnect an expired account, just add it again.
+              </span>
+            </div>
+          )}
+
+          {(!gcal?.has_client || (gcal?.accounts ?? []).length === 0) && (
             <>
               <label className="field">
                 <span className="field-label">OAuth client ID</span>
@@ -335,37 +354,38 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   >
                     Google Cloud Console
                   </a>{" "}
-                  (enable the Calendar API). Add your Google account as a Test user on the consent
-                  screen, or you’ll need to reconnect weekly. Secret is stored in your macOS
-                  Keychain — never on disk.
+                  (enable the Calendar API). Add each Google account you’ll connect as a Test user
+                  on the consent screen, or you’ll need to reconnect weekly. Secret is stored in
+                  your macOS Keychain — never on disk. One client works for all your accounts.
                 </span>
               </label>
 
-              <div className="field-row">
-                <button
-                  className="ghost-btn test-btn"
-                  onClick={saveGcalClient}
-                  disabled={gcalBusy !== "" || !clientId.trim() || !clientSecret.trim()}
-                >
-                  {gcalBusy === "saving" ? <Loader2 size={14} className="spin" /> : <Check size={14} />}
-                  Save credentials
-                </button>
-                <button
-                  className="primary"
-                  onClick={connectGcal}
-                  disabled={gcalBusy !== "" || !gcal?.has_client}
-                >
-                  {gcalBusy === "connecting" ? (
-                    <>
-                      <Loader2 size={14} className="spin" /> Connecting…
-                    </>
-                  ) : (
-                    "Connect"
-                  )}
-                </button>
-              </div>
+              <button
+                className="ghost-btn test-btn"
+                onClick={saveGcalClient}
+                disabled={gcalBusy !== "" || !clientId.trim() || !clientSecret.trim()}
+              >
+                {gcalBusy === "saving" ? <Loader2 size={14} className="spin" /> : <Check size={14} />}
+                Save credentials
+              </button>
             </>
           )}
+
+          <button
+            className={(gcal?.accounts ?? []).length === 0 ? "primary" : "ghost-btn test-btn"}
+            onClick={connectGcal}
+            disabled={gcalBusy !== "" || !gcal?.has_client}
+          >
+            {gcalBusy === "connecting" ? (
+              <>
+                <Loader2 size={14} className="spin" /> Waiting for Google…
+              </>
+            ) : (gcal?.accounts ?? []).length === 0 ? (
+              "Connect Google account"
+            ) : (
+              "Add another account"
+            )}
+          </button>
         </div>
 
         <h3 className="settings-section">Brain vaults</h3>

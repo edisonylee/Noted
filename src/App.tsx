@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "./events";
-import { Camera, Check, Download, Loader, Mic, Moon, Settings, Smartphone, Square, Sun } from "lucide-react";
+import { Camera, Check, ChevronUp, Download, Loader, Mic, Moon, PenLine, Settings, Smartphone, Square, Sun } from "lucide-react";
 import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg, type Img } from "./image";
@@ -11,16 +11,17 @@ import { BottomNav, type MobileTab } from "./BottomNav";
 import { useTheme } from "./useTheme";
 import { api, TokenError, OfflineError, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow, type RelatedBrain } from "./api";
 import { DataView } from "./DataView";
-import { TimelineView } from "./Timeline";
+import { CalendarView } from "./Calendar";
+import { JournalView } from "./Journal";
 import { PhonePanel } from "./PhonePanel";
 import { FloatingChat } from "./FloatingChat";
 import { KnowledgeView } from "./Knowledge";
-import { TodayView } from "./Today";
-import { APP_TZ, easternHour } from "./day";
+import { parseBlocks, TodayView } from "./Today";
+import { APP_TZ, easternDay, easternHour } from "./day";
 import "./App.css";
 
 type Phase = "idle" | "thinking" | "review";
-type View = "today" | "log" | "timeline" | "knowledge";
+type View = "today" | "calendar" | "journal" | "knowledge";
 type Source = "text" | "photo";
 // One editable review card per extracted entry.
 type ReviewCard = {
@@ -87,6 +88,23 @@ export default function App() {
   // screen instead of the desktop topbar/review flow.
   const isMobile = useIsMobile();
   const [mobileTab, setMobileTab] = useState<MobileTab>("today");
+
+  // Once today's schedule exists, the composer's "what's your schedule?" moment
+  // has passed — it collapses to a slim pill and expands on demand (or when a
+  // pasted photo / an in-flight capture needs it).
+  const [composerOpen, setComposerOpen] = useState(false);
+  const hasSchedule = useMemo(() => {
+    const today = easternDay();
+    return notes.some(
+      (n) =>
+        n.event_date === today &&
+        n.entries.some(
+          (e) => e.category?.toLowerCase() === "schedule" && parseBlocks(e.data).length > 0
+        )
+    );
+  }, [notes]);
+  // A pasted image or an in-flight categorize/review always forces it open.
+  const composerVisible = composerOpen || !hasSchedule || phase !== "idle" || img != null;
 
   // Route a thrown error: a TokenError (phone 403) trips the re-pair screen; an
   // OfflineError (Mac unreachable, e.g. mid-rebuild) shows the reconnecting
@@ -263,7 +281,7 @@ export default function App() {
   }
 
   async function ingestPhoto(base64: string, ext: string) {
-    setView("log");
+    setView("today");
     setImg({ base64, ext, dataUrl: `data:image/${ext === "jpg" ? "jpeg" : ext};base64,${base64}` });
     setError(null);
     setPhase("thinking");
@@ -346,6 +364,7 @@ export default function App() {
   function resetAll() {
     setText("");
     setImg(null);
+    setComposerOpen(false); // filed/discarded → the pill again (if a schedule exists)
     setSource("text");
     setCards([]);
     setOcrText("");
@@ -412,17 +431,14 @@ export default function App() {
             <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} onOpenSettings={() => setShowSettings(true)} />
           )}
           {mobileTab === "capture" && <MobileCapture onCaptured={() => refresh().catch(handleErr)} />}
-          {mobileTab === "timeline" && (
-            <TimelineView notes={notes} onMutated={() => refresh().catch(handleErr)} />
-          )}
         </main>
 
         <BottomNav
           active={mobileTab}
           onChange={(t) => {
             setMobileTab(t);
-            // Re-fetch when navigating to a list/schedule so a freshly auto-filed note shows.
-            if (t === "today" || t === "timeline") refresh().catch(handleErr);
+            // Re-fetch when navigating to the schedule so a freshly auto-filed note shows.
+            if (t === "today") refresh().catch(handleErr);
           }}
         />
 
@@ -441,7 +457,11 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div
+      className={
+        "app" + (view === "calendar" ? " calmode" : view === "journal" ? " journalmode" : "")
+      }
+    >
       {reconnectingOverlay}
       <header className="topbar">
         <div className="brand">
@@ -449,13 +469,13 @@ export default function App() {
         </div>
         <nav className="nav">
           <button className={view === "today" ? "on" : ""} onClick={() => setView("today")}>
-            Today
+            Daily Schedule
           </button>
-          <button className={view === "log" ? "on" : ""} onClick={() => setView("log")}>
-            Log
+          <button className={view === "calendar" ? "on" : ""} onClick={() => setView("calendar")}>
+            Calendar
           </button>
-          <button className={view === "timeline" ? "on" : ""} onClick={() => setView("timeline")}>
-            Timeline
+          <button className={view === "journal" ? "on" : ""} onClick={() => setView("journal")}>
+            Journal
           </button>
           <button className={view === "knowledge" ? "on" : ""} onClick={() => setView("knowledge")}>
             Knowledge
@@ -479,8 +499,10 @@ export default function App() {
       </header>
 
       <main className="content">
-        {view === "today" ? (
-          <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} onOpenSettings={() => setShowSettings(true)} />
+        {view === "calendar" ? (
+          <CalendarView onOpenSettings={() => setShowSettings(true)} />
+        ) : view === "journal" ? (
+          <JournalView notes={notes} onSaved={() => refresh().catch(handleErr)} />
         ) : view === "knowledge" ? (
           <KnowledgeView
             theme={theme}
@@ -488,14 +510,30 @@ export default function App() {
             openEntityId={knowledgeEntity}
             onOpenedEntity={() => setKnowledgeEntity(null)}
           />
-        ) : view === "timeline" ? (
-          <TimelineView notes={notes} onMutated={() => refresh().catch(handleErr)} />
         ) : (
+        <div className="home">
+        {/* The day's schedule leads — its header (date + calendar actions) is
+            the page's anchor — with the composer right below it. Hidden while
+            a capture is being reviewed so the cards keep the room. */}
+        {phase !== "review" && (
+          <TodayView
+            notes={notes}
+            onSaved={() => refresh().catch(handleErr)}
+            onOpenSettings={() => setShowSettings(true)}
+          />
+        )}
         <div className="log-hero">
-        <div className="greeting">
-          <div className="greet-date">{homeGreeting().dateLine}</div>
-          <h1 className="greet-title">{homeGreeting().title}</h1>
-        </div>
+        {!composerVisible ? (
+          <button className="home-capturebtn" onClick={() => setComposerOpen(true)}>
+            <PenLine size={15} /> Capture a note
+          </button>
+        ) : (
+        <>
+        {!hasSchedule && (
+          <div className="greeting">
+            <h1 className="greet-title">{homeGreeting().title}</h1>
+          </div>
+        )}
         <section
           className={"capture" + (dragOver ? " dragover" : "")}
           onDragOver={(e) => {
@@ -540,6 +578,16 @@ export default function App() {
           />
 
           <div className="capture-actions">
+            {hasSchedule && phase === "idle" && !img && (
+              <button
+                className="ghost"
+                onClick={() => setComposerOpen(false)}
+                title="Hide the composer"
+                aria-label="Hide the composer"
+              >
+                <ChevronUp size={15} />
+              </button>
+            )}
             {!img && (
               <button className="ghost" onClick={() => fileInput.current?.click()} disabled={busy}>
                 <Camera size={15} /> Photo
@@ -605,6 +653,8 @@ export default function App() {
             </div>
           )}
         </section>
+        </>
+        )}
 
         {error && <div className="error">{error}</div>}
 
@@ -746,10 +796,11 @@ export default function App() {
         )}
 
         {savedMsg && (
-          <button className="saved-toast" onClick={() => setView("timeline")}>
-            <Check size={15} /> Filed under <strong>{savedMsg}</strong> · view timeline
+          <button className="saved-toast" onClick={() => setView("knowledge")}>
+            <Check size={15} /> Filed under <strong>{savedMsg}</strong> · view in knowledge
           </button>
         )}
+        </div>
         </div>
         )}
       </main>

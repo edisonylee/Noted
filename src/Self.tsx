@@ -25,6 +25,9 @@ export function SelfView({
   emptyBody?: string;
 }) {
   const [data, setData] = useState<GraphData | null>(null);
+  // One-off entities (single mention) are hidden by default — they're the bulk
+  // of the visual noise. The toggle brings them back on demand.
+  const [showAll, setShowAll] = useState(false);
   const [hover, setHover] = useState<number | null>(null);
   const [selected, setSelected] = useState<GraphNode | null>(null);
   const [detail, setDetail] = useState<EntityMention[]>([]);
@@ -56,13 +59,26 @@ export function SelfView({
     [theme]
   );
 
+  // When everything is a one-off (young graph) the filter would present a false
+  // empty state, so it only engages once some entity has real signal.
+  const hasSignal = useMemo(() => (data?.nodes ?? []).some((n) => (n.mention_count || 0) >= 2), [data]);
+  const hideSingles = !showAll && hasSignal;
+  const singleCount = useMemo(
+    () => (data?.nodes ?? []).filter((n) => (n.mention_count || 0) < 2).length,
+    [data]
+  );
+
   const graph = useMemo(() => {
     if (!data) return { nodes: [], links: [] };
+    const nodes = hideSingles ? data.nodes.filter((n) => (n.mention_count || 0) >= 2) : data.nodes;
+    const keep = new Set(nodes.map((n) => n.id));
     return {
-      nodes: data.nodes.map((n) => ({ ...n })),
-      links: data.edges.map((e) => ({ source: e.source, target: e.target, weight: e.weight })),
+      nodes: nodes.map((n) => ({ ...n })),
+      links: data.edges
+        .filter((e) => keep.has(e.source) && keep.has(e.target))
+        .map((e) => ({ source: e.source, target: e.target, weight: e.weight })),
     };
-  }, [data]);
+  }, [data, hideSingles]);
 
   const neighbors = useMemo(() => {
     const m = new Map<number, Set<number>>();
@@ -145,6 +161,14 @@ export function SelfView({
               </span>
             ))}
           </div>
+        )}
+
+        {!empty && hasSignal && singleCount > 0 && (
+          <button className="graph-filter" onClick={() => setShowAll((s) => !s)}>
+            {showAll
+              ? "hide one-offs"
+              : `show ${singleCount} one-off${singleCount === 1 ? "" : "s"}`}
+          </button>
         )}
       </div>
 

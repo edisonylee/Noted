@@ -287,6 +287,10 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "merge_entities" => {
             crate::merge_entities(a, iarg(b, "keep"), iarg(b, "drop")).await.map(|_| Value::Null)
         }
+        "suggest_entity_merges" => crate::suggest_entity_merges(a).await,
+        "dismiss_merge_suggestion" => {
+            crate::dismiss_merge_suggestion(a, iarg(b, "a"), iarg(b, "b")).await.map(|_| Value::Null)
+        }
         "entity_graph" => crate::entity_graph(a).await,
         "entity_detail" => crate::entity_detail(a, iarg(b, "entityId")).await,
         "entity_profile" => crate::entity_profile(a, iarg(b, "entityId")).await,
@@ -310,6 +314,59 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "gcal_sync" => crate::gcal_sync(a, oarg(b, "eventDate")).await,
         "gcal_clear_day" => crate::gcal_clear_day(a, oarg(b, "eventDate")).await.map(|n| json!(n)),
         "gcal_list_events" => crate::gcal_list_events(a, oarg(b, "eventDate")).await,
+        "gcal_remove_account" => crate::gcal_remove_account(a, sarg(b, "email")),
+        "gcal_set_calendar_enabled" => crate::gcal_set_calendar_enabled(
+            a,
+            sarg(b, "account"),
+            sarg(b, "calendarId"),
+            b.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+        ),
+        "gcal_refresh_calendars" => crate::gcal_refresh_calendars(a).await,
+        "gcal_events_range" => {
+            crate::gcal_events_range(a, sarg(b, "startDate"), sarg(b, "endDate")).await
+        }
+        "gcal_create_event" => crate::gcal_create_event(
+            a,
+            sarg(b, "account"),
+            sarg(b, "calendarId"),
+            sarg(b, "title"),
+            sarg(b, "date"),
+            oarg(b, "start"),
+            oarg(b, "end"),
+            oarg(b, "endDate"),
+            oarg(b, "location"),
+            oarg(b, "description"),
+        )
+        .await,
+        "gcal_update_event" => crate::gcal_update_event(
+            a,
+            sarg(b, "account"),
+            sarg(b, "calendarId"),
+            sarg(b, "eventId"),
+            sarg(b, "title"),
+            sarg(b, "date"),
+            oarg(b, "start"),
+            oarg(b, "end"),
+            oarg(b, "endDate"),
+            oarg(b, "location"),
+            oarg(b, "description"),
+            oarg(b, "moveTo"),
+        )
+        .await
+        .map(|_| Value::Null),
+        "gcal_delete_event" => crate::gcal_delete_event(
+            a,
+            sarg(b, "account"),
+            sarg(b, "calendarId"),
+            sarg(b, "eventId"),
+        )
+        .await
+        .map(|_| Value::Null),
+        "journal_reflect" => {
+            let history: Vec<crate::ChatMsg> =
+                serde_json::from_value(varg(b, "history")).unwrap_or_default();
+            crate::journal_reflect(a, sarg(b, "text"), history).await
+        }
         "brain_list_vaults" => crate::brain_list_vaults(a).await,
         "brain_add_vault" => crate::brain_add_vault(a, sarg(b, "path"), oarg(b, "direction")).await,
         "brain_remove_vault" => crate::brain_remove_vault(a, sarg(b, "vault")).await.map(|_| Value::Null),

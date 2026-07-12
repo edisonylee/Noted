@@ -1168,6 +1168,68 @@ pub async fn sync(dir: &Path, event_date: &str, blocks: Vec<Value>) -> Result<Sy
 }
 
 // ── Range read (Calendar view) ──────────────────────────────────────────────
+/// Domains that mean "this URL joins a meeting" when found in an event's
+/// location or description (where Zoom/Teams invites usually land).
+const MEET_DOMAINS: [&str; 6] = [
+    "zoom.us",
+    "meet.google.com",
+    "teams.microsoft.com",
+    "webex.com",
+    "whereby.com",
+    "meet.jit.si",
+];
+
+/// First conferencing URL inside free text (which may be HTML — Google event
+/// descriptions often are, so URLs can sit inside href attributes).
+fn find_meeting_url(text: &str) -> Option<String> {
+    for (i, _) in text.match_indices("http") {
+        let rest = &text[i..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | ')'))
+            .unwrap_or(rest.len());
+        let url = rest[..end].trim_end_matches(['.', ',', ';']);
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            continue;
+        }
+        if MEET_DOMAINS.iter().any(|d| url.contains(d)) {
+            return Some(url.to_string());
+        }
+    }
+    None
+}
+
+/// The event's join link: Google Meet (hangoutLink), else the conferenceData
+/// video entry point, else a known conferencing URL in the location or
+/// description (Zoom invites live there).
+fn conference_link(it: &Value) -> Option<String> {
+    if let Some(l) = it.get("hangoutLink").and_then(|s| s.as_str()) {
+        return Some(l.to_string());
+    }
+    if let Some(eps) = it
+        .get("conferenceData")
+        .and_then(|c| c.get("entryPoints"))
+        .and_then(|e| e.as_array())
+    {
+        let video = eps
+            .iter()
+            .find(|e| e.get("entryPointType").and_then(|t| t.as_str()) == Some("video"));
+        if let Some(uri) = video
+            .or_else(|| eps.first())
+            .and_then(|e| e.get("uri"))
+            .and_then(|u| u.as_str())
+        {
+            if uri.starts_with("http") {
+                return Some(uri.to_string());
+            }
+        }
+    }
+    for field in ["location", "description"] {
+        if let Some(found) = it.get(field).and_then(|s| s.as_str()).and_then(find_meeting_url) {
+            return Some(found);
+        }
+    }
+    None
+}
 /// One Google event → the Calendar view's shape. Timed events carry `date`
 /// (start day, Eastern) plus `start_min`/`end_min` in minutes from that day's
 /// midnight — `end_min` exceeds 1440 when the event crosses midnight. All-day
@@ -1183,6 +1245,34 @@ fn map_event(it: &Value, cal: &GcalCalendar, account: &str) -> Option<Value> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("(untitled)");
+    // Guests, minus rooms/resources: display name (or email) + RSVP status.
+    // Capped for IPC — attendee_count keeps the real total.
+    let attendee_count = it
+        .get("attendees")
+        .and_then(|a| a.as_array())
+        .map(|a| a.iter().filter(|x| !x.get("resource").and_then(|r| r.as_bool()).unwrap_or(false)).count())
+        .unwrap_or(0);
+    let attendees: Vec<Value> = it
+        .get("attendees")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|a| !a.get("resource").and_then(|r| r.as_bool()).unwrap_or(false))
+                .take(12)
+                .filter_map(|a| {
+                    let name = a
+                        .get("displayName")
+                        .or_else(|| a.get("email"))
+                        .and_then(|s| s.as_str())?;
+                    Some(json!({
+                        "name": name,
+                        "status": a.get("responseStatus").and_then(|s| s.as_str()).unwrap_or("needsAction"),
+                        "self": a.get("self").and_then(|s| s.as_bool()).unwrap_or(false),
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let mut ev = json!({
         "id": it.get("id").and_then(|s| s.as_str()).unwrap_or_default(),
         "title": title,
@@ -1197,6 +1287,13 @@ fn map_event(it: &Value, cal: &GcalCalendar, account: &str) -> Option<Value> {
             .and_then(|s| s.as_str())
             .map(|s| s.chars().take(600).collect::<String>()),
         "declined": is_declined(it),
+        "meet_link": conference_link(it),
+        "html_link": it.get("htmlLink").and_then(|s| s.as_str()),
+        "organizer": it.get("organizer").and_then(|o| {
+            o.get("displayName").or_else(|| o.get("email")).and_then(|s| s.as_str())
+        }),
+        "attendees": attendees,
+        "attendee_count": attendee_count,
     });
     match it.get("start").and_then(|s| s.get("dateTime")).and_then(|s| s.as_str()) {
         Some(sdt) => {
@@ -1757,6 +1854,54 @@ mod tests {
         assert_eq!(ev["date"], "2026-06-05");
         assert_eq!(ev["end_date"], "2026-06-08");
         assert_eq!(ev["start_min"], Value::Null);
+    }
+
+    #[test]
+    fn conference_link_prefers_hangout_then_conference_then_text() {
+        // hangoutLink wins outright.
+        let ev = json!({ "hangoutLink": "https://meet.google.com/abc-defg-hij" });
+        assert_eq!(conference_link(&ev).as_deref(), Some("https://meet.google.com/abc-defg-hij"));
+        // conferenceData video entry point.
+        let ev = json!({ "conferenceData": { "entryPoints": [
+            { "entryPointType": "phone", "uri": "tel:+1-555-0100" },
+            { "entryPointType": "video", "uri": "https://meet.google.com/xyz" },
+        ]}});
+        assert_eq!(conference_link(&ev).as_deref(), Some("https://meet.google.com/xyz"));
+        // Zoom link parked in the location.
+        let ev = json!({ "location": "https://company.zoom.us/j/123?pwd=x" });
+        assert_eq!(conference_link(&ev).as_deref(), Some("https://company.zoom.us/j/123?pwd=x"));
+        // Zoom link inside an HTML description href.
+        let ev = json!({ "description": "Agenda…<a href=\"https://zoom.us/j/9\">Join</a>" });
+        assert_eq!(conference_link(&ev).as_deref(), Some("https://zoom.us/j/9"));
+        // Ordinary URLs don't count as meetings.
+        let ev = json!({ "description": "notes at https://example.com/doc" });
+        assert_eq!(conference_link(&ev), None);
+    }
+
+    #[test]
+    fn map_event_carries_meeting_details() {
+        let it = json!({
+            "summary": "standup",
+            "start": { "dateTime": "2026-06-05T13:30:00Z" },
+            "end": { "dateTime": "2026-06-05T14:00:00Z" },
+            "hangoutLink": "https://meet.google.com/abc",
+            "htmlLink": "https://calendar.google.com/event?eid=123",
+            "organizer": { "email": "khai@x.com", "displayName": "Khai" },
+            "attendees": [
+                { "email": "khai@x.com", "displayName": "Khai", "responseStatus": "accepted" },
+                { "email": "me@x.com", "self": true, "responseStatus": "needsAction" },
+                { "email": "room-4@resource.calendar.google.com", "resource": true },
+            ],
+        });
+        let ev = map_event(&it, &cal("work"), "me@x.com").unwrap();
+        assert_eq!(ev["meet_link"], "https://meet.google.com/abc");
+        assert_eq!(ev["html_link"], "https://calendar.google.com/event?eid=123");
+        assert_eq!(ev["organizer"], "Khai");
+        // The meeting room resource is filtered out of both list and count.
+        assert_eq!(ev["attendee_count"], 2);
+        assert_eq!(ev["attendees"].as_array().unwrap().len(), 2);
+        assert_eq!(ev["attendees"][0]["name"], "Khai");
+        assert_eq!(ev["attendees"][1]["self"], true);
     }
 
     #[test]

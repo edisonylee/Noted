@@ -274,6 +274,11 @@ export type RangeEvent = {
   location: string | null;
   description: string | null;
   declined: boolean;
+  meet_link: string | null; // Meet/Zoom/Teams join URL (conference data, or found in location/description)
+  html_link: string | null; // open the event in Google Calendar's web UI
+  organizer: string | null;
+  attendees: { name: string; status: string; self: boolean }[]; // capped at 12, rooms excluded
+  attendee_count: number; // real total (rooms excluded)
 };
 // Fields the Calendar view's create/edit forms submit.
 export type EventInput = {

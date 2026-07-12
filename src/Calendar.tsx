@@ -4,6 +4,7 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  ExternalLink,
   Loader,
   MapPin,
   Pencil,
@@ -11,6 +12,8 @@ import {
   RefreshCw,
   SlidersHorizontal,
   Trash2,
+  Users,
+  Video,
   X,
 } from "lucide-react";
 import {
@@ -51,6 +54,24 @@ function fmtMin(m: number): string {
   const ap = h < 12 ? "AM" : "PM";
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return min ? `${h12}:${String(min).padStart(2, "0")} ${ap}` : `${h12} ${ap}`;
+}
+
+// Render plain text with its URLs clickable (descriptions often carry links).
+const URL_RE = /(https?:\/\/[^\s<>"')]+)/g;
+function Linkified({ text }: { text: string }) {
+  return (
+    <>
+      {text.split(URL_RE).map((p, i) =>
+        /^https?:\/\//.test(p) ? (
+          <a key={i} href={p} target="_blank" rel="noreferrer">
+            {p.length > 54 ? p.slice(0, 51) + "…" : p}
+          </a>
+        ) : (
+          p
+        )
+      )}
+    </>
+  );
 }
 
 // One timed event's slice of a single day column (events can cross midnight).
@@ -837,16 +858,55 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
                   (sel.ev.end_min ?? 0) > DAY_MIN ? " (next day)" : ""
                 }`}
           </div>
+          {sel.ev.meet_link && (
+            <a
+              className="cal-btn primary cal-evcard-join"
+              href={sel.ev.meet_link}
+              target="_blank"
+              rel="noreferrer"
+            >
+              <Video size={13} /> Join meeting
+            </a>
+          )}
           {sel.ev.declined && <div className="cal-evcard-meta">You declined this event</div>}
           {sel.ev.location && (
             <div className="cal-evcard-meta">
-              <MapPin size={13} /> {sel.ev.location}
+              <MapPin size={13} /> <Linkified text={sel.ev.location} />
             </div>
+          )}
+          {sel.ev.attendee_count > 0 && (
+            <div className="cal-evcard-meta">
+              <Users size={13} />
+              <span>
+                {sel.ev.attendee_count} {sel.ev.attendee_count === 1 ? "guest" : "guests"}
+                {sel.ev.attendees.length > 0 && (
+                  <>
+                    {" — "}
+                    {sel.ev.attendees
+                      .slice(0, 5)
+                      .map(
+                        (a) =>
+                          (a.self ? "you" : a.name.split("@")[0]) +
+                          (a.status === "declined" ? " (declined)" : "")
+                      )
+                      .join(", ")}
+                    {sel.ev.attendee_count > 5 ? ` +${sel.ev.attendee_count - 5} more` : ""}
+                  </>
+                )}
+              </span>
+            </div>
+          )}
+          {sel.ev.organizer && sel.ev.attendee_count > 0 && (
+            <div className="cal-evcard-meta">organized by {sel.ev.organizer.split("@")[0]}</div>
           )}
           <div className="cal-evcard-meta">
             <CalendarDays size={13} /> {sel.ev.calendar} · {sel.ev.account}
           </div>
-          {sel.ev.description && <div className="cal-evcard-desc">{sel.ev.description}</div>}
+          {sel.ev.description && (
+            <div className="cal-evcard-desc">
+              <Linkified text={sel.ev.description} />
+            </div>
+          )}
           <div className="cal-evcard-actions">
             <button className="cal-btn" onClick={() => openEdit(sel.ev)}>
               <Pencil size={13} /> Edit
@@ -854,6 +914,17 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
             <button className={"cal-btn danger" + (delArmed ? " armed" : "")} onClick={deleteSel}>
               <Trash2 size={13} /> {delArmed ? "Confirm delete" : "Delete"}
             </button>
+            {sel.ev.html_link && (
+              <a
+                className="cal-btn cal-evcard-gcal"
+                href={sel.ev.html_link}
+                target="_blank"
+                rel="noreferrer"
+                title="Open in Google Calendar"
+              >
+                <ExternalLink size={13} /> Open
+              </a>
+            )}
           </div>
         </div>
       )}

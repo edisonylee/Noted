@@ -301,21 +301,21 @@ input, textarea { font-family: inherit; }
 }
 .weather-home-rain .weather-cloud-three, .weather-home-storm .weather-cloud-three { filter: blur(7px) brightness(0.76); }
 .weather-home-snow .weather-cloud { filter: blur(10px) brightness(1.12); }
-.weather-precip { position: absolute; inset: -24% -12%; opacity: 0; will-change: transform; }
-.weather-home-drizzle .weather-precip,
-.weather-home-rain .weather-precip,
-.weather-home-storm .weather-precip {
-  background-image:
-    radial-gradient(ellipse at center, rgba(235, 247, 255, 0.62) 0 10%, transparent 68%),
-    radial-gradient(ellipse at center, rgba(221, 239, 249, 0.4) 0 9%, transparent 66%);
-  background-size: 4px 42px, 3px 29px;
-  background-position: 0 0, 17px 13px;
-  animation: weather-rain 1.05s linear infinite;
+.weather-rain {
+  position: absolute; z-index: 2; inset: 0; overflow: hidden; pointer-events: none;
+  opacity: var(--weather-rain-opacity, 0.42); contain: layout paint style;
 }
-.weather-home-drizzle .weather-precip-far { opacity: 0.1; filter: blur(0.6px); }
-.weather-home-drizzle .weather-precip-near { opacity: 0.06; animation-duration: 1.4s; }
-.weather-home-rain .weather-precip-far, .weather-home-storm .weather-precip-far { opacity: 0.18; filter: blur(0.7px); }
-.weather-home-rain .weather-precip-near, .weather-home-storm .weather-precip-near { opacity: var(--weather-precip-opacity, 0.34); animation-duration: 0.76s; }
+.weather-rain-drop {
+  position: absolute; top: -18vh; left: var(--rain-x); display: block;
+  width: var(--rain-width); height: var(--rain-length); border-radius: 999px; opacity: 0;
+  background: linear-gradient(to bottom, transparent, rgba(225, 242, 251, var(--rain-alpha)) 38%, rgba(239, 249, 255, var(--rain-alpha)) 100%);
+  animation: weather-raindrop var(--rain-duration) linear var(--rain-delay) infinite;
+}
+.weather-rain-drop-near {
+  background: linear-gradient(to bottom, transparent, rgba(235, 247, 255, var(--rain-alpha)) 32%, rgba(247, 252, 255, var(--rain-alpha)) 100%);
+}
+.weather-rain-drizzle .weather-rain-drop { border-radius: 50%; }
+.weather-precip { position: absolute; inset: -24% -12%; opacity: 0; will-change: transform; }
 .weather-home-snow .weather-precip {
   background-image:
     radial-gradient(circle, rgba(255,255,255,0.92) 0 1.5px, transparent 2px),
@@ -410,9 +410,17 @@ input, textarea { font-family: inherit; }
   from { transform: translate3d(-2%, 2%, 0) scale(1.04); }
   to { transform: translate3d(5%, -1%, 0) scale(1.1); }
 }
-@keyframes weather-rain {
-  from { transform: translate3d(0, -12%, 0); }
-  to { transform: translate3d(-5%, 12%, 0); }
+@keyframes weather-raindrop {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, -8vh, 0) rotate(var(--weather-rain-angle, 0deg));
+  }
+  7% { opacity: 1; }
+  90% { opacity: 1; }
+  100% {
+    opacity: 0;
+    transform: translate3d(calc(var(--weather-rain-drift, 0vw) + var(--rain-drop-drift)), 138vh, 0) rotate(var(--weather-rain-angle, 0deg));
+  }
 }
 @keyframes weather-snow {
   from { transform: translate3d(-1%, -11%, 0); }
@@ -1235,6 +1243,7 @@ textarea.json.bad { border-color: var(--bad); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
   .weather-cloud, .weather-precip, .weather-haze, .weather-storm-light { animation: none !important; }
+  .weather-rain { display: none !important; }
 }
 
 /* People (Social pillar): a profile card per person, built on the entity graph */
@@ -2264,20 +2273,16 @@ body.vibrant .app.homemode .main-col {
   padding-right: 0;
 }
 
-/* ── Left-anchored content (match the home column) ────────────────────────── */
-/* The shell used to center at 1400px, which left a dead gutter between the
-   sidebar and every non-home view on wide windows. Anchor the shell left and
-   pin each view's column to the sidebar edge; max-widths stay for line length. */
+/* ── Content centering ────────────────────────────────────────────────────── */
+/* The shell spans the window (no 1400px centering — that made a dead gutter
+   next to the rail on wide screens). Each view's column centers within the
+   main column, i.e. within the space right of the sidebar, via its own
+   `margin: 0 auto`. The two views without one get it here; meeting pages
+   stretch by design. */
 .app.side { max-width: none; margin: 0; }
-.app.side .today,
-.app.side .schedule-page,
-.app.side .journal,
-.app.side .knowledge,
-.app.side .settings-page,
-.app.side .ask-view,
 .app.side .notes-view,
-.app.side .meeting-page {
-  margin-left: 0;
+.app.side .comingup {
+  margin-left: auto;
   margin-right: auto;
 }
 

@@ -412,7 +412,9 @@ export default function App() {
             <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} onOpenSettings={() => setShowSettings(true)} />
           )}
           {mobileTab === "capture" && <MobileCapture onCaptured={() => refresh().catch(handleErr)} />}
-          {mobileTab === "timeline" && <TimelineView notes={notes} />}
+          {mobileTab === "timeline" && (
+            <TimelineView notes={notes} onMutated={() => refresh().catch(handleErr)} />
+          )}
         </main>
 
         <BottomNav
@@ -487,7 +489,7 @@ export default function App() {
             onOpenedEntity={() => setKnowledgeEntity(null)}
           />
         ) : view === "timeline" ? (
-          <TimelineView notes={notes} />
+          <TimelineView notes={notes} onMutated={() => refresh().catch(handleErr)} />
         ) : (
         <div className="log-hero">
         <div className="greeting">

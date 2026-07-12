@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { Camera, ChevronRight, RefreshCw } from "lucide-react";
+import { Camera, ChevronRight, Pencil, RefreshCw } from "lucide-react";
 import { listen } from "./events";
 import { DataView } from "./DataView";
-import { api, type NoteRow, type RecapRow } from "./api";
+import { api, type NoteEntry, type NoteRow, type RecapRow } from "./api";
 import { dayDiff, easternDay, formatDay } from "./day";
 
 // "Today" / "Yesterday" / "Monday, June 1" (year only if not the current year)
@@ -56,8 +56,61 @@ function summarize(data: Record<string, unknown> | null): string {
   return scalars.slice(0, 4).join(" · ");
 }
 
-export function TimelineView({ notes }: { notes: NoteRow[] }) {
+// Inline editor for one entry's structured data — the same JSON-textarea idiom
+// as the Log review card. Lives in the timeline so entries stay editable after
+// capture, anywhere the timeline renders: update_entry is bridged in phone.rs,
+// so this is the phone's edit surface too.
+function EntryEditor({ entry, onDone }: { entry: NoteEntry; onDone: (saved: boolean) => void }) {
+  const [text, setText] = useState(() => JSON.stringify(entry.data ?? {}, null, 2));
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    const v: unknown = JSON.parse(text);
+    if (v && typeof v === "object" && !Array.isArray(v)) parsed = v as Record<string, unknown>;
+  } catch {
+    /* keep parsed null — Save stays disabled */
+  }
+
+  async function save() {
+    if (!parsed || entry.id == null) return;
+    setSaving(true);
+    setErr("");
+    try {
+      await api.updateEntry(entry.id, parsed);
+      onDone(true);
+    } catch (e) {
+      setErr(String(e));
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="tl-edit">
+      <label>Data {parsed ? "" : "⚠︎ invalid JSON"}</label>
+      <textarea
+        className={"json" + (parsed ? "" : " bad")}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        spellCheck={false}
+      />
+      {err && <div className="error">{err}</div>}
+      <div className="tl-edit-actions">
+        <button className="link" onClick={() => onDone(false)} disabled={saving}>
+          cancel
+        </button>
+        <button className="primary" onClick={save} disabled={!parsed || saving}>
+          {saving ? "Saving…" : "Save"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function TimelineView({ notes, onMutated }: { notes: NoteRow[]; onMutated?: () => void }) {
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  // Entry id currently in edit mode (one at a time keeps the feed calm).
+  const [editingId, setEditingId] = useState<number | null>(null);
   const toggle = (id: number) =>
     setExpanded((s) => {
       const n = new Set(s);
@@ -153,10 +206,31 @@ export function TimelineView({ notes }: { notes: NoteRow[] }) {
                   <div className="tl-body">
                     {n.entries.map((e, i) => (
                       <div className="tl-entry" key={i}>
-                        {n.entries.length > 1 && (
-                          <div className="tl-entry-cat">{e.category ?? "uncategorized"}</div>
+                        <div className="tl-entry-head">
+                          {n.entries.length > 1 && (
+                            <div className="tl-entry-cat">{e.category ?? "uncategorized"}</div>
+                          )}
+                          {e.id != null && e.data && editingId !== e.id && (
+                            <button
+                              className="link tl-edit-btn"
+                              onClick={() => setEditingId(e.id!)}
+                              aria-label="Edit entry"
+                            >
+                              <Pencil size={12} /> edit
+                            </button>
+                          )}
+                        </div>
+                        {e.id != null && editingId === e.id ? (
+                          <EntryEditor
+                            entry={e}
+                            onDone={(saved) => {
+                              setEditingId(null);
+                              if (saved) onMutated?.();
+                            }}
+                          />
+                        ) : (
+                          e.data && <DataView value={e.data} />
                         )}
-                        {e.data && <DataView value={e.data} />}
                       </div>
                     ))}
                     <details className="raw">

@@ -355,6 +355,13 @@ textarea.json.bad { border-color: var(--bad); }
   font-size: 11px; font-weight: 540; text-transform: uppercase; letter-spacing: 0.07em;
   color: var(--accent); margin-bottom: 7px;
 }
+/* Inline entry editing in the timeline (desktop and phone). */
+.tl-entry-head { display: flex; align-items: baseline; gap: 8px; }
+.tl-entry-head .tl-edit-btn { margin-left: auto; flex-shrink: 0; }
+.tl-edit { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.tl-edit label { font-size: 12px; color: var(--muted); }
+.tl-edit textarea.json { min-height: 150px; width: 100%; }
+.tl-edit-actions { display: flex; justify-content: flex-end; align-items: center; gap: 12px; }
 .tl-sum { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tl-src { color: var(--faint); margin-left: auto; flex-shrink: 0; }
 .tl-body { padding: 2px 2px 16px 25px; animation: rise 0.16s var(--ease); }

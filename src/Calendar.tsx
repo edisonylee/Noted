@@ -172,6 +172,10 @@ type FormState = {
   endDate: string; // all-day: inclusive last day
   location: string;
   calKey: string; // `${account}|${calendarId}`
+  // Google Meet intent: none = no conference, add = attach one, keep = leave
+  // the existing one, remove = strip the existing one.
+  meet: "none" | "add" | "keep" | "remove";
+  guests: string; // create only: comma/space-separated emails
 };
 
 const calKey = (account: string, calendarId: string) => `${account}|${calendarId}`;
@@ -180,19 +184,24 @@ const splitKey = (key: string): [string, string] => {
   return [key.slice(0, i), key.slice(i + 1)];
 };
 
-// Calendars the user can actually write to, grouped for the <select>.
+// Calendars the user can actually write to, grouped for the <select>. An empty
+// access role means the list was cached before roles existed — include it and
+// let Google be the judge, rather than hiding a whole account from the picker.
 function writableCals(status: GcalStatus | null, lockAccount?: string) {
   return (status?.accounts ?? [])
     .filter((a) => a.connected && (!lockAccount || a.email === lockAccount))
     .map((a) => ({
       email: a.email,
-      cals: a.calendars.filter((c) => c.access === "owner" || c.access === "writer"),
+      cals: a.calendars.filter(
+        (c) => c.access === "owner" || c.access === "writer" || c.access === ""
+      ),
     }))
     .filter((a) => a.cals.length > 0);
 }
 
 function EventForm({
   heading,
+  mode,
   init,
   status,
   lockAccount,
@@ -202,6 +211,7 @@ function EventForm({
   onCancel,
 }: {
   heading: string;
+  mode: "create" | "edit";
   init: FormState;
   status: GcalStatus | null;
   lockAccount?: string; // edit: Google can't move events across accounts
@@ -286,6 +296,46 @@ function EventForm({
           />
           All day
         </label>
+        <div className="cal-form-row">
+          <Video size={14} className="cal-form-ic" />
+          {f.meet === "none" ? (
+            <button className="cal-form-meetbtn" onClick={() => set({ meet: "add" })} disabled={busy}>
+              Add Google Meet video conferencing
+            </button>
+          ) : (
+            <span className="cal-form-meeton">
+              {f.meet === "add"
+                ? "Google Meet will be added"
+                : f.meet === "keep"
+                  ? "Google Meet attached"
+                  : "Google Meet will be removed"}
+              <button
+                className="cal-form-meetx"
+                disabled={busy}
+                onClick={() =>
+                  set({
+                    meet:
+                      f.meet === "add" ? "none" : f.meet === "keep" ? "remove" : "keep",
+                  })
+                }
+              >
+                {f.meet === "remove" ? "Undo" : "Remove"}
+              </button>
+            </span>
+          )}
+        </div>
+        {mode === "create" && (
+          <div className="cal-form-row">
+            <Users size={14} className="cal-form-ic" />
+            <input
+              className="cal-form-grow"
+              value={f.guests}
+              placeholder="Add guests — emails, comma-separated (they'll be invited)"
+              disabled={busy}
+              onChange={(e) => set({ guests: e.target.value })}
+            />
+          </div>
+        )}
         <div className="cal-form-row">
           <MapPin size={14} className="cal-form-ic" />
           <input
@@ -492,6 +542,8 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
         endDate: date,
         location: "",
         calKey: defaultCalKey(),
+        meet: "none",
+        guests: "",
       },
     });
   }
@@ -511,6 +563,8 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
         endDate: ev.end_date ? addDays(ev.end_date, -1) : ev.date,
         location: ev.location ?? "",
         calKey: calKey(ev.account, ev.calendar_id),
+        meet: ev.google_meet ? "keep" : "none",
+        guests: "",
       },
     });
   }
@@ -530,14 +584,26 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
     };
     try {
       if (form.mode === "create") {
-        await api.gcalCreateEvent(input);
+        const guests = f.guests
+          .split(/[,\s]+/)
+          .map((g) => g.trim())
+          .filter((g) => g.includes("@"));
+        await api.gcalCreateEvent({
+          ...input,
+          addMeet: f.meet === "add",
+          ...(guests.length ? { guests } : {}),
+        });
       } else if (form.ev) {
         // PATCH goes to the event's current calendar; a changed pick moves it.
         const moved = calendarId !== form.ev.calendar_id ? calendarId : undefined;
+        // Only send a Meet intent when the user changed it — undefined keeps
+        // whatever conference the event already has.
+        const meet = f.meet === "add" ? true : f.meet === "remove" ? false : undefined;
         await api.gcalUpdateEvent(
           form.ev.id,
           { ...input, calendarId: form.ev.calendar_id },
-          moved
+          moved,
+          meet
         );
       }
       setForm(null);
@@ -932,6 +998,7 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
       {form && (
         <EventForm
           heading={form.mode === "create" ? "New event" : "Edit event"}
+          mode={form.mode}
           init={form.init}
           status={status}
           lockAccount={form.mode === "edit" ? form.ev?.account : undefined}

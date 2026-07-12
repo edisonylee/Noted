@@ -274,6 +274,7 @@ export type RangeEvent = {
   location: string | null;
   description: string | null;
   declined: boolean;
+  google_meet: boolean; // the link is Google conference data (edit can keep/remove it)
   meet_link: string | null; // Meet/Zoom/Teams join URL (conference data, or found in location/description)
   html_link: string | null; // open the event in Google Calendar's web UI
   organizer: string | null;
@@ -291,6 +292,8 @@ export type EventInput = {
   endDate?: string; // all-day only: inclusive last day
   location?: string;
   description?: string;
+  addMeet?: boolean; // create only: attach a Google Meet conference
+  guests?: string[]; // create only: attendee emails (they get invites)
 };
 
 // The Journal agent's response: a companion reply (null if the local model was
@@ -445,8 +448,9 @@ export const api = {
     invoke<RangeEvent[]>("gcal_events_range", { startDate, endDate }),
   gcalCreateEvent: (ev: EventInput) =>
     invoke<{ id: string | null }>("gcal_create_event", { ...ev }),
-  gcalUpdateEvent: (eventId: string, ev: EventInput, moveTo?: string) =>
-    invoke<void>("gcal_update_event", { eventId, moveTo, ...ev }),
+  // `meet`: true attaches a Google Meet, false removes it, undefined keeps it.
+  gcalUpdateEvent: (eventId: string, ev: EventInput, moveTo?: string, meet?: boolean) =>
+    invoke<void>("gcal_update_event", { eventId, moveTo, meet, ...ev }),
   gcalDeleteEvent: (account: string, calendarId: string, eventId: string) =>
     invoke<void>("gcal_delete_event", { account, calendarId, eventId }),
   // Brain-vault sync (Obsidian ↔ noted). camelCase arg keys (Tauri → snake_case).

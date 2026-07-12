@@ -751,7 +751,10 @@ fn merge_calendars(old: Vec<GcalCalendar>, fresh: Vec<GcalCalendar>) -> Vec<Gcal
 }
 
 /// An account's calendars — cached list if present, else fetched from Google
-/// and persisted (first use after the legacy migration lands here).
+/// and persisted (first use after the legacy migration lands here). A cache
+/// written before the `access` field existed (every role empty) can't drive
+/// the writable-calendar picker, so it re-fetches once to backfill, keeping
+/// the user's show/hide choices.
 async fn ensure_calendars(dir: &Path, email: &str) -> Result<Vec<GcalCalendar>> {
     let cached: Vec<GcalCalendar> = {
         let c = cell().read().unwrap();
@@ -761,19 +764,21 @@ async fn ensure_calendars(dir: &Path, email: &str) -> Result<Vec<GcalCalendar>> 
             .map(|a| a.calendars.clone())
             .unwrap_or_default()
     };
-    if !cached.is_empty() {
+    let pre_access = !cached.is_empty() && cached.iter().all(|c| c.access.is_empty());
+    if !cached.is_empty() && !pre_access {
         return Ok(cached);
     }
     let token = access_token_for(dir, email).await?;
-    let cals = fetch_calendars(&http_client()?, &token).await?;
+    let fresh = fetch_calendars(&http_client()?, &token).await?;
+    let merged = merge_calendars(cached, fresh);
     {
         let mut c = cell().write().unwrap();
         if let Some(a) = c.accounts.iter_mut().find(|a| a.email == email) {
-            a.calendars = cals.clone();
+            a.calendars = merged.clone();
         }
     }
     write_config_file(dir);
-    Ok(cals)
+    Ok(merged)
 }
 
 /// Show/hide one calendar in the Calendar view. Persisted, survives refreshes.
@@ -1288,6 +1293,9 @@ fn map_event(it: &Value, cal: &GcalCalendar, account: &str) -> Option<Value> {
             .map(|s| s.chars().take(600).collect::<String>()),
         "declined": is_declined(it),
         "meet_link": conference_link(it),
+        // True when the link is Google-managed conference data (so edit can
+        // keep/remove it) rather than a Zoom/Teams URL found in free text.
+        "google_meet": it.get("hangoutLink").is_some() || it.get("conferenceData").is_some(),
         "html_link": it.get("htmlLink").and_then(|s| s.as_str()),
         "organizer": it.get("organizer").and_then(|o| {
             o.get("displayName").or_else(|| o.get("email")).and_then(|s| s.as_str())
@@ -1424,6 +1432,10 @@ pub async fn events_range(dir: &Path, start_date: &str, end_date: &str) -> Resul
 /// (defaults to `date`). With `patch`, the unused date/dateTime representation
 /// is explicitly nulled — PATCH keeps whatever it isn't told to clear, and
 /// Google rejects an event carrying both.
+/// `meet`: Some(true) asks Google to attach a Meet conference, Some(false)
+/// strips the existing one, None leaves conference data untouched. Requests
+/// carrying it must go to a `conferenceDataVersion=1` URL or Google ignores it.
+#[allow(clippy::too_many_arguments)]
 fn user_event_body(
     title: &str,
     date: &str,
@@ -1432,6 +1444,7 @@ fn user_event_body(
     end_date: Option<&str>,
     location: Option<&str>,
     description: Option<&str>,
+    meet: Option<bool>,
     patch: bool,
 ) -> Result<Value> {
     let title = title.trim();
@@ -1484,10 +1497,24 @@ fn user_event_body(
     if let Some(d) = description {
         body["description"] = json!(d);
     }
+    match meet {
+        Some(true) => {
+            body["conferenceData"] = json!({
+                "createRequest": {
+                    "requestId": rand_token(),
+                    "conferenceSolutionKey": { "type": "hangoutsMeet" },
+                }
+            });
+        }
+        Some(false) => body["conferenceData"] = Value::Null,
+        None => {}
+    }
     Ok(body)
 }
 
 /// Create an event on any connected account's calendar. Returns `{ id }`.
+/// `add_meet` attaches a Google Meet conference; `guests` are attendee emails
+/// (they get invite emails, matching what Google Calendar's own UI does).
 #[allow(clippy::too_many_arguments)]
 pub async fn create_event(
     dir: &Path,
@@ -1500,11 +1527,26 @@ pub async fn create_event(
     end_date: Option<&str>,
     location: Option<&str>,
     description: Option<&str>,
+    add_meet: bool,
+    guests: &[String],
 ) -> Result<Value> {
     let token = access_token_for(dir, account).await?;
-    let body = user_event_body(title, date, start, end, end_date, location, description, false)?;
+    let meet = if add_meet { Some(true) } else { None };
+    let mut body =
+        user_event_body(title, date, start, end, end_date, location, description, meet, false)?;
+    let guests: Vec<&str> =
+        guests.iter().map(|g| g.trim()).filter(|g| g.contains('@')).collect();
+    if !guests.is_empty() {
+        body["attendees"] = json!(guests.iter().map(|g| json!({ "email": g })).collect::<Vec<_>>());
+    }
+    // conferenceDataVersion=1 is required for Meet creation (harmless without);
+    // sendUpdates emails the invite only when there are guests to invite.
+    let send = if guests.is_empty() { "none" } else { "all" };
     let resp = http_client()?
-        .post(format!("{CAL_BASE}/calendars/{}/events", enc(calendar_id)))
+        .post(format!(
+            "{CAL_BASE}/calendars/{}/events?conferenceDataVersion=1&sendUpdates={send}",
+            enc(calendar_id)
+        ))
         .bearer_auth(&token)
         .json(&body)
         .send()
@@ -1519,7 +1561,9 @@ pub async fn create_event(
 }
 
 /// Edit an event in place. `move_to` first relocates it to another calendar in
-/// the SAME account (Google can't move events across accounts).
+/// the SAME account (Google can't move events across accounts). `meet`:
+/// Some(true) attaches a Google Meet, Some(false) removes it, None keeps
+/// whatever is there.
 #[allow(clippy::too_many_arguments)]
 pub async fn update_event(
     dir: &Path,
@@ -1534,6 +1578,7 @@ pub async fn update_event(
     location: Option<&str>,
     description: Option<&str>,
     move_to: Option<&str>,
+    meet: Option<bool>,
 ) -> Result<()> {
     let token = access_token_for(dir, account).await?;
     let client = http_client()?;
@@ -1556,9 +1601,13 @@ pub async fn update_event(
         }
         cal = dest.to_string();
     }
-    let body = user_event_body(title, date, start, end, end_date, location, description, true)?;
+    let body = user_event_body(title, date, start, end, end_date, location, description, meet, true)?;
     let resp = client
-        .patch(format!("{CAL_BASE}/calendars/{}/events/{}", enc(&cal), enc(event_id)))
+        .patch(format!(
+            "{CAL_BASE}/calendars/{}/events/{}?conferenceDataVersion=1",
+            enc(&cal),
+            enc(event_id)
+        ))
         .bearer_auth(&token)
         .json(&body)
         .send()
@@ -1914,14 +1963,14 @@ mod tests {
 
     #[test]
     fn user_event_body_timed_and_all_day() {
-        let b = user_event_body("lunch", "2026-06-05", Some("12:00"), Some("13:00"), None, None, None, false)
+        let b = user_event_body("lunch", "2026-06-05", Some("12:00"), Some("13:00"), None, None, None, None, false)
             .unwrap();
         assert!(b["start"]["dateTime"].as_str().unwrap().starts_with("2026-06-05T12:00:00"));
         assert!(b["end"]["dateTime"].as_str().unwrap().starts_with("2026-06-05T13:00:00"));
         assert!(b["start"].get("date").is_none(), "no null padding on create");
 
         // All-day: inclusive last day → Google's exclusive end.
-        let b = user_event_body("offsite", "2026-06-05", None, None, Some("2026-06-06"), None, None, false)
+        let b = user_event_body("offsite", "2026-06-05", None, None, Some("2026-06-06"), None, None, None, false)
             .unwrap();
         assert_eq!(b["start"]["date"], "2026-06-05");
         assert_eq!(b["end"]["date"], "2026-06-07");
@@ -1929,23 +1978,43 @@ mod tests {
 
     #[test]
     fn user_event_body_patch_nulls_the_other_shape() {
-        let b = user_event_body("x", "2026-06-05", Some("09:00"), None, None, None, None, true).unwrap();
+        let b = user_event_body("x", "2026-06-05", Some("09:00"), None, None, None, None, None, true).unwrap();
         assert_eq!(b["start"]["date"], Value::Null, "patch must clear the all-day shape");
         assert!(b["start"]["dateTime"].is_string());
         // Default end: one hour.
         assert!(b["end"]["dateTime"].as_str().unwrap().starts_with("2026-06-05T10:00:00"));
 
-        let b = user_event_body("x", "2026-06-05", None, None, None, None, None, true).unwrap();
+        let b = user_event_body("x", "2026-06-05", None, None, None, None, None, None, true).unwrap();
         assert_eq!(b["start"]["dateTime"], Value::Null, "patch must clear the timed shape");
         assert_eq!(b["end"]["date"], "2026-06-06");
     }
 
     #[test]
+    fn user_event_body_meet_tristate() {
+        // Some(true): ask Google to mint a Meet conference.
+        let b = user_event_body("sync", "2026-06-05", Some("09:00"), None, None, None, None, Some(true), false)
+            .unwrap();
+        assert_eq!(b["conferenceData"]["createRequest"]["conferenceSolutionKey"]["type"], "hangoutsMeet");
+        assert!(
+            !b["conferenceData"]["createRequest"]["requestId"].as_str().unwrap().is_empty(),
+            "createRequest needs a client-generated requestId"
+        );
+        // Some(false): strip the existing conference on PATCH.
+        let b = user_event_body("sync", "2026-06-05", Some("09:00"), None, None, None, None, Some(false), true)
+            .unwrap();
+        assert_eq!(b["conferenceData"], Value::Null);
+        // None: conference data untouched.
+        let b = user_event_body("sync", "2026-06-05", Some("09:00"), None, None, None, None, None, false)
+            .unwrap();
+        assert!(b.get("conferenceData").is_none());
+    }
+
+    #[test]
     fn user_event_body_rolls_end_past_midnight_and_rejects_empty_title() {
-        let b = user_event_body("late", "2026-06-05", Some("23:00"), Some("01:00"), None, None, None, false)
+        let b = user_event_body("late", "2026-06-05", Some("23:00"), Some("01:00"), None, None, None, None, false)
             .unwrap();
         assert!(b["end"]["dateTime"].as_str().unwrap().starts_with("2026-06-06T01:00:00"));
-        assert!(user_event_body("  ", "2026-06-05", None, None, None, None, None, false).is_err());
+        assert!(user_event_body("  ", "2026-06-05", None, None, None, None, None, None, false).is_err());
     }
 
     #[test]

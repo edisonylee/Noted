@@ -2044,6 +2044,8 @@ async fn gcal_create_event(
     end_date: Option<String>,
     location: Option<String>,
     description: Option<String>,
+    add_meet: Option<bool>,
+    guests: Option<Vec<String>>,
 ) -> Result<Value, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     gcal::create_event(
@@ -2057,6 +2059,8 @@ async fn gcal_create_event(
         end_date.as_deref(),
         location.as_deref(),
         description.as_deref(),
+        add_meet.unwrap_or(false),
+        &guests.unwrap_or_default(),
     )
     .await
     .map_err(|e| e.to_string())
@@ -2079,6 +2083,7 @@ async fn gcal_update_event(
     location: Option<String>,
     description: Option<String>,
     move_to: Option<String>,
+    meet: Option<bool>,
 ) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     gcal::update_event(
@@ -2094,6 +2099,7 @@ async fn gcal_update_event(
         location.as_deref(),
         description.as_deref(),
         move_to.as_deref(),
+        meet,
     )
     .await
     .map_err(|e| e.to_string())

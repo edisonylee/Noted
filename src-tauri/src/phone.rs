@@ -336,6 +336,8 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
             oarg(b, "endDate"),
             oarg(b, "location"),
             oarg(b, "description"),
+            b.get("addMeet").and_then(|v| v.as_bool()),
+            b.get("guests").and_then(|v| serde_json::from_value(v.clone()).ok()),
         )
         .await,
         "gcal_update_event" => crate::gcal_update_event(
@@ -351,6 +353,7 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
             oarg(b, "location"),
             oarg(b, "description"),
             oarg(b, "moveTo"),
+            b.get("meet").and_then(|v| v.as_bool()),
         )
         .await
         .map(|_| Value::Null),

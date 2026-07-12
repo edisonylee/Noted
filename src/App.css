@@ -1336,3 +1336,10 @@ a.cal-btn { text-decoration: none; }
 .cal-evcard-join { margin: 10px 2px 2px; }
 .cal-evcard-gcal { margin-left: auto; }
 .cal-evcard-desc a, .cal-evcard-meta a { color: var(--accent); word-break: break-all; }
+
+/* Google Meet row in the event form */
+.cal-form-meetbtn { border: none; background: none; color: var(--accent); font-size: 13.5px; font-weight: 520; padding: 4px 0; text-align: left; }
+.cal-form-meetbtn:hover { text-decoration: underline; }
+.cal-form-meeton { display: flex; align-items: center; gap: 10px; font-size: 13.5px; color: var(--ink-soft); }
+.cal-form-meetx { border: none; background: none; color: var(--muted); font-size: 12px; text-decoration: underline; padding: 0; }
+.cal-form-meetx:hover { color: var(--bad); }

@@ -16,7 +16,6 @@ import {
   Video,
 } from "lucide-react";
 import { listen } from "./events";
-import { easternDay, easternMinutes } from "./day";
 import {
   api,
   type MeetingDetail,
@@ -29,10 +28,6 @@ function mmss(ms: number): string {
   const s = Math.floor(ms / 1000);
   return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 }
-
-// Events that already auto-started a recording this session. An auto-start
-// must never re-arm after a manual stop.
-const autoStartedEvents = new Set<string>();
 
 function fmtClock(min: number | null): string {
   if (min == null) return "";
@@ -208,33 +203,10 @@ export function MeetingPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [title, ev?.id]);
 
-  // Granola's one true auto-start: this event's page is open when the
-  // scheduled start arrives → recording begins on its own. Strictly once per
-  // event per app session, and only near the scheduled start — otherwise
-  // stopping and landing back on the event page would immediately re-arm
-  // (a runaway-recording loop).
-  useEffect(() => {
-    if (id != null || !ev || !ev.id || ev.date == null || ev.start_min == null) return;
-    const evId = ev.id;
-    const check = async () => {
-      if (autoStartedEvents.has(evId)) return;
-      if (easternDay() !== ev.date) return;
-      const nowMin = easternMinutes();
-      const from = ev.start_min as number;
-      const end = ev.end_min ?? from + 60;
-      // Only within the first 10 minutes — opening the page mid-meeting later
-      // shouldn't surprise-record.
-      if (nowMin < from || nowMin > Math.min(from + 10, end)) return;
-      const st = await api.meetingState().catch(() => null);
-      if (st && !st.active) {
-        autoStartedEvents.add(evId);
-        start();
-      }
-    };
-    const t = window.setInterval(check, 15_000);
-    check();
-    return () => window.clearInterval(t);
-  }, [id, ev, start]);
+  // Deliberately NO auto-start here. Recording begins only from an explicit
+  // click — this page's Record button or the detection prompt (which fires at
+  // T-60s even when this page is open, so nothing is lost). Ending is the
+  // automatic half: the detector stops when the call app releases the mic.
 
   const stop = async () => {
     setStopping(true);

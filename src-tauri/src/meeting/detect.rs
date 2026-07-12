@@ -373,6 +373,27 @@ fn run(app: tauri::AppHandle) {
             }
         }
 
+        // ── Self-cleaning prompt: a card nobody answered goes away when it
+        // stops being true — the mic-holding app released the mic (call
+        // ended), or the calendar start slipped 15+ minutes into the past.
+        {
+            let pending = app.state::<PendingPrompt>();
+            let stale = pending.0.lock().unwrap().as_ref().is_some_and(|p| {
+                match p["kind"].as_str() {
+                    Some("mic") => p["bundleId"]
+                        .as_str()
+                        .is_some_and(|b| !users.iter().any(|u| u == b)),
+                    Some("calendar") => p["event"]["start_min"]
+                        .as_i64()
+                        .is_some_and(|start| nmin > start + ADJACENCY_MIN),
+                    _ => false,
+                }
+            });
+            if stale {
+                close_prompt(&app);
+            }
+        }
+
         // ── Mic prompt: an app held the mic ≥15s ─────────────────────────
         let cooldown = app.state::<DetectState>();
         mic_first_seen.retain(|b, _| users.contains(b));

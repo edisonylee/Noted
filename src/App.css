@@ -140,6 +140,88 @@ input, textarea { font-family: inherit; }
 
 .content { flex: 1; padding-bottom: 64px; display: flex; flex-direction: column; }
 
+/* ── home weather ─────────────────────────────────────── */
+.weather-card {
+  width: 100%; max-width: 620px; margin: 0 auto 28px; overflow: hidden;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg);
+  box-shadow: var(--shadow-1); animation: rise 0.2s var(--ease);
+}
+.weather-main {
+  min-height: 178px; display: flex; align-items: center; justify-content: space-between;
+  gap: 22px; padding: 24px 26px 21px;
+}
+.weather-reading { min-width: 0; }
+.weather-location {
+  display: flex; align-items: center; gap: 6px; color: var(--muted);
+  font-size: 12px; font-weight: 560; letter-spacing: 0.025em;
+}
+.weather-location svg { flex: none; color: var(--faint); }
+.weather-temperature {
+  margin-top: 8px; color: var(--ink); font-size: 58px; line-height: 0.92;
+  font-weight: 585; letter-spacing: -0.065em; font-variant-numeric: tabular-nums;
+}
+.weather-condition { margin-top: 9px; color: var(--ink); font-size: 16px; font-weight: 575; }
+.weather-feels { margin-top: 3px; color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+.weather-art {
+  position: relative; flex: 0 0 150px; height: 124px; display: grid; place-items: center;
+  color: var(--ink-soft); isolation: isolate;
+}
+.weather-art::before {
+  content: ""; position: absolute; z-index: -1; width: 112px; height: 112px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2);
+}
+.weather-art-cloud {
+  position: absolute; right: 11px; bottom: 17px; padding: 4px;
+  color: var(--faint); background: var(--surface); border: 1px solid var(--line);
+  border-radius: 999px; box-sizing: content-box;
+}
+.weather-outlook {
+  display: flex; align-items: center; justify-content: space-between; gap: 22px;
+  padding: 14px 26px; border-top: 1px solid var(--line); background: var(--surface-2);
+}
+.weather-outlook-head { display: flex; flex-direction: column; gap: 2px; flex: none; }
+.weather-outlook-head > span {
+  color: var(--faint); font-size: 10.5px; font-weight: 620;
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+.weather-outlook-head strong { color: var(--ink-soft); font-size: 13px; font-weight: 570; }
+.weather-details {
+  display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap;
+  gap: 7px 18px; color: var(--ink-soft); font-size: 12.5px;
+}
+.weather-details > span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.weather-details b { color: var(--faint); font-size: 10.5px; font-weight: 650; }
+.weather-details svg { color: var(--faint); }
+.weather-source {
+  display: flex; align-items: center; gap: 5px; min-height: 29px; padding: 6px 20px 7px 26px;
+  border-top: 1px solid var(--line); color: var(--faint); font-size: 10.5px;
+}
+.weather-source a { color: inherit; text-underline-offset: 2px; }
+.weather-source a:hover { color: var(--ink-soft); }
+.weather-refresh {
+  display: inline-grid; place-items: center; width: 24px; height: 20px; margin-left: auto;
+  padding: 0; color: var(--faint); background: none; border: none; border-radius: 6px;
+}
+.weather-refresh:hover:not(:disabled) { color: var(--ink); background: var(--hover-soft); }
+.weather-refresh:disabled { cursor: default; opacity: 0.55; }
+
+.weather-card-status {
+  min-height: 178px; display: flex; align-items: center; gap: 16px; padding: 25px 26px;
+}
+.weather-status-icon {
+  flex: none; display: grid; place-items: center; width: 56px; height: 56px;
+  color: var(--faint); background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.weather-status-title { margin: 7px 0 0; color: var(--ink); font-size: 15px; font-weight: 575; }
+.weather-status-copy { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
+.weather-retry {
+  display: inline-flex; align-items: center; gap: 6px; margin-left: auto; padding: 7px 12px;
+  color: var(--muted); background: transparent; border: 1px solid var(--line-strong);
+  border-radius: 999px; font-size: 12.5px; font-weight: 530;
+}
+.weather-retry:hover { color: var(--ink); border-color: var(--faint); }
+
 /* ── log home: hero composer ───────────────────────────── */
 .log-hero {
   flex: 1; display: flex; flex-direction: column; justify-content: safe center; align-items: center;
@@ -1019,6 +1101,22 @@ textarea.json.bad { border-color: var(--bad); }
 /* Timeline's sticky day header assumes the desktop topbar offset; pin to the
    mobile scroll container instead. */
 .mobile-content .tl-date { top: 0; }
+.mobile-content .weather-card { margin-bottom: 24px; }
+
+@media (max-width: 560px) {
+  .weather-main { min-height: 158px; gap: 8px; padding: 21px 20px 18px; }
+  .weather-temperature { font-size: 51px; }
+  .weather-art { flex-basis: 112px; height: 108px; }
+  .weather-art::before { width: 94px; height: 94px; }
+  .weather-art > svg:not(.weather-art-cloud) { width: 70px; height: 70px; }
+  .weather-art-cloud { right: 0; bottom: 12px; }
+  .weather-feels { max-width: 23ch; }
+  .weather-outlook { align-items: flex-start; padding: 13px 20px; }
+  .weather-details { gap: 7px 13px; }
+  .weather-source { padding-left: 20px; }
+  .weather-card-status { min-height: 158px; padding: 22px 20px; }
+  .weather-status-icon { display: none; }
+}
 
 /* Bottom tab bar */
 .bottom-nav {
@@ -1665,3 +1763,26 @@ a.cal-btn { text-decoration: none; }
   box-shadow: var(--shadow-1);
 }
 .side-reveal:hover { background: var(--hover-soft); }
+
+/* ── Codex-style overlay titlebar + sliding sidebar ───────────────────────── */
+/* The top strip is a window-drag region (overlay titlebar); the toggle sits
+   just right of the traffic lights and never moves. The rail slides, the
+   content follows via padding — no popping. */
+.titlebar-drag { position: fixed; top: 0; left: 0; right: 0; height: 38px; z-index: 50; }
+.side-toggle { position: fixed; top: 11px; left: 82px; z-index: 60; color: var(--muted); }
+.side-toggle:hover { color: var(--ink); }
+
+.app.side { padding-left: 234px; transition: padding-left 0.26s var(--ease); }
+.app.side.side-hidden { padding-left: 28px; }
+.sidebar {
+  position: fixed; left: 0; top: 0; bottom: 0; height: auto; width: 206px;
+  margin: 0; padding: 52px 12px 18px 14px;
+  background: var(--surface-2);
+  border-right: 1px solid var(--line);
+  transform: translateX(0); opacity: 1;
+  transition: transform 0.26s var(--ease), opacity 0.22s var(--ease);
+  z-index: 40;
+}
+.side-hidden .sidebar { transform: translateX(-100%); opacity: 0; pointer-events: none; }
+.side-head { padding: 0 4px 8px 12px; }
+.main-col .content { padding-top: 46px; }

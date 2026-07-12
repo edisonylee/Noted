@@ -21,6 +21,7 @@ import { MeetingPage } from "./MeetingPage";
 import { ComingUp } from "./ComingUp";
 import { NotesView } from "./NotesView";
 import { AskView } from "./AskView";
+import { WeatherCard } from "./Weather";
 import { APP_TZ, easternDay, easternHour } from "./day";
 import "./App.css";
 
@@ -483,7 +484,10 @@ export default function App() {
 
         <main className="mobile-content">
           {mobileTab === "today" && (
-            <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} onOpenSettings={() => setShowSettings(true)} />
+            <>
+              <WeatherCard />
+              <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} onOpenSettings={() => setShowSettings(true)} />
+            </>
           )}
           {mobileTab === "capture" && <MobileCapture onCaptured={() => refresh().catch(handleErr)} />}
         </main>
@@ -514,38 +518,29 @@ export default function App() {
   return (
     <div
       className={
-        "app side" + (view === "calendar" ? " calmode" : view === "journal" ? " journalmode" : "")
+        "app side" +
+        (sideOpen ? "" : " side-hidden") +
+        (view === "calendar" ? " calmode" : view === "journal" ? " journalmode" : "")
       }
     >
       {reconnectingOverlay}
-      {/* ElevenLabs-style left rail: workspace nav on top, utilities pinned
-          to the bottom. Collapsible (toggle or ⌘B), Granola-style: collapsed
-          leaves only a floating reveal button in the corner. */}
-      {!sideOpen && (
-        <button
-          className="side-reveal icon-btn"
-          onClick={() => setSideOpen(true)}
-          title="Open sidebar (⌘B)"
-          aria-label="Open sidebar"
-        >
-          <PanelLeft size={17} />
-        </button>
-      )}
-      {sideOpen && (
+      {/* Overlay titlebar (Codex-style): the top strip drags the window, and
+          the sidebar toggle sits just right of the traffic lights — same spot
+          whether the rail is open or closed. */}
+      <div className="titlebar-drag" data-tauri-drag-region />
+      <button
+        className="side-toggle icon-btn"
+        onClick={() => setSideOpen(!sideOpen)}
+        title={(sideOpen ? "Collapse" : "Open") + " sidebar (⌘B)"}
+        aria-label={(sideOpen ? "Collapse" : "Open") + " sidebar"}
+      >
+        <PanelLeft size={17} />
+      </button>
       <aside className="sidebar">
         <div className="side-head">
           <div className="brand">
             noted<span className="dot">.</span>
           </div>
-          <span className="spacer" />
-          <button
-            className="icon-btn"
-            onClick={() => setSideOpen(false)}
-            title="Collapse sidebar (⌘B)"
-            aria-label="Collapse sidebar"
-          >
-            <PanelLeft size={16} />
-          </button>
         </div>
         <nav className="side-nav">
           <button className={view === "today" ? "on" : ""} onClick={() => setView("today")}>
@@ -606,7 +601,6 @@ export default function App() {
           </button>
         </div>
       </aside>
-      )}
 
       <div className="main-col">
       <main className="content">
@@ -636,6 +630,7 @@ export default function App() {
           />
         ) : (
         <div className="home">
+        <WeatherCard />
         {/* Coming up: the next calendar meetings, one click from recording
             (the Granola habit loop). Quietly absent with no calendar. */}
         <ComingUp

@@ -15,7 +15,9 @@
         "title": "noted",
         "width": 920,
         "height": 760,
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {

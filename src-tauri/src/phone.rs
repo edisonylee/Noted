@@ -229,6 +229,22 @@ fn handle_request(app: &AppHandle, inbox: &Path, token: &str, mut req: tiny_http
 async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, String> {
     let a = app.clone();
     match cmd {
+        "theme_state" => crate::theme_state(a).await,
+        "theme_list" => crate::theme_list(a).await,
+        "theme_save" => {
+            let pack: crate::themes::ThemePack =
+                serde_json::from_value(varg(b, "pack")).map_err(|e| e.to_string())?;
+            crate::theme_save(a, pack).await
+        }
+        "theme_activate" => crate::theme_activate(a, sarg(b, "themeId"), oarg(b, "colorMode")).await,
+        "theme_set_color_mode" => crate::theme_set_color_mode(a, sarg(b, "colorMode")).await,
+        "theme_delete" => crate::theme_delete(a, sarg(b, "themeId")).await,
+        "theme_compile_design" => crate::theme_compile_design(sarg(b, "designMd"), oarg(b, "name")).await,
+        "theme_suggest" => {
+            let candidates: Vec<crate::themes::ThemeCandidate> =
+                serde_json::from_value(varg(b, "candidates")).map_err(|e| e.to_string())?;
+            crate::theme_suggest(sarg(b, "prompt"), candidates).await
+        }
         "health" => crate::health(a).await,
         "categorize_note" => crate::categorize_note(a, sarg(b, "text")).await,
         "ocr_photo" => crate::ocr_photo(sarg(b, "imageBase64")).await.map(|s| json!(s)),

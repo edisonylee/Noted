@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, Check, Mic, Sparkles, Square, Volume2, VolumeX, X } from "lucide-react";
+import { ArrowUp, Check, Mic, Palette, Sparkles, Square, Volume2, VolumeX, X } from "lucide-react";
 import { api, isDesktop, type AskSource, type BrainVaultStatus, type ChatProposal } from "./api";
 import { applyProposal, proposalText } from "./chatActions";
 import { startRecording, type Recorder } from "./audio";
 import { DataView } from "./DataView";
+import { isThemeRequest, proposeTheme } from "./themeRequests";
+import { useTheme } from "./useTheme";
 
 type Msg = {
   role: "user" | "assistant";
@@ -24,6 +26,7 @@ export function FloatingChat({
   onOpenChange?: (open: boolean) => void;
   variant?: "floating" | "sheet";
 }) {
+  const { themes, previewTheme, clearPreview, activateTheme } = useTheme();
   const [openState, setOpenState] = useState(false);
   const open = openProp ?? openState;
   const setOpen = (o: boolean) => (onOpenChange ? onOpenChange(o) : setOpenState(o));
@@ -46,6 +49,19 @@ export function FloatingChat({
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, asking]);
+  useEffect(() => () => clearPreview(), [clearPreview]);
+  const wasOpenRef = useRef(open);
+  useEffect(() => {
+    if (wasOpenRef.current && !open && messages.some((message) => message.proposal?.action === "apply_theme" && !message.resolved)) {
+      clearPreview();
+      setMessages((current) => current.map((message) =>
+        message.proposal?.action === "apply_theme" && !message.resolved
+          ? { ...message, resolved: "cancelled" as const }
+          : message
+      ));
+    }
+    wasOpenRef.current = open;
+  }, [open, messages, clearPreview]);
 
   async function ensureVoice() {
     if (voiceReady) return true;
@@ -66,6 +82,17 @@ export function FloatingChat({
     setMessages((p) => [...p, { role: "user", content: q }]);
     setAsking(true);
     try {
+      if (isThemeRequest(q)) {
+        const proposal = await proposeTheme(q, themes);
+        if (proposal.action === "apply_theme") previewTheme(proposal.theme_id);
+        setMessages((p) => [
+          ...p.map((message) => message.proposal?.action === "apply_theme" && !message.resolved
+            ? { ...message, resolved: "cancelled" as const }
+            : message),
+          { role: "assistant", content: proposalText(proposal), proposal },
+        ]);
+        return;
+      }
       const res = await api.chat(q, history, scope === "all" ? undefined : scope);
       if (res.kind === "proposal") {
         setMessages((p) => [
@@ -84,10 +111,19 @@ export function FloatingChat({
   }
 
   async function confirmProposal(i: number, p: ChatProposal) {
-    setMessages((ms) => ms.map((m, idx) => (idx === i ? { ...m, resolved: "confirmed" } : m)));
     try {
-      const done = await applyProposal(p);
-      setMessages((ms) => [...ms, { role: "assistant", content: done }]);
+      let done: string;
+      if (p.action === "apply_theme") {
+        await api.themeActivate(p.theme_id);
+        if (!activateTheme(p.theme_id, false)) throw new Error("That theme is no longer installed.");
+        done = `Applied “${p.theme_name}”. You can change it anytime in Settings → Themes.`;
+      } else {
+        done = await applyProposal(p);
+      }
+      setMessages((ms) => [
+        ...ms.map((m, idx) => (idx === i ? { ...m, resolved: "confirmed" as const } : m)),
+        { role: "assistant", content: done },
+      ]);
       onMutated?.();
     } catch (e) {
       setMessages((ms) => [...ms, { role: "assistant", content: `Couldn’t apply that — ${e}` }]);
@@ -95,6 +131,7 @@ export function FloatingChat({
   }
 
   function cancelProposal(i: number) {
+    if (messages[i]?.proposal?.action === "apply_theme") clearPreview();
     setMessages((ms) => ms.map((m, idx) => (idx === i ? { ...m, resolved: "cancelled" } : m)));
     setMessages((ms) => [...ms, { role: "assistant", content: "Okay, left it as is." }]);
   }
@@ -201,6 +238,12 @@ export function FloatingChat({
             {m.proposal?.action === "edit_entry" && !m.resolved && (
               <div className="proposal-preview">
                 <DataView value={m.proposal.data} />
+              </div>
+            )}
+            {m.proposal?.action === "apply_theme" && !m.resolved && (
+              <div className="theme-proposal-preview">
+                <Palette size={15} />
+                <span>The whole app is showing this preview. Confirm to keep it, or cancel to roll back.</span>
               </div>
             )}
             {m.proposal && !m.resolved && (

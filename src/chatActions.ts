@@ -20,6 +20,9 @@ export function proposalText(p: ChatProposal): string {
       .join(", ");
     return `Put “${p.title}” on your calendar — ${when}${extras ? ` (${extras})` : ""}?`;
   }
+  if (p.action === "apply_theme") {
+    return `Preview “${p.theme_name}” across Noted? ${p.summary}`;
+  }
   return `Apply this change — ${p.summary}?`;
 }
 
@@ -32,6 +35,9 @@ export async function applyProposal(p: ChatProposal): Promise<string> {
   if (p.action === "edit_entry") {
     await api.updateEntry(p.entry_id, p.data);
     return "Done — updated that entry.";
+  }
+  if (p.action === "apply_theme") {
+    throw new Error("Theme proposals must be applied from the active theme preview.");
   }
   // create_event → the sync account's primary calendar (same home as the
   // pushed daily schedule); no account/calendar picker in a chat flow.

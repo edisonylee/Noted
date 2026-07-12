@@ -4,6 +4,7 @@ import "@fontsource-variable/geist";
 import App from "./App";
 import { RecordPrompt } from "./RecordPrompt";
 import { isDesktop } from "./api";
+import { ThemeProvider } from "./useTheme";
 import "./App.css";
 
 // The record-prompt popup is a second webview onto the same bundle — it renders
@@ -21,6 +22,13 @@ const isPromptWindow = (() => {
   }
 })();
 
+// Desktop gets native window vibrancy behind a transparent webview; the
+// "vibrant" class swaps solid backgrounds for glass where we want see-through.
+// The phone browser keeps solid backgrounds.
+if (isDesktop) document.body.classList.add("vibrant");
+
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>{isPromptWindow ? <RecordPrompt /> : <App />}</React.StrictMode>,
+  <React.StrictMode>
+    <ThemeProvider>{isPromptWindow ? <RecordPrompt /> : <App />}</ThemeProvider>
+  </React.StrictMode>,
 );

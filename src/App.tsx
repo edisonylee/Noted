@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "./events";
-import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, Loader, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Sparkles, Square, StickyNote, Sun } from "lucide-react";
+import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, ListTodo, Loader, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Square, StickyNote, Sun } from "lucide-react";
 import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg, type Img } from "./image";
@@ -21,12 +21,12 @@ import { MeetingPage } from "./MeetingPage";
 import { ComingUp } from "./ComingUp";
 import { NotesView } from "./NotesView";
 import { AskView } from "./AskView";
-import { WeatherCard } from "./Weather";
+import { WeatherHome } from "./Weather";
 import { APP_TZ, easternDay, easternHour } from "./day";
 import "./App.css";
 
 type Phase = "idle" | "thinking" | "review";
-type View = "today" | "ask" | "notes" | "calendar" | "journal" | "knowledge" | "settings";
+type View = "today" | "ask" | "capture" | "notes" | "calendar" | "journal" | "knowledge" | "settings";
 type Source = "text" | "photo";
 // One editable review card per extracted entry.
 type ReviewCard = {
@@ -58,7 +58,7 @@ function homeGreeting(): { dateLine: string; title: string } {
 
 export default function App() {
   const { theme, toggle } = useTheme();
-  const [view, setView] = useState<View>("today");
+  const [view, setView] = useState<View>("ask");
   // Entity to open in Knowledge (set when a related-brain chip is clicked).
   const [knowledgeEntity, setKnowledgeEntity] = useState<number | null>(null);
   const [text, setText] = useState("");
@@ -160,7 +160,7 @@ export default function App() {
     );
   }, [notes]);
   // A pasted image or an in-flight categorize/review always forces it open.
-  const composerVisible = composerOpen || !hasSchedule || phase !== "idle" || img != null;
+  const composerVisible = view === "capture" || composerOpen || !hasSchedule || phase !== "idle" || img != null;
 
   // Route a thrown error: a TokenError (phone 403) trips the re-pair screen; an
   // OfflineError (Mac unreachable, e.g. mid-rebuild) shows the reconnecting
@@ -262,6 +262,9 @@ export default function App() {
   // paste an image straight from the clipboard (screenshots etc.)
   useEffect(() => {
     const onPaste = async (e: ClipboardEvent) => {
+      // Ask owns its own attachment paste handler. Only the dedicated Capture
+      // page should populate the note-ingestion state here.
+      if (view !== "capture") return;
       const item = Array.from(e.clipboardData?.items ?? []).find((i) =>
         i.type.startsWith("image/")
       );
@@ -273,7 +276,7 @@ export default function App() {
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
-  }, []);
+  }, [view]);
 
   const cardParses = useMemo(
     () =>
@@ -336,8 +339,36 @@ export default function App() {
     }
   }
 
+  async function beginNoteReview({ text: draftText, img: draftImg }: { text: string; img: Img | null }) {
+    const raw = draftText.trim();
+    if (!raw && !draftImg) return;
+    setError(null);
+    setPhase("thinking");
+    try {
+      let env: Envelope;
+      if (draftImg && raw) {
+        const ocr = await api.ocrPhoto(draftImg.base64);
+        env = await api.categorize([raw, ocr.trim()].filter(Boolean).join("\n\n"));
+      } else if (draftImg) {
+        env = await api.categorizePhoto(draftImg.base64);
+      } else {
+        env = await api.categorize(raw);
+      }
+      setText(raw);
+      setImg(draftImg);
+      enterReview(env, draftImg ? "photo" : "text");
+      setMeetingOpen(null);
+      setView("capture");
+    } catch (e) {
+      setPhase("idle");
+      setError(String(e));
+      throw e;
+    }
+  }
+
   async function ingestPhoto(base64: string, ext: string) {
-    setView("today");
+    setMeetingOpen(null);
+    setView("capture");
     setImg({ base64, ext, dataUrl: `data:image/${ext === "jpg" ? "jpeg" : ext};base64,${base64}` });
     setError(null);
     setPhase("thinking");
@@ -428,6 +459,12 @@ export default function App() {
     setDateWasExtracted(false);
     setEntityChips([]);
     setPhase("idle");
+    setView("ask");
+  }
+
+  function goHome() {
+    setMeetingOpen(null);
+    setView(phase === "idle" ? "ask" : "capture");
   }
 
   const busy = phase === "thinking";
@@ -484,10 +521,7 @@ export default function App() {
 
         <main className="mobile-content">
           {mobileTab === "today" && (
-            <>
-              <WeatherCard />
-              <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} onOpenSettings={() => setShowSettings(true)} />
-            </>
+            <TodayView notes={notes} onSaved={() => refresh().catch(handleErr)} onOpenSettings={() => setShowSettings(true)} />
           )}
           {mobileTab === "capture" && <MobileCapture onCaptured={() => refresh().catch(handleErr)} />}
         </main>
@@ -520,7 +554,13 @@ export default function App() {
       className={
         "app side" +
         (sideOpen ? "" : " side-hidden") +
-        (view === "calendar" ? " calmode" : view === "journal" ? " journalmode" : "")
+        (view === "ask" || view === "capture"
+          ? " homemode"
+          : view === "calendar"
+            ? " calmode"
+            : view === "journal"
+              ? " journalmode"
+              : "")
       }
     >
       {reconnectingOverlay}
@@ -543,11 +583,21 @@ export default function App() {
           </div>
         </div>
         <nav className="side-nav">
-          <button className={view === "today" ? "on" : ""} onClick={() => setView("today")}>
+          <button
+            className={view === "ask" || view === "capture" ? "on" : ""}
+            onClick={goHome}
+          >
             <House size={16} /> Home
           </button>
-          <button className={view === "ask" ? "on" : ""} onClick={() => setView("ask")}>
-            <Sparkles size={16} /> Ask
+          <button
+            className={view === "today" ? "on" : ""}
+            onClick={() => {
+              setMeetingOpen(null);
+              setView("today");
+              refresh().catch(handleErr);
+            }}
+          >
+            <ListTodo size={16} /> Schedule
           </button>
           <button className={view === "notes" ? "on" : ""} onClick={() => setView("notes")}>
             <StickyNote size={16} /> Notes
@@ -605,9 +655,14 @@ export default function App() {
       <div className="main-col">
       <main className="content">
         {view === "settings" ? (
-          <SettingsModal page onClose={() => setView("today")} />
+          <SettingsModal page onClose={goHome} />
         ) : view === "ask" ? (
-          <AskView onMutated={() => refresh().catch(handleErr)} />
+          <WeatherHome>
+            <AskView
+              onMutated={() => refresh().catch(handleErr)}
+              onSaveNote={beginNoteReview}
+            />
+          </WeatherHome>
         ) : view === "notes" ? (
           <NotesView notes={notes} cats={cats} />
         ) : view === "calendar" ? (
@@ -628,26 +683,22 @@ export default function App() {
             onBack={() => setMeetingOpen(null)}
             onStarted={(id) => setMeetingOpen({ id })}
           />
+        ) : view === "today" ? (
+          <div className="schedule-page">
+            <ComingUp
+              onOpenEvent={(ev) => setMeetingOpen({ id: null, event: ev })}
+              onOpenMeeting={(id) => setMeetingOpen({ id })}
+              activeMeetingId={recMeeting?.id ?? null}
+            />
+            <TodayView
+              notes={notes}
+              onSaved={() => refresh().catch(handleErr)}
+              onOpenSettings={() => setView("settings")}
+            />
+          </div>
         ) : (
-        <div className="home">
-        <WeatherCard />
-        {/* Coming up: the next calendar meetings, one click from recording
-            (the Granola habit loop). Quietly absent with no calendar. */}
-        <ComingUp
-          onOpenEvent={(ev) => setMeetingOpen({ id: null, event: ev })}
-          onOpenMeeting={(id) => setMeetingOpen({ id })}
-          activeMeetingId={recMeeting?.id ?? null}
-        />
-        {/* The day's schedule leads — its header (date + calendar actions) is
-            the page's anchor — with the composer right below it. Hidden while
-            a capture is being reviewed so the cards keep the room. */}
-        {phase !== "review" && (
-          <TodayView
-            notes={notes}
-            onSaved={() => refresh().catch(handleErr)}
-            onOpenSettings={() => setView("settings")}
-          />
-        )}
+        <WeatherHome>
+        <div className="capture-workspace">
         <div className="log-hero">
         {!composerVisible ? (
           <button className="home-capturebtn" onClick={() => setComposerOpen(true)}>
@@ -921,15 +972,17 @@ export default function App() {
           </section>
         )}
 
-        {savedMsg && (
-          <button className="saved-toast" onClick={() => setView("knowledge")}>
-            <Check size={15} /> Filed under <strong>{savedMsg}</strong> · view in knowledge
-          </button>
-        )}
         </div>
         </div>
+        </WeatherHome>
         )}
       </main>
+
+      {savedMsg && (
+        <button className="saved-toast" onClick={() => setView("knowledge")}>
+          <Check size={15} /> Filed under <strong>{savedMsg}</strong> · view in knowledge
+        </button>
+      )}
 
       <footer className="status">
         <span className="meta">

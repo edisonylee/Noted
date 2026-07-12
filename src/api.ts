@@ -1,4 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import type { ThemeModePreference, ThemePack } from "./themes/types";
 
 // noted runs in two places: the desktop Tauri shell, and a phone browser that
 // loads the same UI over the LAN HTTPS server (see src-tauri/src/phone.rs).
@@ -214,6 +215,14 @@ export type ProviderSettings = {
   has_gemini_key: boolean;
 };
 
+export type ThemeState = {
+  schemaVersion: 1;
+  activeThemeId: string;
+  colorMode: ThemeModePreference;
+};
+export type ThemeCandidate = { id: string; name: string; description: string };
+export type ThemeSuggestion = { themeId: string; summary: string };
+
 // Google Calendar. noted pushes the day's schedule one-way into a dedicated
 // "noted" calendar in the first account, and the Calendar view reads/writes
 // events across every connected account; auth is OAuth (tokens live in the
@@ -382,6 +391,7 @@ export type AskSource = {
 export type ChatProposal =
   | { action: "create_category"; name: string; description: string; already_exists: boolean }
   | { action: "edit_entry"; entry_id: number; data: Record<string, unknown>; summary: string }
+  | { action: "apply_theme"; theme_id: string; theme_name: string; summary: string }
   | {
       action: "create_event";
       title: string;
@@ -486,6 +496,20 @@ export const api = {
   listRecaps: () => invoke<RecapRow[]>("list_recaps"),
   exportDb: () => invoke<string>("export_db"),
   phoneInfo: () => invoke<PhoneInfo>("phone_info"),
+  // Themes are data-only, versioned token packs. DESIGN.md compilation and
+  // assistant matching always use the local Ollama model, even in Balanced mode.
+  themeState: () => invoke<ThemeState>("theme_state"),
+  themeList: () => invoke<ThemePack[]>("theme_list"),
+  themeSave: (pack: ThemePack) => invoke<ThemePack>("theme_save", { pack }),
+  themeActivate: (themeId: string, colorMode?: ThemeModePreference) =>
+    invoke<ThemeState>("theme_activate", { themeId, colorMode }),
+  themeSetColorMode: (colorMode: ThemeModePreference) =>
+    invoke<ThemeState>("theme_set_color_mode", { colorMode }),
+  themeDelete: (themeId: string) => invoke<ThemeState>("theme_delete", { themeId }),
+  themeCompileDesign: (designMd: string, name?: string) =>
+    invoke<ThemePack>("theme_compile_design", { designMd, name }),
+  themeSuggest: (prompt: string, candidates: ThemeCandidate[]) =>
+    invoke<ThemeSuggestion>("theme_suggest", { prompt, candidates }),
   getProviderSettings: () => invoke<ProviderSettings>("get_provider_settings"),
   setProviderSettings: (args: {
     mode: ProviderMode;

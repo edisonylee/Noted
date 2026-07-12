@@ -4372,6 +4372,7 @@ dependencies = [
  "tiny_http",
  "tokio",
  "whisper-rs",
+ "window-vibrancy",
  "zerocopy 0.7.35",
 ]
 

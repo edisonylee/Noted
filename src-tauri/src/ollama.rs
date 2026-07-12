@@ -41,7 +41,7 @@ pub async fn chat_json(
 }
 
 /// Structured chat that NEVER leaves the machine, even in Balanced mode — for
-/// text the cloud must not see (the Journal's reflections).
+/// privacy-sensitive text such as Journal reflections and imported theme briefs.
 pub async fn chat_json_local(
     model: &str,
     system: &str,

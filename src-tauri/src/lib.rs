@@ -8,6 +8,7 @@ pub mod ollama;
 pub mod phone;
 pub mod pipeline;
 pub mod provider;
+pub mod themes;
 pub mod voice;
 
 use db::{Db, SaveInput};
@@ -45,6 +46,66 @@ fn normalize(mut v: Vec<f32>) -> Vec<f32> {
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
+
+/// Persisted theme selection shared by desktop and phone.
+#[tauri::command]
+async fn theme_state(app: tauri::AppHandle) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    serde_json::to_value(themes::read_state(&dir)).map_err(|e| e.to_string())
+}
+
+/// User-imported theme packs. Built-ins ship with the frontend and are not
+/// duplicated on disk.
+#[tauri::command]
+async fn theme_list(app: tauri::AppHandle) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let packs = themes::list(&dir).map_err(|e| e.to_string())?;
+    serde_json::to_value(packs).map_err(|e| e.to_string())
+}
+
+/// Validate and atomically save a normalized, data-only theme pack.
+#[tauri::command]
+async fn theme_save(app: tauri::AppHandle, pack: themes::ThemePack) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let pack = themes::save(&dir, pack).map_err(|e| e.to_string())?;
+    serde_json::to_value(pack).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn theme_activate(app: tauri::AppHandle, theme_id: String, color_mode: Option<String>) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let state = themes::activate(&dir, &theme_id, color_mode.as_deref()).map_err(|e| e.to_string())?;
+    serde_json::to_value(state).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn theme_set_color_mode(app: tauri::AppHandle, color_mode: String) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let state = themes::set_color_mode(&dir, &color_mode).map_err(|e| e.to_string())?;
+    serde_json::to_value(state).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn theme_delete(app: tauri::AppHandle, theme_id: String) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let state = themes::delete(&dir, &theme_id).map_err(|e| e.to_string())?;
+    serde_json::to_value(state).map_err(|e| e.to_string())
+}
+
+/// Compile pasted design guidance with Ollama only. This call deliberately uses
+/// `chat_json_local` and therefore cannot route to Gemini in Balanced mode.
+#[tauri::command]
+async fn theme_compile_design(design_md: String, name: Option<String>) -> Result<Value, String> {
+    let pack = themes::compile_design(&design_md, name.as_deref()).await.map_err(|e| e.to_string())?;
+    serde_json::to_value(pack).map_err(|e| e.to_string())
+}
+
+/// Pick a frontend-supplied built-in/custom candidate for an assistant request.
+/// Selection is local-only and returns a proposal; it never activates a theme.
+#[tauri::command]
+async fn theme_suggest(prompt: String, candidates: Vec<themes::ThemeCandidate>) -> Result<Value, String> {
+    themes::suggest(&prompt, &candidates).await.map_err(|e| e.to_string())
+}
 
 /// M0 health check: which models are pulled, plus a sqlite-vec smoke test.
 #[tauri::command]
@@ -2556,6 +2617,22 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // Dark-glass chrome: native vibrancy behind the (transparent)
+            // webview — the sidebar region lets it show through. Follows the
+            // window's active state, so it flattens when unfocused.
+            #[cfg(target_os = "macos")]
+            if let Some(win) = app.get_webview_window("main") {
+                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+                if let Err(e) = apply_vibrancy(
+                    &win,
+                    NSVisualEffectMaterial::HudWindow,
+                    Some(NSVisualEffectState::FollowsWindowActiveState),
+                    None,
+                ) {
+                    eprintln!("[noted] vibrancy unavailable: {e}");
+                }
+            }
+
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             let conn = db::init(&dir.join("noted.db"))?;
@@ -2697,6 +2774,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            theme_state,
+            theme_list,
+            theme_save,
+            theme_activate,
+            theme_set_color_mode,
+            theme_delete,
+            theme_compile_design,
+            theme_suggest,
             health,
             categorize_note,
             ocr_photo,

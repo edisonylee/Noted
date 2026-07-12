@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ComponentType } from "react";
+import { useEffect, useState, type ComponentType, type ReactNode } from "react";
 import {
   Cloud,
   CloudDrizzle,
@@ -8,16 +8,13 @@ import {
   CloudRain,
   CloudSnow,
   CloudSun,
-  Droplets,
   MapPin,
   Moon,
   RefreshCw,
   Sun,
-  Umbrella,
-  Wind,
 } from "lucide-react";
 
-export type WeatherLocation = {
+type WeatherLocation = {
   name: string;
   region: string;
   latitude: number;
@@ -27,7 +24,7 @@ export type WeatherLocation = {
 
 // Kept as a single value so Settings can replace it later without changing the
 // card, request, or cache shape.
-export const ATLANTA_WEATHER_LOCATION: WeatherLocation = {
+const ATLANTA_WEATHER_LOCATION: WeatherLocation = {
   name: "Atlanta",
   region: "Georgia",
   latitude: 33.749,
@@ -234,7 +231,7 @@ async function getForecast(location: WeatherLocation, force = false): Promise<We
   return request;
 }
 
-export function weatherCondition(code: number): { label: string; kind: WeatherKind } {
+function weatherCondition(code: number): { label: string; kind: WeatherKind } {
   if (code === 0) return { label: "Clear", kind: "clear" };
   if (code === 1) return { label: "Mostly clear", kind: "clear" };
   if (code === 2) return { label: "Partly cloudy", kind: "cloudy" };
@@ -262,12 +259,9 @@ function WeatherIcon({ kind, isDay }: { kind: WeatherKind; isDay: boolean }) {
   else Icon = CloudLightning;
 
   return (
-    <div className={`weather-art weather-art-${kind}`} aria-hidden="true">
-      <Icon size={84} strokeWidth={1.15} />
-      {(kind === "cloudy" || kind === "fog") && (
-        <Cloud className="weather-art-cloud" size={31} strokeWidth={1.15} />
-      )}
-    </div>
+    <span className="weather-glyph" aria-hidden="true">
+      <Icon size={19} strokeWidth={1.7} />
+    </span>
   );
 }
 
@@ -275,37 +269,38 @@ function rounded(value: number): string {
   return String(Math.round(value));
 }
 
-function updatedAt(snapshot: WeatherSnapshot, location: WeatherLocation): string {
-  return new Date(snapshot.fetchedAt).toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-    timeZone: location.timezone,
-  });
+function weatherDate(date: string): string {
+  const [year, month, day] = date.split("-").map(Number);
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(Date.UTC(year, month - 1, day)));
 }
 
-export function WeatherCard({
+export function WeatherHome({
   location = ATLANTA_WEATHER_LOCATION,
+  children,
 }: {
   location?: WeatherLocation;
+  children: ReactNode;
 }) {
   const [snapshot, setSnapshot] = useState<WeatherSnapshot | null>(() => readCache(location));
   const [loading, setLoading] = useState(() => !readCache(location));
   const [unavailable, setUnavailable] = useState(false);
 
-  const load = useCallback(
-    async (force = false) => {
-      setLoading(true);
-      setUnavailable(false);
-      try {
-        setSnapshot(await getForecast(location, force));
-      } catch {
-        setUnavailable(true);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [location.latitude, location.longitude, location.timezone],
-  );
+  async function load(force = false) {
+    setLoading(true);
+    setUnavailable(false);
+    try {
+      setSnapshot(await getForecast(location, force));
+    } catch {
+      setUnavailable(true);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -334,84 +329,81 @@ export function WeatherCard({
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [location.latitude, location.longitude, location.timezone]);
+  }, [location]);
 
   if (!snapshot) {
     return (
-      <section className="weather-card weather-card-status" aria-live="polite">
-        <div className="weather-status-icon" aria-hidden="true">
-          <Cloud size={32} strokeWidth={1.25} />
+      <section className="weather-home weather-home-loading">
+        <div className="weather-atmosphere" aria-hidden="true">
+          <span className="weather-orb" />
+          <span className="weather-cloud weather-cloud-one" />
+          <span className="weather-cloud weather-cloud-two" />
         </div>
-        <div>
-          <div className="weather-location">
-            <MapPin size={13} /> {location.name}, {location.region}
-          </div>
-          <p className="weather-status-title">
-            {loading ? "Checking the weather…" : "Weather is unavailable"}
-          </p>
-          {!loading && <p className="weather-status-copy">Connect to the internet and try again.</p>}
-        </div>
-        {!loading && (
-          <button className="weather-retry" onClick={() => load(true)}>
-            <RefreshCw size={14} /> Retry
-          </button>
-        )}
+        <header className="weather-bar" aria-live="polite">
+          <span className="weather-bar-place">
+            <MapPin size={14} /> {location.name}
+          </span>
+          <span className="weather-bar-status">
+            <Cloud size={18} /> {loading ? "Checking weather…" : "Weather unavailable"}
+          </span>
+          <span className="weather-bar-spacer" />
+          <span className="weather-bar-date">{weatherDate(localDate(location.timezone))}</span>
+          {!loading && (
+            <button className="weather-bar-refresh" onClick={() => load(true)} aria-label="Retry weather">
+              <RefreshCw size={14} />
+            </button>
+          )}
+        </header>
+        <div className="weather-home-content">{children}</div>
       </section>
     );
   }
 
   const condition = weatherCondition(snapshot.current.weatherCode);
-  const outlook = weatherCondition(snapshot.today.weatherCode);
   const stale = unavailable || Date.now() - snapshot.fetchedAt >= FRESH_FOR_MS;
+  const time = snapshot.current.isDay ? "day" : "night";
 
   return (
-    <section className={`weather-card weather-card-${condition.kind}`} aria-label={`${location.name} weather`}>
-      <div className="weather-main">
-        <div className="weather-reading">
-          <div className="weather-location">
-            <MapPin size={13} /> {location.name}, {location.region}
-          </div>
-          <div className="weather-temperature">
-            {rounded(snapshot.current.temperature)}°
-          </div>
-          <div className="weather-condition">{condition.label}</div>
-          <div className="weather-feels">
-            Feels like {rounded(snapshot.current.apparentTemperature)}° · {rounded(snapshot.current.cloudCover)}% cloud cover
-          </div>
-        </div>
-        <WeatherIcon kind={condition.kind} isDay={snapshot.current.isDay} />
+    <section className={`weather-home weather-home-${condition.kind} weather-home-${time}`}>
+      <div className="weather-atmosphere" aria-hidden="true">
+        <span className="weather-orb" />
+        <span className="weather-cloud weather-cloud-one" />
+        <span className="weather-cloud weather-cloud-two" />
+        <span className="weather-precip" />
+        <span className="weather-haze" />
       </div>
-
-      <div className="weather-outlook">
-        <div className="weather-outlook-head">
-          <span>Today’s outlook</span>
-          <strong>{outlook.label}</strong>
-        </div>
-        <div className="weather-details">
-          <span><b>H</b> {rounded(snapshot.today.high)}°</span>
-          <span><b>L</b> {rounded(snapshot.today.low)}°</span>
-          <span><Umbrella size={13} /> {rounded(snapshot.today.precipitationChance)}%</span>
-          <span><Droplets size={13} /> {rounded(snapshot.current.humidity)}%</span>
-          <span><Wind size={13} /> {rounded(snapshot.current.windSpeed)} mph</span>
-        </div>
-      </div>
-
-      <div className="weather-source">
-        <span>{stale ? "Saved forecast" : `Updated ${updatedAt(snapshot, location)}`}</span>
-        <span aria-hidden="true">·</span>
+      <header
+        className="weather-bar"
+        aria-label={`${weatherDate(snapshot.today.date)}. ${location.name} weather: ${rounded(snapshot.current.temperature)} degrees, ${condition.label}. High ${rounded(snapshot.today.high)}, low ${rounded(snapshot.today.low)}.`}
+      >
+        <span className="weather-bar-current">
+          <WeatherIcon kind={condition.kind} isDay={snapshot.current.isDay} />
+          <strong>{rounded(snapshot.current.temperature)}°</strong>
+          <span>{condition.label}</span>
+          {stale && <em>saved</em>}
+        </span>
+        <span className="weather-bar-date">{weatherDate(snapshot.today.date)}</span>
+        <span className="weather-bar-spacer" />
+        <span className="weather-bar-range">
+          <b>H</b> {rounded(snapshot.today.high)}° <b>L</b> {rounded(snapshot.today.low)}°
+        </span>
+        <span className="weather-bar-place">
+          <MapPin size={13} /> {location.name}
+        </span>
         <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">
-          Weather data by Open-Meteo
+          Weather by Open-Meteo
         </a>
         <button
-          className="weather-refresh"
+          className="weather-bar-refresh"
           onClick={() => load(true)}
           disabled={loading}
           aria-label="Refresh weather"
           title="Refresh weather"
         >
-          <RefreshCw size={12} className={loading ? "spin" : ""} />
+          <RefreshCw size={13} className={loading ? "spin" : ""} />
         </button>
-      </div>
+      </header>
+      <div className="weather-home-content">{children}</div>
     </section>
   );
 }

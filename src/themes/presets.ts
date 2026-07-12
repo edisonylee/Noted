@@ -52,7 +52,7 @@ const darkElevation: ThemeElevation = {
 
 const warmLight: ThemeColors = {
   canvas: "#f7f5f1", surface: "#ffffff", surface2: "#fcfbf8", ink: "#1b1916",
-  inkSoft: "#46413a", muted: "#6f6960", faint: "#837c6f", line: "#e9e5dd",
+  inkSoft: "#46413a", muted: "#6f6960", faint: "#7c756a", line: "#e9e5dd",
   lineStrong: "#ddd8cd", accent: "#3d79bd", accentTint: "#e1eaf4", good: "#3f7d5b",
   bad: "#be463b", onInk: "#f7f5f1", inkHover: "#322d26", hoverSoft: "#efece5",
   scrollThumb: "#ddd7cb", scrollThumbHover: "#cfc8ba", errorBg: "#fbf0ee",
@@ -61,7 +61,7 @@ const warmLight: ThemeColors = {
 
 const warmDark: ThemeColors = {
   canvas: "#17150f", surface: "#211e18", surface2: "#1b1813", ink: "#f3efe7",
-  inkSoft: "#cdc6ba", muted: "#a8a08f", faint: "#8c8475", line: "#322e26",
+  inkSoft: "#cdc6ba", muted: "#a8a08f", faint: "#8e8677", line: "#322e26",
   lineStrong: "#423c31", accent: "#5797df", accentTint: "#19232f", good: "#6fb78c",
   bad: "#e57163", onInk: "#1b1916", inkHover: "#e9e3d8", hoverSoft: "#2a261f",
   scrollThumb: "#3a352c", scrollThumbHover: "#4a4338", errorBg: "#2b1a16",
@@ -124,7 +124,7 @@ const CUPERTINO = preset(
   {
     colors: {
       canvas: "#f5f5f7", surface: "#ffffff", surface2: "#f9f9fb", ink: "#1d1d1f",
-      inkSoft: "#3a3a3c", muted: "#6e6e73", faint: "#85858a", line: "#e5e5ea",
+      inkSoft: "#3a3a3c", muted: "#6e6e73", faint: "#75757a", line: "#e5e5ea",
       lineStrong: "#d1d1d6", accent: "#007aff", accentTint: "#e5f1ff", good: "#248a3d",
       bad: "#d70015", onInk: "#ffffff", inkHover: "#343437", hoverSoft: "#ededf0",
       scrollThumb: "#c7c7cc", scrollThumbHover: "#aeaeb2", errorBg: "#fff0f1",
@@ -143,7 +143,7 @@ const CUPERTINO = preset(
   {
     colors: {
       canvas: "#000000", surface: "#1c1c1e", surface2: "#111113", ink: "#f5f5f7",
-      inkSoft: "#d1d1d6", muted: "#a1a1a6", faint: "#7d7d82", line: "#2c2c2e",
+      inkSoft: "#d1d1d6", muted: "#a1a1a6", faint: "#848489", line: "#2c2c2e",
       lineStrong: "#3a3a3c", accent: "#0a84ff", accentTint: "#0b2945", good: "#30d158",
       bad: "#ff453a", onInk: "#111113", inkHover: "#e5e5ea", hoverSoft: "#2c2c2e",
       scrollThumb: "#3a3a3c", scrollThumbHover: "#545458", errorBg: "#351416",
@@ -163,7 +163,7 @@ const LINEAR_MIDNIGHT = preset(
   {
     colors: {
       canvas: "#f6f5fa", surface: "#ffffff", surface2: "#faf9fc", ink: "#202024",
-      inkSoft: "#45434d", muted: "#706d7a", faint: "#85818f", line: "#e7e5ec",
+      inkSoft: "#45434d", muted: "#706d7a", faint: "#777481", line: "#e7e5ec",
       lineStrong: "#d8d5e0", accent: "#6558d9", accentTint: "#ece9ff", good: "#27845a",
       bad: "#c53e55", onInk: "#ffffff", inkHover: "#34323a", hoverSoft: "#efedf4",
       scrollThumb: "#d6d2df", scrollThumbHover: "#bfbacb", errorBg: "#fff0f3",
@@ -175,7 +175,7 @@ const LINEAR_MIDNIGHT = preset(
   {
     colors: {
       canvas: "#0f1015", surface: "#17181f", surface2: "#121319", ink: "#f1f1f4",
-      inkSoft: "#c8c7ce", muted: "#9997a2", faint: "#777580", line: "#292a33",
+      inkSoft: "#c8c7ce", muted: "#9997a2", faint: "#82808b", line: "#292a33",
       lineStrong: "#383943", accent: "#8b7cf6", accentTint: "#25213e", good: "#5bc794",
       bad: "#ed6a7f", onInk: "#111218", inkHover: "#e2e1e7", hoverSoft: "#22232b",
       scrollThumb: "#33343e", scrollThumbHover: "#494a55", errorBg: "#301a21",
@@ -193,7 +193,7 @@ const PAPER = preset(
   {
     colors: {
       canvas: "#f2efe7", surface: "#fffdf7", surface2: "#f8f4e9", ink: "#29251f",
-      inkSoft: "#4f483d", muted: "#71695d", faint: "#857c6e", line: "#e4dccd",
+      inkSoft: "#4f483d", muted: "#71695d", faint: "#7c7366", line: "#e4dccd",
       lineStrong: "#d5c9b7", accent: "#8c5b3f", accentTint: "#f0e2d6", good: "#52705b",
       bad: "#a94b42", onInk: "#fffdf7", inkHover: "#40382e", hoverSoft: "#ebe5d8",
       scrollThumb: "#d5ccbc", scrollThumbHover: "#bfb4a2", errorBg: "#f8eae6",
@@ -211,7 +211,7 @@ const PAPER = preset(
   {
     colors: {
       canvas: "#191611", surface: "#231f18", surface2: "#1e1a14", ink: "#eee7d9",
-      inkSoft: "#c9beaa", muted: "#a49a87", faint: "#887e6d", line: "#352f25",
+      inkSoft: "#c9beaa", muted: "#a49a87", faint: "#908674", line: "#352f25",
       lineStrong: "#473e30", accent: "#d49a75", accentTint: "#34251c", good: "#7fb08b",
       bad: "#df7b70", onInk: "#211b15", inkHover: "#e2d8c5", hoverSoft: "#2d281f",
       scrollThumb: "#3e372b", scrollThumbHover: "#554b3a", errorBg: "#321d19",
@@ -230,7 +230,7 @@ const EDITORIAL = preset(
   {
     colors: {
       canvas: "#f5f2ec", surface: "#fffefa", surface2: "#f9f6f0", ink: "#151515",
-      inkSoft: "#383735", muted: "#686662", faint: "#817e78", line: "#dedad2",
+      inkSoft: "#383735", muted: "#686662", faint: "#77756f", line: "#dedad2",
       lineStrong: "#c8c3b9", accent: "#b3322b", accentTint: "#f5dfdc", good: "#3e7152",
       bad: "#b3322b", onInk: "#fffefa", inkHover: "#2a2927", hoverSoft: "#ebe7df",
       scrollThumb: "#cbc5bb", scrollThumbHover: "#aaa399", errorBg: "#f7e6e3",
@@ -243,7 +243,7 @@ const EDITORIAL = preset(
   {
     colors: {
       canvas: "#111111", surface: "#191919", surface2: "#141414", ink: "#f4f0e8",
-      inkSoft: "#d0cbc2", muted: "#a39d93", faint: "#837e76", line: "#2d2c2a",
+      inkSoft: "#d0cbc2", muted: "#a39d93", faint: "#878179", line: "#2d2c2a",
       lineStrong: "#41403d", accent: "#e45b50", accentTint: "#351d1b", good: "#70ae82",
       bad: "#e45b50", onInk: "#151515", inkHover: "#e6e1d8", hoverSoft: "#242321",
       scrollThumb: "#3a3936", scrollThumbHover: "#52504c", errorBg: "#301918",
@@ -262,7 +262,7 @@ const TERMINAL = preset(
   {
     colors: {
       canvas: "#eef2ec", surface: "#f8fbf6", surface2: "#f1f6ef", ink: "#152018",
-      inkSoft: "#304237", muted: "#5c6d61", faint: "#748177", line: "#d3ddd4",
+      inkSoft: "#304237", muted: "#5c6d61", faint: "#67766b", line: "#d3ddd4",
       lineStrong: "#becabd", accent: "#087c3e", accentTint: "#d9efe1", good: "#087c3e",
       bad: "#b43c32", onInk: "#f8fbf6", inkHover: "#26372b", hoverSoft: "#e3ebe2",
       scrollThumb: "#c2cec2", scrollThumbHover: "#a7b7a7", errorBg: "#f9e9e6",
@@ -276,7 +276,7 @@ const TERMINAL = preset(
   {
     colors: {
       canvas: "#07100a", surface: "#0b180f", surface2: "#08130c", ink: "#d7fbe0",
-      inkSoft: "#a6d8b2", muted: "#79a584", faint: "#5f8568", line: "#173321",
+      inkSoft: "#a6d8b2", muted: "#79a584", faint: "#61886b", line: "#173321",
       lineStrong: "#245033", accent: "#42e879", accentTint: "#123820", good: "#42e879",
       bad: "#ff6b62", onInk: "#07100a", inkHover: "#c2f2ce", hoverSoft: "#102719",
       scrollThumb: "#1d422a", scrollThumbHover: "#2b5f3c", errorBg: "#351512",
@@ -297,7 +297,7 @@ const SOFT_GLASS = preset(
   {
     colors: {
       canvas: "#eef2f8", surface: "#fbfdff", surface2: "#f4f7fc", ink: "#202736",
-      inkSoft: "#465064", muted: "#6b7487", faint: "#818a9c", line: "#dce3ed",
+      inkSoft: "#465064", muted: "#6b7487", faint: "#6b7487", line: "#dce3ed",
       lineStrong: "#cbd5e2", accent: "#5574d8", accentTint: "#e4e9fb", good: "#41856c",
       bad: "#c14f67", onInk: "#ffffff", inkHover: "#343e51", hoverSoft: "#e6ebf3",
       scrollThumb: "#cbd4e0", scrollThumbHover: "#b3bfce", errorBg: "#fceef2",
@@ -315,7 +315,7 @@ const SOFT_GLASS = preset(
   {
     colors: {
       canvas: "#101521", surface: "#1a2130", surface2: "#141b28", ink: "#f0f3fa",
-      inkSoft: "#c8cede", muted: "#9da6ba", faint: "#7d879c", line: "#2b3548",
+      inkSoft: "#c8cede", muted: "#9da6ba", faint: "#7f899e", line: "#2b3548",
       lineStrong: "#3a465c", accent: "#88a2ff", accentTint: "#252f52", good: "#72c5aa",
       bad: "#ef8297", onInk: "#131927", inkHover: "#dfe5f3", hoverSoft: "#232c3d",
       scrollThumb: "#354156", scrollThumbHover: "#4a5870", errorBg: "#341d27",

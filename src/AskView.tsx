@@ -12,8 +12,10 @@ import {
   Mic,
   Newspaper,
   Paperclip,
+  PenLine,
   AudioLines,
   CalendarPlus,
+  Palette,
   Square,
   X,
 } from "lucide-react";
@@ -22,6 +24,8 @@ import { applyProposal, proposalText } from "./chatActions";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg, type Img } from "./image";
 import { DataView } from "./DataView";
+import { isThemeRequest, proposeTheme } from "./themeRequests";
+import { useTheme } from "./useTheme";
 
 type Msg = {
   role: "user" | "assistant";
@@ -62,10 +66,19 @@ const RECIPES: { label: string; icon: "todo" | "recap" | "meetings" | "event"; p
   },
 ];
 
-export function AskView({ onMutated }: { onMutated?: () => void }) {
+export function AskView({
+  onMutated,
+  onSaveNote,
+}: {
+  onMutated?: () => void;
+  onSaveNote?: (draft: { text: string; img: Img | null }) => Promise<void>;
+}) {
+  const { themes, previewTheme, clearPreview, activateTheme } = useTheme();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [asking, setAsking] = useState(false);
+  const [filing, setFiling] = useState(false);
+  const [fileError, setFileError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
   const [img, setImg] = useState<Img | null>(null);
   const recorderRef = useRef<Recorder | null>(null);
@@ -76,10 +89,11 @@ export function AskView({ onMutated }: { onMutated?: () => void }) {
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, asking]);
+  useEffect(() => () => clearPreview(), [clearPreview]);
 
   async function send(text: string) {
     const raw = text.trim();
-    if ((!raw && !img) || asking) return;
+    if ((!raw && !img) || asking || filing) return;
     setInput("");
     setAsking(true);
     const attached = img;
@@ -98,6 +112,17 @@ export function AskView({ onMutated }: { onMutated?: () => void }) {
         const ocr = await api.ocrPhoto(attached.base64);
         q = `${raw || "Here's a photo — use its contents."}\n\n[text read from the attached photo]\n${ocr}`;
       }
+      if (isThemeRequest(q)) {
+        const proposal = await proposeTheme(q, themes);
+        if (proposal.action === "apply_theme") previewTheme(proposal.theme_id);
+        setMessages((p) => [
+          ...p.map((message) => message.proposal?.action === "apply_theme" && !message.resolved
+            ? { ...message, resolved: "cancelled" as const }
+            : message),
+          { role: "assistant", content: proposalText(proposal), proposal },
+        ]);
+        return;
+      }
       const res = await api.chat(q, history, undefined);
       if (res.kind === "proposal") {
         setMessages((p) => [
@@ -115,10 +140,19 @@ export function AskView({ onMutated }: { onMutated?: () => void }) {
   }
 
   async function confirm(i: number, p: ChatProposal) {
-    setMessages((ms) => ms.map((m, idx) => (idx === i ? { ...m, resolved: "confirmed" } : m)));
     try {
-      const done = await applyProposal(p);
-      setMessages((ms) => [...ms, { role: "assistant", content: done }]);
+      let done: string;
+      if (p.action === "apply_theme") {
+        await api.themeActivate(p.theme_id);
+        if (!activateTheme(p.theme_id, false)) throw new Error("That theme is no longer installed.");
+        done = `Applied “${p.theme_name}”. You can change it anytime in Settings → Themes.`;
+      } else {
+        done = await applyProposal(p);
+      }
+      setMessages((ms) => [
+        ...ms.map((m, idx) => (idx === i ? { ...m, resolved: "confirmed" as const } : m)),
+        { role: "assistant", content: done },
+      ]);
       onMutated?.();
     } catch (e) {
       setMessages((ms) => [...ms, { role: "assistant", content: `Couldn't apply that — ${e}` }]);
@@ -126,6 +160,7 @@ export function AskView({ onMutated }: { onMutated?: () => void }) {
   }
 
   function cancel(i: number) {
+    if (messages[i]?.proposal?.action === "apply_theme") clearPreview();
     setMessages((ms) => [
       ...ms.map((m, idx) => (idx === i ? { ...m, resolved: "cancelled" as const } : m)),
       { role: "assistant" as const, content: "Okay, left it as is." },
@@ -140,7 +175,7 @@ export function AskView({ onMutated }: { onMutated?: () => void }) {
         const { b64, sampleRate } = await recorderRef.current!.stop();
         const q = await api.transcribe(b64, sampleRate);
         setAsking(false);
-        if (q) await send(q);
+        if (q) setInput((current) => (current.trim() ? `${current.trim()} ${q}` : q));
       } catch {
         setAsking(false);
       } finally {
@@ -163,6 +198,22 @@ export function AskView({ onMutated }: { onMutated?: () => void }) {
       setImg(await fileToImg(f));
     } catch {
       /* unreadable file */
+    }
+  }
+
+  async function fileNote() {
+    const raw = input.trim();
+    if ((!raw && !img) || asking || filing || !onSaveNote) return;
+    setFiling(true);
+    setFileError(null);
+    try {
+      await onSaveNote({ text: raw, img });
+      setInput("");
+      setImg(null);
+    } catch {
+      setFileError("Couldn’t file that note. Your draft is still here.");
+    } finally {
+      setFiling(false);
     }
   }
 
@@ -191,7 +242,7 @@ export function AskView({ onMutated }: { onMutated?: () => void }) {
         ref={inputRef}
         rows={1}
         value={input}
-        placeholder="Summarize my meetings this week"
+        placeholder="Ask anything, or write something to save"
         onChange={(e) => setInput(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
@@ -199,7 +250,7 @@ export function AskView({ onMutated }: { onMutated?: () => void }) {
             send(input);
           }
         }}
-        disabled={asking}
+        disabled={asking || filing}
         onPaste={(e) => {
           const f = Array.from(e.clipboardData.files)[0];
           if (f) {
@@ -212,6 +263,7 @@ export function AskView({ onMutated }: { onMutated?: () => void }) {
         <button
           className="icon-btn"
           onClick={() => fileRef.current?.click()}
+          disabled={filing}
           title="Attach a photo (read locally)"
         >
           <Paperclip size={15} />
@@ -226,19 +278,30 @@ export function AskView({ onMutated }: { onMutated?: () => void }) {
             e.target.value = "";
           }}
         />
+        {onSaveNote && (
+          <button
+            className="ask-save-note"
+            onClick={fileNote}
+            disabled={asking || filing || recording || (!input.trim() && !img)}
+            title="File this in your knowledge base"
+          >
+            <PenLine size={13} /> {filing ? "Filing…" : "Save note"}
+          </button>
+        )}
         <span className="spacer" />
         <button
           className={"icon-btn ask-mic" + (recording ? " recording" : "")}
           onClick={onMic}
-          title="Ask by voice"
+          disabled={filing}
+          title="Dictate"
         >
           {recording ? <Square size={14} strokeWidth={2.5} /> : <Mic size={15} />}
         </button>
         <button
           className="ask-send"
           onClick={() => send(input)}
-          disabled={asking || (!input.trim() && !img)}
-          aria-label="Send"
+          disabled={asking || filing || (!input.trim() && !img)}
+          aria-label="Ask"
         >
           <ArrowUp size={16} strokeWidth={2.5} />
         </button>
@@ -272,6 +335,7 @@ export function AskView({ onMutated }: { onMutated?: () => void }) {
           </div>
         </div>
         {asking && <p className="quiet-empty">thinking…</p>}
+        {fileError && <p className="ask-file-error">{fileError}</p>}
       </div>
     );
   }
@@ -297,6 +361,12 @@ export function AskView({ onMutated }: { onMutated?: () => void }) {
                 <DataView value={m.proposal.data} />
               </div>
             )}
+            {m.proposal?.action === "apply_theme" && !m.resolved && (
+              <div className="theme-proposal-preview">
+                <Palette size={15} />
+                <span>The whole app is showing this preview. Confirm to keep it, or cancel to roll back.</span>
+              </div>
+            )}
             {m.proposal && !m.resolved && (
               <div className="proposal-actions">
                 <button className="primary" onClick={() => confirm(i, m.proposal!)}>
@@ -317,6 +387,7 @@ export function AskView({ onMutated }: { onMutated?: () => void }) {
         )}
       </div>
       {composer}
+      {fileError && <p className="ask-file-error">{fileError}</p>}
     </div>
   );
 }

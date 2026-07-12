@@ -16,14 +16,44 @@
     <meta name="apple-mobile-web-app-title" content="noted" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <script>
-      // Set theme before paint to avoid a flash of the wrong palette.
+      // Restore the validated fast cache before paint. Values are applied only
+      // to a fixed semantic-token allowlist; imported themes never inject CSS.
       (function () {
         try {
-          var t = localStorage.getItem("noted-theme");
+          var cached = JSON.parse(localStorage.getItem("noted-theme-cache-v1") || "null");
+          var allowed = new Set([
+            "--canvas", "--surface", "--surface-2", "--ink", "--ink-soft", "--muted", "--faint",
+            "--line", "--line-strong", "--accent", "--accent-tint", "--accent-rgb", "--on-accent", "--on-bad", "--good", "--bad",
+            "--on-ink", "--ink-hover", "--hover-soft", "--scroll-thumb", "--scroll-thumb-hover",
+            "--error-bg", "--error-border", "--error-ink", "--r-sm", "--r-md", "--r-lg", "--r-xl",
+            "--border-width", "--shadow-1", "--shadow-2", "--shadow-3", "--surface-blur", "--font",
+            "--font-display", "--font-mono", "--base-size", "--duration-fast",
+            "--duration-normal", "--duration-slow", "--ease", "--chart-1", "--chart-2", "--chart-3",
+            "--chart-4", "--chart-5", "--chart-6", "--chart-7", "--chart-8"
+          ]);
+          var preference = cached && cached.modePreference;
+          var t = preference === "system"
+            ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+            : preference;
           if (t !== "light" && t !== "dark") {
-            t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+            t = localStorage.getItem("noted-theme");
+            if (t !== "light" && t !== "dark") {
+              t = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+            }
           }
           document.documentElement.setAttribute("data-theme", t);
+          document.documentElement.style.colorScheme = t;
+          if (cached && /^[a-z][a-z0-9-]{0,47}$/.test(cached.themeId || "") && !cached.themeId.endsWith("-") && !cached.themeId.includes("--")) {
+            document.documentElement.setAttribute("data-theme-id", cached.themeId);
+          }
+          if (cached && cached.schemaVersion === 1 && cached.cssVariables) {
+            Object.entries(cached.cssVariables).forEach(function (entry) {
+              var name = entry[0], value = entry[1];
+              if (allowed.has(name) && typeof value === "string" && value.length <= 240 && !/[;{}@]/.test(value) && !/(?:url|image|expression|javascript|import)\s*\(/i.test(value)) {
+                document.documentElement.style.setProperty(name, value);
+              }
+            });
+          }
         } catch (e) {}
       })();
     </script>

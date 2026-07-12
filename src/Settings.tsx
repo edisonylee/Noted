@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { X, Check, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, Download, Mic, RefreshCw, Trash2, FolderPlus } from "lucide-react";
 import { api, type BrainVaultStatus, type GcalStatus, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type ProviderMode, type ProviderSettings } from "./api";
+import { ThemesSettings } from "./ThemesSettings";
 
 // Live connection status, shown as a persistent badge so "is Gemini actually
 // reachable?" is never a mystery — checked on open and after every save/test.
@@ -10,7 +11,7 @@ type Conn =
   | { state: "ok"; msg: string }
   | { state: "err"; msg: string };
 
-type SettingsSection = "models" | "calendar" | "vaults" | "meetings";
+type SettingsSection = "models" | "themes" | "calendar" | "vaults" | "meetings";
 
 // Model-provider settings. noted runs 100% local by default; "Balanced" sends
 // only the latency-sensitive extract/OCR calls to Gemini so a busy local model
@@ -287,6 +288,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
 
   const sections: [SettingsSection, string][] = [
     ["models", "Models"],
+    ["themes", "Themes"],
     ["calendar", "Google Calendar"],
     ["vaults", "Brain vaults"],
     ["meetings", "Meetings"],
@@ -397,6 +399,8 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
         </div>
           </>
         )}
+
+        {section === "themes" && <ThemesSettings />}
 
         {section === "calendar" && (
           <>

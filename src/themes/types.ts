@@ -35,7 +35,7 @@ export const THEME_COLOR_KEYS = [
 ] as const;
 
 export type ThemeColorKey = (typeof THEME_COLOR_KEYS)[number];
-export type ThemeColors = Record<ThemeColorKey, string> & Record<string, string>;
+export type ThemeColors = Record<ThemeColorKey, string>;
 
 export interface ThemeTypography {
   fontUi: string;

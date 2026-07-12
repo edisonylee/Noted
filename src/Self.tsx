@@ -48,16 +48,16 @@ export function SelfView({
     return () => ro.disconnect();
   }, []);
 
-  // theme-aware canvas colors (recompute when the theme flips)
-  const colors = useMemo(
-    () => ({
-      bg: cssVar("--canvas", "#f7f5f1"),
-      ink: cssVar("--ink", "#1b1916"),
-      line: cssVar("--line", "#e9e5dd"),
-      accent: cssVar("--accent", "#3d79bd"),
-    }),
-    [theme]
-  );
+  // Read on every render: switching theme families can change these variables
+  // without changing the light/dark `theme` prop.
+  const dark = theme === "dark";
+  const colors = {
+    bg: cssVar("--canvas", dark ? "#17150f" : "#f7f5f1"),
+    ink: cssVar("--ink", dark ? "#f3efe7" : "#1b1916"),
+    line: cssVar("--line", dark ? "#322e26" : "#e9e5dd"),
+    accent: cssVar("--accent", dark ? "#5797df" : "#3d79bd"),
+    font: cssVar("--font", '"Geist Variable", sans-serif'),
+  };
 
   // When everything is a one-off (young graph) the filter would present a false
   // empty state, so it only engages once some entity has real signal.
@@ -137,7 +137,7 @@ export function SelfView({
               ctx.fill();
               if (scale > 1.3 || (node.mention_count || 0) >= 2 || node.id === hover) {
                 const fs = Math.max(11 / scale, 2.5);
-                ctx.font = `${fs}px "Geist Variable", sans-serif`;
+                ctx.font = `${fs}px ${colors.font}`;
                 ctx.fillStyle = colors.ink;
                 ctx.textAlign = "center";
                 ctx.textBaseline = "top";

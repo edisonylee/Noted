@@ -14,33 +14,14 @@ import {
 import { api, type CategoryInfo, type Trends } from "./api";
 import type { Theme } from "./useTheme";
 import { groupByPillar } from "./pillars";
+import { getChartTheme } from "./themePalette";
 
-// muted series palette — blue accent leads, then earthy neutrals
-const COLORS_LIGHT = ["#3d79bd", "#46413a", "#3f7d5b", "#b8893f", "#5e7e86", "#9b8b6e", "#8a5a4a", "#7a6c84"];
-const COLORS_DARK = ["#5797df", "#b8b0a2", "#6fb78c", "#d6a45f", "#83a7af", "#c0b193", "#cc8576", "#a99bb8"];
 // metrics that usually make the most interesting default chart
 const PRIMARY_METRICS = ["weight", "hours", "duration_min", "minutes", "calories", "amount", "value", "count"];
 type Agg = "sum" | "max" | "avg";
 
-const CHART = {
-  light: {
-    colors: COLORS_LIGHT,
-    axis: { stroke: "#8c857a", fontSize: 11 },
-    grid: "#eee9e0",
-    bar: "#3d79bd",
-    tooltip: { background: "#ffffff", border: "1px solid #e9e5dd", borderRadius: 12, color: "#1b1916" },
-  },
-  dark: {
-    colors: COLORS_DARK,
-    axis: { stroke: "#a8a08f", fontSize: 11 },
-    grid: "#322e26",
-    bar: "#5797df",
-    tooltip: { background: "#211e18", border: "1px solid #423c31", borderRadius: 12, color: "#f3efe7" },
-  },
-} as const;
-
 export function TrendsView({ cats, theme }: { cats: CategoryInfo[]; theme: Theme }) {
-  const c = CHART[theme];
+  const c = getChartTheme(theme);
   const [cat, setCat] = useState(cats[0]?.name ?? "");
   const [trends, setTrends] = useState<Trends | null>(null);
   const [metric, setMetric] = useState("");

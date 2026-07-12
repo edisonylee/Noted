@@ -34,6 +34,8 @@ const COLOR_TO_CSS: Record<(typeof THEME_COLOR_KEYS)[number], string> = {
 export const THEME_CSS_VARIABLES = [
   ...Object.values(COLOR_TO_CSS),
   "--accent-rgb",
+  "--on-accent",
+  "--on-bad",
   "--r-sm",
   "--r-md",
   "--r-lg",
@@ -47,7 +49,6 @@ export const THEME_CSS_VARIABLES = [
   "--font-display",
   "--font-mono",
   "--base-size",
-  "--type-scale",
   "--duration-fast",
   "--duration-normal",
   "--duration-slow",
@@ -76,13 +77,20 @@ function isSafeCssValue(value: unknown, property: string, maxLength = 240): valu
 }
 
 function isSafeColor(value: unknown): value is string {
-  return isSafeCssValue(value, "color", 100) && !/\bvar\s*\(/i.test(value);
+  if (!isSafeCssValue(value, "color", 100) || /\bvar\s*\(/i.test(value)) return false;
+  if (/^#(?:[\da-f]{3}|[\da-f]{4}|[\da-f]{6}|[\da-f]{8})$/i.test(value)) return true;
+  return /^(?:rgb|rgba|hsl|hsla)\([\d\s,.%+\-]+\)$/i.test(value);
 }
 
+const SAFE_FONT_STACKS = new Set([
+  '"Geist Variable", ui-sans-serif, system-ui, sans-serif',
+  '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif',
+  'Iowan Old Style, "Palatino Linotype", Palatino, Georgia, serif',
+  '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
+]);
+
 function isSafeFont(value: unknown): value is string {
-  return safeString(value)
-    && !/[;{}@]/.test(value)
-    && !/(?:url|expression|javascript)\s*\(/i.test(value);
+  return typeof value === "string" && SAFE_FONT_STACKS.has(value);
 }
 
 function isSafeLength(value: unknown, min: number, max: number): value is string {
@@ -100,6 +108,47 @@ function isSafeDuration(value: unknown): value is string {
   if (!match) return false;
   const milliseconds = Number(match[1]) * (match[2] === "s" ? 1000 : 1);
   return milliseconds >= 0 && milliseconds <= 2000;
+}
+
+function isSafeShadow(value: unknown): value is string {
+  if (value === "none") return true;
+  if (!safeString(value, 240) || !/^[a-zA-Z0-9 #,.()%+\-]+$/.test(value)) return false;
+  const words = value
+    .replace(/#[\da-f]{3,8}/gi, "")
+    .split(/[^a-zA-Z]+/)
+    .filter(Boolean)
+    .map((word) => word.toLowerCase());
+  return words.every((word) => ["px", "rem", "em", "rgb", "rgba", "inset"].includes(word))
+    && /(?:px|rem|em)/.test(value)
+    && cssSupports("box-shadow", value);
+}
+
+function isSafeEasing(value: unknown): value is string {
+  if (!safeString(value, 100)) return false;
+  if (["linear", "ease", "ease-in", "ease-out", "ease-in-out"].includes(value)) return true;
+  const match = value.match(/^cubic-bezier\(([^)]+)\)$/);
+  if (!match) return false;
+  const values = match[1].split(",").map((part) => Number(part.trim()));
+  return values.length === 4 && values.every((number) => Number.isFinite(number) && number >= -5 && number <= 5);
+}
+
+function hexLuminance(value: unknown): number | null {
+  if (typeof value !== "string") return null;
+  const match = value.match(/^#([\da-f]{3}|[\da-f]{6})$/i);
+  if (!match) return null;
+  const hex = match[1].length === 3 ? [...match[1]].map((character) => character + character).join("") : match[1];
+  const channels = [0, 2, 4].map((index) => Number.parseInt(hex.slice(index, index + 2), 16) / 255);
+  return channels
+    .map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4)
+    .reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
+}
+
+function hasReadableContrast(foreground: unknown, background: unknown, minimum = 4.5): boolean {
+  const foregroundLuminance = hexLuminance(foreground);
+  const backgroundLuminance = hexLuminance(background);
+  if (foregroundLuminance === null || backgroundLuminance === null) return true;
+  return (Math.max(foregroundLuminance, backgroundLuminance) + 0.05)
+    / (Math.min(foregroundLuminance, backgroundLuminance) + 0.05) >= minimum;
 }
 
 function validateMode(value: unknown, path: string, errors: string[]): ThemeModeTokens | null {
@@ -126,6 +175,17 @@ function validateMode(value: unknown, path: string, errors: string[]): ThemeMode
     for (const key of THEME_COLOR_KEYS) {
       if (!isSafeColor(colors[key])) errors.push(`${path}.colors.${key} must be a safe CSS color.`);
     }
+    for (const [foreground, background] of [
+      ["ink", "surface"],
+      ["muted", "surface"],
+      ["faint", "surface"],
+      ["onInk", "ink"],
+      ["errorInk", "errorBg"],
+    ] as const) {
+      if (!hasReadableContrast(colors[foreground], colors[background])) {
+        errors.push(`${path}.colors.${foreground} needs 4.5:1 contrast against ${background}.`);
+      }
+    }
   }
   if (typography) {
     if (!isSafeFont(typography.fontUi)) errors.push(`${path}.typography.fontUi is invalid.`);
@@ -144,7 +204,7 @@ function validateMode(value: unknown, path: string, errors: string[]): ThemeMode
   }
   if (elevation) {
     for (const key of ["shadowSm", "shadowMd", "shadowLg"] as const) {
-      if (!isSafeCssValue(elevation[key], "box-shadow")) errors.push(`${path}.elevation.${key} is invalid.`);
+      if (!isSafeShadow(elevation[key])) errors.push(`${path}.elevation.${key} is invalid.`);
     }
     if (!isSafeLength(elevation.blur, 0, 32)) errors.push(`${path}.elevation.blur must be between 0 and 32px.`);
   }
@@ -152,7 +212,7 @@ function validateMode(value: unknown, path: string, errors: string[]): ThemeMode
     for (const key of ["durationFast", "durationNormal", "durationSlow"] as const) {
       if (!isSafeDuration(motion[key])) errors.push(`${path}.motion.${key} must be between 0 and 2000ms.`);
     }
-    if (!isSafeCssValue(motion.easing, "transition-timing-function", 100)) {
+    if (!isSafeEasing(motion.easing)) {
       errors.push(`${path}.motion.easing is invalid.`);
     }
   }
@@ -205,17 +265,20 @@ export function validateThemePack(value: unknown): ThemeValidationResult {
   if (pack.schemaVersion !== THEME_SCHEMA_VERSION) {
     errors.push(`schemaVersion must be ${THEME_SCHEMA_VERSION}.`);
   }
-  if (!safeString(pack.id, 128) || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(pack.id)) {
-    errors.push("id may contain only letters, numbers, dots, underscores and hyphens.");
+  if (!safeString(pack.id, 48) || !/^[a-z][a-z0-9-]*$/.test(pack.id) || pack.id.endsWith("-") || pack.id.includes("--")) {
+    errors.push("id must be 1–48 lowercase letters, numbers, and single hyphens.");
   }
-  if (!safeString(pack.name, 80)) errors.push("name must be 1–80 characters.");
-  if (pack.description !== undefined && !safeString(pack.description, 300)) {
+  if (!safeString(pack.name, 80) || !pack.name.trim()) errors.push("name must be 1–80 characters.");
+  if (pack.description !== undefined && pack.description !== "" && !safeString(pack.description, 300)) {
     errors.push("description must be at most 300 characters.");
   }
 
   const source = asRecord(pack.source);
-  const sourceKinds = new Set(["builtin", "imported", "assistant", "custom"]);
-  if (!source || !sourceKinds.has(String(source.kind))) errors.push("source.kind is invalid.");
+  const builtinIds = new Set(["noted-warm", "cupertino", "linear-midnight", "paper", "editorial", "terminal", "soft-glass", "high-contrast"]);
+  const sourceKinds = new Set(["imported", "assistant", "custom"]);
+  const validSource = source
+    && (sourceKinds.has(String(source.kind)) || (source.kind === "builtin" && builtinIds.has(String(pack.id))));
+  if (!validSource) errors.push("source.kind is invalid for this theme id.");
   if (source?.label !== undefined && !safeString(source.label, 120)) errors.push("source.label is invalid.");
 
   const light = validateMode(pack.light, "light", errors);
@@ -273,11 +336,23 @@ function rgbChannels(color: string): string {
   return "61, 121, 189";
 }
 
+function contrastText(color: string): string {
+  const channels = rgbChannels(color).split(",").map((channel) => Number(channel.trim()) / 255);
+  const luminance = channels
+    .map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4)
+    .reduce((sum, channel, index) => sum + channel * [0.2126, 0.7152, 0.0722][index], 0);
+  const whiteContrast = 1.05 / (luminance + 0.05);
+  const blackContrast = (luminance + 0.05) / 0.05;
+  return blackContrast >= whiteContrast ? "#000000" : "#ffffff";
+}
+
 export function themeModeToCssVariables(tokens: ThemeModeTokens): Record<string, string> {
   const variables: Record<string, string> = {};
   for (const key of THEME_COLOR_KEYS) variables[COLOR_TO_CSS[key]] = tokens.colors[key];
   Object.assign(variables, {
     "--accent-rgb": rgbChannels(tokens.colors.accent),
+    "--on-accent": contrastText(tokens.colors.accent),
+    "--on-bad": contrastText(tokens.colors.bad),
     "--r-sm": tokens.shape.radiusSm,
     "--r-md": tokens.shape.radiusMd,
     "--r-lg": tokens.shape.radiusLg,
@@ -290,8 +365,7 @@ export function themeModeToCssVariables(tokens: ThemeModeTokens): Record<string,
     "--font": tokens.typography.fontUi,
     "--font-display": tokens.typography.fontDisplay,
     "--font-mono": tokens.typography.fontMono,
-    "--base-size": tokens.typography.baseSize,
-    "--type-scale": String(tokens.typography.scale),
+    "--base-size": `${Math.min(18, Math.max(13, Number.parseFloat(tokens.typography.baseSize) * tokens.typography.scale))}px`,
     "--duration-fast": tokens.motion.durationFast,
     "--duration-normal": tokens.motion.durationNormal,
     "--duration-slow": tokens.motion.durationSlow,

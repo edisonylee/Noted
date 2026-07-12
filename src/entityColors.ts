@@ -2,18 +2,23 @@
 // Shared by the Self graph and the per-entity page so a type's color is
 // consistent everywhere.
 export const TYPE_COLORS: Record<string, string> = {
-  person: "#3d79bd",
-  place: "#3f7d5b",
-  food: "#c2710c",
-  activity: "#8a5a4a",
-  item: "#7a6c84",
-  org: "#5e7e86",
-  topic: "#9b8b6e",
+  person: "var(--chart-1)",
+  place: "var(--chart-3)",
+  food: "var(--chart-4)",
+  activity: "var(--chart-7)",
+  item: "var(--chart-8)",
+  org: "var(--chart-5)",
+  topic: "var(--chart-6)",
   // Brain-vault artifact types (Work lens). Cooler hues to read as "work".
-  project: "#5566a8",   // muted indigo
-  decision: "#b8902f",  // gold
-  reference: "#6b7280", // slate
-  doc: "#9aa0a6",       // grey
+  project: "var(--chart-2)",
+  decision: "var(--chart-4)",
+  reference: "var(--chart-6)",
+  doc: "var(--faint)",
 };
 
-export const colorForType = (t: string) => TYPE_COLORS[t] ?? "#8c857a";
+export const colorForType = (t: string) => {
+  const color = TYPE_COLORS[t] ?? "var(--faint)";
+  if (typeof document === "undefined" || !color.startsWith("var(")) return color;
+  const variable = color.slice(4, -1);
+  return getComputedStyle(document.documentElement).getPropertyValue(variable).trim() || "#8c857a";
+};

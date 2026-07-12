@@ -81,7 +81,9 @@ export function ComingUp({
 
   const pages = Math.max(1, Math.ceil(upcoming.length / PAGE));
   const view = upcoming.slice(page * PAGE, page * PAGE + PAGE);
-  const recent = meetings.slice(0, 4);
+  // Recent recordings: failed/empty attempts have nothing to open — hide them.
+  // (Still recording / summarizing / done all carry something to show.)
+  const recent = meetings.filter((m) => m.status !== "failed").slice(0, 4);
   const today = easternDay();
 
   if (events === null) return null; // first load: no flash
@@ -168,6 +170,10 @@ export function ComingUp({
 
       {recent.length > 0 && (
         <div className="comingup-recent">
+          {/* Labeled so recordings never read as (stale) calendar events. */}
+          <div className="comingup-head">
+            <h3>Recent recordings</h3>
+          </div>
           {recent.map((m) => (
             <button key={m.id} className="recent-row" onClick={() => onOpenMeeting(m.id)}>
               {m.status === "recording" || m.id === activeMeetingId ? (

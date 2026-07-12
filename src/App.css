@@ -2309,3 +2309,14 @@ body.vibrant .app.homemode .main-col {
 :root:not([data-theme="dark"]) body.vibrant .sidebar {
   background: color-mix(in srgb, var(--canvas) 86%, transparent);
 }
+
+/* Spaces column header (with its collapse toggle) + list header row. */
+.spaces-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 2px 6px 10px;
+  font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--faint);
+}
+.spaces-head span { flex: 1; }
+.spaces-head .icon-btn { width: 24px; height: 24px; }
+.notes-list-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.notes-list-head .notes-search { flex: 1; margin-bottom: 0; }

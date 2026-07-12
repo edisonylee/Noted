@@ -757,11 +757,15 @@ mod tests {
     #[test]
     fn builtin_ids_activate_without_pack_and_cannot_delete() {
         let root = temp();
+        assert_eq!(BUILTIN_IDS.len(), 50);
         assert_eq!(
-            activate(&root, "cupertino", None).unwrap().active_theme_id,
-            "cupertino"
+            BUILTIN_IDS.iter().copied().collect::<HashSet<_>>().len(),
+            50
         );
-        assert!(delete(&root, "cupertino").is_err());
+        for id in BUILTIN_IDS {
+            assert_eq!(activate(&root, id, None).unwrap().active_theme_id, *id);
+            assert!(delete(&root, id).is_err());
+        }
         let _ = fs::remove_dir_all(root);
     }
 

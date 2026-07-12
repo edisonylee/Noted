@@ -15,7 +15,7 @@ By default everything runs **100% locally** through [Ollama](https://ollama.com)
 - **Knowledge graph** — entity resolution for people and things, with embedding-based merge suggestions you confirm. The "Knowledge" view surfaces People and a Self graph.
 - **Recaps & trends** — auto-generated day/week recaps and per-category trends.
 - **Chat** — ask questions over your own knowledge base with a local model.
-- **Themes** — swap the full visual system with bundled presets, import a `DESIGN.md`, or ask the local assistant for a style. Imports are validated data-only packs; no paid MCP or cloud model is required.
+- **Themes** — search 50 bundled visual systems, import a `DESIGN.md`, or ask the local assistant for a style. Imports are validated data-only packs; no paid MCP or cloud model is required.
 - **Phone access** — a token-gated LAN HTTPS server serves the full app (or a lightweight capture page) to your phone, installable as a PWA, with every desktop command bridged over HTTP.
 
 ## Tech stack
@@ -63,7 +63,7 @@ Frontend-only scripts (`vite`) are also available via `npm run dev` / `npm run b
 - **Balanced mode (Gemini):** open Settings, switch to *Balanced*, and paste a Gemini API key. Only OCR/extract calls go to Gemini; chat and embeddings stay local. The connection badge confirms the key is live.
 - **Google Calendar:** in Settings, connect your Google account (OAuth with PKCE). Today can then push the day's schedule one-way into a dedicated "noted" calendar.
 - **Phone access:** open the phone panel in the app to get a QR code / URL and token; your phone joins over the LAN and runs the full client.
-- **Themes:** open Settings → Themes for bundled presets. You can also paste or upload a `DESIGN.md`; the local text model creates a safe preview before you apply it. See [`THEMES.md`](THEMES.md) for the pack contract.
+- **Themes:** open Settings → Themes to search 50 bundled presets. You can also paste or upload a `DESIGN.md`; the local text model creates a safe preview before you apply it. See [`THEMES.md`](THEMES.md) for the pack contract.
 
 ## Tests
 

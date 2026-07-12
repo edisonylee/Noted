@@ -10,17 +10,32 @@ export function isThemeRequest(text: string): boolean {
 
 function deterministicChoice(prompt: string, themes: readonly ThemePack[]): ThemePack {
   const q = prompt.toLowerCase();
-  const preferred =
-    /apple|mac|ios|cupertino/.test(q) ? "cupertino"
-      : /linear|violet|precision|graphite/.test(q) ? "linear-midnight"
-        : /paper|notion|notebook|journal/.test(q) ? "paper"
-          : /editorial|magazine|newspaper|serif/.test(q) ? "editorial"
-            : /terminal|hacker|mono|phosphor/.test(q) ? "terminal"
-              : /glass|airy|soft|translucent/.test(q) ? "soft-glass"
-                : /contrast|accessible|legible/.test(q) ? "high-contrast"
-                  : /warm|original|default/.test(q) ? "noted-warm"
-                    : "noted-warm";
-  return themes.find((theme) => theme.id === preferred) ?? themes[0];
+  const exact = themes.find((theme) =>
+    q.includes(theme.name.toLowerCase()) || q.includes(theme.id.replace(/-/g, " "))
+  );
+  if (exact) return exact;
+
+  const preferred = /apple|mac|ios/.test(q) ? "cupertino"
+    : /contrast|accessible|legible/.test(q) ? "high-contrast"
+      : /warm|original|default/.test(q) ? "noted-warm"
+        : null;
+  if (preferred) return themes.find((theme) => theme.id === preferred) ?? themes[0];
+
+  const ignored = new Set(["theme", "retheme", "restyle", "appearance", "visual", "style", "look", "feel", "make", "give", "want", "apply", "change", "switch", "preview", "noted", "with", "like", "more", "very"]);
+  const words = q.match(/[a-z]{3,}/g)?.filter((word) => !ignored.has(word)) ?? [];
+  let best = themes[0];
+  let bestScore = 0;
+  for (const theme of themes) {
+    const name = theme.name.toLowerCase();
+    const description = theme.description?.toLowerCase() ?? "";
+    const score = words.reduce((total, word) =>
+      total + (name.includes(word) ? 3 : 0) + (description.includes(word) ? 1 : 0), 0);
+    if (score > bestScore) {
+      best = theme;
+      bestScore = score;
+    }
+  }
+  return bestScore > 0 ? best : themes.find((theme) => theme.id === "noted-warm") ?? themes[0];
 }
 
 export async function proposeTheme(prompt: string, themes: readonly ThemePack[]): Promise<ChatProposal> {

@@ -6,7 +6,7 @@ they do not require Refero MCP, a cloud model, or a paid API.
 
 ## Ways to add a theme
 
-- Choose one of the built-in themes in **Settings → Themes**.
+- Search and preview 50 built-in themes in **Settings → Themes**.
 - Paste or upload a `DESIGN.md`. Noted's local Ollama model converts it into a
   constrained theme pack, then shows a preview before anything is applied.
 - Ask the assistant for a visual direction such as “give Noted an Apple-styled

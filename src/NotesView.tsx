@@ -4,7 +4,7 @@
 // everything else gets a clean read-only detail pane.
 
 import { useMemo, useState } from "react";
-import { ArrowLeft, AudioLines, BookOpen, FileText, Inbox, Search } from "lucide-react";
+import { ArrowLeft, AudioLines, BookOpen, FileText, Inbox, PanelLeftClose, PanelLeftOpen, Search } from "lucide-react";
 import { type CategoryInfo, type NoteRow } from "./api";
 import { DataView } from "./DataView";
 import { MeetingPage } from "./MeetingPage";
@@ -41,6 +41,14 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
   const [query, setQuery] = useState("");
   const [openNote, setOpenNote] = useState<NoteRow | null>(null);
   const [openMeeting, setOpenMeeting] = useState<number | null>(null);
+  // The spaces column collapses (and stays collapsed across launches).
+  const [spacesOpen, setSpacesOpenState] = useState(
+    () => localStorage.getItem("noted-spaces") !== "closed"
+  );
+  const setSpacesOpen = (o: boolean) => {
+    setSpacesOpenState(o);
+    localStorage.setItem("noted-spaces", o ? "open" : "closed");
+  };
 
   // Spaces: the two first-class ones, then every other category by volume.
   const spaces = useMemo(() => {
@@ -118,39 +126,70 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
     else setOpenNote(n);
   };
 
+  const currentSpace = spaces.find((s) => s.id === space);
+
   return (
-    <div className="notes-view">
-      <aside className="spaces">
-        {spaces.map((s) => (
-          <button
-            key={s.id}
-            className={space === s.id ? "on" : ""}
-            onClick={() => setSpace(s.id)}
-          >
-            {s.id === "meetings" ? (
-              <AudioLines size={14} />
-            ) : s.id === "journal" ? (
-              <BookOpen size={14} />
-            ) : s.id === "all" ? (
-              <Inbox size={14} />
-            ) : (
-              <FileText size={14} />
-            )}
-            <span className="space-label">{s.label}</span>
-            <span className="space-n">{s.n}</span>
-          </button>
-        ))}
-      </aside>
+    <div className="notes-view" data-tauri-drag-region>
+      {spacesOpen && (
+        <aside className="spaces">
+          <div className="spaces-head">
+            <span>Spaces</span>
+            <button
+              className="icon-btn"
+              onClick={() => setSpacesOpen(false)}
+              title="Collapse spaces"
+              aria-label="Collapse spaces"
+            >
+              <PanelLeftClose size={14} />
+            </button>
+          </div>
+          {spaces.map((s) => (
+            <button
+              key={s.id}
+              className={space === s.id ? "on" : ""}
+              onClick={() => setSpace(s.id)}
+            >
+              {s.id === "meetings" ? (
+                <AudioLines size={14} />
+              ) : s.id === "journal" ? (
+                <BookOpen size={14} />
+              ) : s.id === "all" ? (
+                <Inbox size={14} />
+              ) : (
+                <FileText size={14} />
+              )}
+              <span className="space-label">{s.label}</span>
+              <span className="space-n">{s.n}</span>
+            </button>
+          ))}
+        </aside>
+      )}
 
       <div className="notes-list">
-        <label className="notes-search">
-          <Search size={14} />
-          <input
-            placeholder="Search notes…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-        </label>
+        <div className="notes-list-head">
+          {!spacesOpen && (
+            <button
+              className="icon-btn"
+              onClick={() => setSpacesOpen(true)}
+              title={`Show spaces (viewing: ${currentSpace?.label ?? "All notes"})`}
+              aria-label="Show spaces"
+            >
+              <PanelLeftOpen size={15} />
+            </button>
+          )}
+          <label className="notes-search">
+            <Search size={14} />
+            <input
+              placeholder={
+                spacesOpen || space === "all"
+                  ? "Search notes…"
+                  : `Search ${currentSpace?.label ?? "notes"}…`
+              }
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </label>
+        </div>
         {list.length === 0 ? (
           <p className="quiet-empty">
             {query ? "Nothing matches." : "Nothing here yet — capture something."}

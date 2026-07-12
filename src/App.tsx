@@ -667,8 +667,11 @@ export default function App() {
         </div>
       </aside>
 
-      <div className="main-col">
-      <main className="content">
+      {/* Empty background = window drag, like a native app. The attribute only
+          fires when the grabbed element IS the background (children keep their
+          own clicks/selection), so content stays fully interactive. */}
+      <div className="main-col" data-tauri-drag-region>
+      <main className="content" data-tauri-drag-region>
         {view === "settings" ? (
           <SettingsModal page onClose={goHome} />
         ) : view === "ask" ? (

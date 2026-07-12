@@ -107,9 +107,12 @@ export default function App() {
       })
       .catch(() => {});
     const subs = [
-      listen<{ meetingId: number; title: string }>("meeting-started", (e) =>
-        setRecMeeting({ id: e.payload.meetingId, title: e.payload.title })
-      ),
+      listen<{ meetingId: number; title: string }>("meeting-started", (e) => {
+        setRecMeeting({ id: e.payload.meetingId, title: e.payload.title });
+        // Granola opens the note when recording starts — so do we.
+        setView("today");
+        setMeetingOpen({ id: e.payload.meetingId });
+      }),
       listen<{ meetingId: number }>("meeting-stopped", () => setRecMeeting(null)),
     ];
     return () => {

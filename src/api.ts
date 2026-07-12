@@ -346,6 +346,21 @@ export type MeetingLiveState = {
 };
 export type MeetingTemplate = { name: string; prompt: string; builtin: boolean };
 export type MeetingModelStatus = { turbo: boolean; base: boolean; tap_supported: boolean };
+// What the record-prompt popup shows (calendar T-60s or mic-in-use detection).
+export type PromptPayload = {
+  kind: "calendar" | "mic";
+  title: string;
+  app: string | null;
+  bundleId: string | null;
+  meetingTitle: string;
+  event: Partial<RangeEvent> | null;
+};
+export type MeetingsCfg = {
+  auto_prompt: boolean;
+  retain_audio: boolean;
+  ignore_bundles: string[];
+  default_template: string;
+};
 
 // The Journal agent's response: a companion reply (null if the local model was
 // unreachable — the reflection is saved regardless) + how many knowledge-graph
@@ -515,7 +530,14 @@ export const api = {
     eventId?: string;
     eventJson?: unknown;
     retainAudio?: boolean;
+    sourceBundle?: string;
   }) => invoke<number>("meeting_start", { ...args }),
+  meetingPromptPayload: () => invoke<PromptPayload | null>("meeting_prompt_payload"),
+  meetingDismissPrompt: (bundleId?: string) =>
+    invoke<void>("meeting_dismiss_prompt", { bundleId }),
+  meetingsSettingsGet: () => invoke<MeetingsCfg>("meetings_settings_get"),
+  meetingsSettingsSet: (settings: MeetingsCfg) =>
+    invoke<void>("meetings_settings_set", { settings }),
   meetingStop: () => invoke<number | null>("meeting_stop"),
   meetingState: () => invoke<MeetingLiveState>("meeting_state"),
   meetingList: () => invoke<MeetingListRow[]>("meeting_list"),

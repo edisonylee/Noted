@@ -1,5 +1,12 @@
 # Meetings: a local-first Granola inside Noted
 
+> **Status (2026-07-12):** Phases 0–2 are implemented (capture engine, live ASR,
+> summarization + templates, Coming Up strip, meeting page, detection + prompt
+> window, auto-stop, settings). Outstanding: live verification on a real call
+> (permission grant + turbo model download happen on first use), Phase 3
+> stretch goals (inline black/gray merge, provenance hover, transcript search,
+> md export), and Phase 4 (Parakeet via fluidaudio-rs + diarization).
+
 **Goal:** replicate Granola's core functionality (calendar-aware home, "meeting detected — take notes?" prompt, bot-free dual-stream capture, enhanced notes) with PLAUD's note structuring/formatting — running **100% locally**: whisper.cpp (later Parakeet) for ASR, Ollama for summarization, SQLite for storage. Desktop-only by nature (macOS 14.4+ floor; this machine runs 26.5 on an M5 Pro / 64 GB — comfortably above it).
 
 This plan is the synthesis of a research pass (2026-07-12) over Granola's docs/teardowns and app bundle, PLAUD + Read AI's note formats, the macOS audio-capture ecosystem, ASR benchmarks, and Noted's own code. Research findings are compressed into the relevant sections; each phase ends with acceptance criteria.

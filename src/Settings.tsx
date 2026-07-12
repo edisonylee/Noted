@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { X, Check, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, RefreshCw, Trash2, FolderPlus } from "lucide-react";
-import { api, type BrainVaultStatus, type GcalStatus, type ProviderMode, type ProviderSettings } from "./api";
+import { X, Check, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, Download, Mic, RefreshCw, Trash2, FolderPlus } from "lucide-react";
+import { api, type BrainVaultStatus, type GcalStatus, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type ProviderMode, type ProviderSettings } from "./api";
 
 // Live connection status, shown as a persistent badge so "is Gemini actually
 // reachable?" is never a mystery — checked on open and after every save/test.
@@ -36,6 +36,34 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const [vaultMsg, setVaultMsg] = useState<string | null>(null);
   const [autoProp, setAutoProp] = useState(true);
 
+  // Meetings (recorder + detection). Changes save immediately, like autoProp.
+  const [mcfg, setMcfg] = useState<MeetingsCfg | null>(null);
+  const [mModel, setMModel] = useState<MeetingModelStatus | null>(null);
+  const [mTemplates, setMTemplates] = useState<MeetingTemplate[]>([]);
+  const [ignoreText, setIgnoreText] = useState("");
+  const [mDownloading, setMDownloading] = useState(false);
+
+  async function saveMcfg(next: MeetingsCfg) {
+    setMcfg(next);
+    try {
+      await api.meetingsSettingsSet(next);
+    } catch {
+      /* re-read on next open */
+    }
+  }
+
+  async function downloadMeetingModel() {
+    setMDownloading(true);
+    try {
+      await api.downloadMeetingModel();
+      setMModel(await api.meetingModelStatus());
+    } catch {
+      /* status stays; user can retry */
+    } finally {
+      setMDownloading(false);
+    }
+  }
+
   useEffect(() => {
     api.getProviderSettings().then((cfg) => {
       setS(cfg);
@@ -49,6 +77,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     api.gcalAuthStatus().then(setGcal);
     api.brainListVaults().then(setVaults).catch(() => {});
     api.brainGetAuto().then(setAutoProp).catch(() => {});
+    api
+      .meetingsSettingsGet()
+      .then((c) => {
+        setMcfg(c);
+        setIgnoreText(c.ignore_bundles.join(", "));
+      })
+      .catch(() => {});
+    api.meetingModelStatus().then(setMModel).catch(() => {});
+    api.meetingTemplates().then(setMTemplates).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -492,6 +529,111 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             <button className="ghost-btn" onClick={() => syncVault(undefined)} disabled={vaultBusy !== ""}>
               {vaultBusy === "sync:all" ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
               Sync all
+            </button>
+          </div>
+        </div>
+
+        <h3 className="settings-section">Meetings</h3>
+        <p className="settings-sub">
+          noted records meetings bot-free: your mic + system audio, transcribed and summarized
+          100% on this Mac. Nothing is captured unless you accept a prompt or hit Record.
+        </p>
+
+        <div className="settings-fields">
+          {mModel && !mModel.tap_supported && (
+            <div className="field-hint">
+              System-audio capture needs macOS 14.4+ — recordings here would be mic-only.
+            </div>
+          )}
+          <label className="vault-auto">
+            <input
+              type="checkbox"
+              checked={mcfg?.auto_prompt ?? true}
+              onChange={(e) => mcfg && saveMcfg({ ...mcfg, auto_prompt: e.target.checked })}
+            />
+            <span>
+              Offer to record meetings
+              <em>
+                A small prompt appears 1 minute before calendar meetings and when a call app
+                starts using your microphone. Ignoring it records nothing.
+              </em>
+            </span>
+          </label>
+          <label className="vault-auto">
+            <input
+              type="checkbox"
+              checked={mcfg?.retain_audio ?? true}
+              onChange={(e) => mcfg && saveMcfg({ ...mcfg, retain_audio: e.target.checked })}
+            />
+            <span>
+              Keep audio recordings
+              <em>
+                Store each meeting's audio locally so you can verify the transcript later.
+                Off = transcribe-and-discard, like Granola.
+              </em>
+            </span>
+          </label>
+          <label className="field">
+            <span className="field-label">Default summary template</span>
+            <select
+              value={mcfg?.default_template ?? "Meeting"}
+              onChange={(e) => mcfg && saveMcfg({ ...mcfg, default_template: e.target.value })}
+            >
+              {(mTemplates.length ? mTemplates : [{ name: "Meeting", prompt: "", builtin: true }]).map(
+                (t) => (
+                  <option key={t.name} value={t.name}>
+                    {t.name}
+                  </option>
+                )
+              )}
+            </select>
+          </label>
+          <label className="field">
+            <span className="field-label">
+              Never prompt for these apps (comma-separated bundle-id fragments)
+            </span>
+            <input
+              value={ignoreText}
+              onChange={(e) => setIgnoreText(e.target.value)}
+              onBlur={() =>
+                mcfg &&
+                saveMcfg({
+                  ...mcfg,
+                  ignore_bundles: ignoreText
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                })
+              }
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </label>
+          <div className="field-row">
+            {mModel?.turbo ? (
+              <span className="field-hint">
+                <Check size={13} /> Meeting model ready (whisper large-v3-turbo)
+              </span>
+            ) : (
+              <button
+                className="ghost-btn test-btn"
+                onClick={downloadMeetingModel}
+                disabled={mDownloading}
+              >
+                {mDownloading ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
+                {mDownloading
+                  ? "Downloading (1.6 GB)…"
+                  : mModel?.base
+                    ? "Upgrade meeting transcription (1.6 GB)"
+                    : "Download meeting model (1.6 GB)"}
+              </button>
+            )}
+            <button
+              className="ghost-btn"
+              onClick={() => api.meetingCaptureProbe(8).then(() => setVaultMsg(null)).catch(() => {})}
+              title="Record 8s of mic + system audio to app data/probe — triggers the macOS permission prompts on first use"
+            >
+              <Mic size={14} /> Test capture
             </button>
           </div>
         </div>

@@ -293,8 +293,10 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
             .await
             .map(|_| Value::Null),
         "meeting_templates" => crate::meeting_templates(a).await,
+        "meetings_settings_get" => Ok(crate::meetings_settings_get()),
         "meeting_start" | "meeting_stop" | "meeting_summarize" | "meeting_template_save"
-        | "meeting_template_delete" | "meeting_capture_probe" | "download_meeting_model" => {
+        | "meeting_template_delete" | "meeting_capture_probe" | "download_meeting_model"
+        | "meeting_prompt_payload" | "meeting_dismiss_prompt" | "meetings_settings_set" => {
             Err("this action runs on the desktop app only".into())
         }
         "list_entities" => crate::list_entities(a).await,

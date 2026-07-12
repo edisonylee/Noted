@@ -1482,3 +1482,30 @@ a.cal-btn { text-decoration: none; }
   border-radius: 4px; display: inline-flex; align-items: center; justify-content: center;
   transform: translateY(2px); color: var(--good);
 }
+
+/* Record prompt (its own always-on-top window) */
+.record-prompt {
+  height: 100vh; box-sizing: border-box; display: flex;
+  background: var(--surface); border: 1px solid var(--line-strong);
+  border-radius: var(--r-lg); overflow: hidden; box-shadow: var(--shadow-3);
+  user-select: none; cursor: default;
+}
+.record-prompt::before { content: ""; flex: none; width: 4px; }
+.record-prompt.calendar::before { background: var(--accent); }
+.record-prompt.mic::before {
+  background: repeating-linear-gradient(to bottom, var(--accent) 0 6px, transparent 6px 11px);
+}
+.rp-body { flex: 1; display: flex; align-items: center; gap: 12px; padding: 14px 16px; min-width: 0; }
+.rp-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.rp-kicker { font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--faint); }
+.rp-title { font-size: 14px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rp-error { font-size: 11px; color: var(--error-ink); }
+.rp-actions { flex: none; display: flex; flex-direction: column; gap: 6px; }
+.rp-record {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  border: none; border-radius: 999px; padding: 7px 14px; cursor: pointer;
+  background: var(--ink); color: var(--on-ink); font-size: 12.5px; font-weight: 600;
+}
+.rp-record:hover { background: var(--ink-hover); }
+.rp-dismiss { border: none; background: none; color: var(--muted); font-size: 12px; cursor: pointer; }
+.rp-dismiss:hover { color: var(--ink); }

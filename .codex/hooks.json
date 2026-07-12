@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /Users/edisonlee/noted 2>/dev/null && test -n \"$(git status --porcelain)\" && printf '%s' '{\"systemMessage\":\"📝 noted has uncommitted changes — consider committing before wrapping up (run git status to review).\"}' || true"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## What noted is
 
@@ -53,7 +53,7 @@ The same React app runs in **two** places, and `src/api.ts` abstracts the differ
 2. registered in the `generate_handler![...]` list at the bottom of `lib.rs`
 3. dispatched in `handle_api`'s `match cmd { ... }` in `src-tauri/src/phone.rs`
 
-Adding a command and forgetting #3 means it works on desktop but silently 404s on the phone. (As of writing, `lib.rs` registers ~50 commands; `phone.rs` mirrors them.)
+Adding a command and forgetting #3 means it works on desktop but silently 404s on the phone. (As of writing, `lib.rs` registers ~41 commands; `phone.rs` mirrors them.)
 
 **Invoke arg keys must be camelCase.** Tauri maps JS invoke args to Rust params by name; a snake_case key on the JS side silently arrives as `None`/default in Rust. `phone.rs` reads args from the JSON body with explicit keys (e.g. `sarg(b, "imageBase64")`) that must match the frontend.
 
@@ -65,10 +65,9 @@ Adding a command and forgetting #3 means it works on desktop but silently 404s o
 - `ollama.rs` — local model client; defines the model-name constants and `chat_json` / `embed`.
 - `db.rs` — `rusqlite` (bundled SQLite) + `sqlite-vec`. Schema below.
 - `entities.rs` — knowledge-graph entity resolution + embedding-based merge suggestions.
-- `gcal.rs` — Google Calendar, multi-account (OAuth PKCE, one refresh token per account email in the Keychain). Push: one-way schedule sync into a "noted" calendar in the **first** account. Pull: the Calendar view's range feed across every connected account's enabled calendars, plus event create/edit/move/delete.
+- `gcal.rs` — Google Calendar one-way sync (OAuth PKCE).
 - `phone.rs` — LAN HTTPS server (`tiny_http` + self-signed `rcgen` cert) and the RPC bridge. A secure context is required so phone mic/camera work; the cert's SAN must match the host IP, so it's regenerated if the IP changes.
 - `voice.rs` — `whisper-rs` (whisper.cpp) in-process offline speech-to-text.
-- `meeting/` — the meeting recorder (local Granola; design + research in `MEETINGS_PLAN.md`). `capture.rs`: system audio via a Core Audio process tap (`cidre`, macOS 14.4+ runtime-gated, needs the one-time System Audio Recording permission — `NSAudioCaptureUsageDescription` in `Info.plist`) + mic via `cpal`, kept as **two streams** so speaker labels are a deterministic mic="me"/system="them" (no diarization model). `asr.rs`: deterministic energy-gate VAD chunker (unit-tested; silence never reaches whisper) → whisper segments → `meeting_segments` + live events. `detect.rs`: zero-permission meeting detection (CoreAudio process objects for mic-in-use + attribution, calendar T-60s prompts, 15s debounce / ignore-list / 10-min cooldown, auto-stop) driving the `record-prompt` always-on-top window. `summarize.rs`: template-driven local summarization (**always** `chat_json_local_ctx`, never Balanced/cloud) — schema-constrained JSON → deterministic markdown; the first summary also files a real note under `meetings` so search/embeddings/KG see it. Config in `meetings.json` (`MeetingsCfg`, provider.json pattern). Meeting transcription prefers `ggml-large-v3-turbo.bin`, falls back to `ggml-base.en.bin`.
 - `analytics.rs` — trends/recap aggregation.
 
 ### Secrets
@@ -83,9 +82,9 @@ Schema migrations are **additive only** via `ensure_column()` (ALTER adds nullab
 
 ### Frontend (`src/`)
 
-React 19 + TS + Vite. `api.ts` is the single bridge (handles desktop-vs-web transport, `TokenError`/`OfflineError`, token caching). `App.tsx` holds the desktop views (`today` / `calendar` / `journal` / `knowledge` — "today" is the merged home: capture composer + the day's schedule, shown in the nav as "Daily Schedule") and the mobile tabs (`today` / `capture` / `ask`). Notable views: `Today.tsx` (deterministically-parsed daily schedule — never hard-fails, no LLM; its empty state is deliberately quiet because the composer above it is the way to make a schedule), `Calendar.tsx` (day/3-day/week grid over every connected Google account; the `.app` gets a `calmode` class so it can go full-width/full-height), `Journal.tsx` (reflection chat agent; each reflection is saved as a `journal` note whose extracted entities feed the personal knowledge graph — its model call is `chat_json_local`, never the Balanced cloud path), `Knowledge.tsx` / `PeopleView.tsx` / `Self.tsx` / `EntityPage.tsx` (KG), `Trends.tsx` / `Recaps.tsx`, `FloatingChat.tsx` (local-model Q&A over your data), `Settings.tsx` (provider + Google accounts), `PhonePanel.tsx` (QR/token pairing). UI libs: `lucide-react` (icons — no emoji), `recharts`, `react-force-graph-2d`.
+React 19 + TS + Vite. `api.ts` is the single bridge (handles desktop-vs-web transport, `TokenError`/`OfflineError`, token caching). `App.tsx` holds the desktop views (`today` / `log` / `timeline` / `knowledge`) and the mobile tabs (`today` / `capture` / `timeline` / `ask`). Notable views: `Today.tsx` (deterministically-parsed daily schedule — never hard-fails, no LLM), `Knowledge.tsx` / `PeopleView.tsx` / `Self.tsx` / `EntityPage.tsx` (KG), `Trends.tsx` / `Recaps.tsx`, `FloatingChat.tsx` (local-model Q&A over your data), `Settings.tsx` (provider + gcal), `PhonePanel.tsx` (QR/token pairing). UI libs: `lucide-react` (icons — no emoji), `recharts`, `react-force-graph-2d`.
 
 ## Conventions
 
-- **Commits:** commit at meaningful checkpoints (a reminder hook nudges this — it is not auto-commit). Per global instructions, commits and PRs carry **no** Claude/AI attribution.
+- **Commits:** commit at meaningful checkpoints (a reminder hook nudges this — it is not auto-commit). Per global instructions, commits and PRs carry **no** Codex/AI attribution.
 - `PROTOCOL.md` documents the intended multi-entry extraction contract; consult it before changing `split_sections`, routing, or the proposal schema.

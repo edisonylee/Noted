@@ -16,6 +16,7 @@ import {
   Video,
 } from "lucide-react";
 import { listen } from "./events";
+import { easternDay, easternMinutes } from "./day";
 import {
   api,
   type MeetingDetail,
@@ -180,7 +181,10 @@ export function MeetingPage({
   const attendees = (ev?.attendees ?? []).filter((a) => !a.self);
   const meetLink = ev?.meet_link ?? null;
 
-  const start = async () => {
+  const notesRef = useRef(notes);
+  notesRef.current = notes;
+
+  const start = useCallback(async () => {
     setStarting(true);
     setError(null);
     try {
@@ -188,16 +192,34 @@ export function MeetingPage({
         title,
         eventId: ev?.id ?? undefined,
         eventJson: ev ?? undefined,
-        retainAudio: true,
       });
-      if (notes.trim()) await api.meetingSetNotes(newId, notes).catch(() => {});
+      const prep = notesRef.current;
+      if (prep.trim()) await api.meetingSetNotes(newId, prep).catch(() => {});
       onStarted?.(newId);
     } catch (e) {
       setError(String(e));
     } finally {
       setStarting(false);
     }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [title, ev?.id]);
+
+  // Granola's one true auto-start: this event's page is open when the
+  // scheduled start arrives → recording begins on its own.
+  useEffect(() => {
+    if (id != null || !ev || ev.date == null || ev.start_min == null) return;
+    const check = async () => {
+      if (easternDay() !== ev.date) return;
+      const nowMin = easternMinutes();
+      const end = ev.end_min ?? (ev.start_min as number) + 60;
+      if (nowMin < (ev.start_min as number) || nowMin >= end) return;
+      const st = await api.meetingState().catch(() => null);
+      if (st && !st.active) start();
+    };
+    const t = window.setInterval(check, 15_000);
+    check();
+    return () => window.clearInterval(t);
+  }, [id, ev, start]);
 
   const stop = async () => {
     setStopping(true);

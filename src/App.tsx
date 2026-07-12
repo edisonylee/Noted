@@ -9,7 +9,7 @@ import { useConnection } from "./useConnection";
 import { MobileCapture } from "./MobileCapture";
 import { BottomNav, type MobileTab } from "./BottomNav";
 import { useTheme } from "./useTheme";
-import { api, TokenError, OfflineError, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow, type RelatedBrain } from "./api";
+import { api, TokenError, OfflineError, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow, type RangeEvent, type RelatedBrain } from "./api";
 import { DataView } from "./DataView";
 import { CalendarView } from "./Calendar";
 import { JournalView } from "./Journal";
@@ -17,6 +17,8 @@ import { PhonePanel } from "./PhonePanel";
 import { FloatingChat } from "./FloatingChat";
 import { KnowledgeView } from "./Knowledge";
 import { parseBlocks, TodayView } from "./Today";
+import { MeetingPage } from "./MeetingPage";
+import { ComingUp } from "./ComingUp";
 import { APP_TZ, easternDay, easternHour } from "./day";
 import "./App.css";
 
@@ -88,6 +90,32 @@ export default function App() {
   // screen instead of the desktop topbar/review flow.
   const isMobile = useIsMobile();
   const [mobileTab, setMobileTab] = useState<MobileTab>("today");
+
+  // Meetings: the open meeting page (a today sub-view) + the global
+  // recording indicator in the topbar.
+  const [meetingOpen, setMeetingOpen] = useState<{
+    id: number | null;
+    event?: Partial<RangeEvent>;
+  } | null>(null);
+  const [recMeeting, setRecMeeting] = useState<{ id: number; title: string } | null>(null);
+  useEffect(() => {
+    api
+      .meetingState()
+      .then((s) => {
+        if (s.active && s.meetingId != null)
+          setRecMeeting({ id: s.meetingId, title: s.title ?? "Meeting" });
+      })
+      .catch(() => {});
+    const subs = [
+      listen<{ meetingId: number; title: string }>("meeting-started", (e) =>
+        setRecMeeting({ id: e.payload.meetingId, title: e.payload.title })
+      ),
+      listen<{ meetingId: number }>("meeting-stopped", () => setRecMeeting(null)),
+    ];
+    return () => {
+      subs.forEach((p) => p.then((un) => un()));
+    };
+  }, []);
 
   // Once today's schedule exists, the composer's "what's your schedule?" moment
   // has passed — it collapses to a slim pill and expands on demand (or when a
@@ -482,6 +510,23 @@ export default function App() {
           </button>
         </nav>
         <span className="spacer" />
+        {recMeeting && (
+          <button
+            className="rec-pill"
+            onClick={() => {
+              setView("today");
+              setMeetingOpen({ id: recMeeting.id });
+            }}
+            title={`Recording: ${recMeeting.title}`}
+          >
+            <span className="bars" aria-hidden>
+              <i />
+              <i />
+              <i />
+            </span>
+            Recording
+          </button>
+        )}
         <button
           className="icon-btn"
           onClick={toggle}
@@ -510,8 +555,22 @@ export default function App() {
             openEntityId={knowledgeEntity}
             onOpenedEntity={() => setKnowledgeEntity(null)}
           />
+        ) : meetingOpen ? (
+          <MeetingPage
+            id={meetingOpen.id}
+            event={meetingOpen.event}
+            onBack={() => setMeetingOpen(null)}
+            onStarted={(id) => setMeetingOpen({ id })}
+          />
         ) : (
         <div className="home">
+        {/* Coming up: the next calendar meetings, one click from recording
+            (the Granola habit loop). Quietly absent with no calendar. */}
+        <ComingUp
+          onOpenEvent={(ev) => setMeetingOpen({ id: null, event: ev })}
+          onOpenMeeting={(id) => setMeetingOpen({ id })}
+          activeMeetingId={recMeeting?.id ?? null}
+        />
         {/* The day's schedule leads — its header (date + calendar actions) is
             the page's anchor — with the composer right below it. Hidden while
             a capture is being reviewed so the cards keep the room. */}

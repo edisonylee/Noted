@@ -299,6 +299,54 @@ export type EventInput = {
   guests?: string[]; // create only: attendee emails (they get invites)
 };
 
+// ── Meetings (local Granola) ────────────────────────────────────────────────
+// A meeting is a recorded capture session; its transcript is Me (mic) / Them
+// (system audio) segments, and each summarize run adds a template-named tab.
+export type MeetingSegment = {
+  id: number;
+  channel: "me" | "them";
+  t0_ms: number;
+  t1_ms: number;
+  text: string;
+  speaker: string | null; // diarized name once available; null = channel default
+};
+export type MeetingSummary = {
+  id: number;
+  template: string;
+  content_md: string;
+  created_at: string;
+};
+export type MeetingStatus = "recording" | "summarizing" | "done" | "failed";
+export type MeetingListRow = {
+  id: number;
+  title: string;
+  started_at: string | null;
+  ended_at: string | null;
+  status: MeetingStatus;
+  note_id: number | null;
+  event_json: Partial<RangeEvent> | null;
+  segment_count: number;
+  summary_count: number;
+};
+export type MeetingDetail = MeetingListRow & {
+  event_id: string | null;
+  raw_notes: string;
+  audio_me_path: string | null;
+  audio_them_path: string | null;
+  segments: MeetingSegment[];
+  summaries: MeetingSummary[];
+  talk_ms: { me: number; them: number };
+};
+export type MeetingLiveState = {
+  active: boolean;
+  meetingId?: number;
+  title?: string;
+  elapsed_ms?: number;
+  last_signal_ms_ago?: number | null;
+};
+export type MeetingTemplate = { name: string; prompt: string; builtin: boolean };
+export type MeetingModelStatus = { turbo: boolean; base: boolean; tap_supported: boolean };
+
 // The Journal agent's response: a companion reply (null if the local model was
 // unreachable — the reflection is saved regardless) + how many knowledge-graph
 // entities the reflection fed.
@@ -458,6 +506,31 @@ export const api = {
     invoke<void>("gcal_update_event", { eventId, moveTo, meet, ...ev }),
   gcalDeleteEvent: (account: string, calendarId: string, eventId: string) =>
     invoke<void>("gcal_delete_event", { account, calendarId, eventId }),
+  // Meetings (local Granola). Capture commands are desktop-only — the phone
+  // bridge returns a clean error for them; reads work everywhere.
+  meetingModelStatus: () => invoke<MeetingModelStatus>("meeting_model_status"),
+  downloadMeetingModel: () => invoke<boolean>("download_meeting_model"),
+  meetingStart: (args: {
+    title?: string;
+    eventId?: string;
+    eventJson?: unknown;
+    retainAudio?: boolean;
+  }) => invoke<number>("meeting_start", { ...args }),
+  meetingStop: () => invoke<number | null>("meeting_stop"),
+  meetingState: () => invoke<MeetingLiveState>("meeting_state"),
+  meetingList: () => invoke<MeetingListRow[]>("meeting_list"),
+  meetingGet: (id: number) => invoke<MeetingDetail>("meeting_get", { id }),
+  meetingSetNotes: (id: number, notes: string) =>
+    invoke<void>("meeting_set_notes", { id, notes }),
+  meetingSummarize: (id: number, template?: string) =>
+    invoke<string>("meeting_summarize", { id, template }),
+  meetingTemplates: () => invoke<MeetingTemplate[]>("meeting_templates"),
+  meetingTemplateSave: (name: string, prompt: string) =>
+    invoke<void>("meeting_template_save", { name, prompt }),
+  meetingTemplateDelete: (name: string) =>
+    invoke<boolean>("meeting_template_delete", { name }),
+  meetingCaptureProbe: (seconds?: number) =>
+    invoke<Record<string, unknown>>("meeting_capture_probe", { seconds }),
   // Brain-vault sync (Obsidian ↔ noted). camelCase arg keys (Tauri → snake_case).
   brainListVaults: () => invoke<BrainVaultStatus[]>("brain_list_vaults"),
   brainAddVault: (path: string, direction?: string) =>

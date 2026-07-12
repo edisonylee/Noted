@@ -1,0 +1,179 @@
+// "Coming up" (Granola's habit loop): the next few calendar meetings across
+// every connected account, each row a click away from its meeting page, plus
+// the most recent recorded meetings. 5 per page, paging arrows, quiet when
+// there's nothing — the strip should never shout.
+
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { AudioLines, ChevronLeft, ChevronRight, FileText, Loader, Mic, Users, Video } from "lucide-react";
+import { api, type MeetingListRow, type RangeEvent } from "./api";
+import { easternDay, easternMinutes, relativeDay } from "./day";
+
+const PAGE = 5;
+
+function fmtClock(min: number | null): string {
+  if (min == null) return "";
+  const h = Math.floor((min % 1440) / 60);
+  const m = min % 60;
+  const ampm = h >= 12 ? "pm" : "am";
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return m === 0 ? `${h12}${ampm}` : `${h12}:${String(m).padStart(2, "0")}${ampm}`;
+}
+
+export function ComingUp({
+  onOpenEvent,
+  onOpenMeeting,
+  activeMeetingId,
+  refreshKey,
+}: {
+  onOpenEvent: (ev: RangeEvent) => void;
+  onOpenMeeting: (id: number) => void;
+  activeMeetingId: number | null;
+  refreshKey?: number;
+}) {
+  const [events, setEvents] = useState<RangeEvent[] | null>(null);
+  const [meetings, setMeetings] = useState<MeetingListRow[]>([]);
+  const [page, setPage] = useState(0);
+  const [nowMin, setNowMin] = useState(easternMinutes());
+
+  const load = useCallback(async () => {
+    const today = easternDay();
+    const tomorrow = easternDay(new Date(Date.now() + 86_400_000));
+    try {
+      const [evs, ms] = await Promise.all([
+        api.gcalEventsRange(today, tomorrow),
+        api.meetingList(),
+      ]);
+      setEvents(evs);
+      setMeetings(ms);
+    } catch {
+      setEvents([]); // no calendar connected — the strip just shows recordings
+      api.meetingList().then(setMeetings).catch(() => {});
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    const t = window.setInterval(() => {
+      setNowMin(easternMinutes());
+      load();
+    }, 300_000);
+    return () => window.clearInterval(t);
+  }, [load, refreshKey]);
+
+  const upcoming = useMemo(() => {
+    if (!events) return [];
+    const today = easternDay();
+    return events
+      .filter((e) => !e.declined && !e.all_day && e.start_min != null)
+      .filter((e) => {
+        // Still relevant: hasn't ended yet (with 5 min grace) or is tomorrow.
+        if (e.date !== today) return true;
+        const end = e.end_min ?? (e.start_min ?? 0) + 60;
+        return end > nowMin - 5;
+      })
+      .sort((a, b) => (a.date === b.date ? (a.start_min ?? 0) - (b.start_min ?? 0) : a.date < b.date ? -1 : 1));
+  }, [events, nowMin]);
+
+  const pages = Math.max(1, Math.ceil(upcoming.length / PAGE));
+  const view = upcoming.slice(page * PAGE, page * PAGE + PAGE);
+  const recent = meetings.slice(0, 4);
+  const today = easternDay();
+
+  if (events === null) return null; // first load: no flash
+  if (upcoming.length === 0 && recent.length === 0) return null; // nothing to say
+
+  return (
+    <section className="comingup">
+      {upcoming.length > 0 && (
+        <>
+          <div className="comingup-head">
+            <h3>Coming up</h3>
+            <span className="spacer" />
+            {pages > 1 && (
+              <span className="comingup-pager">
+                <button
+                  className="icon-btn"
+                  disabled={page === 0}
+                  onClick={() => setPage((p) => p - 1)}
+                  aria-label="Earlier meetings"
+                >
+                  <ChevronLeft size={15} />
+                </button>
+                <button
+                  className="icon-btn"
+                  disabled={page >= pages - 1}
+                  onClick={() => setPage((p) => p + 1)}
+                  aria-label="Later meetings"
+                >
+                  <ChevronRight size={15} />
+                </button>
+              </span>
+            )}
+          </div>
+          <div className="comingup-list">
+            {view.map((ev) => {
+              const live =
+                ev.date === today &&
+                ev.start_min != null &&
+                ev.start_min <= nowMin &&
+                (ev.end_min ?? ev.start_min + 60) > nowMin;
+              return (
+                <button key={ev.id} className={"comingup-row" + (live ? " live" : "")} onClick={() => onOpenEvent(ev)}>
+                  <span className="cal-dot" style={{ background: ev.color }} />
+                  <span className="cu-time">
+                    {ev.date !== today ? "Tmrw " : ""}
+                    {fmtClock(ev.start_min)}
+                  </span>
+                  <span className="cu-title">{ev.title}</span>
+                  {ev.attendee_count > 1 && (
+                    <span className="cu-meta" title={`${ev.attendee_count} attendees — noted will offer to record`}>
+                      <Users size={12} /> {ev.attendee_count}
+                      <Mic size={12} className="will-record" />
+                    </span>
+                  )}
+                  {ev.meet_link && (
+                    <a
+                      className="cu-join"
+                      href={ev.meet_link}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <Video size={13} /> Join
+                    </a>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {recent.length > 0 && (
+        <div className="comingup-recent">
+          {recent.map((m) => (
+            <button key={m.id} className="recent-row" onClick={() => onOpenMeeting(m.id)}>
+              {m.status === "recording" || m.id === activeMeetingId ? (
+                <span className="bars small" aria-hidden>
+                  <i />
+                  <i />
+                  <i />
+                </span>
+              ) : m.status === "summarizing" ? (
+                <Loader size={13} className="spin" />
+              ) : m.summary_count > 0 ? (
+                <FileText size={13} />
+              ) : (
+                <AudioLines size={13} />
+              )}
+              <span className="cu-title">{m.title}</span>
+              <span className="cu-when">
+                {m.started_at ? relativeDay(m.started_at.slice(0, 10)) : ""}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}

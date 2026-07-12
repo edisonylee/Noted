@@ -1343,3 +1343,20 @@ a.cal-btn { text-decoration: none; }
 .cal-form-meeton { display: flex; align-items: center; gap: 10px; font-size: 13.5px; color: var(--ink-soft); }
 .cal-form-meetx { border: none; background: none; color: var(--muted); font-size: 12px; text-decoration: underline; padding: 0; }
 .cal-form-meetx:hover { color: var(--bad); }
+
+/* Guest autocomplete (event form) + Settings sync-target badge */
+.cal-form-guestwrap { position: relative; flex: 1; min-width: 0; }
+.cal-form-guestwrap input { width: 100%; }
+.cal-form-suggest {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 10;
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  box-shadow: var(--shadow-2); overflow: hidden;
+}
+.cal-form-suggest button { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; border: none; background: none; padding: 7px 11px; text-align: left; }
+.cal-form-suggest button:hover { background: var(--hover-soft); }
+.cal-suggest-name { font-size: 13px; color: var(--ink); }
+.cal-suggest-email { font-size: 11.5px; color: var(--muted); }
+
+.gcal-acct-sync { font-size: 11px; color: var(--accent); background: var(--accent-tint); border-radius: 999px; padding: 2px 9px; white-space: nowrap; }
+.gcal-acct-synchere { border: none; background: none; color: var(--muted); font-size: 11.5px; text-decoration: underline; padding: 0; white-space: nowrap; }
+.gcal-acct-synchere:hover { color: var(--accent); }

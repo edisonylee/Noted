@@ -234,10 +234,13 @@ export type GcalAccountInfo = {
 export type GcalStatus = {
   connected: boolean; // at least one account has a refresh token
   has_client: boolean; // the OAuth client id + secret are set
-  account_email: string | null; // first account (hosts the "noted" push calendar)
+  account_email: string | null; // first account
+  sync_account: string | null; // account hosting the "noted" push calendar
   calendar_id: string | null;
   accounts: GcalAccountInfo[];
 };
+// One remembered guest for event-form autocomplete (harvested from events).
+export type GcalContact = { email: string; name: string };
 export type SyncReport = {
   created: number;
   updated: number;
@@ -278,7 +281,7 @@ export type RangeEvent = {
   meet_link: string | null; // Meet/Zoom/Teams join URL (conference data, or found in location/description)
   html_link: string | null; // open the event in Google Calendar's web UI
   organizer: string | null;
-  attendees: { name: string; status: string; self: boolean }[]; // capped at 12, rooms excluded
+  attendees: { name: string; email: string; status: string; self: boolean }[]; // capped at 12, rooms excluded
   attendee_count: number; // real total (rooms excluded)
 };
 // Fields the Calendar view's create/edit forms submit.
@@ -444,6 +447,8 @@ export const api = {
   gcalSetCalendarEnabled: (account: string, calendarId: string, enabled: boolean) =>
     invoke<GcalStatus>("gcal_set_calendar_enabled", { account, calendarId, enabled }),
   gcalRefreshCalendars: () => invoke<GcalStatus>("gcal_refresh_calendars"),
+  gcalSetSyncAccount: (email: string) => invoke<GcalStatus>("gcal_set_sync_account", { email }),
+  gcalContacts: () => invoke<GcalContact[]>("gcal_contacts"),
   gcalEventsRange: (startDate: string, endDate: string) =>
     invoke<RangeEvent[]>("gcal_events_range", { startDate, endDate }),
   gcalCreateEvent: (ev: EventInput) =>

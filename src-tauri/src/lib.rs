@@ -2014,6 +2014,19 @@ async fn gcal_refresh_calendars(app: tauri::AppHandle) -> Result<Value, String> 
     gcal::refresh_calendars(&dir).await.map_err(|e| e.to_string())
 }
 
+/// Pick which account the daily-schedule push targets. Returns auth status.
+#[tauri::command]
+fn gcal_set_sync_account(app: tauri::AppHandle, email: String) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    gcal::set_sync_account(&dir, email.trim()).map_err(|e| e.to_string())
+}
+
+/// Guest-autocomplete pool: attendee emails harvested from calendar events.
+#[tauri::command]
+fn gcal_contacts() -> Value {
+    gcal::contacts()
+}
+
 /// Events across every connected account's enabled calendars for the inclusive
 /// day range [startDate, endDate] — the Calendar view's feed.
 #[tauri::command]
@@ -2401,6 +2414,8 @@ pub fn run() {
             gcal_remove_account,
             gcal_set_calendar_enabled,
             gcal_refresh_calendars,
+            gcal_set_sync_account,
+            gcal_contacts,
             gcal_events_range,
             gcal_create_event,
             gcal_update_event,

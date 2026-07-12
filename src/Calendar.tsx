@@ -19,6 +19,7 @@ import {
 import {
   api,
   type EventInput,
+  type GcalContact,
   type GcalStatus,
   type RangeEvent,
 } from "./api";
@@ -204,6 +205,7 @@ function EventForm({
   mode,
   init,
   status,
+  contacts,
   lockAccount,
   busy,
   error,
@@ -214,6 +216,7 @@ function EventForm({
   mode: "create" | "edit";
   init: FormState;
   status: GcalStatus | null;
+  contacts: GcalContact[]; // guest autocomplete pool
   lockAccount?: string; // edit: Google can't move events across accounts
   busy: boolean;
   error: string | null;
@@ -224,6 +227,25 @@ function EventForm({
   const groups = writableCals(status, lockAccount);
   const set = (patch: Partial<FormState>) => setF((prev) => ({ ...prev, ...patch }));
   const canSave = !!f.title.trim() && !!f.date && !!f.calKey && (f.allDay || !!f.start);
+
+  // Guest autocomplete: match the token being typed after the last comma
+  // against people harvested from your calendars (name or email).
+  const guestToken = f.guests.split(",").pop()?.trim().toLowerCase() ?? "";
+  const guestMatches =
+    mode === "create" && guestToken.length >= 1
+      ? contacts
+          .filter(
+            (m) =>
+              !f.guests.toLowerCase().includes(m.email) &&
+              (m.email.includes(guestToken) || m.name.toLowerCase().includes(guestToken))
+          )
+          .slice(0, 6)
+      : [];
+  function pickGuest(email: string) {
+    const parts = f.guests.split(",");
+    parts[parts.length - 1] = email;
+    set({ guests: parts.map((p) => p.trim()).filter(Boolean).join(", ") + ", " });
+  }
 
   return (
     <div className="cal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onCancel()}>
@@ -327,13 +349,38 @@ function EventForm({
         {mode === "create" && (
           <div className="cal-form-row">
             <Users size={14} className="cal-form-ic" />
-            <input
-              className="cal-form-grow"
-              value={f.guests}
-              placeholder="Add guests — emails, comma-separated (they'll be invited)"
-              disabled={busy}
-              onChange={(e) => set({ guests: e.target.value })}
-            />
+            <div className="cal-form-guestwrap">
+              <input
+                value={f.guests}
+                placeholder="Add guests — emails, comma-separated (they'll be invited)"
+                disabled={busy}
+                onChange={(e) => set({ guests: e.target.value })}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && guestMatches.length) {
+                    e.preventDefault(); // pick, don't save
+                    pickGuest(guestMatches[0].email);
+                  }
+                }}
+              />
+              {guestMatches.length > 0 && (
+                <div className="cal-form-suggest" role="listbox">
+                  {guestMatches.map((m) => (
+                    <button
+                      key={m.email}
+                      role="option"
+                      // mousedown so the pick lands before the input blurs
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        pickGuest(m.email);
+                      }}
+                    >
+                      <span className="cal-suggest-name">{m.name || m.email}</span>
+                      {m.name && <span className="cal-suggest-email">{m.email}</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
         <div className="cal-form-row">
@@ -392,6 +439,7 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
   const [anchor, setAnchor] = useState(() => (days === 7 ? weekStart(today) : today));
   const [status, setStatus] = useState<GcalStatus | null>(null);
   const [events, setEvents] = useState<RangeEvent[] | null>(null);
+  const [contacts, setContacts] = useState<GcalContact[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -443,6 +491,8 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
       if (seq !== seqRef.current) return;
       setEvents(evs);
       setError(null);
+      // The range fetch also grows the guest-autocomplete pool — pick it up.
+      api.gcalContacts().then(setContacts).catch(() => {});
     } catch (e) {
       if (seq !== seqRef.current) return;
       setError(String(e));
@@ -1001,6 +1051,7 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
           mode={form.mode}
           init={form.init}
           status={status}
+          contacts={contacts}
           lockAccount={form.mode === "edit" ? form.ev?.account : undefined}
           busy={formBusy}
           error={formErr}

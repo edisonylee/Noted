@@ -148,6 +148,15 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     }
   }
 
+  async function setGcalSyncAccount(email: string) {
+    try {
+      setGcal(await api.gcalSetSyncAccount(email));
+      setGcalMsg(null);
+    } catch (e) {
+      setGcalMsg({ kind: "err", text: String(e) });
+    }
+  }
+
   // Persist the current fields, then hit Gemini and reflect the real result in
   // the status badge. Shared by Save, Test, and the on-open auto-check.
   async function checkConnection() {
@@ -306,6 +315,21 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   )}
                   <span className="gcal-acct-email">{a.email}</span>
                   {!a.connected && <span className="gcal-acct-warn">reconnect needed</span>}
+                  {a.email === gcal!.sync_account ? (
+                    <span className="gcal-acct-sync" title="Your daily schedule pushes into the 'noted' calendar in this account">
+                      schedule syncs here
+                    </span>
+                  ) : (
+                    a.connected && (
+                      <button
+                        className="gcal-acct-synchere"
+                        onClick={() => setGcalSyncAccount(a.email)}
+                        title="Push the daily schedule into this account instead"
+                      >
+                        sync here
+                      </button>
+                    )
+                  )}
                   <button
                     className="gcal-acct-x"
                     onClick={() => removeGcalAccount(a.email)}
@@ -317,8 +341,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 </div>
               ))}
               <span className="field-hint">
-                Choose which calendars show up from the filter inside the Calendar view. To
-                reconnect an expired account, just add it again.
+                The daily schedule pushes one-way into a calendar named “noted” inside the account
+                marked above — never into your real calendars. Choose which calendars show up from
+                the filter inside the Calendar view. To reconnect an expired account, just add it
+                again.
               </span>
             </div>
           )}

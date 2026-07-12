@@ -99,6 +99,15 @@ pub struct GcalAccount {
     pub access_expires_at: Option<i64>, // unix secs
 }
 
+/// One remembered guest — the autocomplete pool for the event form. Built
+/// locally from attendees seen on calendar events (no Google contacts scope).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GcalContact {
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GcalConfig {
     #[serde(default)]
@@ -108,7 +117,11 @@ pub struct GcalConfig {
     #[serde(default)]
     pub account_email: Option<String>, // legacy pre-multi-account field; migrated at init
     #[serde(default)]
-    pub accounts: Vec<GcalAccount>, // accounts[0] hosts the "noted" push calendar
+    pub accounts: Vec<GcalAccount>,
+    #[serde(default)]
+    pub sync_account: Option<String>, // hosts the "noted" push calendar; None = first account
+    #[serde(default)]
+    pub contacts: Vec<GcalContact>, // guest-autocomplete pool, harvested from events
     // Loaded from the Keychain / minted at runtime; never serialized to JSON.
     #[serde(skip)]
     pub client_secret: Option<String>,
@@ -275,6 +288,7 @@ pub fn auth_status() -> Value {
         "has_client": !c.client_id.is_empty()
             && c.client_secret.as_deref().map(|s| !s.is_empty()).unwrap_or(false),
         "account_email": c.accounts.first().map(|a| a.email.clone()),
+        "sync_account": resolve_sync_account(&c.accounts, c.sync_account.as_deref()),
         "calendar_id": c.calendar_id,
         "accounts": c.accounts.iter().map(|a| json!({
             "email": a.email,
@@ -605,14 +619,43 @@ pub async fn begin_auth(dir: &Path) -> Result<Value> {
     Ok(auth_status())
 }
 
-/// The account hosting the "noted" push calendar — the first one connected.
-/// Everything the one-way schedule sync does goes through this account.
-fn sync_account() -> Result<String> {
-    get()
-        .accounts
-        .first()
+/// Which account hosts the "noted" push calendar: the user's explicit choice
+/// when it still exists, else the first connected. Pure so it's testable.
+fn resolve_sync_account(accounts: &[GcalAccount], pref: Option<&str>) -> Option<String> {
+    pref.and_then(|p| accounts.iter().find(|a| a.email == p))
+        .or_else(|| accounts.first())
         .map(|a| a.email.clone())
+}
+
+/// The account the one-way schedule sync pushes through.
+fn sync_account() -> Result<String> {
+    let c = get();
+    resolve_sync_account(&c.accounts, c.sync_account.as_deref())
         .ok_or_else(|| anyhow!("not connected to Google Calendar"))
+}
+
+/// Pick which account the daily-schedule push targets. The "noted" calendar
+/// self-heals on the next sync: the stored id won't resolve under the new
+/// account's token, so it's re-found by name or freshly created there.
+pub fn set_sync_account(dir: &Path, email: &str) -> Result<Value> {
+    {
+        let mut c = cell().write().unwrap();
+        if !c.accounts.iter().any(|a| a.email == email) {
+            return Err(anyhow!("no such account: {email}"));
+        }
+        c.sync_account = Some(email.to_string());
+    }
+    write_config_file(dir);
+    Ok(auth_status())
+}
+
+/// The guest-autocomplete pool for the event form.
+pub fn contacts() -> Value {
+    json!(get()
+        .contacts
+        .iter()
+        .map(|k| json!({ "email": k.email, "name": k.name }))
+        .collect::<Vec<_>>())
 }
 
 /// A valid access token for the sync account (schedule push / clear).
@@ -1271,6 +1314,7 @@ fn map_event(it: &Value, cal: &GcalCalendar, account: &str) -> Option<Value> {
                         .and_then(|s| s.as_str())?;
                     Some(json!({
                         "name": name,
+                        "email": a.get("email").and_then(|s| s.as_str()).unwrap_or(""),
                         "status": a.get("responseStatus").and_then(|s| s.as_str()).unwrap_or("needsAction"),
                         "self": a.get("self").and_then(|s| s.as_bool()).unwrap_or(false),
                     }))
@@ -1423,7 +1467,50 @@ pub async fn events_range(dir: &Path, start_date: &str, end_date: &str) -> Resul
         };
         key(a).cmp(&key(b))
     });
+    harvest_contacts(dir, &events);
     Ok(events)
+}
+
+/// Remember attendee emails seen on events — the event form's guest
+/// autocomplete pool. Local-first by design: no Google contacts scope, just
+/// the people the user actually meets with, accumulated as ranges load.
+fn harvest_contacts(dir: &Path, events: &[Value]) {
+    let mut changed = false;
+    {
+        let mut c = cell().write().unwrap();
+        for ev in events {
+            let Some(atts) = ev.get("attendees").and_then(|a| a.as_array()) else { continue };
+            for a in atts {
+                if a.get("self").and_then(|s| s.as_bool()).unwrap_or(false) {
+                    continue; // no point autocompleting yourself
+                }
+                let Some(email) = a.get("email").and_then(|e| e.as_str()) else { continue };
+                let email = email.trim().to_lowercase();
+                if email.is_empty() || !email.contains('@') {
+                    continue;
+                }
+                let name = a
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .filter(|n| !n.eq_ignore_ascii_case(&email))
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if let Some(k) = c.contacts.iter_mut().find(|k| k.email == email) {
+                    if k.name.is_empty() && !name.is_empty() {
+                        k.name = name;
+                        changed = true;
+                    }
+                } else if c.contacts.len() < 500 {
+                    c.contacts.push(GcalContact { email, name });
+                    changed = true;
+                }
+            }
+        }
+    }
+    if changed {
+        write_config_file(dir);
+    }
 }
 
 // ── Event CRUD (Calendar view) ──────────────────────────────────────────────
@@ -1903,6 +1990,21 @@ mod tests {
         assert_eq!(ev["date"], "2026-06-05");
         assert_eq!(ev["end_date"], "2026-06-08");
         assert_eq!(ev["start_min"], Value::Null);
+    }
+
+    #[test]
+    fn resolve_sync_account_prefers_choice_then_first() {
+        let accounts = vec![
+            GcalAccount { email: "a@x.com".into(), ..Default::default() },
+            GcalAccount { email: "b@y.com".into(), ..Default::default() },
+        ];
+        // No preference → first account.
+        assert_eq!(resolve_sync_account(&accounts, None).as_deref(), Some("a@x.com"));
+        // Explicit choice wins.
+        assert_eq!(resolve_sync_account(&accounts, Some("b@y.com")).as_deref(), Some("b@y.com"));
+        // A removed account's stale preference falls back to first.
+        assert_eq!(resolve_sync_account(&accounts, Some("gone@z.com")).as_deref(), Some("a@x.com"));
+        assert_eq!(resolve_sync_account(&[], None), None);
     }
 
     #[test]

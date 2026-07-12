@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowUp, Check, Mic, Sparkles, Square, Volume2, VolumeX, X } from "lucide-react";
 import { api, isDesktop, type AskSource, type BrainVaultStatus, type ChatProposal } from "./api";
+import { applyProposal, proposalText } from "./chatActions";
 import { startRecording, type Recorder } from "./audio";
 import { DataView } from "./DataView";
 
@@ -82,26 +83,10 @@ export function FloatingChat({
     }
   }
 
-  function proposalText(p: ChatProposal): string {
-    if (p.action === "create_category") {
-      return p.already_exists
-        ? `“${p.name}” already exists — open it anyway?`
-        : `Create a new category “${p.name}”?`;
-    }
-    return `Apply this change — ${p.summary}?`;
-  }
-
   async function confirmProposal(i: number, p: ChatProposal) {
     setMessages((ms) => ms.map((m, idx) => (idx === i ? { ...m, resolved: "confirmed" } : m)));
     try {
-      let done: string;
-      if (p.action === "create_category") {
-        await api.createCategory(p.name, p.description);
-        done = `Created category “${p.name}”.`;
-      } else {
-        await api.updateEntry(p.entry_id, p.data);
-        done = "Done — updated that entry.";
-      }
+      const done = await applyProposal(p);
       setMessages((ms) => [...ms, { role: "assistant", content: done }]);
       onMutated?.();
     } catch (e) {

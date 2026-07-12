@@ -381,7 +381,17 @@ export type AskSource = {
 // A pending action the chat agent proposes (applied only on user confirm).
 export type ChatProposal =
   | { action: "create_category"; name: string; description: string; already_exists: boolean }
-  | { action: "edit_entry"; entry_id: number; data: Record<string, unknown>; summary: string };
+  | { action: "edit_entry"; entry_id: number; data: Record<string, unknown>; summary: string }
+  | {
+      action: "create_event";
+      title: string;
+      date: string; // YYYY-MM-DD
+      start: string | null; // "HH:MM"; null = all-day
+      end: string | null;
+      guests: string[];
+      meet: boolean;
+      summary: string;
+    };
 
 // chat() returns either a grounded answer or a proposal awaiting confirmation.
 export type AskResult =

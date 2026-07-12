@@ -950,6 +950,69 @@ async fn chat(
                 }));
             }
         }
+    } else if action == "create_event" {
+        // Scheduling: validated proposal only — the UI confirms, then writes to
+        // Google Calendar. Malformed model output falls through to an answer.
+        if let Some(ev) = routed.as_ref().and_then(|v| v.get("event")) {
+            let time_ok = |s: &str| {
+                s.len() == 5
+                    && s.as_bytes()[2] == b':'
+                    && s[..2].chars().all(|c| c.is_ascii_digit())
+                    && s[3..].chars().all(|c| c.is_ascii_digit())
+            };
+            let title = ev.get("title").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
+            let date = ev.get("date").and_then(|d| d.as_str()).unwrap_or("").trim().to_string();
+            let date_ok = date.len() == 10
+                && date
+                    .chars()
+                    .enumerate()
+                    .all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() });
+            let start = ev
+                .get("start")
+                .and_then(|s| s.as_str())
+                .map(str::trim)
+                .filter(|s| time_ok(s))
+                .map(String::from);
+            let end = ev
+                .get("end")
+                .and_then(|s| s.as_str())
+                .map(str::trim)
+                .filter(|s| time_ok(s))
+                .map(String::from);
+            let guests: Vec<String> = ev
+                .get("guests")
+                .and_then(|g| g.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str())
+                        .filter(|s| s.contains('@'))
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let meet = ev.get("meet").and_then(|m| m.as_bool()).unwrap_or(false);
+            if !title.is_empty() && date_ok {
+                let summary = ev
+                    .get("summary")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                return Ok(json!({
+                    "kind": "proposal",
+                    "proposal": {
+                        "action": "create_event",
+                        "title": title,
+                        "date": date,
+                        "start": start,
+                        "end": end,
+                        "guests": guests,
+                        "meet": meet,
+                        "summary": summary,
+                    }
+                }));
+            }
+        }
+        // fall through to a normal answer if the event was malformed
     } else if action == "edit_entry" {
         if let Some(edit) = routed.as_ref().and_then(|v| v.get("edit")) {
             let entry_id = edit.get("entry_id").and_then(|i| i.as_i64());

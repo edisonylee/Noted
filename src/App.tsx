@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "./events";
-import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, Loader, Mic, Moon, Network, PenLine, Settings, Smartphone, Square, StickyNote, Sun } from "lucide-react";
+import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, Loader, Mic, Moon, Network, PenLine, Settings, Smartphone, Sparkles, Square, StickyNote, Sun } from "lucide-react";
 import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg, type Img } from "./image";
@@ -20,11 +20,12 @@ import { parseBlocks, TodayView } from "./Today";
 import { MeetingPage } from "./MeetingPage";
 import { ComingUp } from "./ComingUp";
 import { NotesView } from "./NotesView";
+import { AskView } from "./AskView";
 import { APP_TZ, easternDay, easternHour } from "./day";
 import "./App.css";
 
 type Phase = "idle" | "thinking" | "review";
-type View = "today" | "notes" | "calendar" | "journal" | "knowledge" | "settings";
+type View = "today" | "ask" | "notes" | "calendar" | "journal" | "knowledge" | "settings";
 type Source = "text" | "photo";
 // One editable review card per extracted entry.
 type ReviewCard = {
@@ -505,6 +506,9 @@ export default function App() {
           <button className={view === "today" ? "on" : ""} onClick={() => setView("today")}>
             <House size={16} /> Home
           </button>
+          <button className={view === "ask" ? "on" : ""} onClick={() => setView("ask")}>
+            <Sparkles size={16} /> Ask
+          </button>
           <button className={view === "notes" ? "on" : ""} onClick={() => setView("notes")}>
             <StickyNote size={16} /> Notes
           </button>
@@ -562,6 +566,8 @@ export default function App() {
       <main className="content">
         {view === "settings" ? (
           <SettingsModal page onClose={() => setView("today")} />
+        ) : view === "ask" ? (
+          <AskView onMutated={() => refresh().catch(handleErr)} />
         ) : view === "notes" ? (
           <NotesView notes={notes} cats={cats} />
         ) : view === "calendar" ? (
@@ -903,7 +909,6 @@ export default function App() {
       </div>
 
       {showPhone && <PhonePanel onClose={() => setShowPhone(false)} />}
-      <FloatingChat onMutated={refresh} />
     </div>
   );
 }

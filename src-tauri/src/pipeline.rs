@@ -60,12 +60,24 @@ pub fn agent_router_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "action": { "type": "string", "enum": ["answer", "create_category", "edit_entry"] },
+            "action": { "type": "string", "enum": ["answer", "create_category", "edit_entry", "create_event"] },
             "category": {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string" },
                     "description": { "type": "string" }
+                }
+            },
+            "event": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "date": { "type": "string" },
+                    "start": { "type": "string" },
+                    "end": { "type": "string" },
+                    "guests": { "type": "array", "items": { "type": "string" } },
+                    "meet": { "type": "boolean" },
+                    "summary": { "type": "string" }
                 }
             },
             "edit": {
@@ -102,6 +114,13 @@ reproduced IN FULL — copy EVERY field and EVERY element of EVERY array exactly
 ONLY the specific value the user asked about. Do not drop, summarize, or omit any other item. E.g. if \
 the entry has exercises [squat, bench] and the user fixes squat's reps, return BOTH squat (with the \
 new reps) AND bench unchanged.\n\
+- \"create_event\" — ONLY when the user asks to schedule, book, or put a meeting/event on their \
+calendar. Fill \"event\": \"title\" (short), \"date\" as YYYY-MM-DD (resolve today/tomorrow/weekday \
+words from today's date), \"start\" and \"end\" as 24-hour \"HH:MM\" (omit \"end\" if unstated; omit \
+both for an all-day event), \"guests\" = email addresses ONLY if the user explicitly provided them \
+(never invent emails), \"meet\" = true only if they asked for a video-call link, and \"summary\" \
+(one line, e.g. \"standup tomorrow 09:30\"). Never invent a date or time the user didn't imply; if \
+the date is missing, set action=\"answer\" and ask for it in \"clarify\".\n\
 If the user wants to edit something but you cannot tell which entry, set action=\"answer\" and put a \
 short clarifying question in \"clarify\".\n\
 Be conservative: if you are unsure whether they want an action at all, choose \"answer\". Never invent \

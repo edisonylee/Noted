@@ -1602,3 +1602,53 @@ a.cal-btn { text-decoration: none; }
 .note-detail-body { white-space: pre-wrap; font-size: 14px; line-height: 1.65; color: var(--ink); }
 .note-detail-entries { display: flex; flex-direction: column; gap: 10px; }
 .note-entry-card { border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px 14px; background: var(--surface); display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+
+/* ── Ask page (chat home, Granola-style) ──────────────────────────────────── */
+.ask-view { display: flex; flex-direction: column; flex: 1; width: 100%; max-width: 640px; margin: 0 auto; min-height: 0; }
+.ask-home { justify-content: center; gap: 22px; padding-bottom: 12vh; }
+.ask-hero {
+  margin: 0; font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  font-size: 27px; font-weight: 500; letter-spacing: -0.01em; color: var(--ink);
+}
+.ask-composer {
+  border: 1px solid var(--line-strong); border-radius: var(--r-lg);
+  background: var(--surface); padding: 12px 14px 10px; box-shadow: var(--shadow-1);
+  display: flex; flex-direction: column; gap: 6px;
+}
+.ask-composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint); }
+.ask-composer textarea {
+  border: none; background: none; resize: none; font: inherit; font-size: 14px;
+  color: var(--ink); outline: none; min-height: 24px; max-height: 140px; line-height: 1.5;
+}
+.ask-composer-row { display: flex; align-items: center; gap: 6px; }
+.ask-composer-row .spacer { flex: 1; }
+.ask-mic.recording { color: var(--bad); background: var(--error-bg); }
+.ask-send {
+  display: inline-grid; place-items: center; width: 32px; height: 32px;
+  border: none; border-radius: 999px; cursor: pointer;
+  background: var(--ink); color: var(--on-ink);
+}
+.ask-send:hover { background: var(--ink-hover); }
+.ask-send:disabled { opacity: 0.35; cursor: default; }
+.ask-attach-preview { position: relative; align-self: flex-start; }
+.ask-attach-preview img { max-height: 72px; border-radius: var(--r-sm); border: 1px solid var(--line); }
+.ask-attach-preview .icon-btn { position: absolute; top: -8px; right: -8px; width: 22px; height: 22px; background: var(--surface); border: 1px solid var(--line); }
+
+.ask-recipes { display: flex; flex-direction: column; gap: 8px; }
+.ask-recipes-label { font-size: 11.5px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--faint); }
+.ask-recipe-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.ask-recipe {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px;
+  background: var(--surface); color: var(--ink-soft); font-size: 12.5px; cursor: pointer;
+}
+.ask-recipe:hover { background: var(--hover-soft); border-color: var(--line-strong); }
+
+.ask-thread { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 24px 2px 16px; }
+.ask-bubble { max-width: 82%; border-radius: var(--r-lg); padding: 10px 14px; font-size: 14px; line-height: 1.55; }
+.ask-bubble p { margin: 0; white-space: pre-wrap; }
+.ask-bubble.user { align-self: flex-end; background: var(--accent-tint); }
+.ask-bubble.assistant { align-self: flex-start; background: var(--surface); border: 1px solid var(--line); }
+.ask-bubble .muted { color: var(--faint); }
+.ask-bubble-img { max-height: 120px; border-radius: var(--r-sm); margin-bottom: 6px; display: block; }
+.ask-view > .ask-composer { margin: 10px 0 20px; }

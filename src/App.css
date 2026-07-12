@@ -1531,3 +1531,74 @@ a.cal-btn { text-decoration: none; }
 .settings-modal .settings-layout { flex-direction: column; gap: 16px; }
 .settings-modal .settings-nav { position: static; width: auto; flex-direction: row; flex-wrap: wrap; }
 .record-prompt.status::before { background: var(--good); }
+
+/* ── left sidebar shell (desktop) ─────────────────────────────────────────── */
+.app.side { flex-direction: row; align-items: stretch; gap: 30px; }
+.sidebar {
+  flex: none; width: 176px;
+  position: sticky; top: 0; align-self: flex-start; height: 100vh;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 26px 0 20px;
+}
+.sidebar .brand { padding: 0 12px 12px; }
+.sidebar .spacer { flex: 1; }
+.side-nav { display: flex; flex-direction: column; gap: 2px; }
+.side-nav button {
+  display: flex; align-items: center; gap: 10px; text-align: left;
+  border: none; background: none; cursor: pointer;
+  padding: 8px 12px; border-radius: var(--r-sm);
+  font-size: 13.5px; font-weight: 490; color: var(--muted);
+  transition: 0.14s var(--ease);
+}
+.side-nav button:hover { color: var(--ink); background: var(--hover-soft); }
+.side-nav button.on { background: var(--hover-soft); color: var(--ink); font-weight: 570; }
+.side-foot { display: flex; gap: 4px; padding: 8px 8px 0; border-top: 1px solid var(--line); }
+.sidebar .rec-pill { margin: 0 8px 10px; justify-content: center; }
+.main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 100vh; }
+.app.calmode .main-col, .app.journalmode .main-col { min-height: 0; height: 100%; }
+.main-col .content { padding-top: 26px; }
+
+/* ── Notes workspace: spaces column + note list ───────────────────────────── */
+.notes-view { display: flex; gap: 26px; align-items: flex-start; width: 100%; max-width: 900px; }
+.spaces { flex: none; width: 168px; display: flex; flex-direction: column; gap: 2px; position: sticky; top: 26px; }
+.spaces button {
+  display: flex; align-items: center; gap: 8px; text-align: left;
+  border: none; background: none; cursor: pointer;
+  padding: 7px 10px; border-radius: var(--r-sm);
+  font-size: 13px; color: var(--muted);
+}
+.spaces button:hover { color: var(--ink); background: var(--hover-soft); }
+.spaces button.on { background: var(--hover-soft); color: var(--ink); font-weight: 570; }
+.space-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.space-n { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
+
+.notes-list { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.notes-search {
+  display: flex; align-items: center; gap: 8px; color: var(--faint);
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: 8px 12px; background: var(--surface); margin-bottom: 8px;
+}
+.notes-search input { flex: 1; border: none; background: none; font: inherit; font-size: 13.5px; color: var(--ink); outline: none; }
+.note-row {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  border: 1px solid transparent; border-radius: var(--r-md);
+  background: none; padding: 9px 12px; cursor: pointer; font-size: 13.5px; color: var(--ink);
+}
+.note-row:hover { background: var(--surface); border-color: var(--line); }
+.note-row-icon { flex: none; color: var(--faint); }
+.note-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 510; }
+.note-row-chips { flex: none; display: inline-flex; gap: 4px; }
+.note-chip {
+  font-style: normal; font-size: 10.5px; color: var(--muted);
+  background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 999px; padding: 1px 8px; white-space: nowrap;
+}
+.note-row-date { flex: none; font-size: 12px; color: var(--faint); width: 74px; text-align: right; }
+
+.note-detail { max-width: 680px; display: flex; flex-direction: column; gap: 16px; }
+.note-detail-head { display: flex; align-items: flex-start; gap: 12px; }
+.note-detail-head h2 { margin: 0; font-size: 19px; font-weight: 620; letter-spacing: -0.01em; }
+.note-detail-meta { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+.note-detail-body { white-space: pre-wrap; font-size: 14px; line-height: 1.65; color: var(--ink); }
+.note-detail-entries { display: flex; flex-direction: column; gap: 10px; }
+.note-entry-card { border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px 14px; background: var(--surface); display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }

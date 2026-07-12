@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "./events";
-import { Camera, Check, ChevronUp, Download, Loader, Mic, Moon, PenLine, Settings, Smartphone, Square, Sun } from "lucide-react";
+import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, Loader, Mic, Moon, Network, PenLine, Settings, Smartphone, Square, StickyNote, Sun } from "lucide-react";
 import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg, type Img } from "./image";
@@ -19,11 +19,12 @@ import { KnowledgeView } from "./Knowledge";
 import { parseBlocks, TodayView } from "./Today";
 import { MeetingPage } from "./MeetingPage";
 import { ComingUp } from "./ComingUp";
+import { NotesView } from "./NotesView";
 import { APP_TZ, easternDay, easternHour } from "./day";
 import "./App.css";
 
 type Phase = "idle" | "thinking" | "review";
-type View = "today" | "calendar" | "journal" | "knowledge" | "settings";
+type View = "today" | "notes" | "calendar" | "journal" | "knowledge" | "settings";
 type Source = "text" | "photo";
 // One editable review card per extracted entry.
 type ReviewCard = {
@@ -490,26 +491,31 @@ export default function App() {
   return (
     <div
       className={
-        "app" + (view === "calendar" ? " calmode" : view === "journal" ? " journalmode" : "")
+        "app side" + (view === "calendar" ? " calmode" : view === "journal" ? " journalmode" : "")
       }
     >
       {reconnectingOverlay}
-      <header className="topbar">
+      {/* ElevenLabs-style left rail: workspace nav on top, utilities pinned
+          to the bottom. The old topbar is gone. */}
+      <aside className="sidebar">
         <div className="brand">
           noted<span className="dot">.</span>
         </div>
-        <nav className="nav">
+        <nav className="side-nav">
           <button className={view === "today" ? "on" : ""} onClick={() => setView("today")}>
-            Daily Schedule
+            <House size={16} /> Home
+          </button>
+          <button className={view === "notes" ? "on" : ""} onClick={() => setView("notes")}>
+            <StickyNote size={16} /> Notes
           </button>
           <button className={view === "calendar" ? "on" : ""} onClick={() => setView("calendar")}>
-            Calendar
+            <CalendarDays size={16} /> Calendar
           </button>
           <button className={view === "journal" ? "on" : ""} onClick={() => setView("journal")}>
-            Journal
+            <BookOpen size={16} /> Journal
           </button>
           <button className={view === "knowledge" ? "on" : ""} onClick={() => setView("knowledge")}>
-            Knowledge
+            <Network size={16} /> Knowledge
           </button>
         </nav>
         <span className="spacer" />
@@ -530,29 +536,34 @@ export default function App() {
             Recording
           </button>
         )}
-        <button
-          className="icon-btn"
-          onClick={toggle}
-          title={theme === "dark" ? "Switch to light" : "Switch to dark"}
-          aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-        >
-          {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
-        </button>
-        <button className="icon-btn" onClick={() => setShowPhone(true)} title="Capture from your phone">
-          <Smartphone size={18} />
-        </button>
-        <button
-          className={"icon-btn" + (view === "settings" ? " on" : "")}
-          onClick={() => setView("settings")}
-          title="Settings"
-        >
-          <Settings size={18} />
-        </button>
-      </header>
+        <div className="side-foot">
+          <button
+            className="icon-btn"
+            onClick={toggle}
+            title={theme === "dark" ? "Switch to light" : "Switch to dark"}
+            aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          >
+            {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
+          <button className="icon-btn" onClick={() => setShowPhone(true)} title="Capture from your phone">
+            <Smartphone size={18} />
+          </button>
+          <button
+            className={"icon-btn" + (view === "settings" ? " on" : "")}
+            onClick={() => setView("settings")}
+            title="Settings"
+          >
+            <Settings size={18} />
+          </button>
+        </div>
+      </aside>
 
+      <div className="main-col">
       <main className="content">
         {view === "settings" ? (
           <SettingsModal page onClose={() => setView("today")} />
+        ) : view === "notes" ? (
+          <NotesView notes={notes} cats={cats} />
         ) : view === "calendar" ? (
           <CalendarView onOpenSettings={() => setView("settings")} />
         ) : view === "journal" ? (
@@ -889,6 +900,7 @@ export default function App() {
           </button>
         </span>
       </footer>
+      </div>
 
       {showPhone && <PhonePanel onClose={() => setShowPhone(false)} />}
       <FloatingChat onMutated={refresh} />

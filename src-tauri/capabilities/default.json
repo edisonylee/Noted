@@ -5,6 +5,7 @@
   "windows": ["main", "record-prompt"],
   "permissions": [
     "core:default",
+    "core:window:allow-start-dragging",
     "opener:default"
   ]
 }

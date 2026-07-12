@@ -591,7 +591,7 @@ export default function App() {
       {/* The whole sidebar background drags the window (like a native app's
           source list) — buttons still click because the drag region only
           engages when the grabbed element is the one carrying the attribute. */}
-      <aside className="sidebar" data-tauri-drag-region>
+      <aside className="sidebar" data-tauri-drag-region="deep">
         <div className="side-head" data-tauri-drag-region>
           <div className="brand" data-tauri-drag-region>
             noted<span className="dot">.</span>

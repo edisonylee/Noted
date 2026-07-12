@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "./events";
-import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, Loader, Mic, Moon, Network, PenLine, Settings, Smartphone, Sparkles, Square, StickyNote, Sun } from "lucide-react";
+import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, Loader, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Sparkles, Square, StickyNote, Sun } from "lucide-react";
 import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg, type Img } from "./image";
@@ -92,6 +92,28 @@ export default function App() {
   // screen instead of the desktop topbar/review flow.
   const isMobile = useIsMobile();
   const [mobileTab, setMobileTab] = useState<MobileTab>("today");
+
+  // Sidebar collapse (one click or ⌘B), remembered across launches.
+  const [sideOpen, setSideOpenState] = useState(
+    () => localStorage.getItem("noted-sidebar") !== "closed"
+  );
+  const setSideOpen = (o: boolean) => {
+    setSideOpenState(o);
+    localStorage.setItem("noted-sidebar", o ? "open" : "closed");
+  };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setSideOpenState((o) => {
+          localStorage.setItem("noted-sidebar", o ? "closed" : "open");
+          return !o;
+        });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Meetings: the open meeting page (a today sub-view) + the global
   // recording indicator in the topbar.
@@ -497,10 +519,33 @@ export default function App() {
     >
       {reconnectingOverlay}
       {/* ElevenLabs-style left rail: workspace nav on top, utilities pinned
-          to the bottom. The old topbar is gone. */}
+          to the bottom. Collapsible (toggle or ⌘B), Granola-style: collapsed
+          leaves only a floating reveal button in the corner. */}
+      {!sideOpen && (
+        <button
+          className="side-reveal icon-btn"
+          onClick={() => setSideOpen(true)}
+          title="Open sidebar (⌘B)"
+          aria-label="Open sidebar"
+        >
+          <PanelLeft size={17} />
+        </button>
+      )}
+      {sideOpen && (
       <aside className="sidebar">
-        <div className="brand">
-          noted<span className="dot">.</span>
+        <div className="side-head">
+          <div className="brand">
+            noted<span className="dot">.</span>
+          </div>
+          <span className="spacer" />
+          <button
+            className="icon-btn"
+            onClick={() => setSideOpen(false)}
+            title="Collapse sidebar (⌘B)"
+            aria-label="Collapse sidebar"
+          >
+            <PanelLeft size={16} />
+          </button>
         </div>
         <nav className="side-nav">
           <button className={view === "today" ? "on" : ""} onClick={() => setView("today")}>
@@ -561,6 +606,7 @@ export default function App() {
           </button>
         </div>
       </aside>
+      )}
 
       <div className="main-col">
       <main className="content">

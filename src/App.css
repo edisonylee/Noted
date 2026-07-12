@@ -1652,3 +1652,16 @@ a.cal-btn { text-decoration: none; }
 .ask-bubble .muted { color: var(--faint); }
 .ask-bubble-img { max-height: 120px; border-radius: var(--r-sm); margin-bottom: 6px; display: block; }
 .ask-view > .ask-composer { margin: 10px 0 20px; }
+
+/* Collapsible sidebar: visible edge line, head row with the panel toggle,
+   and a floating reveal button when collapsed. */
+.sidebar { border-right: 1px solid var(--line); padding-right: 14px; }
+.side-head { display: flex; align-items: center; gap: 6px; padding: 0 4px 10px 12px; }
+.side-head .brand { padding: 0; }
+.side-reveal {
+  position: fixed; top: 20px; left: 20px; z-index: 70;
+  width: 34px; height: 34px;
+  background: var(--surface); border: 1px solid var(--line);
+  box-shadow: var(--shadow-1);
+}
+.side-reveal:hover { background: var(--hover-soft); }

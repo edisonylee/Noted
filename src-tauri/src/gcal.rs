@@ -640,11 +640,15 @@ pub struct SyncReport {
     pub errors: Vec<String>,
 }
 
-/// Deterministic Google event id from (event_date, block index): same day+index
-/// always maps to the same event, so re-sync updates instead of duplicating.
+/// Deterministic Google event id from the block's *content* (date, start, task):
+/// the same block always maps to the same event, so re-sync updates instead of
+/// duplicating — and, unlike an index-based key, reordering or deleting sibling
+/// blocks can't re-point an id at a different block's event (the old id simply
+/// drops out of `fresh_ids` and the stale-cleanup pass removes it). End time is
+/// deliberately excluded so extending a block updates its event in place.
 /// base32hex charset (a-v, 0-9); "noted" prefix + 32 hex chars = 37 chars.
-fn event_id(event_date: &str, index: usize) -> String {
-    let digest = Sha256::digest(format!("noted-{event_date}-{index}").as_bytes());
+fn event_id(event_date: &str, task: &str, start: &str) -> String {
+    let digest = Sha256::digest(format!("noted-{event_date}-{start}-{}", task.trim()).as_bytes());
     const ALPHA: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(32);
     for b in &digest[..16] {
@@ -845,7 +849,7 @@ pub async fn sync(dir: &Path, event_date: &str, blocks: Vec<Value>) -> Result<Sy
     };
 
     let mut fresh_ids: Vec<String> = Vec::new();
-    for (i, block) in blocks.iter().enumerate() {
+    for block in blocks.iter() {
         let task = block.get("task").and_then(|t| t.as_str()).unwrap_or("").trim();
         let start = block.get("start").and_then(|s| s.as_str());
         match (task.is_empty(), start) {
@@ -863,7 +867,7 @@ pub async fn sync(dir: &Path, event_date: &str, blocks: Vec<Value>) -> Result<Sy
                         }
                     }
                 }
-                let id = event_id(event_date, i);
+                let id = event_id(event_date, task, start);
                 match build_event(event_date, task, start, block, &id) {
                     Ok(body) => {
                         fresh_ids.push(id.clone());
@@ -1025,17 +1029,30 @@ mod tests {
 
     #[test]
     fn event_id_is_deterministic_and_valid() {
-        let a = event_id("2026-06-04", 0);
-        let b = event_id("2026-06-04", 0);
-        assert_eq!(a, b, "same date+index must yield the same id");
-        assert_ne!(event_id("2026-06-04", 0), event_id("2026-06-04", 1));
-        assert_ne!(event_id("2026-06-04", 0), event_id("2026-06-05", 0));
+        let a = event_id("2026-06-04", "gym", "09:00");
+        let b = event_id("2026-06-04", "gym", "09:00");
+        assert_eq!(a, b, "same date+task+start must yield the same id");
+        assert_ne!(a, event_id("2026-06-04", "lunch", "09:00"));
+        assert_ne!(a, event_id("2026-06-04", "gym", "10:00"));
+        assert_ne!(a, event_id("2026-06-05", "gym", "09:00"));
+        // Whitespace-insensitive on task so a stray trim doesn't orphan events.
+        assert_eq!(a, event_id("2026-06-04", "  gym  ", "09:00"));
         // base32hex charset: a-v and 0-9 only, length within Google's 5..=1024.
         assert!(a.len() >= 5 && a.len() <= 1024);
         assert!(
             a.chars().all(|c| matches!(c, 'a'..='v' | '0'..='9')),
             "id {a} must be base32hex"
         );
+    }
+
+    #[test]
+    fn event_id_is_independent_of_sibling_blocks() {
+        // The corruption this guards against: with index-keyed ids, deleting
+        // block 0 shifted every later block onto its neighbor's event. Content
+        // keying makes each block's id a pure function of the block itself.
+        let lunch_alone = event_id("2026-06-04", "lunch", "12:00");
+        let lunch_after_gym = event_id("2026-06-04", "lunch", "12:00");
+        assert_eq!(lunch_alone, lunch_after_gym);
     }
 
     #[test]

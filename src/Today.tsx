@@ -64,6 +64,27 @@ function stripMarker(line: string): string {
   return line.replace(MARKER_RE, "");
 }
 
+// Resolved start (+ optional end) → a timed Block, and the monotonic-cursor
+// value the next line should resolve against. An end at-or-before the start
+// folds across midnight ("10pm–1am" is 3h) — layoutRows and the Rust gcal push
+// already read end<start that way, so the parse side now agrees instead of
+// silently dropping the end. Shared by parseSchedule and salvageBlock so both
+// build blocks identically.
+function buildTimed(task: string, start: number, end: number | null): { block: Block; next: number } {
+  const s = ((start % 1440) + 1440) % 1440;
+  const block: Block = { task, start: minToStr(s) };
+  let next = start;
+  if (end != null) {
+    const e = ((end % 1440) + 1440) % 1440;
+    if (e !== s) {
+      block.end = minToStr(e);
+      block.duration_min = e > s ? e - s : e + 1440 - s;
+      next = start + block.duration_min;
+    }
+  }
+  return { block, next };
+}
+
 // If a block lacks a usable start time, treat its task text as a raw schedule
 // line and recover start/end/duration the same way parseSchedule does — the
 // model sometimes fails to split a line, leaving the time inside `task`
@@ -82,12 +103,7 @@ function salvageBlock(b: Block, prev: number): Block {
     const task = line.slice(m[0].length).replace(/^[\s:.,–—-]+/, "").trim();
     if (task) {
       const end = m[2] ? resolveTime(m[2], start) : null;
-      const out: Block = { task, start: minToStr(start) };
-      if (end != null && end > start) {
-        out.end = minToStr(end);
-        out.duration_min = end - start;
-      }
-      return out;
+      return buildTimed(task, start, end).block;
     }
   }
   // No leading time — keep the task, minus any marker glyph.
@@ -201,15 +217,25 @@ function pickMonotonic(hour: number, min: number, ap: "a" | "p" | null, prevMin:
   if (ap === "a") return (hour === 12 ? 0 : hour) * 60 + min;
   if (ap === "p") return (hour === 12 ? 12 : hour + 12) * 60 + min;
   if (hour >= 13) return hour * 60 + min; // already 24h, e.g. "18:30"
-  const base = (hour % 12) * 60 + min; // 12 -> 0
+  if (hour === 12) {
+    // An unqualified "12" means noon by human convention ("12-1 lunch"), never
+    // 00:xx; once noon has passed it's the coming midnight instead.
+    const noon = 720 + min;
+    return noon >= prevMin ? noon : 1440 + min;
+  }
+  const base = hour * 60 + min;
   if (base >= prevMin) return base;
   if (base + 720 >= prevMin) return base + 720;
   return base + 720;
 }
 
-// Parse one leading time token ("8", "8:30", "8:30pm", "930", "1145").
+// Parse one leading time token ("8", "8:30", "8:30pm", "930", "1145", "noon").
 function resolveTime(tok: string, prevMin: number): number | null {
   const t = tok.trim();
+  // Word clocks — the only ones people actually write in schedules.
+  if (/^(?:noon|midday)$/i.test(t)) return 720;
+  // "midnight" opening a schedule is 00:00; anywhere later it's the coming one.
+  if (/^midnight$/i.test(t)) return prevMin > 0 ? 1440 : 0;
   const m = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm|a|p)?$/i.exec(t);
   if (m) {
     const hour = Number(m[1]);
@@ -218,20 +244,25 @@ function resolveTime(tok: string, prevMin: number): number | null {
     const ap = m[3] ? (m[3][0].toLowerCase() as "a" | "p") : null;
     return pickMonotonic(hour, min, ap, prevMin);
   }
-  const d = /^(\d{3,4})$/.exec(t); // colon-less "930" / "1145"
+  const d = /^(\d{3,4})\s*(am|pm|a|p)?$/i.exec(t); // colon-less "930" / "1145" / "930pm"
   if (d) {
     const n = d[1];
     const hh = Number(n.slice(0, n.length - 2));
     const mm = Number(n.slice(-2));
     if (hh > 23 || mm > 59) return null;
-    return pickMonotonic(hh, mm, null, prevMin);
+    const ap = d[2] ? (d[2][0].toLowerCase() as "a" | "p") : null;
+    return pickMonotonic(hh, mm, ap, prevMin);
   }
   return null;
 }
 
 // am/pm (or bare a/p) only counts as a meridiem when not glued to a word, so
-// "2:00 profound" keeps its "p" instead of reading it as "2:00 p.m.".
-const TIME_TOK = "\\d{1,2}(?::\\d{2})?(?:\\s*(?:am|pm|a|p)(?![a-z]))?|\\d{3,4}";
+// "2:00 profound" keeps its "p" instead of reading it as "2:00 p.m.". Word
+// clocks (noon/midday/midnight) count too, with the same not-glued guard.
+// Colon-less "930"/"0830" must come FIRST: alternation is leftmost-wins, so
+// with \d{1,2} in front it would eat "08" and leave "30 run" as the task.
+const TIME_TOK =
+  "\\d{3,4}(?:\\s*(?:am|pm|a|p)(?![a-z]))?|\\d{1,2}(?::\\d{2})?(?:\\s*(?:am|pm|a|p)(?![a-z]))?|(?:noon|midday|midnight)(?![a-z])";
 const LINE_RE = new RegExp(`^\\s*~?\\s*(${TIME_TOK})\\s*(?:(?:[-–—]|to)\\s*~?\\s*(${TIME_TOK}))?`, "i");
 
 // Longest-first so the alternation matches full names before abbreviations.
@@ -282,13 +313,9 @@ export function parseSchedule(text: string): Block[] {
       const end = m[2] ? resolveTime(m[2], start) : null;
       const task = line.slice(m[0].length).replace(/^[\s:.,–—-]+/, "").trim();
       if (!task) continue;
-      const b: Block = { task, start: minToStr(start) };
-      if (end != null && end > start) {
-        b.end = minToStr(end);
-        b.duration_min = end - start;
-      }
-      blocks.push(b);
-      prev = end ?? start;
+      const { block, next } = buildTimed(task, start, end);
+      blocks.push(block);
+      prev = next;
     } else {
       blocks.push({ task: line });
     }
@@ -465,6 +492,9 @@ export function TodayView({
   // so the DB holds clean start/end. This persists the timeline across reloads
   // and lets Google Calendar sync — which reads the stored times — actually push.
   const healedRef = useRef<number | null>(null);
+  // In-flight heal write, so a Sync clicked right after capture waits for the
+  // healed times to land before the backend reads blocks out of the DB.
+  const healWriteRef = useRef<Promise<void> | null>(null);
   useEffect(() => {
     if (entry?.id == null || healedRef.current === entry.id) return;
     const stored = Array.isArray(entry.data?.blocks) ? (entry.data.blocks as unknown[]) : [];
@@ -478,10 +508,13 @@ export function TodayView({
       });
     healedRef.current = entry.id; // claim before the await so it runs at most once
     if (!changed) return;
-    api
+    healWriteRef.current = api
       .updateEntry(entry.id, { blocks })
       .then(() => onSaved())
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        healWriteRef.current = null;
+      });
   }, [entry?.id, blocks]);
 
   // Pull today's real Google Calendar events. Used by both the empty-state card
@@ -535,6 +568,9 @@ export function TodayView({
     if (sync.state === "syncing") return;
     setSync({ state: "syncing", msg: "" });
     try {
+      // The backend reads blocks from the DB, so let any in-flight self-heal
+      // write finish first — otherwise salvaged times miss this push.
+      if (healWriteRef.current) await healWriteRef.current;
       const r = await api.gcalSync(today);
       const pushed = r.created + r.updated;
       const parts = [`Synced ${pushed} block${pushed === 1 ? "" : "s"}`];

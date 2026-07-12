@@ -2048,8 +2048,12 @@ a.cal-btn { text-decoration: none; }
 }
 .side-toggle:hover { color: var(--ink); }
 
-.app.side { padding-left: 234px; transition: padding-left var(--duration-slow) var(--ease); }
-.app.side.side-hidden { padding-left: 28px; }
+/* Shell padding stops at the sidebar's edge exactly (like homemode); the 28px
+   breathing room lives INSIDE the opaque main column — outside it, it's a
+   transparent strip where the window glass bleeds through as a seam. */
+.app.side { padding-left: 206px; padding-right: 0; transition: padding-left var(--duration-slow) var(--ease); }
+.app.side.side-hidden { padding-left: 0; }
+.app.side:not(.homemode) .main-col { padding-left: 28px; padding-right: 28px; }
 .sidebar {
   /* height in vh, not top+bottom stretch: a transformed/filtered ancestor
      (theme transitions) turns fixed into absolute and breaks the stretch,
@@ -2107,8 +2111,7 @@ a.cal-btn { text-decoration: none; }
    paint solid canvas, the sidebar paints a translucent tint — so the desktop
    shows through the rail only. Browser (phone) never gets .vibrant. */
 body.vibrant { background: transparent; }
-body.vibrant .app.side { padding-right: 0; }
-body.vibrant .main-col { background: var(--canvas); padding-right: 28px; }
+body.vibrant .main-col { background: var(--canvas); }
 body.vibrant .sidebar {
   background: color-mix(in srgb, var(--canvas) 38%, transparent);
   border-right-color: color-mix(in srgb, var(--line) 55%, transparent);

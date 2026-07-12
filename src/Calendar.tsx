@@ -634,10 +634,21 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
     };
     try {
       if (form.mode === "create") {
+        // One malformed address makes Google 400 the whole event — catch it
+        // here with a readable message instead.
+        const EMAIL_RE = /^[^\s@]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
         const guests = f.guests
           .split(/[,\s]+/)
           .map((g) => g.trim())
-          .filter((g) => g.includes("@"));
+          .filter(Boolean);
+        const bad = guests.filter((g) => !EMAIL_RE.test(g));
+        if (bad.length) {
+          setFormErr(
+            `That doesn't look like a valid email: ${bad.join(", ")} — check for typos (e.g. a double dot).`
+          );
+          setFormBusy(false);
+          return;
+        }
         await api.gcalCreateEvent({
           ...input,
           addMeet: f.meet === "add",

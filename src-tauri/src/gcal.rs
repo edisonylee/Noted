@@ -1514,6 +1514,19 @@ fn harvest_contacts(dir: &Path, events: &[Value]) {
 }
 
 // ── Event CRUD (Calendar view) ──────────────────────────────────────────────
+/// Google error bodies are verbose nested JSON; surface just the human
+/// sentence ("Invalid attendee email.") and keep the raw body as a fallback.
+fn api_error_detail(text: &str) -> String {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| text.to_string())
+}
 /// Request body for a user-authored event. `start`/`end` are "HH:MM"; an
 /// absent start means all-day, with `end_date` the INCLUSIVE last day
 /// (defaults to `date`). With `patch`, the unused date/dateTime representation
@@ -1641,7 +1654,7 @@ pub async fn create_event(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("create failed ({status}): {text}"));
+        return Err(anyhow!("create failed ({status}): {}", api_error_detail(&text)));
     }
     let v: Value = resp.json().await?;
     Ok(json!({ "id": v.get("id").cloned().unwrap_or(Value::Null) }))
@@ -1684,7 +1697,7 @@ pub async fn update_event(
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("move failed ({status}): {text}"));
+            return Err(anyhow!("move failed ({status}): {}", api_error_detail(&text)));
         }
         cal = dest.to_string();
     }
@@ -1702,7 +1715,7 @@ pub async fn update_event(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("update failed ({status}): {text}"));
+        return Err(anyhow!("update failed ({status}): {}", api_error_detail(&text)));
     }
     Ok(())
 }
@@ -2089,6 +2102,15 @@ mod tests {
         let b = user_event_body("x", "2026-06-05", None, None, None, None, None, None, true).unwrap();
         assert_eq!(b["start"]["dateTime"], Value::Null, "patch must clear the timed shape");
         assert_eq!(b["end"]["date"], "2026-06-06");
+    }
+
+    #[test]
+    fn api_error_detail_extracts_the_human_message() {
+        // The exact shape Google returned for a malformed guest email.
+        let body = r#"{ "error": { "errors": [ { "domain": "global", "reason": "invalid", "message": "Invalid attendee email." } ], "code": 400, "message": "Invalid attendee email." } }"#;
+        assert_eq!(api_error_detail(body), "Invalid attendee email.");
+        // Non-JSON bodies pass through untouched.
+        assert_eq!(api_error_detail("plain text"), "plain text");
     }
 
     #[test]

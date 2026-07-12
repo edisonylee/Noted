@@ -2320,3 +2320,23 @@ body.vibrant .app.homemode .main-col {
 .spaces-head .icon-btn { width: 24px; height: 24px; }
 .notes-list-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .notes-list-head .notes-search { flex: 1; margin-bottom: 0; }
+
+/* ── Full-bleed sections ──────────────────────────────────────────────────── */
+/* Every view spans the window like Calendar/Home — no more floating cards
+   that slide around while resizing. Text columns stay capped INSIDE the
+   full-width shells (centered tracks), so lines keep a readable measure. */
+.app.side .knowledge,
+.app.side .schedule-page,
+.app.side .journal,
+.app.side .settings-page,
+.app.side .notes-view {
+  max-width: none;
+}
+/* Journal: full-width shell, centered index+editor tracks with a capped editor. */
+.app.side .journal { grid-template-columns: 210px minmax(0, 920px); justify-content: center; }
+/* Schedule: the strip and the timeline share one centered 760px measure. */
+.app.side .comingup { max-width: 760px; margin-left: auto; margin-right: auto; }
+.app.side .schedule-page .today { max-width: 760px; }
+/* Settings: nav + a readable body, spanning like a native settings pane. */
+.app.side .settings-page .settings-layout { justify-content: center; }
+.app.side .settings-page .settings-body { max-width: 720px; }

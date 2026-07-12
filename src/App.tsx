@@ -23,7 +23,7 @@ import { APP_TZ, easternDay, easternHour } from "./day";
 import "./App.css";
 
 type Phase = "idle" | "thinking" | "review";
-type View = "today" | "calendar" | "journal" | "knowledge";
+type View = "today" | "calendar" | "journal" | "knowledge" | "settings";
 type Source = "text" | "photo";
 // One editable review card per extracted entry.
 type ReviewCard = {
@@ -541,14 +541,20 @@ export default function App() {
         <button className="icon-btn" onClick={() => setShowPhone(true)} title="Capture from your phone">
           <Smartphone size={18} />
         </button>
-        <button className="icon-btn" onClick={() => setShowSettings(true)} title="Models & settings">
+        <button
+          className={"icon-btn" + (view === "settings" ? " on" : "")}
+          onClick={() => setView("settings")}
+          title="Settings"
+        >
           <Settings size={18} />
         </button>
       </header>
 
       <main className="content">
-        {view === "calendar" ? (
-          <CalendarView onOpenSettings={() => setShowSettings(true)} />
+        {view === "settings" ? (
+          <SettingsModal page onClose={() => setView("today")} />
+        ) : view === "calendar" ? (
+          <CalendarView onOpenSettings={() => setView("settings")} />
         ) : view === "journal" ? (
           <JournalView notes={notes} onSaved={() => refresh().catch(handleErr)} />
         ) : view === "knowledge" ? (
@@ -581,7 +587,7 @@ export default function App() {
           <TodayView
             notes={notes}
             onSaved={() => refresh().catch(handleErr)}
-            onOpenSettings={() => setShowSettings(true)}
+            onOpenSettings={() => setView("settings")}
           />
         )}
         <div className="log-hero">
@@ -885,7 +891,6 @@ export default function App() {
       </footer>
 
       {showPhone && <PhonePanel onClose={() => setShowPhone(false)} />}
-      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       <FloatingChat onMutated={refresh} />
     </div>
   );

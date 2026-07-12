@@ -346,9 +346,10 @@ export type MeetingLiveState = {
 };
 export type MeetingTemplate = { name: string; prompt: string; builtin: boolean };
 export type MeetingModelStatus = { turbo: boolean; base: boolean; tap_supported: boolean };
-// What the record-prompt popup shows (calendar T-60s or mic-in-use detection).
+// What the record-prompt popup shows: calendar T-60s / mic-in-use detection,
+// or a transient buttonless "status" card (e.g. "Meeting saved").
 export type PromptPayload = {
-  kind: "calendar" | "mic";
+  kind: "calendar" | "mic" | "status";
   title: string;
   app: string | null;
   bundleId: string | null;

@@ -30,6 +30,10 @@ function mmss(ms: number): string {
   return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 }
 
+// Events that already auto-started a recording this session. An auto-start
+// must never re-arm after a manual stop.
+const autoStartedEvents = new Set<string>();
+
 function fmtClock(min: number | null): string {
   if (min == null) return "";
   const h = Math.floor((min % 1440) / 60);
@@ -205,16 +209,27 @@ export function MeetingPage({
   }, [title, ev?.id]);
 
   // Granola's one true auto-start: this event's page is open when the
-  // scheduled start arrives → recording begins on its own.
+  // scheduled start arrives → recording begins on its own. Strictly once per
+  // event per app session, and only near the scheduled start — otherwise
+  // stopping and landing back on the event page would immediately re-arm
+  // (a runaway-recording loop).
   useEffect(() => {
-    if (id != null || !ev || ev.date == null || ev.start_min == null) return;
+    if (id != null || !ev || !ev.id || ev.date == null || ev.start_min == null) return;
+    const evId = ev.id;
     const check = async () => {
+      if (autoStartedEvents.has(evId)) return;
       if (easternDay() !== ev.date) return;
       const nowMin = easternMinutes();
-      const end = ev.end_min ?? (ev.start_min as number) + 60;
-      if (nowMin < (ev.start_min as number) || nowMin >= end) return;
+      const from = ev.start_min as number;
+      const end = ev.end_min ?? from + 60;
+      // Only within the first 10 minutes — opening the page mid-meeting later
+      // shouldn't surprise-record.
+      if (nowMin < from || nowMin > Math.min(from + 10, end)) return;
       const st = await api.meetingState().catch(() => null);
-      if (st && !st.active) start();
+      if (st && !st.active) {
+        autoStartedEvents.add(evId);
+        start();
+      }
     };
     const t = window.setInterval(check, 15_000);
     check();

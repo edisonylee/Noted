@@ -269,6 +269,7 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
         return Ok(None);
     };
     let id = active.id;
+    let title = active.title.clone();
     active.stop.store(true, Ordering::Relaxed);
 
     // Joins block (worker drains + transcribes the tail) — off the async runtime.
@@ -292,6 +293,8 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
         }
     }
     let _ = app.emit("meeting-stopped", json!({ "meetingId": id }));
+    // "Did it end?" should never be a mystery: a small transient card confirms.
+    detect::show_status_card(&app, &title, "Meeting saved — writing notes…");
 
     // Auto-enhance (Granola: enhancement fires when the call ends).
     let h = app.clone();
@@ -304,6 +307,38 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
         }
     });
     Ok(Some(id))
+}
+
+/// Startup reconciliation: a crash or dev-rebuild mid-recording leaves rows
+/// stuck in 'recording'/'summarizing' forever. Anything with a transcript
+/// gets summarized now; empty ones are marked failed.
+pub fn reconcile(app: &tauri::AppHandle) {
+    let stuck = {
+        let db = app.state::<Db>();
+        let conn = db.0.lock().unwrap();
+        store::list_stuck(&conn).unwrap_or_default()
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    for (id, segments) in stuck {
+        let db = app.state::<Db>();
+        let conn = db.0.lock().unwrap();
+        if segments == 0 {
+            let _ = store::mark_interrupted(&conn, id, &now, "failed");
+            continue;
+        }
+        let _ = store::mark_interrupted(&conn, id, &now, "summarizing");
+        drop(conn);
+        println!("[noted] recovering interrupted meeting {id} ({segments} segments)");
+        let h = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = summarize::run(&h, id, None).await {
+                eprintln!("[noted] recovery summarize failed for {id}: {e}");
+                let db = h.state::<Db>();
+                let conn = db.0.lock().unwrap();
+                let _ = store::set_status(&conn, id, "failed");
+            }
+        });
+    }
 }
 
 /// Live status for polling (phone bridge has no event channel).

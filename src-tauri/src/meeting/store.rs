@@ -38,6 +38,28 @@ pub fn set_ended(conn: &Connection, id: i64, ended_at: &str, status: &str) -> Re
     Ok(())
 }
 
+/// Meetings a dead process left mid-flight ("recording"/"summarizing"),
+/// with their segment counts — startup reconciliation input.
+pub fn list_stuck(conn: &Connection) -> Result<Vec<(i64, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT m.id, (SELECT COUNT(*) FROM meeting_segments s WHERE s.meeting_id = m.id)
+         FROM meetings m WHERE m.status IN ('recording', 'summarizing')",
+    )?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Stamp an interrupted meeting: keep any real ended_at, set the new status.
+pub fn mark_interrupted(conn: &Connection, id: i64, now: &str, status: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE meetings SET ended_at = COALESCE(ended_at, ?2), status = ?3 WHERE id = ?1",
+        rusqlite::params![id, now, status],
+    )?;
+    Ok(())
+}
+
 pub fn set_notes(conn: &Connection, id: i64, notes: &str) -> Result<()> {
     conn.execute(
         "UPDATE meetings SET raw_notes = ?2 WHERE id = ?1",

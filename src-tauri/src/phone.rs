@@ -294,7 +294,10 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
             .map(|_| Value::Null),
         "meeting_templates" => crate::meeting_templates(a).await,
         "meetings_settings_get" => Ok(crate::meetings_settings_get()),
-        "meeting_start" | "meeting_stop" | "meeting_summarize" | "meeting_template_save"
+        // Stopping works from the phone too — it's a remote control for the
+        // desktop recorder (capture itself always runs on the Mac).
+        "meeting_stop" => crate::meeting_stop(a).await.map(|v| json!(v)),
+        "meeting_start" | "meeting_summarize" | "meeting_template_save"
         | "meeting_template_delete" | "meeting_capture_probe" | "download_meeting_model"
         | "meeting_prompt_payload" | "meeting_dismiss_prompt" | "meetings_settings_set" => {
             Err("this action runs on the desktop app only".into())

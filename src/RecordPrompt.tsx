@@ -63,15 +63,17 @@ export function RecordPrompt() {
           <strong className="rp-title">{p.meetingTitle}</strong>
           {error && <span className="rp-error">{error}</span>}
         </div>
-        <div className="rp-actions">
-          <button className="rp-record" onClick={accept} disabled={busy}>
-            {p.kind === "calendar" && p.event?.meet_link ? <Video size={14} /> : <Mic size={14} />}
-            {busy ? "Starting…" : p.kind === "calendar" ? "Join & record" : "Record"}
-          </button>
-          <button className="rp-dismiss" onClick={dismiss} disabled={busy}>
-            Not now
-          </button>
-        </div>
+        {p.kind !== "status" && (
+          <div className="rp-actions">
+            <button className="rp-record" onClick={accept} disabled={busy}>
+              {p.kind === "calendar" && p.event?.meet_link ? <Video size={14} /> : <Mic size={14} />}
+              {busy ? "Starting…" : p.kind === "calendar" ? "Join & record" : "Record"}
+            </button>
+            <button className="rp-dismiss" onClick={dismiss} disabled={busy}>
+              Not now
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

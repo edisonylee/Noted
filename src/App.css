@@ -1509,3 +1509,25 @@ a.cal-btn { text-decoration: none; }
 .rp-record:hover { background: var(--ink-hover); }
 .rp-dismiss { border: none; background: none; color: var(--muted); font-size: 12px; cursor: pointer; }
 .rp-dismiss:hover { color: var(--ink); }
+
+/* Settings as a real page (desktop) with a section nav; the mobile modal
+   reuses the same layout, stacked. */
+.settings-page { max-width: 780px; margin: 0 auto; text-align: left; }
+.settings-title { margin: 0 0 20px; font-size: 21px; font-weight: 620; letter-spacing: -0.02em; }
+.settings-layout { display: flex; gap: 32px; align-items: flex-start; }
+.settings-nav { flex: none; width: 168px; position: sticky; top: 18px; display: flex; flex-direction: column; gap: 2px; }
+.settings-nav button {
+  text-align: left; border: none; background: none; cursor: pointer;
+  padding: 8px 12px; border-radius: var(--r-sm);
+  font-size: 13.5px; color: var(--muted);
+}
+.settings-nav button:hover { color: var(--ink); background: var(--hover-soft); }
+.settings-nav button.on { background: var(--hover-soft); color: var(--ink); font-weight: 580; }
+.settings-body { flex: 1; min-width: 0; }
+.settings-body h3 { margin: 0 0 6px; font-size: 16px; font-weight: 580; letter-spacing: -0.01em; }
+.settings-body .settings-actions .field-hint { display: inline-flex; align-items: center; gap: 4px; color: var(--good); margin-right: auto; }
+
+/* Modal variant (mobile): stack the nav horizontally above the section. */
+.settings-modal .settings-layout { flex-direction: column; gap: 16px; }
+.settings-modal .settings-nav { position: static; width: auto; flex-direction: row; flex-wrap: wrap; }
+.record-prompt.status::before { background: var(--good); }

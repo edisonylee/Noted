@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
-  "windows": ["main"],
+  "description": "Capability for the main window + the record-prompt popup",
+  "windows": ["main", "record-prompt"],
   "permissions": [
     "core:default",
     "opener:default"

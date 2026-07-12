@@ -191,6 +191,37 @@ pub fn close_prompt(app: &tauri::AppHandle) {
     }
 }
 
+/// Transient, buttonless top-right card ("Meeting saved — writing notes…").
+/// Auto-closes unless a real prompt replaced it meanwhile.
+pub fn show_status_card(app: &tauri::AppHandle, meeting_title: &str, message: &str) {
+    show_prompt(
+        app,
+        json!({
+            "kind": "status",
+            "title": message,
+            "app": Value::Null,
+            "bundleId": Value::Null,
+            "meetingTitle": meeting_title,
+            "event": Value::Null,
+        }),
+    );
+    let h = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(6));
+        let still_status = {
+            let pending = h.state::<PendingPrompt>();
+            let guard = pending.0.lock().unwrap();
+            guard
+                .as_ref()
+                .map(|p| p["kind"] == "status")
+                .unwrap_or(false)
+        };
+        if still_status {
+            close_prompt(&h);
+        }
+    });
+}
+
 /// Spawn the detection/auto-stop loop (desktop, at startup).
 pub fn spawn(app: tauri::AppHandle) {
     std::thread::spawn(move || run(app));
@@ -207,6 +238,10 @@ fn run(app: tauri::AppHandle) {
     let mut events_fetched_at: u64 = 0;
     // auto-stop: when the source app was last seen on the mic
     let mut source_last_seen: u64 = 0;
+    // Meetings started manually/from calendar have no source bundle — adopt
+    // the first call app seen holding the mic so "left the call" still stops.
+    let mut adopted_source: Option<String> = None;
+    let mut last_recording: Option<i64> = None;
 
     loop {
         std::thread::sleep(Duration::from_secs(2));
@@ -234,6 +269,12 @@ fn run(app: tauri::AppHandle) {
 
         let users = mic_users();
 
+        if recording_id != last_recording {
+            adopted_source = None;
+            source_last_seen = now;
+            last_recording = recording_id;
+        }
+
         // ── Auto-stop checks for the active recording ────────────────────
         if recording_id.is_some() {
             let (source, silence_ms, elapsed_ms, sched_end, ev_date) = {
@@ -257,11 +298,19 @@ fn run(app: tauri::AppHandle) {
                     a.event_date.clone(),
                 )
             };
+            // No known source app? Adopt the first non-ignored one that holds
+            // the mic during this recording (that's the call).
+            if source.is_none() && adopted_source.is_none() {
+                adopted_source = users
+                    .iter()
+                    .find(|u| !ignored(u, &cfg.ignore_bundles))
+                    .cloned();
+            }
             let mut stop_reason: Option<&str> = None;
             if silence_ms > SILENCE_STOP_MS {
                 stop_reason = Some("15 minutes of silence");
             }
-            if let Some(src) = &source {
+            if let Some(src) = source.as_ref().or(adopted_source.as_ref()) {
                 if users.iter().any(|u| u == src) {
                     source_last_seen = now;
                 } else if source_last_seen > 0

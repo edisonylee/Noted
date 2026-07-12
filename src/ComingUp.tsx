@@ -123,7 +123,19 @@ export function ComingUp({
                 ev.start_min <= nowMin &&
                 (ev.end_min ?? ev.start_min + 60) > nowMin;
               return (
-                <button key={ev.id} className={"comingup-row" + (live ? " live" : "")} onClick={() => onOpenEvent(ev)}>
+                // A div, not a <button>: the Join anchor lives inside, and
+                // nested interactive content inside a button is invalid HTML —
+                // WebKit swallows the anchor's click.
+                <div
+                  key={ev.id}
+                  className={"comingup-row" + (live ? " live" : "")}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onOpenEvent(ev)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") onOpenEvent(ev);
+                  }}
+                >
                   <span className="cal-dot" style={{ background: ev.color }} />
                   <span className="cu-time">
                     {ev.date !== today ? "Tmrw " : ""}
@@ -147,7 +159,7 @@ export function ComingUp({
                       <Video size={13} /> Join
                     </a>
                   )}
-                </button>
+                </div>
               );
             })}
           </div>

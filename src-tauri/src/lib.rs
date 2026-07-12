@@ -2513,6 +2513,8 @@ pub fn run() {
                 }
             }
             meeting::detect::spawn(app.handle().clone());
+            // Recover meetings a previous process left mid-recording.
+            meeting::reconcile(&app.handle().clone());
 
             // Load model-provider config (mode + models from disk, key from Keychain).
             provider::init(&dir);

@@ -177,6 +177,17 @@ pub fn meeting_event_json(conn: &Connection, id: i64) -> Result<Option<Value>> {
     Ok(raw.and_then(|s| serde_json::from_str(&s).ok()))
 }
 
+/// 1:1 meetings: them-segments too short to voice-fingerprint never joined a
+/// cluster — but with exactly one external attendee they can only be them.
+pub fn label_unlabeled_them(conn: &Connection, meeting_id: i64, name: &str) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE meeting_segments SET speaker = ?2
+         WHERE meeting_id = ?1 AND channel = 'them' AND speaker IS NULL",
+        rusqlite::params![meeting_id, name],
+    )?;
+    Ok(n)
+}
+
 /// Record a meeting's diarized voices (label + centroid) so a later rename can
 /// seed a voiceprint. An unlabeled lone voice is stored under "Them".
 pub fn save_meeting_speakers(

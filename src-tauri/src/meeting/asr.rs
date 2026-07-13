@@ -189,62 +189,104 @@ impl Chunker {
 }
 
 // ---------------------------------------------------------------------------
-// Whisper
+// ASR engines. Whisper (whisper.cpp) is the default; Parakeet (NVIDIA
+// Parakeet-TDT 0.6B, a NeMo transducer running on the sherpa-onnx runtime we
+// already link for speaker embeddings) is faster and stronger on proper
+// nouns. Both consume the same VAD-chunked 16 kHz mono segments.
 // ---------------------------------------------------------------------------
 
-/// Model stays loaded for the whole meeting; a fresh (cheap) state per segment
-/// avoids self-referential lifetime knots. Calls are serialized by the worker
-/// loop so Metal never sees two decodes at once.
-pub struct Transcriber {
-    ctx: whisper_rs::WhisperContext,
-    /// Decoder bias for domain terms and names (whisper's initial_prompt).
-    hint: Option<String>,
+/// Which engine to load, resolved from config + downloaded files at meeting
+/// start (`meeting::engine_spec`).
+pub enum EngineSpec {
+    Whisper { model: PathBuf },
+    /// Directory holding encoder/decoder/joiner int8 ONNX + tokens.txt.
+    Parakeet { dir: PathBuf },
+}
+
+/// Model stays loaded for the whole meeting. Calls are serialized by the
+/// worker loop so Metal/onnxruntime never see two decodes at once.
+pub enum Transcriber {
+    Whisper {
+        ctx: whisper_rs::WhisperContext,
+        /// Decoder bias for domain terms and names (whisper's initial_prompt).
+        hint: Option<String>,
+    },
+    /// No prompt biasing: the published Parakeet export ships no bpe.vocab,
+    /// so sherpa hotwords can't be used — `apply_vocab` still canonicalizes
+    /// vocabulary terms after decode.
+    Parakeet { rec: sherpa_rs::transducer::TransducerRecognizer },
 }
 
 impl Transcriber {
-    pub fn new(model_path: &Path, hint: Option<String>) -> Result<Self> {
-        let path = model_path
-            .to_str()
-            .ok_or_else(|| anyhow!("bad model path"))?;
-        let ctx = whisper_rs::WhisperContext::new_with_params(
-            path,
-            whisper_rs::WhisperContextParameters::default(),
-        )
-        .map_err(|e| anyhow!("whisper load failed: {e:?}"))?;
-        // set_initial_prompt panics on interior NULs.
-        let hint = hint.map(|h| h.replace('\0', ""));
-        Ok(Self { ctx, hint })
-    }
-
-    pub fn transcribe(&self, samples: &[f32]) -> Result<String> {
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| anyhow!("whisper state: {e:?}"))?;
-        let mut params =
-            whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(Some("en"));
-        params.set_print_progress(false);
-        params.set_print_special(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        if let Some(h) = &self.hint {
-            // whisper-rs leaks a small CString per call here — bounded at
-            // ~1 KB per segment, dwarfed by decode-state churn.
-            params.set_initial_prompt(h);
-        }
-        state
-            .full(params, samples)
-            .map_err(|e| anyhow!("transcribe failed: {e:?}"))?;
-        let mut out = String::new();
-        for i in 0..state.full_n_segments() {
-            if let Some(seg) = state.get_segment(i) {
-                if let Ok(t) = seg.to_str() {
-                    out.push_str(t);
-                }
+    pub fn new(spec: &EngineSpec, hint: Option<String>) -> Result<Self> {
+        match spec {
+            EngineSpec::Whisper { model } => {
+                let path = model.to_str().ok_or_else(|| anyhow!("bad model path"))?;
+                let ctx = whisper_rs::WhisperContext::new_with_params(
+                    path,
+                    whisper_rs::WhisperContextParameters::default(),
+                )
+                .map_err(|e| anyhow!("whisper load failed: {e:?}"))?;
+                // set_initial_prompt panics on interior NULs.
+                let hint = hint.map(|h| h.replace('\0', ""));
+                Ok(Self::Whisper { ctx, hint })
+            }
+            EngineSpec::Parakeet { dir } => {
+                let p = |f: &str| dir.join(f).to_string_lossy().to_string();
+                let rec = sherpa_rs::transducer::TransducerRecognizer::new(
+                    sherpa_rs::transducer::TransducerConfig {
+                        encoder: p("encoder.int8.onnx"),
+                        decoder: p("decoder.int8.onnx"),
+                        joiner: p("joiner.int8.onnx"),
+                        tokens: p("tokens.txt"),
+                        model_type: "nemo_transducer".into(),
+                        decoding_method: "greedy_search".into(),
+                        sample_rate: SR as i32,
+                        feature_dim: 80,
+                        num_threads: 4,
+                        ..Default::default()
+                    },
+                )
+                .map_err(|e| anyhow!("parakeet load failed: {e}"))?;
+                Ok(Self::Parakeet { rec })
             }
         }
-        Ok(out.trim().to_string())
+    }
+
+    pub fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
+        match self {
+            Self::Whisper { ctx, hint } => {
+                let mut state = ctx
+                    .create_state()
+                    .map_err(|e| anyhow!("whisper state: {e:?}"))?;
+                let mut params = whisper_rs::FullParams::new(
+                    whisper_rs::SamplingStrategy::Greedy { best_of: 1 },
+                );
+                params.set_language(Some("en"));
+                params.set_print_progress(false);
+                params.set_print_special(false);
+                params.set_print_realtime(false);
+                params.set_print_timestamps(false);
+                if let Some(h) = hint {
+                    // whisper-rs leaks a small CString per call here — bounded
+                    // at ~1 KB per segment, dwarfed by decode-state churn.
+                    params.set_initial_prompt(h);
+                }
+                state
+                    .full(params, samples)
+                    .map_err(|e| anyhow!("transcribe failed: {e:?}"))?;
+                let mut out = String::new();
+                for i in 0..state.full_n_segments() {
+                    if let Some(seg) = state.get_segment(i) {
+                        if let Ok(t) = seg.to_str() {
+                            out.push_str(t);
+                        }
+                    }
+                }
+                Ok(out.trim().to_string())
+            }
+            Self::Parakeet { rec } => Ok(rec.transcribe(SR as u32, samples).trim().to_string()),
+        }
     }
 }
 
@@ -487,7 +529,7 @@ pub struct WorkerArgs {
     pub me: Arc<ChannelBuf>,
     pub them: Arc<ChannelBuf>,
     pub stop: Arc<AtomicBool>,
-    pub model_path: PathBuf,
+    pub engine: EngineSpec,
     /// None = audio retention off. Some(dir) = write me.wav / them.wav there.
     pub audio_dir: Option<PathBuf>,
     /// Wall anchor for both channel timelines (gap insertion keys off it).
@@ -515,7 +557,7 @@ const GAP_SLACK_MS: u64 = 2_500;
 const WAV_GAP_CAP_MS: u64 = 30 * 60 * 1_000;
 
 pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
-    let transcriber = match Transcriber::new(&args.model_path, args.asr_hint.clone()) {
+    let mut transcriber = match Transcriber::new(&args.engine, args.asr_hint.clone()) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("[noted] meeting ASR unavailable: {e}");
@@ -869,6 +911,11 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                     labels.len()
                 ),
                 Err(e) => eprintln!("[noted] diarization write failed: {e}"),
+            }
+            // Short reactions ("Mm-hmm.") embed too briefly to cluster; in a
+            // 1:1 they can only be the one other person — no third "Them".
+            if external.len() == 1 {
+                let _ = store::label_unlabeled_them(&conn, args.meeting_id, &external[0]);
             }
         }
     }

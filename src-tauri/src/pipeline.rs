@@ -435,7 +435,7 @@ async fn extract_segment(
                  event_date (YYYY-MM-DD or null), data (object). JSON only.)"
             )
         };
-        match ollama::chat_json(ollama::TEXT_MODEL, &system, &user, None, Some(routing_schema())).await {
+        match ollama::chat_json(&ollama::text_model(), &system, &user, None, Some(routing_schema())).await {
             Ok(v) => {
                 let raw_date = v.get("event_date").and_then(|d| d.as_str()).map(String::from);
                 let ents = parse_entities(&v);
@@ -529,7 +529,7 @@ async fn segment_note(
     today: &str,
 ) -> Result<Vec<Segment>> {
     let system = build_segment_prompt(catalog, today);
-    let v = ollama::chat_json(ollama::TEXT_MODEL, &system, text, None, Some(segment_schema())).await?;
+    let v = ollama::chat_json(&ollama::text_model(), &system, text, None, Some(segment_schema())).await?;
     let items = v
         .get("items")
         .and_then(|i| i.as_array())
@@ -692,7 +692,7 @@ pub async fn transcribe_photo(image_b64: &str) -> Result<String> {
         "required": ["raw_text"]
     });
     let v = ollama::chat_json(
-        ollama::VISION_MODEL,
+        &ollama::vision_model(),
         system,
         "Transcribe this note exactly.",
         Some(vec![image_b64.to_string()]),

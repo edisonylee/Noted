@@ -19,9 +19,13 @@ use std::process::Command;
 use std::sync::{OnceLock, RwLock};
 
 const KEYCHAIN_SERVICE: &str = "com.noted.app";
-const KEYCHAIN_ACCOUNT: &str = "gemini_api_key";
 // Gemini speaks an OpenAI-compatible dialect at this base (chat/completions).
 const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
+const OPENAI_DEFAULT_BASE: &str = "https://api.openai.com/v1";
+// Anthropic has no OpenAI-compatible dialect — raw Messages API over reqwest
+// (there is no official Rust SDK).
+const ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 const CONFIG_FILE: &str = "provider.json";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,7 +33,7 @@ const CONFIG_FILE: &str = "provider.json";
 pub enum Mode {
     /// 100% local Ollama. The default. $0, fully private.
     Local,
-    /// Local embeddings + chat, but extract/OCR go to Gemini (fast + cheap).
+    /// Local embeddings + chat, but extract/OCR go to the cloud (fast + cheap).
     Balanced,
 }
 
@@ -42,23 +46,115 @@ impl Mode {
     }
 }
 
+/// Which cloud service Balanced mode's extract/OCR calls hit. "openai" means
+/// any OpenAI-compatible endpoint (OpenAI itself, LM Studio, llama.cpp server,
+/// vLLM, OpenRouter…) via a configurable base URL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudProvider {
+    Gemini,
+    OpenAI,
+    Anthropic,
+}
+
+impl CloudProvider {
+    fn parse(s: &str) -> CloudProvider {
+        match s.to_ascii_lowercase().as_str() {
+            "openai" => CloudProvider::OpenAI,
+            "anthropic" => CloudProvider::Anthropic,
+            _ => CloudProvider::Gemini,
+        }
+    }
+    fn keychain_account(self) -> &'static str {
+        match self {
+            CloudProvider::Gemini => "gemini_api_key",
+            CloudProvider::OpenAI => "openai_api_key",
+            CloudProvider::Anthropic => "anthropic_api_key",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub mode: Mode,
+    /// Local Ollama models for the text/vision paths — any pulled model works
+    /// (defaults are the tuned qwen2.5 pair). The embedding model is NOT
+    /// configurable: the vec0 tables are 768-dim and a different embedder is a
+    /// different, incompatible vector space (switching would require a full
+    /// re-embed of every note and entity).
+    #[serde(default = "d_text_model")]
+    pub text_model: String,
+    #[serde(default = "d_vision_model")]
+    pub vision_model: String,
+    /// Which cloud service Balanced routes extract/OCR to.
+    #[serde(default = "d_cloud_provider")]
+    pub cloud_provider: CloudProvider,
     pub gemini_text_model: String,   // extraction hot path — cheapest/fastest
     pub gemini_vision_model: String, // handwriting OCR — a touch stronger
+    /// OpenAI-compatible endpoint (OpenAI, LM Studio, llama.cpp, OpenRouter…).
+    #[serde(default = "d_openai_base")]
+    pub openai_base_url: String,
+    #[serde(default = "d_openai_text")]
+    pub openai_text_model: String,
+    #[serde(default = "d_openai_vision")]
+    pub openai_vision_model: String,
+    /// Anthropic model ids — mirrors the Gemini split: a fast/cheap model for
+    /// the per-note extract hot path, a stronger one for handwriting OCR.
+    #[serde(default = "d_anthropic_text")]
+    pub anthropic_text_model: String,
+    #[serde(default = "d_anthropic_vision")]
+    pub anthropic_vision_model: String,
     // Loaded from the Keychain at startup; never serialized to the JSON file.
     #[serde(skip)]
     pub gemini_api_key: Option<String>,
+    #[serde(skip)]
+    pub openai_api_key: Option<String>,
+    #[serde(skip)]
+    pub anthropic_api_key: Option<String>,
+}
+
+fn d_text_model() -> String {
+    crate::ollama::TEXT_MODEL.into()
+}
+fn d_vision_model() -> String {
+    crate::ollama::VISION_MODEL.into()
+}
+fn d_cloud_provider() -> CloudProvider {
+    CloudProvider::Gemini
+}
+fn d_openai_base() -> String {
+    OPENAI_DEFAULT_BASE.into()
+}
+fn d_openai_text() -> String {
+    "gpt-5-mini".into()
+}
+fn d_openai_vision() -> String {
+    "gpt-5-mini".into()
+}
+fn d_anthropic_text() -> String {
+    "claude-haiku-4-5".into()
+}
+fn d_anthropic_vision() -> String {
+    "claude-sonnet-5".into()
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             mode: Mode::Local,
+            text_model: d_text_model(),
+            vision_model: d_vision_model(),
+            cloud_provider: d_cloud_provider(),
             gemini_text_model: "gemini-2.5-flash-lite".into(),
             gemini_vision_model: "gemini-2.5-flash".into(),
+            openai_base_url: d_openai_base(),
+            openai_text_model: d_openai_text(),
+            openai_vision_model: d_openai_vision(),
+            anthropic_text_model: d_anthropic_text(),
+            anthropic_vision_model: d_anthropic_vision(),
             gemini_api_key: None,
+            openai_api_key: None,
+            anthropic_api_key: None,
         }
     }
 }
@@ -73,16 +169,26 @@ pub fn get() -> Config {
     cell().read().unwrap().clone()
 }
 
+/// The API key for the active cloud provider, if one is stored.
+fn active_cloud_key(c: &Config) -> Option<&str> {
+    match c.cloud_provider {
+        CloudProvider::Gemini => c.gemini_api_key.as_deref(),
+        CloudProvider::OpenAI => c.openai_api_key.as_deref(),
+        CloudProvider::Anthropic => c.anthropic_api_key.as_deref(),
+    }
+    .filter(|k| !k.is_empty())
+}
+
 /// True when structured calls (extract + OCR) should be routed to the cloud.
 pub fn use_cloud_for_extract() -> bool {
     let c = get();
-    c.mode == Mode::Balanced && c.gemini_api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false)
+    c.mode == Mode::Balanced && active_cloud_key(&c).is_some()
 }
 
 // ── Keychain (via the macOS `security` CLI) ─────────────────────────────────
-fn keychain_read() -> Option<String> {
+fn keychain_read(account: &str) -> Option<String> {
     let out = Command::new("security")
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w"])
+        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -92,10 +198,10 @@ fn keychain_read() -> Option<String> {
     if key.is_empty() { None } else { Some(key) }
 }
 
-fn keychain_write(key: &str) -> Result<()> {
+fn keychain_write(account: &str, key: &str) -> Result<()> {
     // -U updates the item if it already exists.
     let status = Command::new("security")
-        .args(["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w", key])
+        .args(["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", account, "-w", key])
         .status()?;
     if status.success() {
         Ok(())
@@ -104,9 +210,9 @@ fn keychain_write(key: &str) -> Result<()> {
     }
 }
 
-fn keychain_delete() {
+fn keychain_delete(account: &str) {
     let _ = Command::new("security")
-        .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT])
+        .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account])
         .status();
 }
 
@@ -121,59 +227,108 @@ fn write_config_file(dir: &Path, c: &Config) {
     }
 }
 
-/// Load config from disk + key from the Keychain into the process global.
+/// Load config from disk + keys from the Keychain into the process global.
 /// Called once at startup.
 pub fn init(dir: &Path) {
     let mut c = std::fs::read_to_string(config_path(dir))
         .ok()
         .and_then(|s| serde_json::from_str::<Config>(&s).ok())
         .unwrap_or_default();
-    c.gemini_api_key = keychain_read();
+    c.gemini_api_key = keychain_read(CloudProvider::Gemini.keychain_account());
+    c.openai_api_key = keychain_read(CloudProvider::OpenAI.keychain_account());
+    c.anthropic_api_key = keychain_read(CloudProvider::Anthropic.keychain_account());
     *cell().write().unwrap() = c;
 }
 
-/// Apply settings changes from the UI: update mode/models, store-or-clear the
-/// key in the Keychain, persist the JSON, and refresh the global.
-/// `gemini_api_key`: Some(non-empty) sets it, Some("") clears it, None leaves it.
-pub fn update(
-    dir: &Path,
-    mode: &str,
-    gemini_api_key: Option<String>,
-    gemini_text_model: Option<String>,
-    gemini_vision_model: Option<String>,
-) -> Result<()> {
+/// A partial settings update from the UI. Model/url fields: Some(non-empty)
+/// sets, everything else leaves unchanged. Key fields: Some(non-empty) stores
+/// in the Keychain, Some("") deletes, None leaves unchanged.
+#[derive(Default)]
+pub struct SettingsPatch {
+    pub mode: Option<String>,
+    pub cloud_provider: Option<String>,
+    pub text_model: Option<String>,
+    pub vision_model: Option<String>,
+    pub gemini_api_key: Option<String>,
+    pub gemini_text_model: Option<String>,
+    pub gemini_vision_model: Option<String>,
+    pub openai_base_url: Option<String>,
+    pub openai_api_key: Option<String>,
+    pub openai_text_model: Option<String>,
+    pub openai_vision_model: Option<String>,
+    pub anthropic_api_key: Option<String>,
+    pub anthropic_text_model: Option<String>,
+    pub anthropic_vision_model: Option<String>,
+}
+
+/// Apply settings changes from the UI: update mode/provider/models, store or
+/// clear keys in the Keychain, persist the JSON, and refresh the global.
+pub fn update(dir: &Path, patch: SettingsPatch) -> Result<()> {
     let mut c = get();
-    c.mode = Mode::parse(mode);
-    if let Some(m) = gemini_text_model {
-        if !m.trim().is_empty() {
-            c.gemini_text_model = m.trim().to_string();
-        }
+    if let Some(m) = patch.mode {
+        c.mode = Mode::parse(&m);
     }
-    if let Some(m) = gemini_vision_model {
-        if !m.trim().is_empty() {
-            c.gemini_vision_model = m.trim().to_string();
-        }
+    if let Some(p) = patch.cloud_provider {
+        c.cloud_provider = CloudProvider::parse(&p);
     }
-    match gemini_api_key {
-        Some(k) if !k.trim().is_empty() => {
-            keychain_write(k.trim())?;
-            c.gemini_api_key = Some(k.trim().to_string());
+    let set = |dst: &mut String, src: Option<String>| {
+        if let Some(v) = src {
+            if !v.trim().is_empty() {
+                *dst = v.trim().to_string();
+            }
         }
-        Some(_) => {
-            keychain_delete();
-            c.gemini_api_key = None;
+    };
+    set(&mut c.text_model, patch.text_model);
+    set(&mut c.vision_model, patch.vision_model);
+    set(&mut c.gemini_text_model, patch.gemini_text_model);
+    set(&mut c.gemini_vision_model, patch.gemini_vision_model);
+    set(&mut c.openai_base_url, patch.openai_base_url);
+    set(&mut c.openai_text_model, patch.openai_text_model);
+    set(&mut c.openai_vision_model, patch.openai_vision_model);
+    set(&mut c.anthropic_text_model, patch.anthropic_text_model);
+    set(&mut c.anthropic_vision_model, patch.anthropic_vision_model);
+    let set_key = |slot: &mut Option<String>,
+                   account: &str,
+                   incoming: Option<String>|
+     -> Result<()> {
+        match incoming {
+            Some(k) if !k.trim().is_empty() => {
+                keychain_write(account, k.trim())?;
+                *slot = Some(k.trim().to_string());
+            }
+            Some(_) => {
+                keychain_delete(account);
+                *slot = None;
+            }
+            None => {} // unchanged
         }
-        None => {} // unchanged
-    }
+        Ok(())
+    };
+    set_key(
+        &mut c.gemini_api_key,
+        CloudProvider::Gemini.keychain_account(),
+        patch.gemini_api_key,
+    )?;
+    set_key(
+        &mut c.openai_api_key,
+        CloudProvider::OpenAI.keychain_account(),
+        patch.openai_api_key,
+    )?;
+    set_key(
+        &mut c.anthropic_api_key,
+        CloudProvider::Anthropic.keychain_account(),
+        patch.anthropic_api_key,
+    )?;
     write_config_file(dir, &c);
     *cell().write().unwrap() = c;
     Ok(())
 }
 
-// ── Gemini (OpenAI-compatible chat/completions) ─────────────────────────────
-fn data_url(b64: &str) -> String {
-    // Cheap magic-byte sniff so the mime is right for Gemini's vision input.
-    let mime = if b64.starts_with("iVBOR") {
+// ── Cloud chat (dispatch by provider) ────────────────────────────────────────
+
+fn sniff_mime(b64: &str) -> &'static str {
+    // Cheap magic-byte sniff so the mime is right for vision input.
+    if b64.starts_with("iVBOR") {
         "image/png"
     } else if b64.starts_with("R0lGOD") {
         "image/gif"
@@ -181,15 +336,26 @@ fn data_url(b64: &str) -> String {
         "image/webp"
     } else {
         "image/jpeg"
-    };
-    format!("data:{mime};base64,{b64}")
+    }
 }
 
-/// Structured single-turn call against Gemini. Mirrors `ollama::chat_json`:
-/// returns parsed JSON. `vision` selects the OCR-tuned model and lets images
-/// through. `format`, when present, is sent as an OpenAI `json_schema` so the
-/// model is shape-constrained; otherwise we ask for a plain JSON object.
-pub async fn gemini_chat_json(
+fn data_url(b64: &str) -> String {
+    format!("data:{};base64,{b64}", sniff_mime(b64))
+}
+
+/// A bounded timeout so a wedged network never leaves the UI spinning with no
+/// result — a failed connectivity test should fail *visibly*, not hang.
+fn http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?)
+}
+
+/// Structured single-turn call against the configured cloud provider. Mirrors
+/// `ollama::chat_json`: returns parsed JSON. `vision` selects the OCR-tuned
+/// model and lets images through; `format`, when present, shape-constrains
+/// the output (natively where the API supports it, by prompt otherwise).
+pub async fn cloud_chat_json(
     system: &str,
     user: &str,
     images: Option<Vec<String>>,
@@ -197,12 +363,41 @@ pub async fn gemini_chat_json(
     vision: bool,
 ) -> Result<Value> {
     let c = get();
-    let key = c
-        .gemini_api_key
-        .clone()
-        .ok_or_else(|| anyhow!("no gemini api key configured"))?;
-    let model = if vision { &c.gemini_vision_model } else { &c.gemini_text_model };
+    match c.cloud_provider {
+        CloudProvider::Gemini => {
+            let key = c.gemini_api_key.clone().ok_or_else(|| anyhow!("no gemini api key configured"))?;
+            let model = if vision { &c.gemini_vision_model } else { &c.gemini_text_model };
+            openai_compat_chat_json(GEMINI_BASE, &key, model, system, user, images, format).await
+        }
+        CloudProvider::OpenAI => {
+            let key = c.openai_api_key.clone().ok_or_else(|| anyhow!("no openai api key configured"))?;
+            let model = if vision { &c.openai_vision_model } else { &c.openai_text_model };
+            let base = c.openai_base_url.trim_end_matches('/');
+            openai_compat_chat_json(base, &key, model, system, user, images, format).await
+        }
+        CloudProvider::Anthropic => {
+            let key = c
+                .anthropic_api_key
+                .clone()
+                .ok_or_else(|| anyhow!("no anthropic api key configured"))?;
+            let model = if vision { &c.anthropic_vision_model } else { &c.anthropic_text_model };
+            anthropic_chat_json(&key, model, system, user, images, format).await
+        }
+    }
+}
 
+/// OpenAI-compatible chat/completions — serves Gemini's OpenAI dialect,
+/// OpenAI itself, and any compatible server (LM Studio, llama.cpp, vLLM,
+/// OpenRouter) via the configurable base URL.
+async fn openai_compat_chat_json(
+    base: &str,
+    key: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+    images: Option<Vec<String>>,
+    format: Option<Value>,
+) -> Result<Value> {
     // Build the user message; vision uses the array-content form.
     let user_content: Value = match &images {
         Some(imgs) if !imgs.is_empty() => {
@@ -233,14 +428,9 @@ pub async fn gemini_chat_json(
         "response_format": response_format,
     });
 
-    // A bounded timeout so a wedged network never leaves the UI spinning with no
-    // result — a failed connectivity test should fail *visibly*, not hang.
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()?;
-    let resp = client
-        .post(format!("{GEMINI_BASE}/chat/completions"))
-        .bearer_auth(&key)
+    let resp = http_client()?
+        .post(format!("{base}/chat/completions"))
+        .bearer_auth(key)
         .json(&body)
         .send()
         .await?;
@@ -248,7 +438,7 @@ pub async fn gemini_chat_json(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("gemini {status}: {text}"));
+        return Err(anyhow!("cloud provider {status}: {text}"));
     }
 
     let v: Value = resp.json().await?;
@@ -258,17 +448,108 @@ pub async fn gemini_chat_json(
         .and_then(|c| c.get("message"))
         .and_then(|m| m.get("content"))
         .and_then(|c| c.as_str())
-        .ok_or_else(|| anyhow!("no choices[0].message.content in gemini response"))?;
+        .ok_or_else(|| anyhow!("no choices[0].message.content in response"))?;
 
-    serde_json::from_str(content)
-        .map_err(|e| anyhow!("gemini returned non-JSON content: {e}\n---\n{content}"))
+    parse_json_content(content)
+}
+
+/// Anthropic Messages API (raw HTTP — no official Rust SDK). Output shaping:
+/// the app's extraction schemas are free-form (emergent `data` objects, no
+/// additionalProperties constraints), which Anthropic's structured-outputs
+/// mode doesn't accept — so the schema is embedded in the system prompt and
+/// the JSON is parsed from the text response instead. Claude models are
+/// reliable JSON emitters, and pipeline.rs validates every proposal anyway.
+async fn anthropic_chat_json(
+    key: &str,
+    model: &str,
+    system: &str,
+    user: &str,
+    images: Option<Vec<String>>,
+    format: Option<Value>,
+) -> Result<Value> {
+    let system_full = match &format {
+        Some(schema) => format!(
+            "{system}\n\nRespond ONLY with a single JSON object conforming to this JSON Schema — \
+             no prose, no code fences:\n{schema}"
+        ),
+        None => format!("{system}\n\nRespond ONLY with a single JSON object — no prose, no code fences."),
+    };
+
+    let mut content = Vec::new();
+    if let Some(imgs) = &images {
+        for img in imgs {
+            content.push(json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": sniff_mime(img), "data": img }
+            }));
+        }
+    }
+    content.push(json!({ "type": "text", "text": user }));
+
+    let body = json!({
+        "model": model,
+        "max_tokens": 8192,
+        "system": system_full,
+        "messages": [{ "role": "user", "content": content }],
+    });
+
+    let resp = http_client()?
+        .post(format!("{ANTHROPIC_BASE}/messages"))
+        .header("x-api-key", key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .json(&body)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("anthropic {status}: {text}"));
+    }
+
+    let v: Value = resp.json().await?;
+    // A refusal is a 200 with stop_reason "refusal" — surface it as an error
+    // so the caller falls back to the local model instead of parsing nothing.
+    if v.get("stop_reason").and_then(|s| s.as_str()) == Some("refusal") {
+        return Err(anyhow!("anthropic declined the request (stop_reason: refusal)"));
+    }
+    let content = v
+        .get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|blocks| {
+            blocks
+                .iter()
+                .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+        })
+        .and_then(|b| b.get("text"))
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| anyhow!("no text block in anthropic response"))?;
+
+    parse_json_content(content)
+}
+
+/// Parse a model's JSON reply, tolerating markdown code fences.
+fn parse_json_content(content: &str) -> Result<Value> {
+    let t = content.trim();
+    let t = t
+        .strip_prefix("```json")
+        .or_else(|| t.strip_prefix("```"))
+        .map(|s| s.strip_suffix("```").unwrap_or(s))
+        .unwrap_or(t)
+        .trim();
+    serde_json::from_str(t)
+        .map_err(|e| anyhow!("provider returned non-JSON content: {e}\n---\n{content}"))
 }
 
 /// Lightweight connectivity/credential check for the settings "Test" button.
-pub async fn test_gemini() -> Result<String> {
+pub async fn test_cloud() -> Result<String> {
     let c = get();
-    let model = c.gemini_text_model.clone();
-    let out = gemini_chat_json(
+    let (name, model) = match c.cloud_provider {
+        CloudProvider::Gemini => ("Gemini", c.gemini_text_model.clone()),
+        CloudProvider::OpenAI => ("OpenAI-compatible", c.openai_text_model.clone()),
+        CloudProvider::Anthropic => ("Anthropic", c.anthropic_text_model.clone()),
+    };
+    let out = cloud_chat_json(
         "You are a connectivity check.",
         "Return JSON: {\"ok\": true}",
         None,
@@ -277,7 +558,7 @@ pub async fn test_gemini() -> Result<String> {
     )
     .await?;
     if out.get("ok").is_some() || out.is_object() {
-        Ok(format!("Connected to Gemini ({model})."))
+        Ok(format!("Connected to {name} ({model})."))
     } else {
         Err(anyhow!("unexpected response"))
     }

@@ -295,7 +295,7 @@ async fn condense_chunk(chunk: &str) -> Result<String> {
         "required": ["facts"]
     });
     let out = ollama::chat_json_local_ctx(
-        ollama::TEXT_MODEL,
+        &ollama::text_model(),
         "Condense this meeting transcript chunk into dense factual notes. Each fact \
          starts with the [mm:ss] timestamp it came from and preserves names, numbers, \
          decisions, tasks, and questions verbatim. Respond ONLY with JSON {\"facts\":[...]}.",
@@ -429,7 +429,7 @@ pub async fn suggest_speaker_names(app: &tauri::AppHandle, meeting_id: i64) -> R
         if attendees.is_empty() { "(none listed — use names stated in the transcript)".into() } else { attendees.join(", ") },
     );
     let out = ollama::chat_json_local_ctx(
-        ollama::TEXT_MODEL,
+        &ollama::text_model(),
         "You map a meeting's unidentified speakers to real names, using only evidence \
          in the transcript: being addressed by name right after speaking, answering when \
          a name is called, self-introductions, or presenting work attributed to a name. \
@@ -531,7 +531,7 @@ pub async fn run(app: &tauri::AppHandle, meeting_id: i64, template_name: Option<
     );
 
     let out = ollama::chat_json_local_ctx(
-        ollama::TEXT_MODEL,
+        &ollama::text_model(),
         SYSTEM,
         &user,
         None,

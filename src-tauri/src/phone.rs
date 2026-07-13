@@ -323,8 +323,9 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "meeting_stop" => crate::meeting_stop(a).await.map(|v| json!(v)),
         "meeting_start" | "meeting_summarize" | "meeting_template_save"
         | "meeting_template_delete" | "meeting_capture_probe" | "download_meeting_model"
-        | "download_speaker_model" | "meeting_prompt_payload" | "meeting_dismiss_prompt"
-        | "meetings_settings_set" | "meeting_export_md" | "set_chrome_theme" => {
+        | "download_speaker_model" | "download_parakeet_model" | "meeting_prompt_payload"
+        | "meeting_dismiss_prompt" | "meetings_settings_set" | "meeting_export_md"
+        | "set_chrome_theme" => {
             Err("this action runs on the desktop app only".into())
         }
         "list_entities" => crate::list_entities(a).await,
@@ -340,12 +341,24 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "entity_profile" => crate::entity_profile(a, iarg(b, "entityId")).await,
         "list_people" => crate::list_people(a).await,
         "get_provider_settings" => Ok(crate::get_provider_settings()),
+        // Keys are camelCase — they must match what api.ts sends (the old
+        // snake_case reads silently dropped every optional arg to None).
         "set_provider_settings" => crate::set_provider_settings(
             a,
             sarg(b, "mode"),
-            oarg(b, "gemini_api_key"),
-            oarg(b, "gemini_text_model"),
-            oarg(b, "gemini_vision_model"),
+            oarg(b, "cloudProvider"),
+            oarg(b, "geminiApiKey"),
+            oarg(b, "geminiTextModel"),
+            oarg(b, "geminiVisionModel"),
+            oarg(b, "openaiBaseUrl"),
+            oarg(b, "openaiApiKey"),
+            oarg(b, "openaiTextModel"),
+            oarg(b, "openaiVisionModel"),
+            oarg(b, "anthropicApiKey"),
+            oarg(b, "anthropicTextModel"),
+            oarg(b, "anthropicVisionModel"),
+            oarg(b, "textModel"),
+            oarg(b, "visionModel"),
         )
         .map(|_| Value::Null),
         "test_provider" => crate::test_provider().await.map(|s| json!(s)),

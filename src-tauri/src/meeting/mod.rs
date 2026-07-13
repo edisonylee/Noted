@@ -65,6 +65,10 @@ pub struct MeetingsCfg {
     /// canonicalize near-miss spellings after decode.
     #[serde(default)]
     pub vocabulary: Vec<String>,
+    /// "whisper" (default) or "parakeet". Parakeet needs its model download;
+    /// missing files fall back to whisper rather than failing the recording.
+    #[serde(default = "d_engine")]
+    pub asr_engine: String,
 }
 
 fn d_true() -> bool {
@@ -72,6 +76,9 @@ fn d_true() -> bool {
 }
 fn d_template() -> String {
     store::DEFAULT_TEMPLATE.to_string()
+}
+fn d_engine() -> String {
+    "whisper".into()
 }
 
 /// Dictation, recording, and voice-assistant apps that hold the mic without
@@ -111,6 +118,7 @@ impl Default for MeetingsCfg {
             ignore_bundles: default_ignore(),
             default_template: d_template(),
             vocabulary: Vec::new(),
+            asr_engine: d_engine(),
         }
     }
 }
@@ -170,6 +178,44 @@ pub fn model_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf> {
     ))
 }
 
+/// Parakeet-TDT 0.6B v2 (int8 sherpa-onnx export): the four files that make
+/// up the model, downloaded individually (no archive handling).
+pub const PARAKEET_DIR: &str = "parakeet-tdt-0.6b-v2-int8";
+pub const PARAKEET_FILES: &[&str] = &[
+    "encoder.int8.onnx",
+    "decoder.int8.onnx",
+    "joiner.int8.onnx",
+    "tokens.txt",
+];
+
+pub fn parakeet_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| anyhow!("{e}"))?
+        .join("models")
+        .join(PARAKEET_DIR))
+}
+
+pub fn parakeet_ready(app: &tauri::AppHandle) -> bool {
+    parakeet_dir(app)
+        .map(|d| PARAKEET_FILES.iter().all(|f| d.join(f).exists()))
+        .unwrap_or(false)
+}
+
+/// Resolve the configured ASR engine against what's actually downloaded.
+/// Parakeet with missing files degrades to whisper (recording must never
+/// fail over a settings/download mismatch).
+pub fn engine_spec(app: &tauri::AppHandle) -> Result<asr::EngineSpec> {
+    if cfg().asr_engine == "parakeet" {
+        if parakeet_ready(app) {
+            return Ok(asr::EngineSpec::Parakeet { dir: parakeet_dir(app)? });
+        }
+        eprintln!("[noted] parakeet selected but not downloaded — using whisper");
+    }
+    Ok(asr::EngineSpec::Whisper { model: model_path(app)? })
+}
+
 /// Begin recording. `event_json` is the calendar-event snapshot when started
 /// from Coming Up / a calendar prompt; `source_bundle` is the mic-holding app
 /// when started from a mic-detection prompt (drives auto-stop).
@@ -181,7 +227,7 @@ pub fn start(
     retain_audio: bool,
     source_bundle: Option<String>,
 ) -> Result<i64> {
-    let model = model_path(app)?; // fail fast before any DB writes
+    let engine = engine_spec(app)?; // fail fast before any DB writes
     let state = app.state::<MeetingState>();
     let mut guard = state.0.lock().unwrap();
     if guard.is_some() {
@@ -259,7 +305,7 @@ pub fn start(
             me: me.clone(),
             them: them.clone(),
             stop: stop.clone(),
-            model_path: model,
+            engine,
             audio_dir: audio_dir.clone(),
             started_epoch_ms,
             speaker_model: diarize::model_path(app),

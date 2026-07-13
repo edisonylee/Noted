@@ -7,9 +7,23 @@ use serde_json::{json, Value};
 
 const BASE: &str = "http://localhost:11434";
 
+// Defaults — the live models come from provider.json via text_model() /
+// vision_model() so users can point noted at any pulled Ollama model.
+// EMBED_MODEL is deliberately NOT configurable: the vec0 tables are 768-dim
+// and a different embedder is an incompatible vector space.
 pub const TEXT_MODEL: &str = "qwen2.5:7b-instruct";
 pub const VISION_MODEL: &str = "qwen2.5vl:7b";
 pub const EMBED_MODEL: &str = "nomic-embed-text";
+
+/// The user-selected local text model (falls back to TEXT_MODEL).
+pub fn text_model() -> String {
+    crate::provider::get().text_model
+}
+
+/// The user-selected local vision model (falls back to VISION_MODEL).
+pub fn vision_model() -> String {
+    crate::provider::get().vision_model
+}
 
 /// Which models are pulled — used for the M0 health check / setup screen.
 pub async fn tags() -> Result<Value> {
@@ -28,13 +42,14 @@ pub async fn chat_json(
     format: Option<Value>,
 ) -> Result<Value> {
     // Balanced mode: route the latency-sensitive structured calls (note extract
-    // + photo OCR) to Gemini. On any failure (bad key, offline, rate limit) we
-    // fall through to the local model so capture never hard-fails.
+    // + photo OCR) to the configured cloud provider. On any failure (bad key,
+    // offline, rate limit, refusal) we fall through to the local model so
+    // capture never hard-fails.
     if crate::provider::use_cloud_for_extract() {
         let vision = images.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
-        match crate::provider::gemini_chat_json(system, user, images.clone(), format.clone(), vision).await {
+        match crate::provider::cloud_chat_json(system, user, images.clone(), format.clone(), vision).await {
             Ok(v) => return Ok(v),
-            Err(e) => eprintln!("[noted] gemini extract failed, falling back to local: {e}"),
+            Err(e) => eprintln!("[noted] cloud extract failed, falling back to local: {e}"),
         }
     }
     chat_json_local(model, system, user, images, format).await

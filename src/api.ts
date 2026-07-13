@@ -212,13 +212,25 @@ export type CategoryInfo = {
 export type Health = { models: string[]; vec_version: string };
 
 // Model-provider settings. "local" = 100% Ollama; "balanced" routes the
-// extract/OCR hot path to Gemini while keeping embeddings + chat local.
+// extract/OCR hot path to the chosen cloud provider while keeping
+// embeddings + chat local.
 export type ProviderMode = "local" | "balanced";
+export type CloudProvider = "gemini" | "openai" | "anthropic";
 export type ProviderSettings = {
   mode: ProviderMode;
+  cloud_provider: CloudProvider;
+  text_model: string; // local Ollama text model (any pulled model)
+  vision_model: string; // local Ollama vision model
   gemini_text_model: string;
   gemini_vision_model: string;
+  openai_base_url: string; // any OpenAI-compatible endpoint
+  openai_text_model: string;
+  openai_vision_model: string;
+  anthropic_text_model: string;
+  anthropic_vision_model: string;
   has_gemini_key: boolean;
+  has_openai_key: boolean;
+  has_anthropic_key: boolean;
 };
 
 export type ThemeState = {
@@ -372,6 +384,7 @@ export type MeetingModelStatus = {
   turbo: boolean;
   base: boolean;
   speaker: boolean; // voice-embedding model for per-speaker labels
+  parakeet: boolean; // Parakeet-TDT ASR engine files present
   tap_supported: boolean;
 };
 // What the record-prompt popup shows: calendar T-60s / mic-in-use detection,
@@ -390,6 +403,7 @@ export type MeetingsCfg = {
   ignore_bundles: string[];
   default_template: string;
   vocabulary: string[];
+  asr_engine: "whisper" | "parakeet";
 };
 
 // The Journal agent's response: a companion reply (null if the local model was
@@ -533,18 +547,38 @@ export const api = {
   getProviderSettings: () => invoke<ProviderSettings>("get_provider_settings"),
   setProviderSettings: (args: {
     mode: ProviderMode;
+    cloud_provider?: CloudProvider;
     gemini_api_key?: string | null;
     gemini_text_model?: string;
     gemini_vision_model?: string;
+    openai_base_url?: string;
+    openai_api_key?: string | null;
+    openai_text_model?: string;
+    openai_vision_model?: string;
+    anthropic_api_key?: string | null;
+    anthropic_text_model?: string;
+    anthropic_vision_model?: string;
+    text_model?: string;
+    vision_model?: string;
   }) =>
     // Tauri maps camelCase JS args → snake_case Rust params, so the payload keys
     // MUST be camelCase. Sending snake_case silently drops them to None — which
     // is why the API key never reached the Keychain.
     invoke<void>("set_provider_settings", {
       mode: args.mode,
+      cloudProvider: args.cloud_provider,
       geminiApiKey: args.gemini_api_key,
       geminiTextModel: args.gemini_text_model,
       geminiVisionModel: args.gemini_vision_model,
+      openaiBaseUrl: args.openai_base_url,
+      openaiApiKey: args.openai_api_key,
+      openaiTextModel: args.openai_text_model,
+      openaiVisionModel: args.openai_vision_model,
+      anthropicApiKey: args.anthropic_api_key,
+      anthropicTextModel: args.anthropic_text_model,
+      anthropicVisionModel: args.anthropic_vision_model,
+      textModel: args.text_model,
+      visionModel: args.vision_model,
     }),
   testProvider: () => invoke<string>("test_provider"),
   readInboxImage: (path: string) =>
@@ -581,6 +615,7 @@ export const api = {
   meetingModelStatus: () => invoke<MeetingModelStatus>("meeting_model_status"),
   downloadMeetingModel: () => invoke<boolean>("download_meeting_model"),
   downloadSpeakerModel: () => invoke<boolean>("download_speaker_model"),
+  downloadParakeetModel: () => invoke<boolean>("download_parakeet_model"),
   meetingStart: (args: {
     title?: string;
     eventId?: string;

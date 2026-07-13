@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { CalendarCheck, CalendarDays, CalendarX, Camera, Check, Loader, Pencil, Plus, Trash2, X } from "lucide-react";
 import { api, type CalEvent, type EntityCandidate, type NoteRow } from "./api";
 import { fileToImg, type Img } from "./image";
@@ -180,14 +180,15 @@ export function layoutRows(blocks: Block[]): { b: Block; start: number; effEnd: 
     });
 }
 
-// Serialize blocks back to the text form parseSchedule understands, so inline
-// edits keep raw_text (and therefore the text/photo editor) in sync with the
-// structured blocks. "HH:MM" round-trips cleanly through resolveTime.
+// Serialize blocks into the human-facing editor format. The app keeps canonical
+// HH:MM values internally for storage, sorting, and calendar sync, but the edit
+// surface should always speak in an explicit US 12-hour clock. Both endpoints
+// carry their own meridiem so parseSchedule can round-trip ranges across noon.
 function blocksToText(blocks: Block[]): string {
   return blocks
     .map((b) => {
       if (!b.start) return b.task;
-      const time = b.end ? `${b.start}-${b.end}` : b.start;
+      const time = b.end ? `${fmtTime(b.start)}–${fmtTime(b.end)}` : fmtTime(b.start);
       return `${time} ${b.task}`;
     })
     .join("\n");
@@ -325,11 +326,29 @@ export function parseSchedule(text: string): Block[] {
 
 const PLACEHOLDER = `Lay out your day, however messy:
 
-woke up 7:30, gym 8–9
-deep work on the today view 10–12
-lunch w/ sam 12:30
-errands 2–4, call the dentist sometime
-dinner 7, wind down by 10`;
+7:30 AM Wake up
+8:00 AM–9:00 AM Gym
+10:00 AM–12:00 PM Deep work
+12:30 PM Lunch with Sam
+2:00 PM–4:00 PM Errands
+7:00 PM Dinner`;
+
+// Parse a user-facing US time while keeping the rest of the schedule pipeline
+// canonical. Blank is a valid "no time" value; null means the text is invalid.
+// Requiring AM/PM avoids silently turning an ambiguous "2:00" into 2 AM.
+export function parseTime12(value: string): string | null {
+  const text = value.trim().replace(/\./g, "");
+  if (!text) return "";
+  if (/^noon$/i.test(text)) return "12:00";
+  if (/^midnight$/i.test(text)) return "00:00";
+  const match = /^(\d{1,2})(?::(\d{1,2}))?\s*([ap])m?$/i.exec(text);
+  if (!match) return null;
+  const hour = Number(match[1]);
+  const minute = match[2] ? Number(match[2]) : 0;
+  if (hour < 1 || hour > 12 || minute > 59) return null;
+  const hour24 = (hour % 12) + (match[3].toLowerCase() === "p" ? 12 : 0);
+  return `${String(hour24).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
 
 // Inline row editor: start/end time pickers + task field, with save/delete/cancel.
 // Used both for editing an existing block and for adding a new one. Enter saves,
@@ -347,47 +366,156 @@ function ScheduleRowForm({
   onCancel: () => void;
   onDelete?: () => void;
 }) {
-  const [start, setStart] = useState(init.start ?? "");
-  const [end, setEnd] = useState(init.end ?? "");
+  const [start, setStart] = useState(init.start ? fmtTime(init.start) : "");
+  const [end, setEnd] = useState(init.end ? fmtTime(init.end) : "");
   const [task, setTask] = useState(init.task ?? "");
+  const initialStart = toMinutes(init.start);
+  const initialEnd = toMinutes(init.end);
+  const [endsNextDay, setEndsNextDay] = useState(
+    initialStart != null && initialEnd != null && initialEnd < initialStart
+  );
+  const [timeError, setTimeError] = useState<{
+    field: "start" | "end" | "range";
+    message: string;
+  } | null>(null);
+  const timeErrorId = useId();
+
+  function normalizeTime(
+    value: string,
+    setValue: (next: string) => void,
+    field: "start" | "end"
+  ) {
+    const parsed = parseTime12(value);
+    if (parsed == null) {
+      if (value.trim()) setTimeError({ field, message: "Use a time like 9:30 AM." });
+      return;
+    }
+    setValue(parsed ? fmtTime(parsed) : "");
+    setTimeError(null);
+  }
 
   function commit() {
     const t = task.trim();
     if (!t) return;
+    const parsedStart = parseTime12(start);
+    const parsedEnd = parseTime12(end);
+    if (parsedStart == null) {
+      setTimeError({ field: "start", message: "Use a start time like 9:30 AM." });
+      return;
+    }
+    if (parsedEnd == null) {
+      setTimeError({ field: "end", message: "Use an end time like 10:30 AM." });
+      return;
+    }
+    if (parsedEnd && !parsedStart) {
+      setTimeError({ field: "start", message: "Add a start time before the end time." });
+      return;
+    }
+    if (parsedStart && parsedEnd && parsedStart === parsedEnd) {
+      setTimeError({ field: "range", message: "Start and end time need to be different." });
+      return;
+    }
+    const startMinutes = parsedStart ? toMinutes(parsedStart) : null;
+    const endMinutes = parsedEnd ? toMinutes(parsedEnd) : null;
+    if (
+      startMinutes != null &&
+      endMinutes != null &&
+      endMinutes < startMinutes &&
+      !endsNextDay
+    ) {
+      setTimeError({
+        field: "range",
+        message: "The end is earlier than the start. Check “Ends next day” if that’s intentional.",
+      });
+      return;
+    }
     const b: Block = { task: t };
-    if (start) {
-      b.start = start;
-      const s = toMinutes(start);
-      const e = end ? toMinutes(end) : null;
-      if (s != null && e != null && e > s) {
-        b.end = end;
-        b.duration_min = e - s;
+    if (parsedStart) {
+      b.start = parsedStart;
+      if (startMinutes != null && endMinutes != null) {
+        b.end = parsedEnd;
+        b.duration_min = (endMinutes - startMinutes + 1440) % 1440;
       }
     }
     onCommit(b);
   }
 
+  const onEditorKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") commit();
+    else if (e.key === "Escape") onCancel();
+  };
+  const currentStart = parseTime12(start);
+  const currentEnd = parseTime12(end);
+  const currentStartMinutes = currentStart ? toMinutes(currentStart) : null;
+  const currentEndMinutes = currentEnd ? toMinutes(currentEnd) : null;
+  const crossesMidnight =
+    currentStartMinutes != null &&
+    currentEndMinutes != null &&
+    currentEndMinutes < currentStartMinutes;
+
   return (
     <div className="today-block today-rowedit">
       <div className="today-rowedit-times">
-        <input
-          type="time"
-          className="today-timeinput"
-          value={start}
-          disabled={busy}
-          onChange={(e) => setStart(e.target.value)}
-          aria-label="Start time"
-        />
+        <label className="today-timefield">
+          <span>Start</span>
+          <input
+            type="text"
+            className={"today-timeinput" + (timeError?.field === "start" || timeError?.field === "range" ? " invalid" : "")}
+            value={start}
+            disabled={busy}
+            placeholder="9:00 AM"
+            autoCapitalize="characters"
+            onChange={(e) => {
+              const next = e.target.value;
+              setStart(next);
+              if (!next.trim()) setEnd("");
+              setEndsNextDay(false);
+              setTimeError(null);
+            }}
+            onBlur={() => normalizeTime(start, setStart, "start")}
+            onKeyDown={onEditorKeyDown}
+            aria-label="Start time, for example 9:00 AM"
+            aria-invalid={timeError?.field === "start" || timeError?.field === "range"}
+            aria-describedby={timeError ? timeErrorId : undefined}
+          />
+        </label>
         <span className="today-rowedit-dash">–</span>
-        <input
-          type="time"
-          className="today-timeinput"
-          value={end}
-          disabled={busy || !start}
-          onChange={(e) => setEnd(e.target.value)}
-          aria-label="End time"
-        />
+        <label className="today-timefield">
+          <span>End</span>
+          <input
+            type="text"
+            className={"today-timeinput" + (timeError?.field === "end" || timeError?.field === "range" ? " invalid" : "")}
+            value={end}
+            disabled={busy || !start.trim()}
+            placeholder="10:00 AM"
+            autoCapitalize="characters"
+            onChange={(e) => {
+              setEnd(e.target.value);
+              setEndsNextDay(false);
+              setTimeError(null);
+            }}
+            onBlur={() => normalizeTime(end, setEnd, "end")}
+            onKeyDown={onEditorKeyDown}
+            aria-label="End time, for example 10:00 AM"
+            aria-invalid={timeError?.field === "end" || timeError?.field === "range"}
+            aria-describedby={timeError ? timeErrorId : undefined}
+          />
+        </label>
       </div>
+      {crossesMidnight && (
+        <label className="today-overnight">
+          <input
+            type="checkbox"
+            checked={endsNextDay}
+            disabled={busy}
+            onChange={(e) => {
+              setEndsNextDay(e.target.checked);
+              setTimeError(null);
+            }}
+          />
+          Ends next day
+        </label>
+      )}
       <input
         className="today-taskinput"
         value={task}
@@ -395,10 +523,7 @@ function ScheduleRowForm({
         autoFocus
         placeholder="What's happening?"
         onChange={(e) => setTask(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") commit();
-          else if (e.key === "Escape") onCancel();
-        }}
+        onKeyDown={onEditorKeyDown}
       />
       <div className="today-rowedit-actions">
         <button className="today-rowbtn save" onClick={commit} disabled={busy || !task.trim()} title="Save (Enter)">
@@ -413,6 +538,7 @@ function ScheduleRowForm({
           <X size={15} />
         </button>
       </div>
+      {timeError && <div id={timeErrorId} className="today-rowedit-error" role="alert">{timeError.message}</div>}
     </div>
   );
 }
@@ -440,9 +566,12 @@ export function TodayView({
   // window.confirm() (returns false), so we arm/confirm in-app instead.
   const [clearArmed, setClearArmed] = useState(false);
   const [photo, setPhoto] = useState<Img | null>(null);
+  const [photoReading, setPhotoReading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const photoRequestRef = useRef(0);
+  const photoTextRef = useRef("");
   const calWrapRef = useRef<HTMLDivElement>(null); // anchor for the calendar peek popover
 
   // Inline row editing on the agenda: which block index is open, an "add new"
@@ -630,15 +759,22 @@ export function TodayView({
     }
   }
 
+  function editorSeed(): string {
+    if (blocks.length) return blocksToText(blocks);
+    // Older captures may still have useful raw text without structured blocks.
+    // Parse and reserialize it so recovery does not reintroduce 24-hour text.
+    return blocksToText(parseSchedule(note?.raw_text ?? ""));
+  }
+
   function openEditor() {
-    // Inline edits update blocks in place but leave raw_text as the original
-    // capture. If they've diverged, seed the text editor from the current blocks
-    // so it can't overwrite an inline edit with stale text; otherwise keep the
-    // user's original phrasing.
-    const fromRaw = note?.raw_text ?? "";
-    const diverged = blocksToText(parseSchedule(fromRaw)) !== blocksToText(blocks);
-    setDraft(diverged ? blocksToText(blocks) : fromRaw);
+    // Structured blocks are authoritative. Normalizing them here both prevents
+    // stale raw capture text from overwriting inline edits and guarantees the
+    // editor opens with explicit 12-hour times.
+    photoRequestRef.current += 1;
+    photoTextRef.current = "";
+    setDraft(editorSeed());
     setPhoto(null);
+    setPhotoReading(false);
     setEditError(null);
     setSync({ state: "idle", msg: "" }); // clear stale sync/clear feedback
     setEditing(true);
@@ -653,6 +789,8 @@ export function TodayView({
       .map((e) =>
         e.start ? { task: e.task, start: e.start, ...(e.end ? { end: e.end } : {}) } : { task: e.task }
       );
+    photoRequestRef.current += 1;
+    photoTextRef.current = "";
     setDraft(blocksToText(seeded));
     setPhoto(null);
     setEditError(null);
@@ -675,12 +813,75 @@ export function TodayView({
 
   async function attachPhoto(file: File | undefined) {
     if (!file) return;
+    const requestId = ++photoRequestRef.current;
     try {
-      setPhoto(await fileToImg(file));
+      const nextPhoto = await fileToImg(file);
+      if (requestId !== photoRequestRef.current) return;
+      // Photo capture is a first-class way into the schedule builder. Opening
+      // the editor here means the visible photo card works without an Edit step.
+      if (!editing) {
+        setDraft(editorSeed());
+        setSync({ state: "idle", msg: "" });
+        setEditing(true);
+      }
+      const previousPhotoText = photoTextRef.current.trim();
+      if (previousPhotoText) {
+        setDraft((current) => {
+          const trimmed = current.trim();
+          if (trimmed === previousPhotoText) return "";
+          const suffix = `\n${previousPhotoText}`;
+          return trimmed.endsWith(suffix) ? trimmed.slice(0, -suffix.length).trimEnd() : current;
+        });
+        photoTextRef.current = "";
+      }
+      setPhoto(nextPhoto);
       setEditError(null);
+      setPhotoReading(true);
+      try {
+        const transcription = (await api.ocrPhoto(nextPhoto.base64)).trim();
+        if (requestId !== photoRequestRef.current) return;
+        if (!transcription) {
+          setEditError("No schedule text was found in that photo. You can still type it below.");
+        } else {
+          const photoBlocks = parseSchedule(transcription);
+          if (!photoBlocks.length) {
+            setEditError("No schedule items were found in that photo. Try another image or type them below.");
+          } else {
+            const normalized = blocksToText(photoBlocks).trim();
+            photoTextRef.current = normalized;
+            setDraft((current) => [current.trim(), normalized].filter(Boolean).join("\n"));
+          }
+        }
+      } catch (e) {
+        if (requestId === photoRequestRef.current) {
+          setEditError(`Couldn’t read that photo: ${String(e)}`);
+        }
+      } finally {
+        if (requestId === photoRequestRef.current) setPhotoReading(false);
+      }
     } catch (e) {
+      if (requestId !== photoRequestRef.current) return;
+      if (!editing) {
+        setDraft(editorSeed());
+        setEditing(true);
+      }
       setEditError(String(e));
     }
+  }
+
+  function removePhoto() {
+    photoRequestRef.current += 1;
+    photoTextRef.current = "";
+    setPhotoReading(false);
+    setPhoto(null);
+  }
+
+  function closeEditor() {
+    photoRequestRef.current += 1;
+    photoTextRef.current = "";
+    setPhotoReading(false);
+    setEditing(false);
+    setEditError(null);
   }
 
   async function saveDraft() {
@@ -693,20 +894,15 @@ export function TodayView({
       let image_path: string | null = null;
       let entities: EntityCandidate[] = [];
 
-      // Photo: transcription only (ocrPhoto), then parse it the same
-      // deterministic way as typed input. We deliberately skip the extract
-      // pipeline here — the schedule is parsed by parseSchedule below, so
-      // extraction would be wasted work (and used to hard-fail on a pure
-      // schedule that yields no structured entries). Matches typed-input
-      // behavior, which also surfaces no entities.
+      // Photo OCR is inserted into the visible editor as soon as the image is
+      // selected. Save only persists the reviewed text and local image here.
       if (photo) {
-        body = (await api.ocrPhoto(photo.base64)).trim() || body;
         source = "photo";
         image_path = await api.saveImage(photo.base64, photo.ext);
       }
 
       if (!body) {
-        setBusy(false);
+        setEditError("Add at least one schedule item before saving.");
         return;
       }
 
@@ -776,6 +972,22 @@ export function TodayView({
     setEditError(null);
     setEditIdx(idx);
   };
+
+  const PhotoEntry = () => (
+    <button
+      type="button"
+      className="today-photo-entry"
+      onClick={() => fileRef.current?.click()}
+      disabled={busy}
+    >
+      <span className="today-photo-entry-icon" aria-hidden><Camera size={18} /></span>
+      <span className="today-photo-entry-copy">
+        <strong>Add a schedule photo</strong>
+        <small>Turn handwriting or a screenshot into today’s plan.</small>
+      </span>
+      <span className="today-photo-entry-action">Choose photo</span>
+    </button>
+  );
 
   const Head = (withEdit: boolean) => (
     <header className="today-head">
@@ -873,12 +1085,23 @@ export function TodayView({
               )}
               {gcalConnected === false ? "Connect Calendar" : "Sync"}
             </button>
-            <button className="today-edit" onClick={openEditor} aria-label="Edit schedule">
-              <Pencil size={14} /> Edit
+            <button className="today-edit today-edit-primary" onClick={openEditor} aria-label={blocks.length ? "Edit schedule" : "Create schedule"}>
+              <Pencil size={14} /> {blocks.length ? "Edit schedule" : "Create schedule"}
             </button>
           </div>
         )}
       </div>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*,.heic,.heif"
+        capture="environment"
+        hidden
+        onChange={(e) => {
+          void attachPhoto(e.currentTarget.files?.[0]);
+          e.currentTarget.value = "";
+        }}
+      />
       {withEdit && sync.state !== "idle" && sync.state !== "syncing" && sync.state !== "clearing" && (
         <div className={"today-syncmsg " + sync.state}>{sync.msg}</div>
       )}
@@ -891,21 +1114,34 @@ export function TodayView({
       <div className="today">
         {Head(false)}
         <div className="today-editor">
+          <div className="today-editor-intro">
+            <div>
+              <div className="today-editor-kicker">Schedule builder</div>
+              <h2>{blocks.length ? "Edit today’s schedule" : "Create today’s schedule"}</h2>
+            </div>
+            <p>Use one item per line. Write times as 9:00 AM or 2:00 PM–4:00 PM.</p>
+          </div>
           <textarea
             className="today-textarea"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder={PLACEHOLDER}
             autoFocus
-            disabled={busy}
+            disabled={busy || photoReading}
           />
 
           {photo && (
             <div className="today-photo">
               <img src={photo.dataUrl} alt="schedule" />
-              <button className="today-photo-x" onClick={() => setPhoto(null)} aria-label="Remove photo">
+              <button className="today-photo-x" onClick={removePhoto} aria-label="Remove photo">
                 <X size={14} />
               </button>
+            </div>
+          )}
+
+          {photoReading && (
+            <div className="today-photo-reading" role="status">
+              <Loader size={14} className="spin" /> Reading the schedule into the editor…
             </div>
           )}
 
@@ -916,26 +1152,18 @@ export function TodayView({
           )}
 
           <div className="today-editor-actions">
-            <input
-              ref={fileRef}
-              type="file"
-              accept="image/*,.heic,.heif"
-              capture="environment"
-              hidden
-              onChange={(e) => attachPhoto(e.target.files?.[0])}
-            />
             <button
               className="today-photo-btn"
               onClick={() => fileRef.current?.click()}
-              disabled={busy}
+              disabled={busy || photoReading}
               title="Snap a handwritten schedule"
             >
-              <Camera size={16} /> Photo
+              <Camera size={16} /> {photo ? "Replace photo" : "Add photo"}
             </button>
             <button
               className={"today-photo-btn" + (clearArmed ? " armed" : "")}
               onClick={clearToday}
-              disabled={busy || sync.state === "clearing"}
+              disabled={busy || photoReading || sync.state === "clearing"}
               title={
                 gcalConnected
                   ? "Clear today's schedule in noted, and today's events from the noted calendar"
@@ -952,10 +1180,7 @@ export function TodayView({
             <span className="today-spacer" />
             <button
               className="today-cancel"
-              onClick={() => {
-                setEditing(false);
-                setEditError(null);
-              }}
+              onClick={closeEditor}
               disabled={busy}
             >
               Cancel
@@ -963,9 +1188,13 @@ export function TodayView({
             <button
               className="today-save"
               onClick={saveDraft}
-              disabled={busy || (!draft.trim() && !photo)}
+              disabled={busy || photoReading || !draft.trim()}
             >
-              {busy ? (
+              {photoReading ? (
+                <>
+                  <Loader size={15} className="spin" /> Reading photo…
+                </>
+              ) : busy ? (
                 <>
                   <Loader size={15} className="spin" /> Building…
                 </>
@@ -980,15 +1209,12 @@ export function TodayView({
   }
 
   // ---- Empty state ----
-  // Deliberately quiet: the composer above this view is how a schedule gets
-  // made (type/speak/photo your day and it files here), so there's no
-  // "make today's schedule" CTA anymore. The only extra we offer is the
-  // calendar seed card, when Google has events worth pulling in.
   if (!blocks.length) {
     const showCal = gcalConnected && calEvents && calEvents.length > 0;
     return (
       <div className="today">
         {Head(true)}
+        <PhotoEntry />
         {showCal && (
           <div className="today-empty">
             <div className="today-cal">
@@ -1012,6 +1238,16 @@ export function TodayView({
             </div>
           </div>
         )}
+        {!showCal && (
+          <div className="today-empty today-empty-schedule">
+            <CalendarDays size={24} className="today-empty-icon" />
+            <h2 className="today-empty-title">Build today’s schedule</h2>
+            <p className="today-empty-sub">Type your day in plain language, then adjust individual items whenever you need to.</p>
+            <button className="today-make" onClick={openEditor}>
+              <Plus size={16} /> Create schedule
+            </button>
+          </div>
+        )}
       </div>
     );
   }
@@ -1027,6 +1263,7 @@ export function TodayView({
   return (
     <div className="today">
       {Head(true)}
+      <PhotoEntry />
 
       <div className="today-agenda">
         {rows.map((r, i) => {
@@ -1065,6 +1302,15 @@ export function TodayView({
                   <span className="today-dur">{fmtDur(r.b.duration_min)}</span>
                 )}
                 {isNow && <span className="today-nowtag">now</span>}
+                <button
+                  type="button"
+                  className="today-row-edit-trigger"
+                  onClick={() => beginEdit(idx)}
+                  aria-label={`Edit ${r.b.task}`}
+                  title="Edit schedule item"
+                >
+                  <Pencil size={13} />
+                </button>
               </div>
             </div>
           );
@@ -1103,6 +1349,15 @@ export function TodayView({
                     {fmtDur(b.duration_min) && (
                       <span className="today-dur">{fmtDur(b.duration_min)}</span>
                     )}
+                    <button
+                      type="button"
+                      className="today-row-edit-trigger"
+                      onClick={() => beginEdit(idx)}
+                      aria-label={`Edit ${b.task}`}
+                      title="Edit schedule item"
+                    >
+                      <Pencil size={13} />
+                    </button>
                   </div>
                 </div>
               );
@@ -1131,13 +1386,6 @@ export function TodayView({
       </div>
 
       {editError && !editing && <div className="error today-rowerror">{editError}</div>}
-
-      {note?.raw_text && (
-        <details className="today-notes">
-          <summary>notes</summary>
-          <pre>{note.raw_text}</pre>
-        </details>
-      )}
     </div>
   );
 }

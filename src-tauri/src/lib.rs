@@ -422,7 +422,7 @@ fact the reflection reveals about them, and the relationship when stated. [] if 
     };
 
     let model_out =
-        ollama::chat_json_local(ollama::TEXT_MODEL, system, &user_msg, None, Some(schema)).await;
+        ollama::chat_json_local(&ollama::text_model(), system, &user_msg, None, Some(schema)).await;
 
     let (reply, entities): (Option<String>, Vec<EntityArg>) = match &model_out {
         Ok(v) => (
@@ -650,7 +650,7 @@ async fn generate_recap(app: tauri::AppHandle, period: String) -> Result<Value, 
         anything notable like personal records. Keep it tight — a few short sentences or bullets. \
         Do not invent anything not in the entries.";
     let user = format!("Period: {span}.\nEntries:\n{ctx}\nWrite the recap.");
-    let content = ollama::chat_text(ollama::TEXT_MODEL, system, &user)
+    let content = ollama::chat_text(&ollama::text_model(), system, &user)
         .await
         .map_err(|e| e.to_string())?;
     let content = content.trim().to_string();
@@ -712,7 +712,7 @@ async fn recap_period(
         format!("{end}")
     };
     let user = format!("Period: {span}.\nEntries:\n{ctx}\nWrite the recap.");
-    let content = ollama::chat_text(ollama::TEXT_MODEL, RECAP_SYSTEM, &user)
+    let content = ollama::chat_text(&ollama::text_model(), RECAP_SYSTEM, &user)
         .await
         .map_err(|e| e.to_string())?
         .trim()
@@ -845,7 +845,7 @@ async fn chat(
             "role": "user",
             "content": format!("Everything I know about \"{name}\":\n{context}\nQuestion: {question}")
         }));
-        let answer = ollama::chat_messages(ollama::TEXT_MODEL, messages, 0.2)
+        let answer = ollama::chat_messages(&ollama::text_model(), messages, 0.2)
             .await
             .map_err(|e| e.to_string())?;
         return Ok(json!({ "kind": "answer", "answer": answer.trim(), "sources": sources }));
@@ -890,7 +890,7 @@ async fn chat(
             "role": "user",
             "content": format!("Entries (from the {vault} knowledge base only):\n{context}\nQuestion: {question}")
         }));
-        let answer = ollama::chat_messages(ollama::TEXT_MODEL, messages, 0.2)
+        let answer = ollama::chat_messages(&ollama::text_model(), messages, 0.2)
             .await
             .map_err(|e| e.to_string())?;
         return Ok(json!({ "kind": "answer", "answer": answer.trim(), "sources": sources }));
@@ -973,7 +973,7 @@ async fn chat(
     convo.push_str(&format!("user: {question}"));
     let route_user = format!("Candidate entries:\n{agent_ctx}\nConversation:\n{convo}");
     let routed = ollama::chat_json(
-        ollama::TEXT_MODEL,
+        &ollama::text_model(),
         &pipeline::route_system(&today_local()),
         &route_user,
         None,
@@ -1126,7 +1126,7 @@ async fn chat(
         "role": "user",
         "content": format!("Entries:\n{context}\nQuestion: {question}")
     }));
-    let answer = ollama::chat_messages(ollama::TEXT_MODEL, messages, 0.2)
+    let answer = ollama::chat_messages(&ollama::text_model(), messages, 0.2)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -1445,6 +1445,7 @@ fn meeting_model_status(app: tauri::AppHandle) -> Value {
         "turbo": dir.join("ggml-large-v3-turbo.bin").exists(),
         "base": dir.join("ggml-base.en.bin").exists(),
         "speaker": dir.join(meeting::diarize::MODEL_FILE).exists(),
+        "parakeet": meeting::parakeet_ready(&app),
         "tap_supported": meeting::capture::tap_supported(),
     })
 }
@@ -1475,6 +1476,41 @@ async fn download_meeting_model(app: tauri::AppHandle) -> Result<bool, String> {
     file.flush().map_err(|e| e.to_string())?;
     drop(file);
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Parakeet-TDT 0.6B v2 int8 (sherpa-onnx export, ~660MB across four files) —
+/// the faster, proper-noun-stronger ASR engine. Files are fetched one by one
+/// (no archive handling); already-present files are skipped so a failed
+/// download resumes where it stopped.
+const PARAKEET_BASE_URL: &str =
+    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main";
+
+#[tauri::command]
+async fn download_parakeet_model(app: tauri::AppHandle) -> Result<bool, String> {
+    use std::io::Write;
+    let dir = meeting::parakeet_dir(&app).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    for file in meeting::PARAKEET_FILES {
+        let path = dir.join(file);
+        if path.exists() {
+            continue;
+        }
+        let tmp = dir.join(format!("{file}.part"));
+        let mut resp = reqwest::get(format!("{PARAKEET_BASE_URL}/{file}"))
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("parakeet download failed ({file}): {}", resp.status()));
+        }
+        let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+            out.write_all(&chunk).map_err(|e| e.to_string())?;
+        }
+        out.flush().map_err(|e| e.to_string())?;
+        drop(out);
+        std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    }
     Ok(true)
 }
 
@@ -2396,30 +2432,70 @@ async fn personal_export(app: tauri::AppHandle) -> Result<Value, String> {
 #[tauri::command]
 fn get_provider_settings() -> Value {
     let c = provider::get();
+    let has = |k: &Option<String>| k.as_deref().map(|k| !k.is_empty()).unwrap_or(false);
     json!({
         "mode": c.mode,
+        "cloud_provider": c.cloud_provider,
+        "text_model": c.text_model,
+        "vision_model": c.vision_model,
         "gemini_text_model": c.gemini_text_model,
         "gemini_vision_model": c.gemini_vision_model,
-        "has_gemini_key": c.gemini_api_key.as_deref().map(|k| !k.is_empty()).unwrap_or(false),
+        "openai_base_url": c.openai_base_url,
+        "openai_text_model": c.openai_text_model,
+        "openai_vision_model": c.openai_vision_model,
+        "anthropic_text_model": c.anthropic_text_model,
+        "anthropic_vision_model": c.anthropic_vision_model,
+        "has_gemini_key": has(&c.gemini_api_key),
+        "has_openai_key": has(&c.openai_api_key),
+        "has_anthropic_key": has(&c.anthropic_api_key),
     })
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 fn set_provider_settings(
     app: tauri::AppHandle,
     mode: String,
+    cloud_provider: Option<String>,
     gemini_api_key: Option<String>,
     gemini_text_model: Option<String>,
     gemini_vision_model: Option<String>,
+    openai_base_url: Option<String>,
+    openai_api_key: Option<String>,
+    openai_text_model: Option<String>,
+    openai_vision_model: Option<String>,
+    anthropic_api_key: Option<String>,
+    anthropic_text_model: Option<String>,
+    anthropic_vision_model: Option<String>,
+    text_model: Option<String>,
+    vision_model: Option<String>,
 ) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    provider::update(&dir, &mode, gemini_api_key, gemini_text_model, gemini_vision_model)
-        .map_err(|e| e.to_string())
+    provider::update(
+        &dir,
+        provider::SettingsPatch {
+            mode: Some(mode),
+            cloud_provider,
+            text_model,
+            vision_model,
+            gemini_api_key,
+            gemini_text_model,
+            gemini_vision_model,
+            openai_base_url,
+            openai_api_key,
+            openai_text_model,
+            openai_vision_model,
+            anthropic_api_key,
+            anthropic_text_model,
+            anthropic_vision_model,
+        },
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn test_provider() -> Result<String, String> {
-    provider::test_gemini().await.map_err(|e| e.to_string())
+    provider::test_cloud().await.map_err(|e| e.to_string())
 }
 
 // ── Google Calendar sync (one-way push to a dedicated "noted" calendar) ──────
@@ -2935,6 +3011,7 @@ pub fn run() {
             meeting_model_status,
             download_meeting_model,
             download_speaker_model,
+            download_parakeet_model,
             meeting_rename_speaker,
             meeting_suggest_speakers,
             meeting_export_md,

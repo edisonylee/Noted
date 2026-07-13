@@ -684,7 +684,8 @@ textarea.json.bad { border-color: var(--bad); }
 }
 .today-edit:hover { color: var(--ink); border-color: var(--faint); }
 .today-edit:disabled { opacity: 0.5; cursor: not-allowed; }
-.today-headbtns { display: inline-flex; gap: 8px; }
+.today-edit-primary { color: var(--ink); background: var(--accent-tint); border-color: color-mix(in srgb, var(--accent) 28%, var(--line)); }
+.today-headbtns { display: inline-flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
 .today-syncmsg { margin-top: 10px; font-size: 12.5px; font-weight: 500; }
 .today-syncmsg.ok { color: var(--accent); }
 .today-syncmsg.err { color: var(--error-ink); }
@@ -693,6 +694,23 @@ textarea.json.bad { border-color: var(--bad); }
   color: var(--accent); margin-bottom: 4px;
 }
 .today-date { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; color: var(--ink); margin: 0; }
+
+.today-photo-entry {
+  width: 100%; display: flex; align-items: center; gap: 12px; margin: -4px 0 20px; padding: 11px 13px;
+  color: var(--ink-soft); background: color-mix(in srgb, var(--surface) 72%, transparent);
+  border: var(--border-width, 1px) dashed var(--line-strong); border-radius: var(--r-md); text-align: left;
+  transition: color var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), background var(--duration-fast) var(--ease);
+}
+.today-photo-entry:hover:not(:disabled) { color: var(--ink); border-color: var(--accent); background: var(--accent-tint); }
+.today-photo-entry:disabled { opacity: 0.5; cursor: default; }
+.today-photo-entry-icon {
+  flex: none; display: grid; place-items: center; width: 34px; height: 34px;
+  color: var(--accent); background: var(--accent-tint); border-radius: var(--r-sm);
+}
+.today-photo-entry-copy { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 2px; }
+.today-photo-entry-copy strong { font-size: 13.5px; font-weight: 590; color: var(--ink); }
+.today-photo-entry-copy small { color: var(--muted); font-size: 11.5px; line-height: 1.35; }
+.today-photo-entry-action { flex: none; color: var(--accent); font-size: 12px; font-weight: 600; }
 
 .today-agenda { display: flex; flex-direction: column; }
 .today-block {
@@ -721,6 +739,15 @@ textarea.json.bad { border-color: var(--bad); }
 
 .today-info { min-width: 0; font-size: 15px; line-height: 1.4; }
 .today-task { color: var(--ink); }
+.today-row-edit-trigger {
+  display: inline-grid; place-items: center; width: 25px; height: 25px; margin-left: 7px; padding: 0;
+  color: var(--muted); background: transparent; border: var(--border-width, 1px) solid transparent;
+  border-radius: var(--r-sm); vertical-align: middle; opacity: 0.48;
+  transition: opacity var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease);
+}
+.today-block:hover .today-row-edit-trigger,
+.today-row-edit-trigger:hover,
+.today-row-edit-trigger:focus-visible { color: var(--ink); border-color: var(--line-strong); opacity: 1; outline: none; }
 .today-dur {
   font-size: 11.5px; font-weight: 500; color: var(--muted); background: var(--surface-2);
   border: var(--border-width, 1px) solid var(--line); padding: 1px 8px; border-radius: 99px;
@@ -759,19 +786,28 @@ textarea.json.bad { border-color: var(--bad); }
 .today-rowedit {
   /* break out of the 3-col grid into one flex row */
   display: flex !important;
-  align-items: center; gap: 8px;
+  align-items: flex-end; flex-wrap: wrap; gap: 8px;
   background: var(--surface); border: var(--border-width, 1px) solid var(--accent);
   box-shadow: 0 0 0 3px var(--accent-tint);
 }
-.today-rowedit-times { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
-.today-rowedit-dash { color: var(--faint); }
+.today-rowedit-times { display: inline-flex; align-items: flex-end; gap: 5px; flex-shrink: 0; }
+.today-timefield { display: flex; flex-direction: column; gap: 3px; }
+.today-timefield > span { color: var(--faint); font-size: 9.5px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; }
+.today-rowedit-dash { color: var(--faint); padding-bottom: 7px; }
 .today-timeinput {
-  font-size: 13px; font-variant-numeric: tabular-nums; padding: 5px 7px;
+  width: 94px; font-size: 13px; font-variant-numeric: tabular-nums; padding: 6px 7px;
   background: var(--surface-2); border: var(--border-width, 1px) solid var(--line-strong);
   border-radius: var(--r-sm); color: var(--ink);
 }
+.today-timeinput::placeholder { color: var(--faint); }
 .today-timeinput:disabled { opacity: 0.5; }
 .today-timeinput:focus { outline: none; border-color: var(--accent); }
+.today-timeinput.invalid { border-color: var(--bad); }
+.today-overnight {
+  display: inline-flex; align-items: center; gap: 5px; align-self: center; color: var(--muted);
+  font-size: 11px; white-space: nowrap;
+}
+.today-overnight input { accent-color: var(--accent); }
 .today-taskinput {
   flex: 1; min-width: 0; font-size: 15px; padding: 6px 9px;
   background: var(--surface-2); border: var(--border-width, 1px) solid var(--line-strong);
@@ -790,6 +826,7 @@ textarea.json.bad { border-color: var(--bad); }
 .today-rowbtn.save:hover { color: var(--accent); border-color: var(--accent); }
 .today-rowbtn.del:hover { color: var(--bad); border-color: var(--bad); }
 .today-rowbtn:disabled { opacity: 0.4; }
+.today-rowedit-error { flex: 1 0 100%; color: var(--error-ink); font-size: 11.5px; padding: 1px 2px 0; }
 
 .today-addrow {
   display: inline-flex; align-items: center; gap: 6px; align-self: flex-start;
@@ -800,15 +837,6 @@ textarea.json.bad { border-color: var(--bad); }
 }
 .today-addrow:hover { color: var(--ink); border-color: var(--faint); }
 .today-rowerror { margin-top: 12px; }
-
-.today-notes { margin-top: 24px; }
-.today-notes summary { color: var(--muted); font-size: 12px; cursor: pointer; list-style: none; }
-.today-notes summary::-webkit-details-marker { display: none; }
-.today-notes pre {
-  margin: 8px 0 0; padding: 12px; background: var(--surface-2); border: var(--border-width, 1px) solid var(--line);
-  border-radius: var(--r-sm); font-size: 12.5px; color: var(--ink-soft); white-space: pre-wrap;
-  font-family: ui-monospace, "SF Mono", monospace; line-height: 1.5;
-}
 
 .today-empty {
   display: flex; flex-direction: column; align-items: center; text-align: center; padding: 56px 20px; gap: 6px;
@@ -898,6 +926,10 @@ textarea.json.bad { border-color: var(--bad); }
 
 /* Inline schedule editor */
 .today-editor { display: flex; flex-direction: column; gap: 14px; }
+.today-editor-intro { display: flex; align-items: flex-end; justify-content: space-between; gap: 22px; }
+.today-editor-intro h2 { margin: 2px 0 0; color: var(--ink); font-size: 18px; font-weight: 620; letter-spacing: -0.02em; }
+.today-editor-intro p { max-width: 34ch; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; text-align: right; }
+.today-editor-kicker { color: var(--accent); font-size: 10px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase; }
 .today-textarea {
   width: 100%; min-height: 220px; resize: vertical; padding: 16px 18px;
   background: var(--surface); border: var(--border-width, 1px) solid var(--line-strong); border-radius: var(--r-lg);
@@ -916,7 +948,8 @@ textarea.json.bad { border-color: var(--bad); }
   background: color-mix(in srgb, var(--ink) 72%, transparent); color: var(--on-ink);
   border: none; border-radius: 99px;
 }
-.today-editor-actions { display: flex; align-items: center; gap: 10px; }
+.today-photo-reading { display: inline-flex; align-items: center; gap: 7px; color: var(--accent); font-size: 12.5px; }
+.today-editor-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .today-spacer { flex: 1; }
 .today-photo-btn {
   display: inline-flex; align-items: center; gap: 6px; padding: 9px 14px;
@@ -939,6 +972,26 @@ textarea.json.bad { border-color: var(--bad); }
 .today-save:hover:not(:disabled) { background: var(--ink-hover); }
 .today-save:active:not(:disabled) { transform: scale(0.97); }
 .today-save:disabled, .today-photo-btn:disabled, .today-cancel:disabled { opacity: 0.5; cursor: default; }
+
+@media (max-width: 700px) {
+  .today-headrow { align-items: flex-start; flex-direction: column; }
+  .today-headbtns { justify-content: flex-start; }
+  .today-editor-intro { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .today-editor-intro p { text-align: left; }
+  .today-rowedit-times { width: 100%; }
+  .today-taskinput { flex-basis: 180px; }
+}
+
+@media (max-width: 460px) {
+  .today-photo-entry-action { display: none; }
+  .today-photo-entry-copy small { white-space: normal; }
+  .today-rowedit-actions { margin-left: auto; }
+  .today-editor-actions .today-spacer { flex-basis: 100%; height: 0; }
+}
+
+@media (hover: none) {
+  .today-row-edit-trigger { opacity: 0.72; }
+}
 
 .raw { margin-top: 12px; }
 .raw summary { color: var(--muted); font-size: 12px; cursor: pointer; list-style: none; }
@@ -2348,6 +2401,8 @@ a.cal-btn { text-decoration: none; }
 body.vibrant { background: transparent; }
 body.vibrant .main-col { background: var(--canvas); }
 body.vibrant .sidebar {
+  /* Keep the glass ratio identical in both color modes. The active theme's
+     canvas color and macOS material change the tint, not the amount of bleed. */
   background: color-mix(in srgb, var(--canvas) 38%, transparent);
   border-right-color: color-mix(in srgb, var(--line) 55%, transparent);
 }
@@ -2374,13 +2429,6 @@ body.vibrant .app.homemode .main-col {
 
 /* The rail doubles as a window-drag surface — no text selection mid-drag. */
 .sidebar { user-select: none; -webkit-user-select: none; }
-
-/* Light-mode glass: the tint must carry the contrast (a translucent light
-   wash over whatever's behind can't) — nearly solid, with a whisper of glass. */
-[data-theme="light"] body.vibrant .sidebar,
-:root:not([data-theme="dark"]) body.vibrant .sidebar {
-  background: color-mix(in srgb, var(--canvas) 86%, transparent);
-}
 
 /* Spaces column header (with its collapse toggle) + list header row. */
 .spaces-head {

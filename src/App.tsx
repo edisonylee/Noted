@@ -106,6 +106,22 @@ export default function App() {
     return () => mo.disconnect();
   }, []);
 
+  // Phone captures are categorized by a background worker — refresh the lists
+  // the moment one files (or fails) so it appears without switching views.
+  const refreshRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    refreshRef.current = () => refresh().catch(handleErr);
+  });
+  useEffect(() => {
+    const subs = [
+      listen("note-filed", () => refreshRef.current()),
+      listen("capture-needs-attention", () => refreshRef.current()),
+    ];
+    return () => {
+      subs.forEach((p) => p.then((un) => un()));
+    };
+  }, []);
+
   // Sidebar collapse (one click or ⌘B), remembered across launches.
   const [sideOpen, setSideOpenState] = useState(
     () => localStorage.getItem("noted-sidebar") !== "closed"

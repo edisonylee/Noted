@@ -35,6 +35,17 @@ const CUTOFF: f32 = 0.55;
 const SNAP_MIN: f32 = 0.30;
 /// A cluster centroid this close to a stored voiceprint takes its name.
 const PROFILE_MATCH: f32 = 0.60;
+/// A them-segment/cluster this close to the note-taker's own mic voiceprint
+/// is their voice coming back through the call (the remote side's speakers →
+/// their mic) — it must never appear as a "them" speaker. Measured on real
+/// meetings: echo clusters land 0.68–0.75, genuine other people 0.38–0.43.
+pub const ME_ECHO: f32 = 0.60;
+/// Below this, matched system audio is provably NOT the note-taker's voice —
+/// the only condition under which a mic line may be dropped as local echo.
+pub const NOT_ME: f32 = 0.50;
+/// Reserved profile name holding the note-taker's own voiceprint (seeds echo
+/// detection at meeting start). Never shown, never assignable via rename.
+pub const ME_PROFILE: &str = "__me__";
 /// Embed at most the first 12s of a segment (plenty for a voice print).
 const EMBED_CAP_MS: i64 = 12_000;
 /// Matrix-size guard: cluster at most this many seeds (longest kept).
@@ -133,7 +144,7 @@ pub struct NamedSpeaker {
     pub centroid: Vec<f32>,
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();

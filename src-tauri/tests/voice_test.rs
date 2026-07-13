@@ -18,7 +18,7 @@ fn transcribes_jfk_sample() {
         .map(|s| s.unwrap() as f32 / 32768.0)
         .collect();
 
-    let text = voice::transcribe(model, &samples).unwrap();
+    let text = voice::transcribe(model, &samples, None).unwrap();
     println!("--- transcript ---\n{text}");
     let lc = text.to_lowercase();
     assert!(
@@ -54,6 +54,6 @@ fn base64_f32_roundtrip_transcribes() {
         .collect();
     let resampled = voice::resample_to_16k(&back, 16_000);
 
-    let text = voice::transcribe(model, &resampled).unwrap();
+    let text = voice::transcribe(model, &resampled, None).unwrap();
     assert!(text.to_lowercase().contains("country"), "got: {text}");
 }

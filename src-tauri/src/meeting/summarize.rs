@@ -106,6 +106,39 @@ pub fn export_markdown(meeting: &Value) -> String {
     md
 }
 
+/// "brian@heybaro.com" → "Brian"; display names pass through untouched.
+fn humanize(name: &str) -> String {
+    let base = name.split('@').next().unwrap_or(name).trim();
+    let mut c = base.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Attendees who are NOT the note-taker, as presentable names — the candidate
+/// pool for speaker naming (a lone entry = the 1:1 rule's ground truth).
+pub fn external_attendees(event_json: &Value) -> Vec<String> {
+    let Some(arr) = event_json.get("attendees").and_then(|a| a.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter(|a| !a.get("self").and_then(|s| s.as_bool()).unwrap_or(false))
+        .filter_map(|a| {
+            if let Some(s) = a.as_str() {
+                return Some(humanize(s));
+            }
+            a.get("name")
+                .or_else(|| a.get("displayName"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(humanize)
+                .or_else(|| a.get("email").and_then(|v| v.as_str()).map(humanize))
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 fn attendee_names(event_json: &Value) -> Vec<String> {
     let arr = event_json.get("attendees").and_then(|a| a.as_array());
     let Some(arr) = arr else { return Vec::new() };
@@ -244,7 +277,13 @@ actually appears in the transcript — the moment that topic starts.\n\
 - Action items use kind='todos', each item shaped 'Owner — verb phrase' with \
 'by <date>' appended when a deadline was stated. Owner is Me or a speaker/stated name.\n\
 - If the meeting has nothing for a section, omit that section entirely.\n\
-- Be concrete and terse. Quote short phrases where wording matters.\n\
+- The notes must stand alone: someone who missed the meeting should get everything \
+that mattered without reading the transcript. Err on the side of MORE detail, not less.\n\
+- Every point carries its specifics — who said it, the numbers, dates, names, and the \
+reasoning or disagreement behind it. Never collapse distinct points into one vague bullet.\n\
+- Scale detail to the meeting: a 5-minute check-in earns a few lines; an hour of \
+discussion earns thorough notes on every topic raised.\n\
+- Be concrete. Quote short phrases where the exact wording matters.\n\
 Respond ONLY with JSON: {\"sections\":[{\"heading\",\"kind\":\"paragraph|bullets|timeline|todos\",\
 \"paragraph\"?,\"items\"?,\"timeline\"?:[{\"ts\",\"text\"}]}]}";
 
@@ -357,7 +396,7 @@ pub async fn suggest_speaker_names(app: &tauri::AppHandle, meeting_id: i64) -> R
             })
             .filter_map(|s| s["label"].as_str().map(String::from))
             .collect();
-        (segments, unnamed, attendee_names(&meeting["event_json"]))
+        (segments, unnamed, external_attendees(&meeting["event_json"]))
     };
     if unnamed.is_empty() || segments.is_empty() {
         return Ok(0);
@@ -580,6 +619,20 @@ pub async fn run(app: &tauri::AppHandle, meeting_id: i64, template_name: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_attendees_humanized_and_self_excluded() {
+        let ev = json!({ "attendees": [
+            { "email": "edison@heybaro.com", "self": true },
+            { "email": "brian@heybaro.com" },
+            { "name": "Jasmine Wu", "email": "j@x.com" },
+        ]});
+        assert_eq!(external_attendees(&ev), vec!["Brian", "Jasmine Wu"]);
+        // Plain-string attendee lists humanize too.
+        let ev2 = json!({ "attendees": ["mayan@heybaro.com"] });
+        assert_eq!(external_attendees(&ev2), vec!["Mayan"]);
+        assert!(external_attendees(&json!({})).is_empty());
+    }
 
     #[test]
     fn export_markdown_composes_all_parts() {

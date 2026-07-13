@@ -1411,11 +1411,19 @@ async fn transcribe(
         .collect();
     let samples = voice::resample_to_16k(&samples, sample_rate);
 
+    // The user's custom vocabulary applies to all speech-to-text, not just
+    // meetings — quick captures mishear "a16z" the same way.
+    let vocab = meeting::cfg().vocabulary;
+    let hint = meeting::asr::vocab_hint(&[], &vocab);
+
     // whisper is CPU/Metal-bound and blocking; run off the async runtime.
-    tauri::async_runtime::spawn_blocking(move || voice::transcribe(&model, &samples))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        voice::transcribe(&model, &samples, hint.as_deref())
+            .map(|t| meeting::asr::apply_vocab(&t, &vocab))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

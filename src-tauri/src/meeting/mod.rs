@@ -60,6 +60,11 @@ pub struct MeetingsCfg {
     pub ignore_bundles: Vec<String>,
     #[serde(default = "d_template")]
     pub default_template: String,
+    /// Domain terms whisper keeps mishearing (company names, products,
+    /// acronyms — "a16z"). Fed to the decoder as a bias and used to
+    /// canonicalize near-miss spellings after decode.
+    #[serde(default)]
+    pub vocabulary: Vec<String>,
 }
 
 fn d_true() -> bool {
@@ -105,6 +110,7 @@ impl Default for MeetingsCfg {
             retain_audio: true,
             ignore_bundles: default_ignore(),
             default_template: d_template(),
+            vocabulary: Vec::new(),
         }
     }
 }
@@ -187,6 +193,25 @@ pub fn start(
         .and_then(|e| e["date"].as_str())
         .map(String::from);
 
+    // ASR vocabulary bias: this meeting's attendees + every known voice +
+    // the user's custom terms.
+    let (asr_hint, vocab) = {
+        let c = cfg();
+        let mut names = event_json
+            .as_ref()
+            .map(summarize::external_attendees)
+            .unwrap_or_default();
+        let db = app.state::<Db>();
+        let conn = db.0.lock().unwrap();
+        names.extend(
+            store::speaker_profiles(&conn)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(n, _, _)| n),
+        );
+        (asr::vocab_hint(&names, &c.vocabulary), c.vocabulary)
+    };
+
     let now = chrono::Utc::now().to_rfc3339();
     let id = {
         let db = app.state::<Db>();
@@ -238,6 +263,8 @@ pub fn start(
             audio_dir: audio_dir.clone(),
             started_epoch_ms,
             speaker_model: diarize::model_path(app),
+            asr_hint,
+            vocab,
         };
         let h = app.clone();
         threads.push(std::thread::spawn(move || asr::run_worker(h, args)));

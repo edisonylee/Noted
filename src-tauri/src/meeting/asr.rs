@@ -197,10 +197,12 @@ impl Chunker {
 /// loop so Metal never sees two decodes at once.
 pub struct Transcriber {
     ctx: whisper_rs::WhisperContext,
+    /// Decoder bias for domain terms and names (whisper's initial_prompt).
+    hint: Option<String>,
 }
 
 impl Transcriber {
-    pub fn new(model_path: &Path) -> Result<Self> {
+    pub fn new(model_path: &Path, hint: Option<String>) -> Result<Self> {
         let path = model_path
             .to_str()
             .ok_or_else(|| anyhow!("bad model path"))?;
@@ -209,7 +211,9 @@ impl Transcriber {
             whisper_rs::WhisperContextParameters::default(),
         )
         .map_err(|e| anyhow!("whisper load failed: {e:?}"))?;
-        Ok(Self { ctx })
+        // set_initial_prompt panics on interior NULs.
+        let hint = hint.map(|h| h.replace('\0', ""));
+        Ok(Self { ctx, hint })
     }
 
     pub fn transcribe(&self, samples: &[f32]) -> Result<String> {
@@ -224,6 +228,11 @@ impl Transcriber {
         params.set_print_special(false);
         params.set_print_realtime(false);
         params.set_print_timestamps(false);
+        if let Some(h) = &self.hint {
+            // whisper-rs leaks a small CString per call here — bounded at
+            // ~1 KB per segment, dwarfed by decode-state churn.
+            params.set_initial_prompt(h);
+        }
         state
             .full(params, samples)
             .map_err(|e| anyhow!("transcribe failed: {e:?}"))?;
@@ -240,12 +249,18 @@ impl Transcriber {
 }
 
 /// Whisper emits bracketed sound tags on non-speech ("[BLANK_AUDIO]", "(music)",
-/// "*ding*") and lone punctuation ("."). A segment that is only such tokens
-/// carries no words.
+/// "*ding*", "*sad music*") and lone punctuation ("."). A segment that is only
+/// such tokens carries no words.
 pub fn is_junk(text: &str) -> bool {
     let t = text.trim();
     if t.is_empty() {
         return true;
+    }
+    // Whole-line sound tag, possibly multi-word ("*sad music*", "(door slams)").
+    for (open, close) in [('*', '*'), ('(', ')'), ('[', ']')] {
+        if t.starts_with(open) && t.ends_with(close) && t.len() >= 2 {
+            return true;
+        }
     }
     t.split_whitespace().all(|w| {
         (w.starts_with('[') && w.ends_with(']'))
@@ -253,6 +268,134 @@ pub fn is_junk(text: &str) -> bool {
             || (w.starts_with('*') && w.ends_with('*'))
             || !w.chars().any(|c| c.is_alphanumeric())
     })
+}
+
+// ---------------------------------------------------------------------------
+// Vocabulary: whisper knows English, not this user's world — "a16z" comes out
+// "a sixteen z" and colleague names get respelled. Two defenses: an
+// initial-prompt decoder bias (names + user vocabulary), and a deterministic
+// canonicalizer that rewrites near-miss spellings after decode.
+// ---------------------------------------------------------------------------
+
+/// Whisper keeps only the tail of an over-long initial prompt, so the
+/// user-curated vocabulary goes last (names are re-learnable from context;
+/// jargon isn't).
+const HINT_CAP_CHARS: usize = 700;
+
+/// Build whisper's initial-prompt bias from people names + user vocabulary.
+/// Returns None when there is nothing to bias toward.
+pub fn vocab_hint(names: &[String], vocab: &[String]) -> Option<String> {
+    let clean = |list: &[String]| -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        list.iter()
+            .map(|s| s.trim().replace(['\0', '\n'], " "))
+            .filter(|s| !s.is_empty())
+            .filter(|s| seen.insert(s.to_lowercase()))
+            .collect()
+    };
+    let names = clean(names);
+    let vocab = clean(vocab);
+    let mut parts = Vec::new();
+    if !names.is_empty() {
+        parts.push(format!("Participants: {}.", names.join(", ")));
+    }
+    if !vocab.is_empty() {
+        parts.push(format!("Vocabulary: {}.", vocab.join(", ")));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let mut hint = parts.join(" ");
+    if hint.len() > HINT_CAP_CHARS {
+        // Trim from the front so the vocabulary tail survives, on a char
+        // boundary, from the start of a term.
+        let cut = hint.len() - HINT_CAP_CHARS;
+        let cut = hint[cut..].find(' ').map(|i| cut + i + 1).unwrap_or(cut);
+        hint = hint[cut..].to_string();
+    }
+    Some(hint)
+}
+
+/// Word tokens (consecutive alphanumerics) with byte ranges.
+fn word_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, c) in text.char_indices() {
+        if c.is_alphanumeric() {
+            start.get_or_insert(i);
+        } else if let Some(s) = start.take() {
+            spans.push((s, i));
+        }
+    }
+    if let Some(s) = start {
+        spans.push((s, text.len()));
+    }
+    spans
+}
+
+/// Canonicalize vocabulary terms in decoded text: a run of whole words whose
+/// alphanumeric collapse equals a term's ("a 16 z", "A16-Z", "a16z" for term
+/// "a16z") is rewritten to the canonical spelling. Deterministic; runs never
+/// start or end inside a word, and multi-word runs must collapse to ≥ 3 chars
+/// so "a i" can't become "AI".
+pub fn apply_vocab(text: &str, vocab: &[String]) -> String {
+    let collapse =
+        |s: &str| -> String { s.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect() };
+    let terms: Vec<(&String, String)> = vocab
+        .iter()
+        .map(|t| (t, collapse(t)))
+        .filter(|(_, c)| c.len() >= 2)
+        .collect();
+    if terms.is_empty() {
+        return text.to_string();
+    }
+    let spans = word_spans(text);
+    let words: Vec<String> = spans.iter().map(|&(a, b)| collapse(&text[a..b])).collect();
+
+    let mut out = String::with_capacity(text.len());
+    let mut consumed = 0; // bytes of `text` already emitted
+    let mut i = 0;
+    while i < spans.len() {
+        let mut matched: Option<(usize, &String)> = None; // (last word idx, canonical)
+        for (canon, target) in &terms {
+            let mut acc = String::new();
+            for j in i..spans.len() {
+                // Words in a run may only be separated by light punctuation
+                // ("a 16 z", "A.16.Z"), never across sentence-sized gaps —
+                // a period followed by whitespace is a sentence boundary.
+                if j > i {
+                    let gap = &text[spans[j - 1].1..spans[j].0];
+                    if gap.len() > 2
+                        || !gap.chars().all(|c| " -.'’".contains(c))
+                        || (gap.contains('.') && gap.contains(' '))
+                    {
+                        break;
+                    }
+                }
+                acc.push_str(&words[j]);
+                if acc.len() >= target.len() {
+                    if acc == *target && (j == i || target.len() >= 3) {
+                        matched = Some((j, canon));
+                    }
+                    break;
+                }
+            }
+            if matched.is_some() {
+                break;
+            }
+        }
+        match matched {
+            Some((j, canon)) => {
+                out.push_str(&text[consumed..spans[i].0]);
+                out.push_str(canon);
+                consumed = spans[j].1;
+                i = j + 1;
+            }
+            None => i += 1,
+        }
+    }
+    out.push_str(&text[consumed..]);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -292,16 +435,30 @@ struct RecentSeg {
     t0: i64,
     t1: i64,
     text: String,
+    /// them-channel only: similarity of this segment's voice to the
+    /// note-taker's mic voiceprint (None = too short to embed / no model).
+    me_sim: Option<f32>,
 }
 
-/// Concatenated text of recent segments overlapping [t0, t1] ± slack.
-fn overlapping_text(recents: &[RecentSeg], t0: i64, t1: i64) -> String {
+/// Recent segments overlapping [t0, t1] ± slack.
+fn overlapping<'a>(recents: &'a [RecentSeg], t0: i64, t1: i64) -> Vec<&'a RecentSeg> {
     recents
         .iter()
         .filter(|r| r.t1 >= t0 - ECHO_SLACK_MS && r.t0 <= t1 + ECHO_SLACK_MS)
-        .map(|r| r.text.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect()
+}
+
+/// May this mic line be dropped as local echo of `matched` system audio?
+/// Only when the matched audio is provably ANOTHER voice: text similarity
+/// alone is symmetric — the mic line could equally be the original that the
+/// remote side echoed back — so voice identity is the tiebreak, and the mic
+/// wins every ambiguous case (deleting real speech is the worst failure).
+fn matched_is_foreign(matched: &[&RecentSeg], me_ready: bool) -> bool {
+    me_ready
+        && matched.iter().any(|r| r.me_sim.is_some())
+        && matched
+            .iter()
+            .all(|r| r.me_sim.map_or(true, |s| s < super::diarize::NOT_ME))
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +494,10 @@ pub struct WorkerArgs {
     pub started_epoch_ms: u64,
     /// Speaker-embedding model, when downloaded — None = no diarization.
     pub speaker_model: Option<PathBuf>,
+    /// Whisper initial-prompt bias (names + vocabulary), when there is one.
+    pub asr_hint: Option<String>,
+    /// Canonical user-vocabulary terms for post-decode normalization.
+    pub vocab: Vec<String>,
 }
 
 fn epoch_ms() -> u64 {
@@ -354,7 +515,7 @@ const GAP_SLACK_MS: u64 = 2_500;
 const WAV_GAP_CAP_MS: u64 = 30 * 60 * 1_000;
 
 pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
-    let transcriber = match Transcriber::new(&args.model_path) {
+    let transcriber = match Transcriber::new(&args.model_path, args.asr_hint.clone()) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("[noted] meeting ASR unavailable: {e}");
@@ -370,6 +531,25 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
             .ok()
     });
     let mut voice_prints: Vec<super::diarize::SegEmb> = Vec::new();
+
+    // The note-taker's own voiceprint, built live from the mic channel (and
+    // seeded from previous meetings via the reserved __me__ profile). It is
+    // the ground truth that lets us recognize the user's voice coming back
+    // through the call — the remote side's speakers → their mic — which must
+    // never become a "them" speaker.
+    let (mut me_print, mut me_n): (Vec<f32>, i64) = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        store::get_profile(&conn, super::diarize::ME_PROFILE)
+            .ok()
+            .flatten()
+            .unwrap_or((Vec::new(), 0))
+    };
+    // This meeting's own mic embeddings (kept separate so the profile merge
+    // at stop doesn't double-count the seed).
+    let mut me_meeting_sum: Vec<f32> = Vec::new();
+    let mut me_meeting_n: i64 = 0;
+    let me_ready = |n: i64| n >= 5;
 
     let (me_wav, them_wav) = match &args.audio_dir {
         Some(dir) => {
@@ -444,7 +624,7 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
             }
             for seg in segments {
                 let text = match transcriber.transcribe(&seg.samples) {
-                    Ok(t) => t,
+                    Ok(t) => apply_vocab(&t, &args.vocab),
                     Err(e) => {
                         eprintln!("[noted] segment transcribe error: {e}");
                         continue;
@@ -453,11 +633,38 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                 if is_junk(&text) {
                     continue;
                 }
-                if pipe.name == "me"
-                    && is_echo(&text, &overlapping_text(&recent_them, seg.t0_ms, seg.t1_ms))
-                {
-                    eprintln!("[noted] echo suppressed: {}", text.chars().take(60).collect::<String>());
-                    continue;
+                // Voice work happens BEFORE insert: a them-segment that is the
+                // note-taker's own voice echoed back through the call is not a
+                // speaker — it never enters the transcript at all.
+                let mut them_emb: Option<Vec<f32>> = None;
+                let mut me_sim: Option<f32> = None;
+                if pipe.name == "them" {
+                    if let Some(embedder) = embedder.as_mut() {
+                        them_emb = embedder.embed(&seg.samples);
+                        if let (Some(e), true) = (&them_emb, me_ready(me_n)) {
+                            me_sim = Some(super::diarize::cosine(e, &me_print));
+                        }
+                    }
+                    if me_sim.map_or(false, |s| s >= super::diarize::ME_ECHO) {
+                        eprintln!(
+                            "[noted] own-voice echo skipped ({:.2}): {}",
+                            me_sim.unwrap(),
+                            text.chars().take(60).collect::<String>()
+                        );
+                        continue;
+                    }
+                }
+                if pipe.name == "me" {
+                    let matched = overlapping(&recent_them, seg.t0_ms, seg.t1_ms);
+                    let sys_text =
+                        matched.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join(" ");
+                    if is_echo(&text, &sys_text) && matched_is_foreign(&matched, me_ready(me_n)) {
+                        eprintln!(
+                            "[noted] echo suppressed: {}",
+                            text.chars().take(60).collect::<String>()
+                        );
+                        continue;
+                    }
                 }
                 let seg_id = {
                     let state = app.state::<Db>();
@@ -483,28 +690,31 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                         "text": text,
                     }),
                 );
-                let recent = RecentSeg { id, t0: seg.t0_ms, t1: seg.t1_ms, text };
+                let recent = RecentSeg { id, t0: seg.t0_ms, t1: seg.t1_ms, text, me_sim };
                 if pipe.name == "them" {
-                    if let Some(embedder) = embedder.as_mut() {
-                        if let Some(emb) = embedder.embed(&seg.samples) {
-                            voice_prints.push(super::diarize::SegEmb {
-                                seg_id: id,
-                                dur_ms: seg.t1_ms - seg.t0_ms,
-                                emb,
-                            });
-                        }
+                    if let Some(emb) = them_emb {
+                        voice_prints.push(super::diarize::SegEmb {
+                            seg_id: id,
+                            dur_ms: seg.t1_ms - seg.t0_ms,
+                            emb,
+                        });
                     }
                     recent_them.retain(|r| r.t1 >= seg.t1_ms - 90_000);
                     recent_them.push(recent);
                     // A mic segment can close before its system-audio source
                     // does (the echo is quieter, so the mic's gate shuts
                     // early) — re-check recent mic rows against this segment.
+                    // Same foreign-voice proof as at insert time: never delete
+                    // a mic line over system audio that might be the user.
                     let mut echoed: Vec<usize> = Vec::new();
                     for (i, m) in recent_me.iter().enumerate() {
-                        if m.t1 >= seg.t0_ms - ECHO_SLACK_MS
-                            && m.t0 <= seg.t1_ms + ECHO_SLACK_MS
-                            && is_echo(&m.text, &overlapping_text(&recent_them, m.t0, m.t1))
-                        {
+                        if m.t1 < seg.t0_ms - ECHO_SLACK_MS || m.t0 > seg.t1_ms + ECHO_SLACK_MS {
+                            continue;
+                        }
+                        let matched = overlapping(&recent_them, m.t0, m.t1);
+                        let sys_text =
+                            matched.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join(" ");
+                        if is_echo(&m.text, &sys_text) && matched_is_foreign(&matched, me_ready(me_n)) {
                             echoed.push(i);
                         }
                     }
@@ -527,6 +737,35 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                         }
                     }
                 } else {
+                    // Grow the note-taker's voiceprint from confident mic
+                    // segments. Self-consistency gate: without headphones the
+                    // mic also hears the speakers, and those foreign-voice
+                    // segments must not drag the centroid.
+                    if seg.t1_ms - seg.t0_ms >= 2_500 {
+                        if let Some(embedder) = embedder.as_mut() {
+                            if let Some(emb) = embedder.embed(&seg.samples) {
+                                let consistent = me_n == 0
+                                    || super::diarize::cosine(&emb, &me_print) >= 0.45;
+                                if consistent {
+                                    if me_print.is_empty() {
+                                        me_print = vec![0.0; emb.len()];
+                                    }
+                                    if me_meeting_sum.is_empty() {
+                                        me_meeting_sum = vec![0.0; emb.len()];
+                                    }
+                                    let n = me_n as f32;
+                                    for (c, e) in me_print.iter_mut().zip(&emb) {
+                                        *c = (*c * n + e) / (n + 1.0);
+                                    }
+                                    me_n += 1;
+                                    for (s, e) in me_meeting_sum.iter_mut().zip(&emb) {
+                                        *s += e;
+                                    }
+                                    me_meeting_n += 1;
+                                }
+                            }
+                        }
+                    }
                     recent_me.retain(|r| r.t1 >= seg.t1_ms - 90_000);
                     recent_me.push(recent);
                 }
@@ -542,7 +781,34 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
     // meeting-stopped, so the reloaded transcript and the summary see names.
     // Known voiceprints resolve to real names; the rest become "Speaker N".
     if !voice_prints.is_empty() {
-        let clusters = super::diarize::cluster(&voice_prints);
+        let mut clusters = super::diarize::cluster(&voice_prints);
+        // Purge own-voice echo that slipped in before the mic voiceprint was
+        // ready (the live check needs a few mic segments to warm up).
+        if me_ready(me_n) {
+            let (echo, keep): (Vec<_>, Vec<_>) = clusters.into_iter().partition(|c| {
+                super::diarize::cosine(&c.centroid, &me_print) >= super::diarize::ME_ECHO
+            });
+            clusters = keep;
+            for c in &echo {
+                eprintln!(
+                    "[noted] own-voice echo cluster purged ({} segments)",
+                    c.seg_ids.len()
+                );
+                for &sid in &c.seg_ids {
+                    let removed = {
+                        let state = app.state::<Db>();
+                        let conn = state.0.lock().unwrap();
+                        store::delete_segment(&conn, sid)
+                    };
+                    if removed.is_ok() {
+                        let _ = app.emit(
+                            "meeting-segment-removed",
+                            json!({ "meetingId": args.meeting_id, "id": sid }),
+                        );
+                    }
+                }
+            }
+        }
         if !clusters.is_empty() {
             let state = app.state::<Db>();
             let conn = state.0.lock().unwrap();
@@ -551,7 +817,24 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                 .into_iter()
                 .map(|(name, emb, _)| (name, emb))
                 .collect();
-            let named = super::diarize::assign_names(clusters, &profiles);
+            let mut named = super::diarize::assign_names(clusters, &profiles);
+            // 1:1 rule: with exactly one external attendee on the calendar
+            // event, every voice that didn't match a stored profile IS that
+            // person — no model, no guessing.
+            let external = store::meeting_event_json(&conn, args.meeting_id)
+                .ok()
+                .flatten()
+                .map(|ev| super::summarize::external_attendees(&ev))
+                .unwrap_or_default();
+            if external.len() == 1 {
+                for s in named.iter_mut() {
+                    let generic =
+                        s.label.as_deref().map_or(true, |l| l.starts_with("Speaker "));
+                    if generic {
+                        s.label = Some(external[0].clone());
+                    }
+                }
+            }
             let mut labels: Vec<(i64, String)> = Vec::new();
             let mut rows: Vec<(String, Vec<f32>, i64)> = Vec::new();
             for s in &named {
@@ -565,6 +848,20 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                 ));
             }
             let _ = store::save_meeting_speakers(&conn, args.meeting_id, &rows);
+            // Calendar-derived names are ground truth enough to persist: the
+            // next call with this person auto-labels even without an event.
+            if external.len() == 1 {
+                for s in &named {
+                    if s.label.as_deref() == Some(external[0].as_str()) {
+                        let _ = store::merge_profile(
+                            &conn,
+                            &external[0],
+                            &s.centroid,
+                            s.seg_ids.len() as i64,
+                        );
+                    }
+                }
+            }
             match store::set_segment_speakers(&conn, &labels) {
                 Ok(()) => eprintln!(
                     "[noted] diarization: {} voices, {} segments labeled",
@@ -574,6 +871,16 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                 Err(e) => eprintln!("[noted] diarization write failed: {e}"),
             }
         }
+    }
+    // Refresh the note-taker's own voiceprint with this meeting's mic voice.
+    if me_meeting_n > 0 {
+        let mean: Vec<f32> = me_meeting_sum
+            .iter()
+            .map(|s| s / me_meeting_n as f32)
+            .collect();
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        let _ = store::merge_profile(&conn, super::diarize::ME_PROFILE, &mean, me_meeting_n);
     }
 
     for pipe in pipes {
@@ -642,10 +949,79 @@ mod tests {
         assert!(is_junk("  [BLANK_AUDIO]  "));
         assert!(is_junk("(music) [applause]"));
         assert!(is_junk("*ding*"), "starred sound tags are junk");
+        assert!(is_junk("*sad music*"), "multi-word starred tags are junk");
+        assert!(is_junk("(door slams loudly)"));
         assert!(is_junk("."), "lone punctuation is junk");
         assert!(is_junk("- ."));
         assert!(!is_junk("- Cool."));
+        assert!(!is_junk("(music) hello everyone"));
         assert!(!is_junk("let's ship the meeting recorder"));
+    }
+
+    #[test]
+    fn vocab_hint_composes_and_caps() {
+        assert_eq!(vocab_hint(&[], &[]), None);
+        let h = vocab_hint(
+            &["Mayan".into(), "  ".into(), "mayan".into()],
+            &["a16z".into(), "Tauri".into()],
+        )
+        .unwrap();
+        assert_eq!(h, "Participants: Mayan. Vocabulary: a16z, Tauri.");
+        // Over-long hints keep the tail (the vocabulary), never the front.
+        let many: Vec<String> = (0..200).map(|i| format!("Person{i}")).collect();
+        let h = vocab_hint(&many, &["a16z".into()]).unwrap();
+        assert!(h.len() <= HINT_CAP_CHARS);
+        assert!(h.ends_with("Vocabulary: a16z."), "tail survives: {h}");
+    }
+
+    #[test]
+    fn vocab_canonicalizes_near_miss_spellings() {
+        let v = vec!["a16z".into(), "Vanta".into(), "SOC 2".into()];
+        // Split renditions collapse to the canonical form.
+        assert_eq!(apply_vocab("we talked to a 16 z yesterday", &v), "we talked to a16z yesterday");
+        assert_eq!(apply_vocab("A16-Z passed on it", &v), "a16z passed on it");
+        // Case normalization on a single word.
+        assert_eq!(apply_vocab("vanta is doing our soc 2", &v), "Vanta is doing our SOC 2");
+        // Whole words only — no rewriting inside longer words.
+        assert_eq!(apply_vocab("advantage stays put", &v), "advantage stays put");
+        // Runs never jump sentence boundaries.
+        assert_eq!(apply_vocab("plan A. 16 z is not a term here", &v), "plan A. 16 z is not a term here");
+        // Untouched text round-trips byte-for-byte.
+        assert_eq!(apply_vocab("nothing to see here.", &v), "nothing to see here.");
+        assert_eq!(apply_vocab("", &v), "");
+    }
+
+    #[test]
+    fn vocab_short_multiword_matches_are_rejected() {
+        let v = vec!["AI".into()];
+        // Single word "ai" is canonicalized...
+        assert_eq!(apply_vocab("the ai stuff", &v), "the AI stuff");
+        // ...but "a i" (two words collapsing to 2 chars) is not.
+        assert_eq!(apply_vocab("give it a i mean look", &v), "give it a i mean look");
+    }
+
+    #[test]
+    fn mic_lines_survive_unless_matched_audio_is_provably_foreign() {
+        let them = |sim: Option<f32>| RecentSeg {
+            id: 1,
+            t0: 0,
+            t1: 1000,
+            text: "x".into(),
+            me_sim: sim,
+        };
+        // Matched system audio is another voice → local echo, suppressible.
+        let foreign = [them(Some(0.30))];
+        assert!(matched_is_foreign(&foreign.iter().collect::<Vec<_>>(), true));
+        // Matched audio resembles the note-taker → their own remote echo; the
+        // mic line is the original and must survive.
+        let mine = [them(Some(0.62))];
+        assert!(!matched_is_foreign(&mine.iter().collect::<Vec<_>>(), true));
+        let mixed = [them(Some(0.30)), them(Some(0.55))];
+        assert!(!matched_is_foreign(&mixed.iter().collect::<Vec<_>>(), true));
+        // Unknown voice (too short to embed) or no voiceprint yet → keep mic.
+        let unknown = [them(None)];
+        assert!(!matched_is_foreign(&unknown.iter().collect::<Vec<_>>(), true));
+        assert!(!matched_is_foreign(&foreign.iter().collect::<Vec<_>>(), false));
     }
 
     #[test]

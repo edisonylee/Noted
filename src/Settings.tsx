@@ -53,6 +53,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   const [tplDraft, setTplDraft] = useState<{ name: string; prompt: string } | null>(null);
   const [tplBusy, setTplBusy] = useState(false);
   const [ignoreText, setIgnoreText] = useState("");
+  const [vocabText, setVocabText] = useState("");
   const [mDownloading, setMDownloading] = useState(false);
   const [sDownloading, setSDownloading] = useState(false);
   const [probeMsg, setProbeMsg] = useState<string | null>(null);
@@ -162,6 +163,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
       .then((c) => {
         setMcfg(c);
         setIgnoreText(c.ignore_bundles.join(", "));
+        setVocabText((c.vocabulary ?? []).join(", "));
       })
       .catch(() => {});
     api.meetingModelStatus().then(setMModel).catch(() => {});
@@ -825,6 +827,28 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               )}
             </div>
           </div>
+          <label className="field">
+            <span className="field-label">
+              Custom vocabulary — names and jargon the transcriber mishears (comma-separated)
+            </span>
+            <input
+              value={vocabText}
+              onChange={(e) => setVocabText(e.target.value)}
+              onBlur={() =>
+                mcfg &&
+                saveMcfg({
+                  ...mcfg,
+                  vocabulary: vocabText
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+                })
+              }
+              placeholder="a16z, Anthropic, Tauri, SOC 2"
+              spellCheck={false}
+              autoComplete="off"
+            />
+          </label>
           <label className="field">
             <span className="field-label">
               Never prompt for these apps (comma-separated bundle-id fragments)

@@ -25,7 +25,7 @@ pub fn resample_to_16k(samples: &[f32], from_rate: u32) -> Vec<f32> {
         .collect()
 }
 
-pub fn transcribe(model_path: &Path, samples: &[f32]) -> Result<String> {
+pub fn transcribe(model_path: &Path, samples: &[f32], hint: Option<&str>) -> Result<String> {
     let path = model_path.to_str().ok_or_else(|| anyhow!("bad model path"))?;
     let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default())
         .map_err(|e| anyhow!("whisper load failed: {e:?}"))?;
@@ -37,6 +37,11 @@ pub fn transcribe(model_path: &Path, samples: &[f32]) -> Result<String> {
     params.set_print_special(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
+    if let Some(h) = hint {
+        // Decoder bias toward the user's vocabulary (set_initial_prompt
+        // panics on interior NULs).
+        params.set_initial_prompt(&h.replace('\0', ""));
+    }
 
     state
         .full(params, samples)

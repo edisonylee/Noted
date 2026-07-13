@@ -117,9 +117,13 @@ pub fn set_segment_speakers(conn: &Connection, labels: &[(i64, String)]) -> Resu
     Ok(())
 }
 
-/// Saved voiceprints: (name, embedding, samples).
+/// Saved voiceprints: (name, embedding, samples). Reserved internal profiles
+/// (double-underscore names, e.g. the note-taker's own __me__) are excluded —
+/// they must never label a "them" speaker.
 pub fn speaker_profiles(conn: &Connection) -> Result<Vec<(String, Vec<f32>, i64)>> {
-    let mut stmt = conn.prepare("SELECT name, embedding, samples FROM speaker_profiles")?;
+    let mut stmt = conn.prepare(
+        "SELECT name, embedding, samples FROM speaker_profiles WHERE substr(name, 1, 2) != '__'",
+    )?;
     let rows = stmt
         .query_map([], |r| {
             Ok((
@@ -130,6 +134,47 @@ pub fn speaker_profiles(conn: &Connection) -> Result<Vec<(String, Vec<f32>, i64)
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+/// One profile by exact name (reserved names included).
+pub fn get_profile(conn: &Connection, name: &str) -> Result<Option<(Vec<f32>, i64)>> {
+    Ok(conn
+        .query_row(
+            "SELECT embedding, samples FROM speaker_profiles WHERE name = ?1",
+            [name],
+            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .ok()
+        .map(|(blob, n)| (super::diarize::blob_to_emb(&blob), n)))
+}
+
+/// Fold `centroid` (over `n` segments) into the named voiceprint as a
+/// samples-weighted running mean; creates the profile if new.
+pub fn merge_profile(conn: &Connection, name: &str, centroid: &[f32], n: i64) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let (emb, samples) = match get_profile(conn, name)? {
+        Some((old, old_n)) => (
+            super::diarize::merge_centroid(&old, old_n, centroid, n),
+            old_n + n,
+        ),
+        None => (centroid.to_vec(), n),
+    };
+    conn.execute(
+        "INSERT OR REPLACE INTO speaker_profiles (name, embedding, samples, updated_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![name, super::diarize::emb_to_blob(&emb), samples, now],
+    )?;
+    Ok(())
+}
+
+/// The calendar-event snapshot captured at start, if this meeting had one.
+pub fn meeting_event_json(conn: &Connection, id: i64) -> Result<Option<Value>> {
+    let raw: Option<String> = conn.query_row(
+        "SELECT event_json FROM meetings WHERE id = ?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    Ok(raw.and_then(|s| serde_json::from_str(&s).ok()))
 }
 
 /// Record a meeting's diarized voices (label + centroid) so a later rename can
@@ -190,7 +235,7 @@ pub fn set_speaker_suggestion(
 /// the lone-voice case (speaker still NULL on the segments).
 pub fn rename_speaker(conn: &Connection, meeting_id: i64, from: &str, to: &str) -> Result<()> {
     let to = to.trim();
-    if to.is_empty() || to == "Me" || to == "Them" {
+    if to.is_empty() || to == "Me" || to == "Them" || to.starts_with("__") {
         return Err(anyhow::anyhow!("invalid speaker name"));
     }
     if from == "Them" {
@@ -222,33 +267,7 @@ pub fn rename_speaker(conn: &Connection, meeting_id: i64, from: &str, to: &str) 
          WHERE meeting_id = ?1 AND label = ?2",
         rusqlite::params![meeting_id, from, to],
     )?;
-    let centroid = super::diarize::blob_to_emb(&blob);
-    let now = chrono::Utc::now().to_rfc3339();
-    let existing: Option<(Vec<u8>, i64)> = conn
-        .query_row(
-            "SELECT embedding, samples FROM speaker_profiles WHERE name = ?1",
-            [to],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .ok();
-    let (emb, samples) = match existing {
-        Some((old_blob, old_n)) => (
-            super::diarize::merge_centroid(
-                &super::diarize::blob_to_emb(&old_blob),
-                old_n,
-                &centroid,
-                seg_count,
-            ),
-            old_n + seg_count,
-        ),
-        None => (centroid, seg_count),
-    };
-    conn.execute(
-        "INSERT OR REPLACE INTO speaker_profiles (name, embedding, samples, updated_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![to, super::diarize::emb_to_blob(&emb), samples, now],
-    )?;
-    Ok(())
+    merge_profile(conn, to, &super::diarize::blob_to_emb(&blob), seg_count)
 }
 
 /// Full transcript, timeline order, interleaved across channels.
@@ -398,8 +417,15 @@ const BUILTIN_TEMPLATES: &[(&str, &str)] = &[
     (
         "Meeting",
         "General meeting notes. Sections, in this order: \
-         'Summary' — one short paragraph on what the meeting was about and its outcome. \
-         'Key Takeaways' — the most important points as tight bullets. \
+         'Summary' — a full paragraph (4-6 sentences): what the meeting was about, \
+         who drove it, the main threads, and how each was left. \
+         'Discussion' — the heart of the notes and the LONGEST section: detailed \
+         bullets covering every topic discussed, in order. Open each topic with a \
+         bold lead ('**Pricing** — …'), then one bullet per substantive point: \
+         decisions and the reasoning behind them, options considered and rejected, \
+         numbers, dates, names, disagreements, and how each thread was left. \
+         'Key Takeaways' — the 5-10 points that matter most, each a complete \
+         sentence carrying its own specifics. \
          'Chapters' — the conversation's phases as a timeline: each item gets the \
          timestamp where the topic started and a 1-2 line gist. \
          'Action Items' — every task, commitment, deadline, or follow-up as \
@@ -409,10 +435,14 @@ const BUILTIN_TEMPLATES: &[(&str, &str)] = &[
     (
         "1:1",
         "One-on-one meeting notes. Sections, in this order: \
-         'Summary' — one paragraph capturing the tone and main threads. \
-         'Updates' — progress and wins each person shared, as bullets. \
-         'Blockers & Concerns' — problems raised and how they landed. \
+         'Summary' — a full paragraph capturing the tone and main threads. \
+         'Updates' — progress and wins each person shared, as detailed bullets that \
+         keep the specifics (project names, numbers, dates, who was involved). \
+         'Blockers & Concerns' — every problem raised, the context behind it, and \
+         how it landed. \
          'Feedback' — feedback exchanged in either direction, quoted where sharp. \
+         'Discussion' — anything substantive outside the above, topic by topic, \
+         with the reasoning and details preserved. \
          'Action Items' — commitments as 'Owner — verb phrase by date'. \
          'Key Questions' — open questions to revisit next time.",
     ),
@@ -428,20 +458,27 @@ const BUILTIN_TEMPLATES: &[(&str, &str)] = &[
     (
         "Interview",
         "Interview notes (candidate, user research, or journalistic). Sections: \
-         'Summary' — one paragraph: who was interviewed and the overall read. \
-         'Background' — relevant experience or context the interviewee gave. \
-         'Highlights' — the strongest answers or moments, with short quotes. \
-         'Concerns' — weak answers, risks, or open doubts. \
+         'Summary' — a full paragraph: who was interviewed, the ground covered, \
+         and the overall read. \
+         'Background' — the experience and context the interviewee gave, as \
+         detailed bullets (roles, companies, dates, scope). \
+         'Highlights' — the strongest answers or moments: what was asked, how they \
+         answered, and why it landed, with short quotes. \
+         'Concerns' — weak answers, risks, or open doubts, each with the moment \
+         that raised it. \
          'Chapters' — question areas as a timeline with timestamps. \
          'Action Items' — follow-ups as 'Owner — verb phrase by date'.",
     ),
     (
         "Lecture",
         "Lecture or talk notes. Sections, in this order: \
-         'Summary' — one paragraph: thesis of the talk. \
-         'Key Concepts' — each concept as a bullet with a one-line explanation. \
+         'Summary' — a full paragraph: the thesis of the talk and the arc of its \
+         argument. \
+         'Key Concepts' — each concept as a bullet with the explanation actually \
+         given: definitions, numbers, and the examples used to make the point. \
          'Chapters' — the talk's arc as a timeline with timestamps. \
-         'Examples & References' — concrete examples, papers, books, or tools mentioned. \
+         'Examples & References' — concrete examples, papers, books, or tools \
+         mentioned, each with why it came up. \
          'Key Questions' — audience questions and any left unanswered.",
     ),
 ];

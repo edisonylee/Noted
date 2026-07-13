@@ -389,6 +389,7 @@ export type MeetingsCfg = {
   retain_audio: boolean;
   ignore_bundles: string[];
   default_template: string;
+  vocabulary: string[];
 };
 
 // The Journal agent's response: a companion reply (null if the local model was

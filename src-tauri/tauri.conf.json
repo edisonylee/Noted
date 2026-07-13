@@ -28,7 +28,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app"],
     "macOS": {
       "minimumSystemVersion": "10.15"
     },

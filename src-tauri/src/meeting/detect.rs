@@ -165,10 +165,12 @@ fn show_prompt(app: &tauri::AppHandle, payload: Value) {
         let w = mon.size().width as f64 / mon.scale_factor();
         x = (w - 392.0).max(20.0);
     }
+    // ?window=prompt is how the frontend knows to render ONLY the prompt card
+    // (label introspection proved unreliable — a full mini-app leaked through).
     let _ = tauri::WebviewWindowBuilder::new(
         app,
         "record-prompt",
-        tauri::WebviewUrl::App("index.html".into()),
+        tauri::WebviewUrl::App("index.html?window=prompt".into()),
     )
     .title("noted")
     .inner_size(372.0, 132.0)

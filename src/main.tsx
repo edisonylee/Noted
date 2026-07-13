@@ -7,16 +7,25 @@ import { isDesktop } from "./api";
 import { ThemeProvider } from "./useTheme";
 import "./App.css";
 
-// The record-prompt popup is a second webview onto the same bundle — it renders
-// just the prompt card, not the app. Label is read straight off the internals
-// so the phone browser (no Tauri) never touches the window API.
+// The record-prompt popup is a second webview onto the same bundle — it must
+// render just the prompt card, never the app (a 372px window otherwise falls
+// into the phone layout). Detected by URL (the backend opens
+// index.html?window=prompt) with the window label as belt-and-braces; the
+// internals poke used before was unreliable and leaked the mini-app.
 const isPromptWindow = (() => {
+  if (new URLSearchParams(window.location.search).get("window") === "prompt") return true;
   if (!isDesktop) return false;
   try {
-    type TauriInternals = { metadata?: { currentWebviewWindow?: { label?: string } } };
-    const internals = (window as unknown as { __TAURI_INTERNALS__?: TauriInternals })
-      .__TAURI_INTERNALS__;
-    return internals?.metadata?.currentWebviewWindow?.label === "record-prompt";
+    type TauriInternals = {
+      metadata?: {
+        currentWebviewWindow?: { label?: string };
+        currentWindow?: { label?: string };
+      };
+    };
+    const meta = (window as unknown as { __TAURI_INTERNALS__?: TauriInternals })
+      .__TAURI_INTERNALS__?.metadata;
+    const label = meta?.currentWebviewWindow?.label ?? meta?.currentWindow?.label;
+    return label === "record-prompt";
   } catch {
     return false;
   }

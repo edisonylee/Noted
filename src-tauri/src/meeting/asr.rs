@@ -503,6 +503,26 @@ fn matched_is_foreign(matched: &[&RecentSeg], me_ready: bool) -> bool {
             .all(|r| r.me_sim.map_or(true, |s| s < super::diarize::NOT_ME))
 }
 
+/// Is a system-audio voice the note-taker echoed back through the call?
+/// The ME_ECHO threshold alone is not enough: the mic centroid is built from
+/// mic audio, and without headphones that audio can carry the other side too,
+/// pulling the centroid toward the remote voice until the remote voice itself
+/// clears the bar — the gate then eats the entire "them" channel. So an
+/// own-voice call must also BEAT the best match against every known foreign
+/// voiceprint; with no foreign prints stored it falls back to the threshold.
+fn is_own_voice(me_sim: Option<f32>, best_foreign_sim: Option<f32>) -> bool {
+    me_sim.map_or(false, |s| {
+        s >= super::diarize::ME_ECHO && best_foreign_sim.map_or(true, |f| s > f)
+    })
+}
+
+fn best_foreign_sim(emb: &[f32], prints: &[(String, Vec<f32>)]) -> Option<f32> {
+    prints
+        .iter()
+        .map(|(_, p)| super::diarize::cosine(emb, p))
+        .fold(None, |acc: Option<f32>, s| Some(acc.map_or(s, |a| a.max(s))))
+}
+
 // ---------------------------------------------------------------------------
 // Worker: the per-meeting loop tying capture → chunker → whisper → DB/UI.
 // ---------------------------------------------------------------------------
@@ -586,6 +606,17 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
             .ok()
             .flatten()
             .unwrap_or((Vec::new(), 0))
+    };
+    // Every stored voiceprint that isn't the user: the own-voice gate must
+    // beat these, not just clear ME_ECHO (see is_own_voice).
+    let foreign_prints: Vec<(String, Vec<f32>)> = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        store::speaker_profiles(&conn)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, emb, _)| (name, emb))
+            .collect()
     };
     // This meeting's own mic embeddings (kept separate so the profile merge
     // at stop doesn't double-count the seed).
@@ -687,7 +718,9 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                             me_sim = Some(super::diarize::cosine(e, &me_print));
                         }
                     }
-                    if me_sim.map_or(false, |s| s >= super::diarize::ME_ECHO) {
+                    let foreign =
+                        them_emb.as_ref().and_then(|e| best_foreign_sim(e, &foreign_prints));
+                    if is_own_voice(me_sim, foreign) {
                         eprintln!(
                             "[noted] own-voice echo skipped ({:.2}): {}",
                             me_sim.unwrap(),
@@ -780,10 +813,16 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                     }
                 } else {
                     // Grow the note-taker's voiceprint from confident mic
-                    // segments. Self-consistency gate: without headphones the
-                    // mic also hears the speakers, and those foreign-voice
-                    // segments must not drag the centroid.
-                    if seg.t1_ms - seg.t0_ms >= 2_500 {
+                    // segments — but only while the remote side is quiet.
+                    // Without headphones the mic also hears the speakers, and
+                    // the self-consistency gate below cannot stop a slow
+                    // drift: each mixed-voice segment passes the gate and
+                    // pulls the centroid a little further toward the remote
+                    // voice. No overlapping system audio → the mic is
+                    // provably just the user.
+                    let remote_quiet =
+                        overlapping(&recent_them, seg.t0_ms, seg.t1_ms).is_empty();
+                    if remote_quiet && seg.t1_ms - seg.t0_ms >= 2_500 {
                         if let Some(embedder) = embedder.as_mut() {
                             if let Some(emb) = embedder.embed(&seg.samples) {
                                 let consistent = me_n == 0
@@ -828,7 +867,10 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
         // ready (the live check needs a few mic segments to warm up).
         if me_ready(me_n) {
             let (echo, keep): (Vec<_>, Vec<_>) = clusters.into_iter().partition(|c| {
-                super::diarize::cosine(&c.centroid, &me_print) >= super::diarize::ME_ECHO
+                is_own_voice(
+                    Some(super::diarize::cosine(&c.centroid, &me_print)),
+                    best_foreign_sim(&c.centroid, &foreign_prints),
+                )
             });
             clusters = keep;
             for c in &echo {
@@ -1069,6 +1111,25 @@ mod tests {
         let unknown = [them(None)];
         assert!(!matched_is_foreign(&unknown.iter().collect::<Vec<_>>(), true));
         assert!(!matched_is_foreign(&foreign.iter().collect::<Vec<_>>(), false));
+    }
+
+    #[test]
+    fn own_voice_must_beat_known_foreign_prints() {
+        // Bare threshold when nothing else is stored (first-ever meeting).
+        assert!(is_own_voice(Some(0.70), None));
+        assert!(!is_own_voice(Some(0.55), None));
+        // A polluted mic centroid can score a remote voice above ME_ECHO —
+        // but the remote voice matches their own stored print even better,
+        // so it is NOT the user and must reach the transcript.
+        assert!(!is_own_voice(Some(0.70), Some(0.80)));
+        assert!(is_own_voice(Some(0.80), Some(0.70)));
+        // Too short to embed / no voiceprint yet → never an own-voice call.
+        assert!(!is_own_voice(None, Some(0.10)));
+
+        let prints = vec![("Brian".into(), vec![1.0f32, 0.0]), ("Ana".into(), vec![0.0f32, 1.0])];
+        let best = best_foreign_sim(&[0.6, 0.8], &prints).unwrap();
+        assert!((best - 0.8).abs() < 1e-6);
+        assert!(best_foreign_sim(&[1.0, 0.0], &[]).is_none());
     }
 
     #[test]

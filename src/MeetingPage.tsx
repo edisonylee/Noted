@@ -8,9 +8,14 @@ import {
   AudioLines,
   Check,
   ChevronDown,
+  Copy,
+  Download,
   Loader,
   Mic,
+  Pause,
+  Play,
   Plus,
+  Search,
   Sparkles,
   Square,
   Users,
@@ -19,6 +24,8 @@ import {
 import { listen } from "./events";
 import {
   api,
+  isDesktop,
+  localFileUrl,
   type MeetingDetail,
   type MeetingSegment,
   type MeetingTemplate,
@@ -108,6 +115,10 @@ export function MeetingPage({
   const [renameFor, setRenameFor] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
   const [suggesting, setSuggesting] = useState(false);
+  const [query, setQuery] = useState("");
+  const [playingSeg, setPlayingSeg] = useState<number | null>(null);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const notesTimer = useRef<number | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
 
@@ -285,6 +296,56 @@ export function MeetingPage({
     }
   };
 
+  const exportMd = async () => {
+    if (id == null) return;
+    try {
+      const path = await api.meetingExportMd(id);
+      setExportMsg(`Saved to ${path.split("/").slice(-2).join("/")}`);
+      window.setTimeout(() => setExportMsg(null), 4000);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  // Tap-a-line-to-seek into the retained per-channel WAVs (desktop only;
+  // paths land at stop, so playback is a post-meeting affordance).
+  const meAudio = localFileUrl(detail?.audio_me_path);
+  const themAudio = localFileUrl(detail?.audio_them_path);
+  const playLine = (s: MeetingSegment) => {
+    const src = s.channel === "me" ? meAudio : themAudio;
+    const el = audioRef.current;
+    if (!src || !el) return;
+    if (playingSeg === s.id) {
+      el.pause();
+      setPlayingSeg(null);
+      return;
+    }
+    if (!el.src.endsWith(src)) el.src = src;
+    el.currentTime = s.t0_ms / 1000;
+    el.play().catch(() => {});
+    setPlayingSeg(s.id);
+  };
+  useEffect(() => {
+    const el = audioRef.current;
+    return () => el?.pause();
+  }, []);
+
+  const copyLine = (s: MeetingSegment) => {
+    const who = s.channel === "me" ? "Me" : s.speaker || "Them";
+    navigator.clipboard?.writeText(`[${mmss(s.t0_ms)}] ${who}: ${s.text}`).catch(() => {});
+  };
+
+  const q = query.trim().toLowerCase();
+  const visibleSegments = useMemo(() => {
+    const sorted = [...liveSegments].sort((a, b) => a.t0_ms - b.t0_ms || a.id - b.id);
+    if (!q) return sorted;
+    return sorted.filter(
+      (s) =>
+        s.text.toLowerCase().includes(q) ||
+        (s.channel === "me" ? "me" : (s.speaker || "them").toLowerCase()).includes(q)
+    );
+  }, [liveSegments, q]);
+
   return (
     <div className="meeting-page">
       <header className="meeting-head">
@@ -333,8 +394,19 @@ export function MeetingPage({
             <Loader size={14} className="spin" /> enhancing notes…
           </span>
         ) : null}
+        {isDesktop && id != null && !recording && liveSegments.length > 0 && (
+          <button
+            className="icon-btn"
+            onClick={exportMd}
+            title="Export summaries + notes + transcript as Markdown (to Downloads)"
+            aria-label="Export as Markdown"
+          >
+            <Download size={16} />
+          </button>
+        )}
       </header>
 
+      {exportMsg && <div className="meeting-hint">{exportMsg}</div>}
       {error && <div className="error">{error}</div>}
       {id == null && (
         <p className="meeting-hint">
@@ -454,24 +526,65 @@ export function MeetingPage({
               </datalist>
             </div>
           )}
+          {liveSegments.length > 0 && (
+            <div className="transcript-tools">
+              <span className="tsearch">
+                <Search size={13} />
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search transcript…"
+                  spellCheck={false}
+                />
+              </span>
+              {q && (
+                <span className="tsearch-count">
+                  {visibleSegments.length} of {liveSegments.length}
+                </span>
+              )}
+            </div>
+          )}
           <div className="meeting-transcript" ref={transcriptRef}>
           {liveSegments.length === 0 ? (
             <p className="quiet-empty">
               {recording ? "Listening — the transcript fills in as people speak." : "No transcript."}
             </p>
+          ) : visibleSegments.length === 0 ? (
+            <p className="quiet-empty">No lines match "{query.trim()}".</p>
           ) : (
-            [...liveSegments]
-              .sort((a, b) => a.t0_ms - b.t0_ms || a.id - b.id)
-              .map((s) => (
-                <div key={s.id} className={"bubble " + s.channel}>
+            visibleSegments.map((s) => {
+              const playable = s.channel === "me" ? meAudio : themAudio;
+              return (
+                <div
+                  key={s.id}
+                  className={
+                    "bubble " + s.channel + (playingSeg === s.id ? " playing" : "")
+                  }
+                >
                   <span className="who">
                     {s.channel === "me" ? "Me" : s.speaker || "Them"} · {mmss(s.t0_ms)}
+                    <span className="line-ops">
+                      {playable && !recording && (
+                        <button
+                          className="line-op"
+                          title="Play from here"
+                          onClick={() => playLine(s)}
+                        >
+                          {playingSeg === s.id ? <Pause size={11} /> : <Play size={11} />}
+                        </button>
+                      )}
+                      <button className="line-op" title="Copy line" onClick={() => copyLine(s)}>
+                        <Copy size={11} />
+                      </button>
+                    </span>
                   </span>
                   <p>{s.text}</p>
                 </div>
-              ))
+              );
+            })
           )}
           </div>
+          <audio ref={audioRef} onEnded={() => setPlayingSeg(null)} style={{ display: "none" }} />
         </>
       ) : (
         <div className="meeting-summary">

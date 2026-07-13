@@ -1,4 +1,4 @@
-import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import type { ThemeModePreference, ThemePack } from "./themes/types";
 
 // noted runs in two places: the desktop Tauri shell, and a phone browser that
@@ -7,6 +7,12 @@ import type { ThemeModePreference, ThemePack } from "./themes/types";
 // access token from the launch URL (?t=…), cached so it survives reloads.
 export const isDesktop =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+// Playable URL for a locally retained file (meeting audio) via the Tauri
+// asset protocol. Desktop only — the phone bridge doesn't serve raw files.
+export function localFileUrl(path: string | null | undefined): string | null {
+  return isDesktop && path ? convertFileSrc(path) : null;
+}
 
 function webToken(): string {
   const fromUrl = new URLSearchParams(window.location.search).get("t");
@@ -603,6 +609,8 @@ export const api = {
     invoke<void>("meeting_rename_speaker", { id, from, to }),
   meetingSuggestSpeakers: (id: number) =>
     invoke<number>("meeting_suggest_speakers", { id }),
+  // Writes "<date> <title>.md" into ~/Downloads; resolves to the path.
+  meetingExportMd: (id: number) => invoke<string>("meeting_export_md", { id }),
   meetingTemplates: () => invoke<MeetingTemplate[]>("meeting_templates"),
   meetingTemplateSave: (name: string, prompt: string) =>
     invoke<void>("meeting_template_save", { name, prompt }),

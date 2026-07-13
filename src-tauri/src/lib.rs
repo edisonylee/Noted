@@ -1632,6 +1632,42 @@ async fn meeting_suggest_speakers(app: tauri::AppHandle, id: i64) -> Result<usiz
         .map_err(|e| e.to_string())
 }
 
+/// Export the whole meeting (summaries + notes + labeled transcript) as one
+/// Markdown file in ~/Downloads; returns the written path.
+#[tauri::command]
+async fn meeting_export_md(app: tauri::AppHandle, id: i64) -> Result<String, String> {
+    let meeting = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        meeting::store::get_meeting(&conn, id).map_err(|e| e.to_string())?
+    };
+    let md = meeting::summarize::export_markdown(&meeting);
+    let dir = app.path().download_dir().map_err(|e| e.to_string())?;
+    let title: String = meeting["title"]
+        .as_str()
+        .unwrap_or("Meeting")
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let date: String = meeting["started_at"]
+        .as_str()
+        .map(|s| s.chars().take(10).collect())
+        .unwrap_or_default();
+    let base = if date.is_empty() {
+        title.trim().to_string()
+    } else {
+        format!("{date} {}", title.trim())
+    };
+    let mut path = dir.join(format!("{base}.md"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{base} ({n}).md"));
+        n += 1;
+    }
+    std::fs::write(&path, md).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 /// Generate a summary tab with the given (or default) template. PLAUD-style:
 /// each run adds a tab; the first one also files the meeting note.
 #[tauri::command]
@@ -2893,6 +2929,7 @@ pub fn run() {
             download_speaker_model,
             meeting_rename_speaker,
             meeting_suggest_speakers,
+            meeting_export_md,
             meeting_start,
             meeting_stop,
             meeting_state,

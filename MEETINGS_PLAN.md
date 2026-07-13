@@ -1,11 +1,17 @@
 # Meetings: a local-first Granola inside Noted
 
-> **Status (2026-07-12):** Phases 0–2 are implemented (capture engine, live ASR,
+> **Status (2026-07-13):** Phases 0–3 are implemented (capture engine, live ASR,
 > summarization + templates, Coming Up strip, meeting page, detection + prompt
-> window, auto-stop, settings). Outstanding: live verification on a real call
-> (permission grant + turbo model download happen on first use), Phase 3
-> stretch goals (inline black/gray merge, provenance hover, transcript search,
-> md export), and Phase 4 (Parakeet via fluidaudio-rs + diarization).
+> window, auto-stop, settings; transcript search, per-line copy + tap-to-seek
+> audio, Markdown export, custom template editor). Phase 4's diarization half
+> shipped early — via sherpa-onnx voiceprints (`meeting/diarize.rs`), not
+> FluidAudio — plus speaker rename UI, persistent `speaker_profiles`, and
+> local-LLM name suggestions. Also fixed from real-call experience: channel
+> timelines are wall-anchored (the tap delivers nothing until audio plays) and
+> a cross-channel echo suppressor drops mic copies of remote speech.
+> Outstanding: Phase 3's stretch goal (inline black/gray merge + per-bullet
+> provenance), and Phase 4's engine work — Parakeet via fluidaudio-rs, plus
+> VoiceProcessingIO AEC on the mic path (the proper echo fix).
 
 **Goal:** replicate Granola's core functionality (calendar-aware home, "meeting detected — take notes?" prompt, bot-free dual-stream capture, enhanced notes) with PLAUD's note structuring/formatting — running **100% locally**: whisper.cpp (later Parakeet) for ASR, Ollama for summarization, SQLite for storage. Desktop-only by nature (macOS 14.4+ floor; this machine runs 26.5 on an M5 Pro / 64 GB — comfortably above it).
 

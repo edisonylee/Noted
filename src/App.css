@@ -2022,6 +2022,40 @@ a.cal-btn { text-decoration: none; }
 }
 .speaker-rename:focus { outline: none; box-shadow: var(--shadow-1); }
 
+/* Settings: summary-template editor */
+.tpl-list { display: flex; flex-direction: column; gap: 4px; }
+.tpl-row { border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+.tpl-head {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  border: none; background: var(--surface); color: var(--ink); cursor: pointer;
+  font: inherit; font-size: 13px; padding: 8px 12px;
+}
+.tpl-head:hover { background: var(--hover-soft); }
+.tpl-head em { font-style: normal; font-size: 10.5px; color: var(--faint); letter-spacing: 0.03em; text-transform: uppercase; }
+.tpl-editor { display: flex; flex-direction: column; gap: 8px; padding: 8px 12px 10px; border-top: var(--border-width, 1px) solid var(--line); }
+.tpl-editor textarea, .tpl-editor input {
+  border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm);
+  background: var(--surface); color: var(--ink); font: inherit; font-size: 12.5px;
+  line-height: 1.5; padding: 8px 10px; resize: vertical;
+}
+.tpl-editor textarea[readonly] { color: var(--muted); background: var(--surface-2); }
+.tpl-editor textarea:focus, .tpl-editor input:focus { outline: none; border-color: var(--line-strong); }
+.tpl-actions { display: flex; align-items: center; gap: 8px; }
+.tpl-actions .ghost-btn.danger { color: var(--bad); }
+.tpl-actions .field-hint { flex: 1; }
+.tpl-new { align-self: flex-start; }
+
+/* Transcript search + per-line ops (copy, tap-to-seek audio). */
+.transcript-tools { display: flex; align-items: center; gap: 8px; padding: 6px 2px 0; }
+.tsearch {
+  display: inline-flex; align-items: center; gap: 6px; flex: 0 1 260px;
+  border: var(--border-width, 1px) solid var(--line); border-radius: 999px;
+  padding: 4px 10px; color: var(--faint); background: var(--surface);
+}
+.tsearch input { border: none; outline: none; background: none; color: var(--ink); font: inherit; font-size: 12.5px; width: 100%; }
+.tsearch:focus-within { border-color: var(--line-strong); }
+.tsearch-count { font-size: 11.5px; color: var(--faint); }
+
 .meeting-transcript {
   flex: 1; min-height: 320px; max-height: 60vh; overflow-y: auto;
   display: flex; flex-direction: column; gap: 8px; padding: 8px 2px;
@@ -2029,7 +2063,15 @@ a.cal-btn { text-decoration: none; }
 .bubble { max-width: 76%; border-radius: var(--r-lg); padding: 8px 12px; }
 .bubble.me { align-self: flex-end; background: var(--accent-tint); }
 .bubble.them { align-self: flex-start; background: var(--surface-2); border: var(--border-width, 1px) solid var(--line); }
-.bubble .who { display: block; font-size: 10.5px; color: var(--faint); margin-bottom: 2px; }
+.bubble.playing { outline: 2px solid var(--accent); outline-offset: -1px; }
+.bubble .who { display: flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--faint); margin-bottom: 2px; }
+.bubble .line-ops { display: inline-flex; gap: 2px; opacity: 0; transition: opacity 0.12s; }
+.bubble:hover .line-ops { opacity: 1; }
+.bubble .line-op {
+  display: inline-flex; align-items: center; border: none; background: none;
+  color: var(--muted); cursor: pointer; padding: 1px 3px; border-radius: var(--r-sm);
+}
+.bubble .line-op:hover { color: var(--ink); background: var(--hover-soft); }
 .bubble p { margin: 0; font-size: 13.5px; line-height: 1.5; }
 .quiet-empty { color: var(--faint); font-size: 13px; text-align: center; margin-top: 40px; }
 

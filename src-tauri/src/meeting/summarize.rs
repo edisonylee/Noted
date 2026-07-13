@@ -39,6 +39,73 @@ fn transcript_text(segments: &[Value]) -> String {
         .join("\n")
 }
 
+/// One self-contained Markdown document for a meeting: header, every summary
+/// tab (headings demoted one level under the tab name), the user's verbatim
+/// notes, and the full speaker-labeled transcript. Deterministic — no model.
+pub fn export_markdown(meeting: &Value) -> String {
+    let title = meeting["title"].as_str().unwrap_or("Meeting");
+    let date: String = meeting["started_at"]
+        .as_str()
+        .map(|s| s.chars().take(10).collect())
+        .unwrap_or_default();
+    let attendees = attendee_names(&meeting["event_json"]);
+    let empty = Vec::new();
+    let segments = meeting["segments"].as_array().unwrap_or(&empty);
+    let summaries = meeting["summaries"].as_array().unwrap_or(&empty);
+    let raw_notes = meeting["raw_notes"].as_str().unwrap_or("");
+
+    let mut md = format!("# {title}\n\n");
+    let mut meta: Vec<String> = Vec::new();
+    if !date.is_empty() {
+        meta.push(date);
+    }
+    if !attendees.is_empty() {
+        meta.push(attendees.join(", "));
+    }
+    let (me_ms, them_ms) = (
+        meeting["talk_ms"]["me"].as_i64().unwrap_or(0),
+        meeting["talk_ms"]["them"].as_i64().unwrap_or(0),
+    );
+    if me_ms + them_ms > 0 {
+        meta.push(format!("you spoke {}%", me_ms * 100 / (me_ms + them_ms)));
+    }
+    if !meta.is_empty() {
+        md.push_str(&format!("*{}*\n", meta.join(" · ")));
+    }
+
+    for s in summaries {
+        let tpl = s["template"].as_str().unwrap_or("Summary");
+        md.push_str(&format!("\n---\n\n## {tpl}\n\n"));
+        for line in s["content_md"].as_str().unwrap_or("").lines() {
+            if let Some(rest) = line.strip_prefix("## ") {
+                md.push_str(&format!("### {rest}\n"));
+            } else {
+                md.push_str(line);
+                md.push('\n');
+            }
+        }
+    }
+    if !raw_notes.trim().is_empty() {
+        md.push_str(&format!("\n---\n\n## Your Notes (verbatim)\n\n{}\n", raw_notes.trim()));
+    }
+    if !segments.is_empty() {
+        md.push_str("\n---\n\n## Transcript\n\n");
+        for s in segments {
+            let who = match s["channel"].as_str().unwrap_or("them") {
+                "me" => "Me",
+                _ => s["speaker"].as_str().unwrap_or("Them"),
+            };
+            md.push_str(&format!(
+                "- [{}] **{}**: {}\n",
+                mmss(s["t0_ms"].as_i64().unwrap_or(0)),
+                who,
+                s["text"].as_str().unwrap_or("")
+            ));
+        }
+    }
+    md
+}
+
 fn attendee_names(event_json: &Value) -> Vec<String> {
     let arr = event_json.get("attendees").and_then(|a| a.as_array());
     let Some(arr) = arr else { return Vec::new() };
@@ -164,18 +231,18 @@ pub fn render_markdown(sections: &Value) -> String {
 }
 
 const SYSTEM: &str = "You write meeting notes. You are given a meeting transcript \
-(lines look like '[mm:ss] Me: ...' — 'Me' is the note-taker's own mic, 'Them' is \
-everyone else via system audio), the note-taker's own typed notes, and a template \
-describing the sections to produce.\n\
+(lines look like '[mm:ss] Me: ...' — 'Me' is the note-taker's own mic; other lines \
+carry the speaker's name when identified, or 'Speaker N'/'Them' when not), the \
+note-taker's own typed notes, and a template describing the sections to produce.\n\
 Rules:\n\
 - Ground every statement in the transcript or the typed notes. Never invent facts, \
 names, numbers, or dates.\n\
 - The typed notes are the highest-priority signal: every point in them must be \
 reflected and expanded with context from the transcript.\n\
 - Timeline sections use kind='timeline' with ts set to a [mm:ss] timestamp that \
-actually appears in the transcript.\n\
+actually appears in the transcript — the moment that topic starts.\n\
 - Action items use kind='todos', each item shaped 'Owner — verb phrase' with \
-'by <date>' appended when a deadline was stated. Owner is Me, Them, or a stated name.\n\
+'by <date>' appended when a deadline was stated. Owner is Me or a speaker/stated name.\n\
 - If the meeting has nothing for a section, omit that section entirely.\n\
 - Be concrete and terse. Quote short phrases where wording matters.\n\
 Respond ONLY with JSON: {\"sections\":[{\"heading\",\"kind\":\"paragraph|bullets|timeline|todos\",\
@@ -513,6 +580,31 @@ pub async fn run(app: &tauri::AppHandle, meeting_id: i64, template_name: Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_markdown_composes_all_parts() {
+        let meeting = json!({
+            "title": "Standup",
+            "started_at": "2026-07-13T18:00:00Z",
+            "raw_notes": "remember the demo",
+            "event_json": { "attendees": [{ "name": "Mayan" }, { "name": "Jasmine" }] },
+            "talk_ms": { "me": 250, "them": 750 },
+            "segments": [
+                { "t0_ms": 1000, "channel": "me", "text": "hi", "speaker": null },
+                { "t0_ms": 2000, "channel": "them", "text": "hello", "speaker": "Mayan" },
+            ],
+            "summaries": [
+                { "template": "Meeting", "content_md": "## Summary\nshort." },
+            ],
+        });
+        let md = export_markdown(&meeting);
+        assert!(md.starts_with("# Standup"));
+        assert!(md.contains("*2026-07-13 · Mayan, Jasmine · you spoke 25%*"));
+        assert!(md.contains("## Meeting"));
+        assert!(md.contains("### Summary"), "summary headings demote under the tab name");
+        assert!(md.contains("- [00:02] **Mayan**: hello"));
+        assert!(md.contains("## Your Notes (verbatim)\n\nremember the demo"));
+    }
 
     #[test]
     fn renders_all_section_kinds_in_order() {

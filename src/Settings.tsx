@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { X, Check, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, Download, Mic, RefreshCw, Trash2, FolderPlus } from "lucide-react";
+import { X, Check, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, Download, Mic, Plus, RefreshCw, Trash2, FolderPlus } from "lucide-react";
 import { api, type BrainVaultStatus, type GcalStatus, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type ProviderMode, type ProviderSettings } from "./api";
 import { ThemesSettings } from "./ThemesSettings";
 
@@ -47,6 +47,11 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   const [mcfg, setMcfg] = useState<MeetingsCfg | null>(null);
   const [mModel, setMModel] = useState<MeetingModelStatus | null>(null);
   const [mTemplates, setMTemplates] = useState<MeetingTemplate[]>([]);
+  // Template editor: which template row is expanded, and its draft state.
+  // A null editTpl with a non-null draft = creating a new template.
+  const [editTpl, setEditTpl] = useState<string | null>(null);
+  const [tplDraft, setTplDraft] = useState<{ name: string; prompt: string } | null>(null);
+  const [tplBusy, setTplBusy] = useState(false);
   const [ignoreText, setIgnoreText] = useState("");
   const [mDownloading, setMDownloading] = useState(false);
   const [sDownloading, setSDownloading] = useState(false);
@@ -95,6 +100,35 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
       /* status stays; user can retry */
     } finally {
       setMDownloading(false);
+    }
+  }
+
+  async function saveTemplate() {
+    if (!tplDraft || !tplDraft.name.trim() || !tplDraft.prompt.trim()) return;
+    setTplBusy(true);
+    try {
+      await api.meetingTemplateSave(tplDraft.name.trim(), tplDraft.prompt.trim());
+      setMTemplates(await api.meetingTemplates());
+      setEditTpl(null);
+      setTplDraft(null);
+    } catch {
+      /* keep the draft so nothing is lost; user can retry */
+    } finally {
+      setTplBusy(false);
+    }
+  }
+
+  async function deleteTemplate(name: string) {
+    setTplBusy(true);
+    try {
+      await api.meetingTemplateDelete(name);
+      setMTemplates(await api.meetingTemplates());
+      setEditTpl(null);
+      setTplDraft(null);
+    } catch {
+      /* builtins can't be deleted; nothing to do */
+    } finally {
+      setTplBusy(false);
     }
   }
 
@@ -686,6 +720,111 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               )}
             </select>
           </label>
+          <div className="field">
+            <span className="field-label">Summary templates</span>
+            <div className="tpl-list">
+              {mTemplates.map((t) => (
+                <div key={t.name} className="tpl-row">
+                  <button
+                    className="tpl-head"
+                    onClick={() => {
+                      if (editTpl === t.name) {
+                        setEditTpl(null);
+                        setTplDraft(null);
+                      } else {
+                        setEditTpl(t.name);
+                        setTplDraft({ name: t.name, prompt: t.prompt });
+                      }
+                    }}
+                  >
+                    {t.name}
+                    {t.builtin && <em>built-in</em>}
+                  </button>
+                  {editTpl === t.name && tplDraft && (
+                    <div className="tpl-editor">
+                      <textarea
+                        value={tplDraft.prompt}
+                        readOnly={t.builtin}
+                        rows={5}
+                        spellCheck={false}
+                        onChange={(e) => setTplDraft({ ...tplDraft, prompt: e.target.value })}
+                      />
+                      <div className="tpl-actions">
+                        {t.builtin ? (
+                          <>
+                            <span className="field-hint">
+                              Built-in templates reset on launch — duplicate to customize.
+                            </span>
+                            <button
+                              className="ghost-btn"
+                              onClick={() => {
+                                setEditTpl(null);
+                                setTplDraft({ name: `${t.name} (mine)`, prompt: t.prompt });
+                              }}
+                            >
+                              Duplicate & edit
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button className="ghost-btn" onClick={saveTemplate} disabled={tplBusy}>
+                              {tplBusy ? <Loader2 size={13} className="spin" /> : <Check size={13} />} Save
+                            </button>
+                            <button
+                              className="ghost-btn danger"
+                              onClick={() => deleteTemplate(t.name)}
+                              disabled={tplBusy}
+                            >
+                              <Trash2 size={13} /> Delete
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+              {tplDraft && editTpl === null ? (
+                <div className="tpl-editor">
+                  <input
+                    placeholder="Template name"
+                    value={tplDraft.name}
+                    autoFocus
+                    onChange={(e) => setTplDraft({ ...tplDraft, name: e.target.value })}
+                  />
+                  <textarea
+                    placeholder="Describe the sections to produce, in order — e.g. 'Summary' — one paragraph. 'Decisions' — tight bullets…"
+                    value={tplDraft.prompt}
+                    rows={5}
+                    spellCheck={false}
+                    onChange={(e) => setTplDraft({ ...tplDraft, prompt: e.target.value })}
+                  />
+                  <div className="tpl-actions">
+                    <button
+                      className="ghost-btn"
+                      onClick={saveTemplate}
+                      disabled={tplBusy || !tplDraft.name.trim() || !tplDraft.prompt.trim()}
+                    >
+                      {tplBusy ? <Loader2 size={13} className="spin" /> : <Check size={13} />} Save
+                    </button>
+                    <button className="ghost-btn" onClick={() => setTplDraft(null)}>
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  className="ghost-btn tpl-new"
+                  onClick={() => {
+                    setEditTpl(null);
+                    setTplDraft({ name: "", prompt: "" });
+                  }}
+                >
+                  <Plus size={13} /> New template
+                </button>
+              )}
+            </div>
+          </div>
           <label className="field">
             <span className="field-label">
               Never prompt for these apps (comma-separated bundle-id fragments)

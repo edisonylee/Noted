@@ -2,17 +2,21 @@
 //
 // The ASR worker computes one voice embedding per transcribed them-segment as
 // it lands (WeSpeaker CAM++ via sherpa-onnx, 512-dim, ~30ms per segment). At
-// stop, `cluster` labels ALL segments at once — full-context agglomerative
+// stop, `cluster` groups ALL segments at once — full-context agglomerative
 // clustering beats online assignment, needs no retained audio, and finishes
 // before the meeting-stopped event, so the UI reload and the summary both see
 // the names. During recording the transcript shows the channel default
 // ("Them"); labels appear the moment the meeting ends.
 //
+// Naming (`assign_names`): a cluster whose centroid matches a stored voice
+// profile gets that person's real name; the rest become "Speaker N". A lone
+// unrecognized cluster stays NULL — in a 1:1, "Them" reads better than a
+// lone "Speaker 1". Profiles are written only on explicit rename/confirm
+// (never silently from a match), so a bad label can't self-reinforce.
+//
 // Everything below the model is deterministic policy:
 //   - only segments >= SEED_MS may found a speaker (short blips embed noisily)
 //   - shorter segments snap to the nearest final centroid, or stay NULL
-//   - a single cluster stays NULL everywhere — in a 1:1, "Them" reads better
-//     than a lone "Speaker 1"
 
 use std::path::{Path, PathBuf};
 
@@ -29,6 +33,8 @@ const SEED_MS: i64 = 2_500;
 const CUTOFF: f32 = 0.55;
 /// A short segment snaps to the nearest speaker only above this.
 const SNAP_MIN: f32 = 0.30;
+/// A cluster centroid this close to a stored voiceprint takes its name.
+const PROFILE_MATCH: f32 = 0.60;
 /// Embed at most the first 12s of a segment (plenty for a voice print).
 const EMBED_CAP_MS: i64 = 12_000;
 /// Matrix-size guard: cluster at most this many seeds (longest kept).
@@ -79,13 +85,52 @@ impl Embedder {
 }
 
 // ---------------------------------------------------------------------------
-// Clustering (pure, unit-tested — no model involved)
+// Embedding blobs (f32 little-endian) — stored in meeting_speakers /
+// speaker_profiles so renames can seed voiceprints after the audio is gone.
+// ---------------------------------------------------------------------------
+
+pub fn emb_to_blob(v: &[f32]) -> Vec<u8> {
+    v.iter().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+pub fn blob_to_emb(b: &[u8]) -> Vec<f32> {
+    b.chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// Weighted running mean — folds a meeting's cluster centroid (over `cur_n`
+/// segments) into a stored profile (over `old_n`).
+pub fn merge_centroid(old: &[f32], old_n: i64, cur: &[f32], cur_n: i64) -> Vec<f32> {
+    let (on, cn) = (old_n.max(0) as f32, cur_n.max(1) as f32);
+    old.iter()
+        .zip(cur)
+        .map(|(o, c)| (o * on + c * cn) / (on + cn))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Clustering + naming (pure, unit-tested — no model involved)
 // ---------------------------------------------------------------------------
 
 pub struct SegEmb {
     pub seg_id: i64,
     pub dur_ms: i64,
     pub emb: Vec<f32>,
+}
+
+pub struct SpeakerCluster {
+    /// Timeline order (seeds first-appearance, then snapped short segments).
+    pub seg_ids: Vec<i64>,
+    /// Mean of the seed embeddings (short snapped segments don't move it).
+    pub centroid: Vec<f32>,
+}
+
+pub struct NamedSpeaker {
+    /// None = keep the channel default ("Them"): a lone unrecognized voice.
+    pub label: Option<String>,
+    pub seg_ids: Vec<i64>,
+    pub centroid: Vec<f32>,
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -99,24 +144,10 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-fn mean(members: &[usize], segs: &[&SegEmb]) -> Vec<f32> {
-    let dim = segs[members[0]].emb.len();
-    let mut m = vec![0.0f32; dim];
-    for &i in members {
-        for (mv, ev) in m.iter_mut().zip(&segs[i].emb) {
-            *mv += ev;
-        }
-    }
-    for mv in m.iter_mut() {
-        *mv /= members.len() as f32;
-    }
-    m
-}
-
-/// Label segments "Speaker 1..N" (numbered by first appearance — `segs` must
-/// be in timeline order). Returns only the segments that earned a label; a
-/// single-cluster meeting returns nothing.
-pub fn cluster(segs: &[SegEmb]) -> Vec<(i64, String)> {
+/// Group segments by voice; clusters come back ordered by first appearance
+/// (`segs` must be in timeline order). May return a single cluster — the
+/// naming stage decides what that means.
+pub fn cluster(segs: &[SegEmb]) -> Vec<SpeakerCluster> {
     let segs: Vec<&SegEmb> = segs.iter().filter(|s| !s.emb.is_empty()).collect();
     let mut seed_idx: Vec<usize> = (0..segs.len())
         .filter(|&i| segs[i].dur_ms >= SEED_MS)
@@ -126,7 +157,7 @@ pub fn cluster(segs: &[SegEmb]) -> Vec<(i64, String)> {
         seed_idx.truncate(MAX_SEEDS);
         seed_idx.sort_unstable();
     }
-    if seed_idx.len() < 2 {
+    if seed_idx.is_empty() {
         return Vec::new();
     }
 
@@ -178,39 +209,78 @@ pub fn cluster(segs: &[SegEmb]) -> Vec<(i64, String)> {
         members[a].as_mut().unwrap().extend(moved);
     }
 
-    let mut clusters: Vec<Vec<usize>> = members.into_iter().flatten().collect();
-    if clusters.len() < 2 {
-        return Vec::new();
-    }
-    // "Speaker 1" is whoever spoke first.
-    clusters.sort_by_key(|c| *c.iter().min().unwrap());
-    let centroids: Vec<Vec<f32>> = clusters.iter().map(|c| mean(c, &segs)).collect();
+    let mut groups: Vec<Vec<usize>> = members.into_iter().flatten().collect();
+    // Order by first appearance so "Speaker 1" is whoever spoke first.
+    groups.sort_by_key(|c| *c.iter().min().unwrap());
 
-    let mut out: Vec<(i64, String)> = Vec::new();
-    let mut labeled = vec![None::<usize>; segs.len()];
-    for (ci, c) in clusters.iter().enumerate() {
-        for &i in c {
-            labeled[i] = Some(ci);
-        }
-    }
-    for (i, seg) in segs.iter().enumerate() {
-        let ci = labeled[i].or_else(|| {
-            // Non-seed: snap to the nearest final speaker, if close enough.
-            let (mut bi, mut bs) = (None, SNAP_MIN);
-            for (ci, cen) in centroids.iter().enumerate() {
-                let s = cosine(&seg.emb, cen);
-                if s >= bs {
-                    bs = s;
-                    bi = Some(ci);
+    let mut out: Vec<SpeakerCluster> = groups
+        .iter()
+        .map(|g| {
+            let dim = segs[g[0]].emb.len();
+            let mut centroid = vec![0.0f32; dim];
+            for &i in g {
+                for (cv, ev) in centroid.iter_mut().zip(&segs[i].emb) {
+                    *cv += ev;
                 }
             }
-            bi
-        });
-        if let Some(ci) = ci {
-            out.push((seg.seg_id, format!("Speaker {}", ci + 1)));
+            centroid.iter_mut().for_each(|v| *v /= g.len() as f32);
+            let mut ids: Vec<usize> = g.clone();
+            ids.sort_unstable();
+            SpeakerCluster {
+                seg_ids: ids.iter().map(|&i| segs[i].seg_id).collect(),
+                centroid,
+            }
+        })
+        .collect();
+
+    // Snap short-but-embeddable segments to the nearest cluster.
+    let seeded: std::collections::HashSet<usize> = seed_idx.iter().copied().collect();
+    for (i, seg) in segs.iter().enumerate() {
+        if seeded.contains(&i) {
+            continue;
+        }
+        let (mut bi, mut bs) = (None, SNAP_MIN);
+        for (ci, c) in out.iter().enumerate() {
+            let s = cosine(&seg.emb, &c.centroid);
+            if s >= bs {
+                bs = s;
+                bi = Some(ci);
+            }
+        }
+        if let Some(ci) = bi {
+            out[ci].seg_ids.push(seg.seg_id);
         }
     }
     out
+}
+
+/// Turn clusters into display labels: a stored voiceprint match wins the real
+/// name; the rest are "Speaker N" by appearance — unless it's the meeting's
+/// only voice, which keeps the channel default. `profiles` = (name, embedding).
+pub fn assign_names(
+    clusters: Vec<SpeakerCluster>,
+    profiles: &[(String, Vec<f32>)],
+) -> Vec<NamedSpeaker> {
+    let lone = clusters.len() == 1;
+    clusters
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let mut best: Option<(&str, f32)> = None;
+            for (name, emb) in profiles {
+                let s = cosine(&c.centroid, emb);
+                if s >= PROFILE_MATCH && best.map(|(_, b)| s > b).unwrap_or(true) {
+                    best = Some((name, s));
+                }
+            }
+            let label = match best {
+                Some((name, _)) => Some(name.to_string()),
+                None if lone => None,
+                None => Some(format!("Speaker {}", i + 1)),
+            };
+            NamedSpeaker { label, seg_ids: c.seg_ids, centroid: c.centroid }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -233,6 +303,13 @@ mod tests {
         SegEmb { seg_id: id, dur_ms: dur, emb: voice(base, jitter) }
     }
 
+    fn label_of(named: &[NamedSpeaker], id: i64) -> Option<String> {
+        named
+            .iter()
+            .find(|s| s.seg_ids.contains(&id))
+            .and_then(|s| s.label.clone())
+    }
+
     #[test]
     fn two_speakers_separate_and_number_by_first_appearance() {
         let segs = vec![
@@ -242,19 +319,43 @@ mod tests {
             seg(13, 3000, 0, 4),
             seg(14, 5000, 0, 5),
         ];
-        let out = cluster(&segs);
-        let get = |id: i64| out.iter().find(|(i, _)| *i == id).map(|(_, l)| l.as_str());
-        assert_eq!(get(10), Some("Speaker 1"));
-        assert_eq!(get(12), Some("Speaker 1"));
-        assert_eq!(get(11), Some("Speaker 2"));
-        assert_eq!(get(13), Some("Speaker 2"));
-        assert_eq!(get(14), Some("Speaker 2"));
+        let named = assign_names(cluster(&segs), &[]);
+        assert_eq!(label_of(&named, 10).as_deref(), Some("Speaker 1"));
+        assert_eq!(label_of(&named, 12).as_deref(), Some("Speaker 1"));
+        assert_eq!(label_of(&named, 11).as_deref(), Some("Speaker 2"));
+        assert_eq!(label_of(&named, 13).as_deref(), Some("Speaker 2"));
+        assert_eq!(label_of(&named, 14).as_deref(), Some("Speaker 2"));
     }
 
     #[test]
-    fn single_speaker_stays_unlabeled() {
+    fn lone_unknown_voice_stays_unlabeled() {
         let segs: Vec<SegEmb> = (0..6).map(|i| seg(i, 5000, 2, i as u64)).collect();
-        assert!(cluster(&segs).is_empty(), "1:1 calls keep the channel default");
+        let named = assign_names(cluster(&segs), &[]);
+        assert_eq!(named.len(), 1);
+        assert!(named[0].label.is_none(), "1:1 calls keep the channel default");
+    }
+
+    #[test]
+    fn lone_voice_matching_a_profile_gets_the_name() {
+        let segs: Vec<SegEmb> = (0..4).map(|i| seg(i, 5000, 2, i as u64)).collect();
+        let profiles = vec![("Mayan".to_string(), voice(2, 99))];
+        let named = assign_names(cluster(&segs), &profiles);
+        assert_eq!(named[0].label.as_deref(), Some("Mayan"));
+    }
+
+    #[test]
+    fn known_voice_named_next_to_speaker_n() {
+        let segs = vec![
+            seg(1, 5000, 0, 1),
+            seg(2, 5000, 1, 2),
+            seg(3, 5000, 0, 3),
+            seg(4, 5000, 1, 4),
+        ];
+        let profiles = vec![("Mayan".to_string(), voice(0, 50))];
+        let named = assign_names(cluster(&segs), &profiles);
+        assert_eq!(label_of(&named, 1).as_deref(), Some("Mayan"));
+        // The unknown second voice keeps its appearance number.
+        assert_eq!(label_of(&named, 2).as_deref(), Some("Speaker 2"));
     }
 
     #[test]
@@ -266,9 +367,8 @@ mod tests {
             seg(4, 5000, 0, 4),
             seg(5, 5000, 1, 5),
         ];
-        let out = cluster(&segs);
-        let get = |id: i64| out.iter().find(|(i, _)| *i == id).map(|(_, l)| l.as_str());
-        assert_eq!(get(3), get(1));
+        let named = assign_names(cluster(&segs), &[]);
+        assert_eq!(label_of(&named, 3), label_of(&named, 1));
     }
 
     #[test]
@@ -281,14 +381,25 @@ mod tests {
         ];
         // Orthogonal to both speakers (a notification chime, music, …).
         segs.push(seg(9, 1200, 3, 5));
-        let out = cluster(&segs);
-        assert!(out.iter().all(|(id, _)| *id != 9));
+        let named = assign_names(cluster(&segs), &[]);
+        assert!(label_of(&named, 9).is_none());
     }
 
     #[test]
     fn empty_and_tiny_inputs() {
         assert!(cluster(&[]).is_empty());
-        assert!(cluster(&[seg(1, 5000, 0, 1)]).is_empty());
+        let one = assign_names(cluster(&[seg(1, 5000, 0, 1)]), &[]);
+        assert_eq!(one.len(), 1);
+        assert!(one[0].label.is_none());
+    }
+
+    #[test]
+    fn blob_roundtrip_and_running_mean() {
+        let v = vec![0.25f32, -1.5, 3.0];
+        assert_eq!(blob_to_emb(&emb_to_blob(&v)), v);
+        // 3 old samples at 1.0, 1 new at 5.0 → mean 2.0
+        let merged = merge_centroid(&[1.0], 3, &[5.0], 1);
+        assert!((merged[0] - 2.0).abs() < 1e-6);
     }
 
     /// Tuning harness against a real recording — needs the model plus a
@@ -327,12 +438,17 @@ mod tests {
                 segs.push(SegEmb { seg_id: id, dur_ms: t1 - t0, emb });
             }
         }
-        let out = cluster(&segs);
-        for (id, label) in &out {
-            println!("{label}  {}", texts[id].chars().take(70).collect::<String>());
+        let named = assign_names(cluster(&segs), &[]);
+        for s in &named {
+            for id in &s.seg_ids {
+                println!(
+                    "{}  {}",
+                    s.label.as_deref().unwrap_or("(default)"),
+                    texts[id].chars().take(70).collect::<String>()
+                );
+            }
         }
-        let speakers: std::collections::HashSet<_> = out.iter().map(|(_, l)| l).collect();
-        println!("→ {} labeled segments, {} speakers", out.len(), speakers.len());
-        assert!(speakers.len() >= 2, "a multi-speaker meeting should separate");
+        println!("→ {} speakers", named.len());
+        assert!(named.len() >= 2, "a multi-speaker meeting should separate");
     }
 }

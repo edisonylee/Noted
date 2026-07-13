@@ -117,6 +117,140 @@ pub fn set_segment_speakers(conn: &Connection, labels: &[(i64, String)]) -> Resu
     Ok(())
 }
 
+/// Saved voiceprints: (name, embedding, samples).
+pub fn speaker_profiles(conn: &Connection) -> Result<Vec<(String, Vec<f32>, i64)>> {
+    let mut stmt = conn.prepare("SELECT name, embedding, samples FROM speaker_profiles")?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                super::diarize::blob_to_emb(&r.get::<_, Vec<u8>>(1)?),
+                r.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Record a meeting's diarized voices (label + centroid) so a later rename can
+/// seed a voiceprint. An unlabeled lone voice is stored under "Them".
+pub fn save_meeting_speakers(
+    conn: &Connection,
+    meeting_id: i64,
+    speakers: &[(String, Vec<f32>, i64)], // (label, centroid, seg_count)
+) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "INSERT OR REPLACE INTO meeting_speakers (meeting_id, label, centroid, seg_count)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    for (label, centroid, seg_count) in speakers {
+        stmt.execute(rusqlite::params![
+            meeting_id,
+            label,
+            super::diarize::emb_to_blob(centroid),
+            seg_count
+        ])?;
+    }
+    Ok(())
+}
+
+pub fn list_meeting_speakers(conn: &Connection, meeting_id: i64) -> Result<Vec<Value>> {
+    let mut stmt = conn.prepare(
+        "SELECT label, suggested, seg_count FROM meeting_speakers
+         WHERE meeting_id = ?1 ORDER BY seg_count DESC",
+    )?;
+    let rows = stmt
+        .query_map([meeting_id], |r| {
+            Ok(json!({
+                "label": r.get::<_, String>(0)?,
+                "suggested": r.get::<_, Option<String>>(1)?,
+                "seg_count": r.get::<_, i64>(2)?,
+            }))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn set_speaker_suggestion(
+    conn: &Connection,
+    meeting_id: i64,
+    label: &str,
+    suggested: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE meeting_speakers SET suggested = ?3 WHERE meeting_id = ?1 AND label = ?2",
+        rusqlite::params![meeting_id, label, suggested],
+    )?;
+    Ok(())
+}
+
+/// Rename a diarized voice: relabels its transcript lines and folds the
+/// meeting's cluster centroid into the persistent voiceprint for `to` (running
+/// mean), so future meetings auto-label this person. `from` = "Them" renames
+/// the lone-voice case (speaker still NULL on the segments).
+pub fn rename_speaker(conn: &Connection, meeting_id: i64, from: &str, to: &str) -> Result<()> {
+    let to = to.trim();
+    if to.is_empty() || to == "Me" || to == "Them" {
+        return Err(anyhow::anyhow!("invalid speaker name"));
+    }
+    if from == "Them" {
+        conn.execute(
+            "UPDATE meeting_segments SET speaker = ?2
+             WHERE meeting_id = ?1 AND channel = 'them' AND speaker IS NULL",
+            rusqlite::params![meeting_id, to],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE meeting_segments SET speaker = ?3
+             WHERE meeting_id = ?1 AND speaker = ?2",
+            rusqlite::params![meeting_id, from, to],
+        )?;
+    }
+    let row: Option<(Vec<u8>, i64)> = conn
+        .query_row(
+            "SELECT centroid, seg_count FROM meeting_speakers
+             WHERE meeting_id = ?1 AND label = ?2",
+            rusqlite::params![meeting_id, from],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    let Some((blob, seg_count)) = row else {
+        return Ok(()); // pre-voiceprint meeting: relabel only
+    };
+    conn.execute(
+        "UPDATE OR REPLACE meeting_speakers SET label = ?3, suggested = NULL
+         WHERE meeting_id = ?1 AND label = ?2",
+        rusqlite::params![meeting_id, from, to],
+    )?;
+    let centroid = super::diarize::blob_to_emb(&blob);
+    let now = chrono::Utc::now().to_rfc3339();
+    let existing: Option<(Vec<u8>, i64)> = conn
+        .query_row(
+            "SELECT embedding, samples FROM speaker_profiles WHERE name = ?1",
+            [to],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    let (emb, samples) = match existing {
+        Some((old_blob, old_n)) => (
+            super::diarize::merge_centroid(
+                &super::diarize::blob_to_emb(&old_blob),
+                old_n,
+                &centroid,
+                seg_count,
+            ),
+            old_n + seg_count,
+        ),
+        None => (centroid, seg_count),
+    };
+    conn.execute(
+        "INSERT OR REPLACE INTO speaker_profiles (name, embedding, samples, updated_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![to, super::diarize::emb_to_blob(&emb), samples, now],
+    )?;
+    Ok(())
+}
+
 /// Full transcript, timeline order, interleaved across channels.
 pub fn list_segments(conn: &Connection, meeting_id: i64) -> Result<Vec<Value>> {
     let mut stmt = conn.prepare(
@@ -243,10 +377,12 @@ pub fn get_meeting(conn: &Connection, id: i64) -> Result<Value> {
     let segments = list_segments(conn, id)?;
     let summaries = list_summaries(conn, id)?;
     let (me_ms, them_ms) = talk_time(conn, id)?;
+    let speakers = list_meeting_speakers(conn, id)?;
     let mut out = meta;
     out["segments"] = json!(segments);
     out["summaries"] = json!(summaries);
     out["talk_ms"] = json!({ "me": me_ms, "them": them_ms });
+    out["speakers"] = json!(speakers);
     Ok(out)
 }
 

@@ -337,6 +337,13 @@ export type MeetingListRow = {
   segment_count: number;
   summary_count: number;
 };
+// A diarized voice in a meeting. `suggested` is an unconfirmed LLM-mined name
+// (confirming = renaming); label "Them" is the lone-unrecognized-voice case.
+export type MeetingSpeaker = {
+  label: string;
+  suggested: string | null;
+  seg_count: number;
+};
 export type MeetingDetail = MeetingListRow & {
   event_id: string | null;
   raw_notes: string;
@@ -345,6 +352,7 @@ export type MeetingDetail = MeetingListRow & {
   segments: MeetingSegment[];
   summaries: MeetingSummary[];
   talk_ms: { me: number; them: number };
+  speakers: MeetingSpeaker[];
 };
 export type MeetingLiveState = {
   active: boolean;
@@ -589,6 +597,12 @@ export const api = {
     invoke<void>("meeting_set_notes", { id, notes }),
   meetingSummarize: (id: number, template?: string) =>
     invoke<string>("meeting_summarize", { id, template }),
+  // Rename propagates to the transcript and updates the voiceprint so future
+  // meetings auto-label this person; confirming a suggestion is just a rename.
+  meetingRenameSpeaker: (id: number, from: string, to: string) =>
+    invoke<void>("meeting_rename_speaker", { id, from, to }),
+  meetingSuggestSpeakers: (id: number) =>
+    invoke<number>("meeting_suggest_speakers", { id }),
   meetingTemplates: () => invoke<MeetingTemplate[]>("meeting_templates"),
   meetingTemplateSave: (name: string, prompt: string) =>
     invoke<void>("meeting_template_save", { name, prompt }),

@@ -11,6 +11,7 @@ import {
   Loader,
   Mic,
   Plus,
+  Sparkles,
   Square,
   Users,
   Video,
@@ -104,6 +105,9 @@ export function MeetingPage({
   const [templates, setTemplates] = useState<MeetingTemplate[]>([]);
   const [pickTemplate, setPickTemplate] = useState(false);
   const [generating, setGenerating] = useState<string | null>(null);
+  const [renameFor, setRenameFor] = useState<string | null>(null);
+  const [renameText, setRenameText] = useState("");
+  const [suggesting, setSuggesting] = useState(false);
   const notesTimer = useRef<number | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
 
@@ -147,6 +151,9 @@ export function MeetingPage({
         if (e.payload.meetingId === id) load();
       }),
       listen<{ meetingId: number }>("meeting-summarized", (e) => {
+        if (e.payload.meetingId === id) load();
+      }),
+      listen<{ meetingId: number }>("meeting-speakers-suggested", (e) => {
         if (e.payload.meetingId === id) load();
       }),
     ];
@@ -251,6 +258,32 @@ export function MeetingPage({
   }, [detail?.talk_ms]);
 
   const summaries = detail?.summaries ?? [];
+  const speakers = detail?.speakers ?? [];
+  const unnamed = (l: string) => l.startsWith("Speaker ") || l === "Them";
+
+  const renameSpeaker = async (from: string, to: string) => {
+    if (id == null || !to.trim()) return;
+    setRenameFor(null);
+    try {
+      await api.meetingRenameSpeaker(id, from, to.trim());
+      await load();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const suggestNames = async () => {
+    if (id == null) return;
+    setSuggesting(true);
+    try {
+      const n = await api.meetingSuggestSpeakers(id);
+      if (n > 0) await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSuggesting(false);
+    }
+  };
 
   return (
     <div className="meeting-page">
@@ -364,7 +397,64 @@ export function MeetingPage({
           }
         />
       ) : tab === "transcript" ? (
-        <div className="meeting-transcript" ref={transcriptRef}>
+        <>
+          {speakers.length > 0 && !recording && (
+            <div className="speaker-bar">
+              <span className="speaker-bar-label">Speakers</span>
+              {speakers.map((sp) =>
+                renameFor === sp.label ? (
+                  <input
+                    key={sp.label}
+                    className="speaker-rename"
+                    autoFocus
+                    list="attendee-names"
+                    placeholder="Name…"
+                    value={renameText}
+                    onChange={(e) => setRenameText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") renameSpeaker(sp.label, renameText);
+                      if (e.key === "Escape") setRenameFor(null);
+                    }}
+                    onBlur={() => setRenameFor(null)}
+                  />
+                ) : (
+                  <span key={sp.label} className="speaker-chip">
+                    <button
+                      className="chip-name"
+                      title="Rename this speaker — the name is remembered for future meetings"
+                      onClick={() => {
+                        setRenameFor(sp.label);
+                        setRenameText(sp.suggested ?? "");
+                      }}
+                    >
+                      {sp.label}
+                    </button>
+                    {sp.suggested && (
+                      <button
+                        className="chip-suggest"
+                        title={`Looks like ${sp.suggested} (from the transcript) — click to confirm`}
+                        onClick={() => renameSpeaker(sp.label, sp.suggested!)}
+                      >
+                        {sp.suggested}? <Check size={11} />
+                      </button>
+                    )}
+                  </span>
+                )
+              )}
+              {speakers.some((sp) => unnamed(sp.label) && !sp.suggested) && (
+                <button className="chip-action" onClick={suggestNames} disabled={suggesting}>
+                  {suggesting ? <Loader size={12} className="spin" /> : <Sparkles size={12} />}
+                  Suggest names
+                </button>
+              )}
+              <datalist id="attendee-names">
+                {attendees.map((a) => (
+                  <option key={a.email ?? a.name} value={a.name || a.email} />
+                ))}
+              </datalist>
+            </div>
+          )}
+          <div className="meeting-transcript" ref={transcriptRef}>
           {liveSegments.length === 0 ? (
             <p className="quiet-empty">
               {recording ? "Listening — the transcript fills in as people speak." : "No transcript."}
@@ -381,7 +471,8 @@ export function MeetingPage({
                 </div>
               ))
           )}
-        </div>
+          </div>
+        </>
       ) : (
         <div className="meeting-summary">
           {summaries[tab as number] ? <MdBlock md={summaries[tab as number].content_md} /> : null}

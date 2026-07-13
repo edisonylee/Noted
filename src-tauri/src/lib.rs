@@ -1610,6 +1610,28 @@ async fn meeting_set_notes(app: tauri::AppHandle, id: i64, notes: String) -> Res
     meeting::store::set_notes(&conn, id, &notes).map_err(|e| e.to_string())
 }
 
+/// Rename a diarized voice ("Speaker 2" → "Mayan"): relabels the transcript
+/// and updates the persistent voiceprint so future meetings auto-label them.
+#[tauri::command]
+async fn meeting_rename_speaker(
+    app: tauri::AppHandle,
+    id: i64,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    meeting::store::rename_speaker(&conn, id, &from, &to).map_err(|e| e.to_string())
+}
+
+/// On-demand speaker-name suggestions (stop-time runs this automatically).
+#[tauri::command]
+async fn meeting_suggest_speakers(app: tauri::AppHandle, id: i64) -> Result<usize, String> {
+    meeting::summarize::suggest_speaker_names(&app, id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Generate a summary tab with the given (or default) template. PLAUD-style:
 /// each run adds a tab; the first one also files the meeting note.
 #[tauri::command]
@@ -2869,6 +2891,8 @@ pub fn run() {
             meeting_model_status,
             download_meeting_model,
             download_speaker_model,
+            meeting_rename_speaker,
+            meeting_suggest_speakers,
             meeting_start,
             meeting_stop,
             meeting_state,

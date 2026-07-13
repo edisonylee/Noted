@@ -1992,6 +1992,36 @@ a.cal-btn { text-decoration: none; }
 }
 .meeting-notes:focus { outline: none; border-color: var(--line-strong); box-shadow: var(--shadow-1); }
 
+/* Diarized voices: rename chips + confirmable name suggestions. */
+.speaker-bar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  padding: 6px 2px 2px;
+}
+.speaker-bar-label { font-size: 10.5px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--faint); margin-right: 2px; }
+.speaker-chip { display: inline-flex; align-items: stretch; }
+.speaker-chip .chip-name,
+.speaker-bar .chip-action {
+  display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+  border: var(--border-width, 1px) solid var(--line); background: var(--surface);
+  color: var(--ink); font-size: 12px; padding: 3px 9px; border-radius: 999px;
+}
+.speaker-chip .chip-name:hover { border-color: var(--line-strong); }
+.speaker-chip .chip-suggest {
+  display: inline-flex; align-items: center; gap: 3px; cursor: pointer;
+  border: var(--border-width, 1px) dashed var(--line-strong); border-left: none;
+  background: var(--accent-tint); color: var(--ink); font-size: 12px;
+  padding: 3px 9px; border-radius: 999px; margin-left: -10px; padding-left: 14px;
+}
+.speaker-chip:has(.chip-suggest) .chip-name { border-radius: 999px 0 0 999px; }
+.speaker-bar .chip-action { color: var(--muted); border-style: dashed; }
+.speaker-bar .chip-action:hover { color: var(--ink); }
+.speaker-rename {
+  border: var(--border-width, 1px) solid var(--line-strong); border-radius: 999px;
+  padding: 3px 10px; font: inherit; font-size: 12px; background: var(--surface);
+  color: var(--ink); width: 140px;
+}
+.speaker-rename:focus { outline: none; box-shadow: var(--shadow-1); }
+
 .meeting-transcript {
   flex: 1; min-height: 320px; max-height: 60vh; overflow-y: auto;
   display: flex; flex-direction: column; gap: 8px; padding: 8px 2px;

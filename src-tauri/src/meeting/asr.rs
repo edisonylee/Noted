@@ -540,19 +540,35 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
 
     // Full-context speaker clustering; lands before stop() emits
     // meeting-stopped, so the reloaded transcript and the summary see names.
+    // Known voiceprints resolve to real names; the rest become "Speaker N".
     if !voice_prints.is_empty() {
-        let labels = super::diarize::cluster(&voice_prints);
-        if !labels.is_empty() {
-            let speakers = labels
-                .iter()
-                .map(|(_, l)| l.as_str())
-                .collect::<std::collections::HashSet<_>>()
-                .len();
+        let clusters = super::diarize::cluster(&voice_prints);
+        if !clusters.is_empty() {
             let state = app.state::<Db>();
             let conn = state.0.lock().unwrap();
+            let profiles: Vec<(String, Vec<f32>)> = store::speaker_profiles(&conn)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, emb, _)| (name, emb))
+                .collect();
+            let named = super::diarize::assign_names(clusters, &profiles);
+            let mut labels: Vec<(i64, String)> = Vec::new();
+            let mut rows: Vec<(String, Vec<f32>, i64)> = Vec::new();
+            for s in &named {
+                if let Some(l) = &s.label {
+                    labels.extend(s.seg_ids.iter().map(|&id| (id, l.clone())));
+                }
+                rows.push((
+                    s.label.clone().unwrap_or_else(|| "Them".into()),
+                    s.centroid.clone(),
+                    s.seg_ids.len() as i64,
+                ));
+            }
+            let _ = store::save_meeting_speakers(&conn, args.meeting_id, &rows);
             match store::set_segment_speakers(&conn, &labels) {
                 Ok(()) => eprintln!(
-                    "[noted] diarization: {speakers} speakers across {} segments",
+                    "[noted] diarization: {} voices, {} segments labeled",
+                    named.len(),
                     labels.len()
                 ),
                 Err(e) => eprintln!("[noted] diarization write failed: {e}"),

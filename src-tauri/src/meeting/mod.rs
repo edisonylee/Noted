@@ -300,14 +300,22 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
     // "Did it end?" should never be a mystery: a small transient card confirms.
     detect::show_status_card(&app, &title, "Meeting saved — writing notes…");
 
-    // Auto-enhance (Granola: enhancement fires when the call ends).
+    // Auto-enhance (Granola: enhancement fires when the call ends), then mine
+    // the transcript for who "Speaker N" is (stored as confirmable suggestions).
     let h = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = summarize::run(&h, id, None).await {
-            eprintln!("[noted] meeting summarize failed: {e}");
-            let db = h.state::<Db>();
-            let conn = db.0.lock().unwrap();
-            let _ = store::set_status(&conn, id, "failed");
+        match summarize::run(&h, id, None).await {
+            Ok(_) => {
+                if let Err(e) = summarize::suggest_speaker_names(&h, id).await {
+                    eprintln!("[noted] speaker-name suggestions failed: {e}");
+                }
+            }
+            Err(e) => {
+                eprintln!("[noted] meeting summarize failed: {e}");
+                let db = h.state::<Db>();
+                let conn = db.0.lock().unwrap();
+                let _ = store::set_status(&conn, id, "failed");
+            }
         }
     });
     Ok(Some(id))

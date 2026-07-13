@@ -309,6 +309,14 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
             .await
             .map(|_| Value::Null),
         "meeting_templates" => crate::meeting_templates(a).await,
+        "meeting_rename_speaker" => {
+            crate::meeting_rename_speaker(a, iarg(b, "id"), sarg(b, "from"), sarg(b, "to"))
+                .await
+                .map(|_| Value::Null)
+        }
+        "meeting_suggest_speakers" => crate::meeting_suggest_speakers(a, iarg(b, "id"))
+            .await
+            .map(|n| json!(n)),
         "meetings_settings_get" => Ok(crate::meetings_settings_get()),
         // Stopping works from the phone too — it's a remote control for the
         // desktop recorder (capture itself always runs on the Mac).

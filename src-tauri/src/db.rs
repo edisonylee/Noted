@@ -175,6 +175,29 @@ CREATE TABLE IF NOT EXISTS meeting_summaries (
   created_at TEXT NOT NULL
 );
 
+-- One row per diarized voice in a meeting: the cluster centroid (f32-le blob)
+-- is kept so a later rename can seed/update a persistent voice profile even
+-- after the audio is gone. `suggested` holds an unconfirmed LLM-mined name;
+-- confirming it is just a rename.
+CREATE TABLE IF NOT EXISTS meeting_speakers (
+  meeting_id INTEGER NOT NULL REFERENCES meetings(id),
+  label      TEXT NOT NULL,               -- current display label ("Speaker 2" or a name)
+  centroid   BLOB NOT NULL,
+  seg_count  INTEGER NOT NULL,
+  suggested  TEXT,
+  PRIMARY KEY (meeting_id, label)
+);
+
+-- Named voiceprints across meetings: once a speaker is renamed, future
+-- meetings whose cluster centroid matches auto-label with the name.
+-- `embedding` is a running mean over `samples` segments.
+CREATE TABLE IF NOT EXISTS speaker_profiles (
+  name       TEXT PRIMARY KEY,
+  embedding  BLOB NOT NULL,
+  samples    INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 -- A template is a name + one free-text prompt (PLAUD's model): the prompt
 -- describes the sections to extract. builtin rows are re-seeded on startup.
 CREATE TABLE IF NOT EXISTS meeting_templates (

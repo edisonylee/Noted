@@ -49,6 +49,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   const [mTemplates, setMTemplates] = useState<MeetingTemplate[]>([]);
   const [ignoreText, setIgnoreText] = useState("");
   const [mDownloading, setMDownloading] = useState(false);
+  const [sDownloading, setSDownloading] = useState(false);
   const [probeMsg, setProbeMsg] = useState<string | null>(null);
   const [probing, setProbing] = useState(false);
 
@@ -94,6 +95,18 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
       /* status stays; user can retry */
     } finally {
       setMDownloading(false);
+    }
+  }
+
+  async function downloadSpeakerModel() {
+    setSDownloading(true);
+    try {
+      await api.downloadSpeakerModel();
+      setMModel(await api.meetingModelStatus());
+    } catch {
+      /* status stays; user can retry */
+    } finally {
+      setSDownloading(false);
     }
   }
 
@@ -721,6 +734,23 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
             >
               {probing ? <Loader2 size={14} className="spin" /> : <Mic size={14} />} Test capture
             </button>
+          </div>
+          <div className="field-row">
+            {mModel?.speaker ? (
+              <span className="field-hint">
+                <Check size={13} /> Speaker ID ready — transcripts label who's speaking
+              </span>
+            ) : (
+              <button
+                className="ghost-btn test-btn"
+                onClick={downloadSpeakerModel}
+                disabled={sDownloading}
+                title="Voice-embedding model that tells call participants apart (labels appear when the meeting ends)"
+              >
+                {sDownloading ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
+                {sDownloading ? "Downloading (29 MB)…" : "Download speaker ID model (29 MB)"}
+              </button>
+            )}
           </div>
           {probeMsg && <div className="field-hint">{probeMsg}</div>}
         </div>

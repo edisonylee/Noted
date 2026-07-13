@@ -60,6 +60,10 @@ socket2 = "0.6"
 # Local speech-to-text (whisper.cpp, in-process)
 whisper-rs = "0.16"
 
+# Speaker embeddings for meeting diarization (sherpa-onnx, statically linked;
+# the ~29MB WeSpeaker model downloads from Settings like the whisper models).
+sherpa-rs = { version = "0.6.8", default-features = false, features = ["download-binaries", "static"] }
+
 # Meeting recorder: native mic capture (kept separate from system audio so
 # speaker attribution is a deterministic mic="me" / system="them").
 cpal = "0.17"

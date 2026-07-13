@@ -354,7 +354,12 @@ export type MeetingLiveState = {
   last_signal_ms_ago?: number | null;
 };
 export type MeetingTemplate = { name: string; prompt: string; builtin: boolean };
-export type MeetingModelStatus = { turbo: boolean; base: boolean; tap_supported: boolean };
+export type MeetingModelStatus = {
+  turbo: boolean;
+  base: boolean;
+  speaker: boolean; // voice-embedding model for per-speaker labels
+  tap_supported: boolean;
+};
 // What the record-prompt popup shows: calendar T-60s / mic-in-use detection,
 // or a transient buttonless "status" card (e.g. "Meeting saved").
 export type PromptPayload = {
@@ -560,6 +565,7 @@ export const api = {
   // bridge returns a clean error for them; reads work everywhere.
   meetingModelStatus: () => invoke<MeetingModelStatus>("meeting_model_status"),
   downloadMeetingModel: () => invoke<boolean>("download_meeting_model"),
+  downloadSpeakerModel: () => invoke<boolean>("download_speaker_model"),
   meetingStart: (args: {
     title?: string;
     eventId?: string;

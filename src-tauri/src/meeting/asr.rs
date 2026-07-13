@@ -166,6 +166,26 @@ impl Chunker {
         self.close(&mut out);
         out.pop()
     }
+
+    /// Stream position (where the next pushed sample lands), in ms.
+    pub fn pos_ms(&self) -> u64 {
+        self.frame_idx * FRAME_MS
+    }
+
+    /// The source stopped delivering for `gap_ms` (the system tap goes quiet
+    /// until an app plays audio; session rebuilds drop samples): close any
+    /// open segment and jump the timeline forward so both channels stay
+    /// anchored to the meeting's wall clock — otherwise their transcripts
+    /// interleave in the wrong order.
+    pub fn advance_gap(&mut self, gap_ms: u64, out: &mut Vec<PendingSegment>) {
+        if self.in_speech {
+            self.close(out);
+        }
+        self.carry.clear();
+        self.preroll.clear();
+        self.voiced_run = 0;
+        self.frame_idx += gap_ms / FRAME_MS;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -219,17 +239,69 @@ impl Transcriber {
     }
 }
 
-/// Whisper emits bracketed sound tags on non-speech ("[BLANK_AUDIO]", "(music)").
-/// A segment that is only such tags carries no words.
+/// Whisper emits bracketed sound tags on non-speech ("[BLANK_AUDIO]", "(music)",
+/// "*ding*") and lone punctuation ("."). A segment that is only such tokens
+/// carries no words.
 pub fn is_junk(text: &str) -> bool {
     let t = text.trim();
     if t.is_empty() {
         return true;
     }
-    let only_tags = t
-        .split_whitespace()
-        .all(|w| (w.starts_with('[') && w.ends_with(']')) || (w.starts_with('(') && w.ends_with(')')));
-    only_tags
+    t.split_whitespace().all(|w| {
+        (w.starts_with('[') && w.ends_with(']'))
+            || (w.starts_with('(') && w.ends_with(')'))
+            || (w.starts_with('*') && w.ends_with('*'))
+            || !w.chars().any(|c| c.is_alphanumeric())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Echo suppression: without headphones the mic hears the speakers, so remote
+// speech shows up twice — once clean on "them", once degraded on "me".
+// ---------------------------------------------------------------------------
+
+/// Does `mic_text` look like the mic's rendition of `system_text` spoken at
+/// the same time? Distinct-token containment: whisper mangles echo audio
+/// (drops words, hallucinates fillers), so we ask what fraction of the mic's
+/// words the system channel also heard. Short utterances ("yeah", "thank
+/// you") are never suppressed — both sides genuinely say them.
+pub fn is_echo(mic_text: &str, system_text: &str) -> bool {
+    let tokens = |s: &str| -> std::collections::HashSet<String> {
+        s.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(|w| w.to_lowercase())
+            .collect()
+    };
+    let mic = tokens(mic_text);
+    if mic.len() < 4 {
+        return false;
+    }
+    let sys = tokens(system_text);
+    let hits = mic.iter().filter(|t| sys.contains(*t)).count();
+    hits as f32 / mic.len() as f32 >= 0.70
+}
+
+/// How far apart matching segments may sit across channels: chunk boundaries
+/// differ (the echo is quieter, so the mic's gate opens later and closes
+/// earlier) but the audio itself is simultaneous once timelines are
+/// wall-anchored.
+const ECHO_SLACK_MS: i64 = 2_500;
+
+struct RecentSeg {
+    id: i64,
+    t0: i64,
+    t1: i64,
+    text: String,
+}
+
+/// Concatenated text of recent segments overlapping [t0, t1] ± slack.
+fn overlapping_text(recents: &[RecentSeg], t0: i64, t1: i64) -> String {
+    recents
+        .iter()
+        .filter(|r| r.t1 >= t0 - ECHO_SLACK_MS && r.t0 <= t1 + ECHO_SLACK_MS)
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ---------------------------------------------------------------------------
@@ -261,7 +333,25 @@ pub struct WorkerArgs {
     pub model_path: PathBuf,
     /// None = audio retention off. Some(dir) = write me.wav / them.wav there.
     pub audio_dir: Option<PathBuf>,
+    /// Wall anchor for both channel timelines (gap insertion keys off it).
+    pub started_epoch_ms: u64,
+    /// Speaker-embedding model, when downloaded — None = no diarization.
+    pub speaker_model: Option<PathBuf>,
 }
+
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Wall time may run ahead of a channel's sample count by this much before we
+/// declare a delivery gap (covers drain-tick + device latency jitter).
+const GAP_SLACK_MS: u64 = 2_500;
+/// Gap zeros written into the retained WAV are capped so a laptop asleep for
+/// hours can't bloat the file; the timeline itself always advances fully.
+const WAV_GAP_CAP_MS: u64 = 30 * 60 * 1_000;
 
 pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
     let transcriber = match Transcriber::new(&args.model_path) {
@@ -274,6 +364,12 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
             return;
         }
     };
+    let mut embedder = args.speaker_model.as_ref().and_then(|p| {
+        super::diarize::Embedder::new(p)
+            .map_err(|e| eprintln!("[noted] speaker embeddings unavailable: {e}"))
+            .ok()
+    });
+    let mut voice_prints: Vec<super::diarize::SegEmb> = Vec::new();
 
     let (me_wav, them_wav) = match &args.audio_dir {
         Some(dir) => {
@@ -285,20 +381,24 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
         }
         None => (None, None),
     };
+    // "them" first: it's the clean digital copy, so its segments are already
+    // recorded by the time the mic's echo rendition of the same speech closes.
     let mut pipes = [
-        ChannelPipe {
-            name: "me",
-            buf: args.me.clone(),
-            chunker: Chunker::new(ChunkerCfg::default()),
-            wav: me_wav,
-        },
         ChannelPipe {
             name: "them",
             buf: args.them.clone(),
             chunker: Chunker::new(ChunkerCfg::default()),
             wav: them_wav,
         },
+        ChannelPipe {
+            name: "me",
+            buf: args.me.clone(),
+            chunker: Chunker::new(ChunkerCfg::default()),
+            wav: me_wav,
+        },
     ];
+    let mut recent_them: Vec<RecentSeg> = Vec::new();
+    let mut recent_me: Vec<RecentSeg> = Vec::new();
 
     loop {
         let stopping = args.stop.load(Ordering::Relaxed);
@@ -312,46 +412,123 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
             } else {
                 crate::voice::resample_to_16k(&raw, rate)
             };
+
+            // Wall-anchor the timeline: the drained samples end ~now, so if
+            // the channel's sample count sits far behind the wall clock the
+            // source wasn't delivering (tap before any app plays audio,
+            // session rebuild) — jump forward instead of compacting time.
+            let mut segments = Vec::new();
+            if !pcm.is_empty() {
+                let wall_ms = epoch_ms().saturating_sub(args.started_epoch_ms);
+                let pcm_ms = (pcm.len() / (SR / 1000)) as u64;
+                let stream_end = pipe.chunker.pos_ms() + pcm_ms;
+                if wall_ms > stream_end + GAP_SLACK_MS {
+                    let gap = wall_ms - stream_end;
+                    pipe.chunker.advance_gap(gap, &mut segments);
+                    if let Some(w) = pipe.wav.as_mut() {
+                        for _ in 0..(gap.min(WAV_GAP_CAP_MS) as usize * (SR / 1000)) {
+                            let _ = w.write_sample(0i16);
+                        }
+                    }
+                    eprintln!("[noted] {}: {}s delivery gap bridged", pipe.name, gap / 1000);
+                }
+            }
             if let Some(w) = pipe.wav.as_mut() {
                 for s in &pcm {
                     let _ = w.write_sample((s.clamp(-1.0, 1.0) * 32767.0) as i16);
                 }
             }
-            let mut segments = pipe.chunker.push(&pcm);
+            segments.extend(pipe.chunker.push(&pcm));
             if stopping {
                 segments.extend(pipe.chunker.flush());
             }
             for seg in segments {
-                match transcriber.transcribe(&seg.samples) {
-                    Ok(text) if !is_junk(&text) => {
-                        let seg_id = {
+                let text = match transcriber.transcribe(&seg.samples) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("[noted] segment transcribe error: {e}");
+                        continue;
+                    }
+                };
+                if is_junk(&text) {
+                    continue;
+                }
+                if pipe.name == "me"
+                    && is_echo(&text, &overlapping_text(&recent_them, seg.t0_ms, seg.t1_ms))
+                {
+                    eprintln!("[noted] echo suppressed: {}", text.chars().take(60).collect::<String>());
+                    continue;
+                }
+                let seg_id = {
+                    let state = app.state::<Db>();
+                    let conn = state.0.lock().unwrap();
+                    store::insert_segment(
+                        &conn,
+                        args.meeting_id,
+                        pipe.name,
+                        seg.t0_ms,
+                        seg.t1_ms,
+                        &text,
+                    )
+                };
+                let Ok(id) = seg_id else { continue };
+                let _ = app.emit(
+                    "meeting-segment",
+                    json!({
+                        "meetingId": args.meeting_id,
+                        "id": id,
+                        "channel": pipe.name,
+                        "t0_ms": seg.t0_ms,
+                        "t1_ms": seg.t1_ms,
+                        "text": text,
+                    }),
+                );
+                let recent = RecentSeg { id, t0: seg.t0_ms, t1: seg.t1_ms, text };
+                if pipe.name == "them" {
+                    if let Some(embedder) = embedder.as_mut() {
+                        if let Some(emb) = embedder.embed(&seg.samples) {
+                            voice_prints.push(super::diarize::SegEmb {
+                                seg_id: id,
+                                dur_ms: seg.t1_ms - seg.t0_ms,
+                                emb,
+                            });
+                        }
+                    }
+                    recent_them.retain(|r| r.t1 >= seg.t1_ms - 90_000);
+                    recent_them.push(recent);
+                    // A mic segment can close before its system-audio source
+                    // does (the echo is quieter, so the mic's gate shuts
+                    // early) — re-check recent mic rows against this segment.
+                    let mut echoed: Vec<usize> = Vec::new();
+                    for (i, m) in recent_me.iter().enumerate() {
+                        if m.t1 >= seg.t0_ms - ECHO_SLACK_MS
+                            && m.t0 <= seg.t1_ms + ECHO_SLACK_MS
+                            && is_echo(&m.text, &overlapping_text(&recent_them, m.t0, m.t1))
+                        {
+                            echoed.push(i);
+                        }
+                    }
+                    for &i in echoed.iter().rev() {
+                        let m = recent_me.remove(i);
+                        eprintln!(
+                            "[noted] echo suppressed (late): {}",
+                            m.text.chars().take(60).collect::<String>()
+                        );
+                        let removed = {
                             let state = app.state::<Db>();
                             let conn = state.0.lock().unwrap();
-                            store::insert_segment(
-                                &conn,
-                                args.meeting_id,
-                                pipe.name,
-                                seg.t0_ms,
-                                seg.t1_ms,
-                                &text,
-                            )
+                            store::delete_segment(&conn, m.id)
                         };
-                        if let Ok(id) = seg_id {
+                        if removed.is_ok() {
                             let _ = app.emit(
-                                "meeting-segment",
-                                json!({
-                                    "meetingId": args.meeting_id,
-                                    "id": id,
-                                    "channel": pipe.name,
-                                    "t0_ms": seg.t0_ms,
-                                    "t1_ms": seg.t1_ms,
-                                    "text": text,
-                                }),
+                                "meeting-segment-removed",
+                                json!({ "meetingId": args.meeting_id, "id": m.id }),
                             );
                         }
                     }
-                    Ok(_) => {}
-                    Err(e) => eprintln!("[noted] segment transcribe error: {e}"),
+                } else {
+                    recent_me.retain(|r| r.t1 >= seg.t1_ms - 90_000);
+                    recent_me.push(recent);
                 }
             }
         }
@@ -359,6 +536,28 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
             break;
         }
         std::thread::sleep(Duration::from_millis(400));
+    }
+
+    // Full-context speaker clustering; lands before stop() emits
+    // meeting-stopped, so the reloaded transcript and the summary see names.
+    if !voice_prints.is_empty() {
+        let labels = super::diarize::cluster(&voice_prints);
+        if !labels.is_empty() {
+            let speakers = labels
+                .iter()
+                .map(|(_, l)| l.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            let state = app.state::<Db>();
+            let conn = state.0.lock().unwrap();
+            match store::set_segment_speakers(&conn, &labels) {
+                Ok(()) => eprintln!(
+                    "[noted] diarization: {speakers} speakers across {} segments",
+                    labels.len()
+                ),
+                Err(e) => eprintln!("[noted] diarization write failed: {e}"),
+            }
+        }
     }
 
     for pipe in pipes {
@@ -426,7 +625,61 @@ mod tests {
         assert!(is_junk(""));
         assert!(is_junk("  [BLANK_AUDIO]  "));
         assert!(is_junk("(music) [applause]"));
+        assert!(is_junk("*ding*"), "starred sound tags are junk");
+        assert!(is_junk("."), "lone punctuation is junk");
+        assert!(is_junk("- ."));
+        assert!(!is_junk("- Cool."));
         assert!(!is_junk("let's ship the meeting recorder"));
+    }
+
+    #[test]
+    fn echo_detects_duplicated_remote_speech() {
+        // Word-for-word duplicate (mic heard the speakers clearly).
+        assert!(is_echo(
+            "Sounds good. I might build it over the weekend too.",
+            "Sounds good. I might build it over the weekend too. That sounds fun."
+        ));
+        // Real case from a standup: whisper mangles the echo (hallucinated
+        // "good good…", missing words) but most mic words match.
+        assert!(is_echo(
+            "good good good good good he's joining sir uh did you get decent sleep this weekend",
+            "He's joining soon. Did you get decent sleep this weekend? I was gonna ask you about your sleep score."
+        ));
+        // Overlapping-but-different speech stays (user talking over the call).
+        assert!(!is_echo(
+            "What up? Hey. We got a lady. Hi.",
+            "What up? We got a lot of meat."
+        ));
+        // Short acknowledgments are never suppressed — both sides say them.
+        assert!(!is_echo("Thank you.", "Thank you."));
+        assert!(!is_echo("Yeah.", "Yeah, that's good."));
+        // Nothing on the system channel at that time → keep.
+        assert!(!is_echo("I created my own note taker this weekend", ""));
+    }
+
+    #[test]
+    fn gap_advance_wall_aligns_the_timeline() {
+        let mut c = Chunker::new(ChunkerCfg::default());
+        let mut out = Vec::new();
+        // Source silent for the first 73s (tap before the call app plays).
+        c.advance_gap(73_000, &mut out);
+        assert!(out.is_empty());
+        let mut segs = c.push(&tone(1200, 0.2));
+        segs.extend(c.flush());
+        assert_eq!(segs.len(), 1);
+        assert!(segs[0].t0_ms >= 72_800, "t0={} should sit at ~73s", segs[0].t0_ms);
+    }
+
+    #[test]
+    fn gap_advance_closes_an_open_segment() {
+        let mut c = Chunker::new(ChunkerCfg::default());
+        let mut out = Vec::new();
+        out.extend(c.push(&tone(1500, 0.2))); // speech, still open
+        c.advance_gap(10_000, &mut out); // delivery stops mid-utterance
+        assert_eq!(out.len(), 1, "the open segment closes at the gap");
+        assert!(out[0].t1_ms <= 1_600);
+        let pos = c.pos_ms();
+        assert!(pos >= 11_400, "timeline jumped past the gap: {pos}");
     }
 
     #[test]

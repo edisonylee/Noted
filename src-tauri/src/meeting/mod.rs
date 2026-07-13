@@ -8,6 +8,7 @@
 pub mod asr;
 pub mod capture;
 pub mod detect;
+pub mod diarize;
 pub mod store;
 pub mod summarize;
 
@@ -214,6 +215,7 @@ pub fn start(
     let me = ChannelBuf::new();
     let them = ChannelBuf::new();
     let stop = Arc::new(AtomicBool::new(false));
+    let started_epoch_ms = epoch_ms();
     let mut threads = Vec::new();
 
     if capture::tap_supported() {
@@ -234,6 +236,8 @@ pub fn start(
             stop: stop.clone(),
             model_path: model,
             audio_dir: audio_dir.clone(),
+            started_epoch_ms,
+            speaker_model: diarize::model_path(app),
         };
         let h = app.clone();
         threads.push(std::thread::spawn(move || asr::run_worker(h, args)));
@@ -242,7 +246,7 @@ pub fn start(
     *guard = Some(Active {
         id,
         title: title.clone(),
-        started_epoch_ms: epoch_ms(),
+        started_epoch_ms,
         stop,
         threads,
         me,

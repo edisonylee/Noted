@@ -1436,6 +1436,7 @@ fn meeting_model_status(app: tauri::AppHandle) -> Value {
     json!({
         "turbo": dir.join("ggml-large-v3-turbo.bin").exists(),
         "base": dir.join("ggml-base.en.bin").exists(),
+        "speaker": dir.join(meeting::diarize::MODEL_FILE).exists(),
         "tap_supported": meeting::capture::tap_supported(),
     })
 }
@@ -1466,6 +1467,35 @@ async fn download_meeting_model(app: tauri::AppHandle) -> Result<bool, String> {
     file.flush().map_err(|e| e.to_string())?;
     drop(file);
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// WeSpeaker CAM++ voice-embedding model (~29MB) — powers per-speaker labels
+/// on the system-audio channel. Same explicit-download pattern as whisper.
+const SPEAKER_MODEL_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_CAM%2B%2B_LM.onnx";
+
+#[tauri::command]
+async fn download_speaker_model(app: tauri::AppHandle) -> Result<bool, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("models");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(meeting::diarize::MODEL_FILE);
+    if path.exists() {
+        return Ok(true);
+    }
+    let bytes = reqwest::get(SPEAKER_MODEL_URL)
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?
+        .bytes()
+        .await
+        .map_err(|e| e.to_string())?;
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -2838,6 +2868,7 @@ pub fn run() {
             transcribe,
             meeting_model_status,
             download_meeting_model,
+            download_speaker_model,
             meeting_start,
             meeting_stop,
             meeting_state,

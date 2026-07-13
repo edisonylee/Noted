@@ -100,6 +100,23 @@ pub fn insert_segment(
     Ok(conn.last_insert_rowid())
 }
 
+/// Echo suppression: a mic segment recognized (late) as the speakers' copy of
+/// remote speech is removed outright — it was never real "Me" speech.
+pub fn delete_segment(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM meeting_segments WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// Stamp diarization labels ("Speaker 1..N") onto them-channel segments.
+pub fn set_segment_speakers(conn: &Connection, labels: &[(i64, String)]) -> Result<()> {
+    let mut stmt =
+        conn.prepare("UPDATE meeting_segments SET speaker = ?2 WHERE id = ?1")?;
+    for (id, speaker) in labels {
+        stmt.execute(rusqlite::params![id, speaker])?;
+    }
+    Ok(())
+}
+
 /// Full transcript, timeline order, interleaved across channels.
 pub fn list_segments(conn: &Connection, meeting_id: i64) -> Result<Vec<Value>> {
     let mut stmt = conn.prepare(

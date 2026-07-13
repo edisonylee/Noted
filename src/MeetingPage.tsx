@@ -137,6 +137,12 @@ export function MeetingPage({
         if (e.payload.meetingId !== id) return;
         setLiveSegments((prev) => [...prev, e.payload]);
       }),
+      // A "me" line recognized late as the mic hearing the speakers (echo of
+      // remote speech) gets deleted by the worker — drop it from the view too.
+      listen<{ meetingId: number; id: number }>("meeting-segment-removed", (e) => {
+        if (e.payload.meetingId !== id) return;
+        setLiveSegments((prev) => prev.filter((s) => s.id !== e.payload.id));
+      }),
       listen<{ meetingId: number }>("meeting-stopped", (e) => {
         if (e.payload.meetingId === id) load();
       }),
@@ -364,14 +370,16 @@ export function MeetingPage({
               {recording ? "Listening — the transcript fills in as people speak." : "No transcript."}
             </p>
           ) : (
-            liveSegments.map((s) => (
-              <div key={s.id} className={"bubble " + s.channel}>
-                <span className="who">
-                  {s.channel === "me" ? "Me" : s.speaker || "Them"} · {mmss(s.t0_ms)}
-                </span>
-                <p>{s.text}</p>
-              </div>
-            ))
+            [...liveSegments]
+              .sort((a, b) => a.t0_ms - b.t0_ms || a.id - b.id)
+              .map((s) => (
+                <div key={s.id} className={"bubble " + s.channel}>
+                  <span className="who">
+                    {s.channel === "me" ? "Me" : s.speaker || "Them"} · {mmss(s.t0_ms)}
+                  </span>
+                  <p>{s.text}</p>
+                </div>
+              ))
           )}
         </div>
       ) : (

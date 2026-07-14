@@ -88,6 +88,140 @@ fn overlap_text(rows: &[Row], t0: i64, t1: i64, slack: i64) -> String {
         .join(" ")
 }
 
+/// Speaker re-discrimination: build a strong reference print for a KNOWN
+/// speaker from a repaired meeting's them channel (REF_MEET_DIR + rows of
+/// REF_MEETING_ID), then re-cluster the target meeting's them rows and
+/// report each cluster against that reference — with pairwise cluster sims,
+/// times, and sample text so voices can be identified by structure/content.
+/// Read-only; writes OUT/cluster_rows.tsv (cluster_idx \t comma-joined t0s).
+///
+///   SPEAKER_MODEL=… NOTED_DB=… MEETING_ID=3 MEET_DIR=…/3 SHIFT_MS=73200 \
+///   REF_MEETING_ID=4 REF_MEET_DIR=…/4 OUT=… \
+///   cargo test --test meeting_repair speakers -- --ignored --nocapture
+#[test]
+#[ignore]
+fn speakers() {
+    let speaker_model = std::env::var("SPEAKER_MODEL").expect("SPEAKER_MODEL");
+    let db = std::env::var("NOTED_DB").expect("NOTED_DB");
+    let dir = std::env::var("MEET_DIR").expect("MEET_DIR");
+    let out = std::env::var("OUT").expect("OUT");
+    let meeting_id: i64 = std::env::var("MEETING_ID").expect("MEETING_ID").parse().unwrap();
+    let shift: i64 = std::env::var("SHIFT_MS").expect("SHIFT_MS").parse().unwrap();
+    let ref_id: i64 = std::env::var("REF_MEETING_ID").expect("REF_MEETING_ID").parse().unwrap();
+    let ref_dir = std::env::var("REF_MEET_DIR").expect("REF_MEET_DIR");
+
+    let conn = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("db");
+    let mut embedder = Embedder::new(Path::new(&speaker_model)).expect("model");
+
+    let them_rows = |id: i64| -> Vec<(i64, i64, String)> {
+        conn.prepare(
+            "SELECT t0_ms, t1_ms, text FROM meeting_segments
+             WHERE meeting_id = ?1 AND channel = 'them' ORDER BY t0_ms",
+        )
+        .unwrap()
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+    };
+
+    // Strong reference print: long segments only, from the repaired meeting.
+    let ref_wav = read_wav(&format!("{ref_dir}/them.wav"));
+    let ref_rows = them_rows(ref_id);
+    let mut ref_embs = Vec::new();
+    for (t0, t1, _) in &ref_rows {
+        if t1 - t0 < 3_000 {
+            continue;
+        }
+        let s0 = ((t0.max(&0) * 16) as usize).min(ref_wav.len());
+        let s1 = ((t1.max(&0) * 16) as usize).min(ref_wav.len());
+        if let Some(e) = embedder.embed(&ref_wav[s0..s1]) {
+            ref_embs.push(e);
+        }
+    }
+    let mean = |set: &[Vec<f32>]| -> Vec<f32> {
+        let mut m = vec![0.0f32; set[0].len()];
+        for e in set {
+            for (a, b) in m.iter_mut().zip(e) {
+                *a += b;
+            }
+        }
+        m.iter().map(|v| v / set.len() as f32).collect()
+    };
+    let strong = mean(&ref_embs);
+    let mut selfsims: Vec<f32> = ref_embs.iter().map(|e| cosine(e, &strong)).collect();
+    selfsims.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    println!(
+        "reference print: {} long segs, self-sim p10={:.2} p50={:.2}",
+        ref_embs.len(),
+        selfsims[selfsims.len() / 10],
+        selfsims[selfsims.len() / 2]
+    );
+
+    // Cluster the target meeting's them rows.
+    let wav = read_wav(&format!("{dir}/them.wav"));
+    let rows = them_rows(meeting_id);
+    let mut segs = Vec::new();
+    for (i, (t0, t1, _)) in rows.iter().enumerate() {
+        let s0 = (((t0 - shift).max(0) * 16) as usize).min(wav.len());
+        let s1 = (((t1 - shift).max(0) * 16) as usize).min(wav.len());
+        if let Some(e) = embedder.embed(&wav[s0..s1]) {
+            segs.push(SegEmb { seg_id: i as i64, dur_ms: t1 - t0, emb: e });
+        }
+    }
+    let clusters = cluster(&segs);
+    println!(
+        "\n{} clusters over {} embeddable rows (of {})\n",
+        clusters.len(),
+        segs.len(),
+        rows.len()
+    );
+    let mut map = String::new();
+    for (ci, c) in clusters.iter().enumerate() {
+        let ms: i64 = c
+            .seg_ids
+            .iter()
+            .map(|&i| rows[i as usize].1 - rows[i as usize].0)
+            .sum();
+        println!(
+            "cluster {ci}: {} segs {}s  vs_reference={:.2}",
+            c.seg_ids.len(),
+            ms / 1000,
+            cosine(&c.centroid, &strong)
+        );
+        for &i in c.seg_ids.iter().take(5) {
+            let (t0, _, text) = &rows[i as usize];
+            println!("   {:>4}s {}", t0 / 1000, text.chars().take(85).collect::<String>());
+        }
+        map.push_str(&format!(
+            "{ci}\t{}\t{}\n",
+            c.seg_ids
+                .iter()
+                .map(|&i| rows[i as usize].0.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+            c.centroid.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+        ));
+    }
+    println!("\npairwise cluster sims:");
+    for a in 0..clusters.len() {
+        for b in (a + 1)..clusters.len() {
+            println!(
+                "  {a}x{b}: {:.2}",
+                cosine(&clusters[a].centroid, &clusters[b].centroid)
+            );
+        }
+    }
+    std::fs::write(format!("{out}/cluster_rows.tsv"), map).unwrap();
+    let strong_line =
+        strong.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",") + "\n";
+    std::fs::write(format!("{out}/strong_ref.tsv"), strong_line).unwrap();
+}
+
 #[test]
 #[ignore]
 fn plan() {

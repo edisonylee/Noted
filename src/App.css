@@ -2005,6 +2005,7 @@ a.cal-btn { text-decoration: none; }
 .meeting-meta { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
 .meeting-meta span { display: inline-flex; align-items: center; gap: 4px; }
 .meeting-hint { margin: 0; color: var(--muted); font-size: 13px; }
+.meeting-export-status { align-self: flex-end; color: var(--good); border: 1px solid color-mix(in srgb, var(--good) 32%, transparent); background: color-mix(in srgb, var(--good) 8%, transparent); border-radius: 8px; padding: 7px 10px; }
 .meeting-status { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
 
 .meeting-page .btn {
@@ -2129,6 +2130,32 @@ a.cal-btn { text-decoration: none; }
 .quiet-empty { color: var(--faint); font-size: 13px; text-align: center; margin-top: 40px; }
 
 .meeting-summary { padding: 4px 2px 24px; max-width: 720px; }
+.summary-refresh { float: right; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); padding: 6px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+.summary-refresh:hover { color: var(--ink); background: var(--hover-soft); }
+.meeting-print { display: none; }
+
+@media print {
+  @page { size: A4; margin: 18mm 18mm 20mm; }
+  body { background: #f7f2e9 !important; color: #24201b !important; }
+  body * { visibility: hidden !important; }
+  .meeting-print, .meeting-print * { visibility: visible !important; }
+  .meeting-print { display: block; position: absolute; inset: 0; width: auto; color: #24201b; font-family: Geist, -apple-system, BlinkMacSystemFont, sans-serif; }
+  .meeting-print header { padding: 10mm 0 14mm; break-after: avoid; }
+  .print-kicker { color: #a35f3d; font-size: 9pt; font-weight: 700; letter-spacing: .16em; }
+  .meeting-print h1 { margin: 5mm 0 4mm; max-width: 150mm; font-size: 30pt; line-height: 1.06; letter-spacing: -.035em; }
+  .print-rule { width: 24mm; height: 1.5mm; background: #d6895f; border-radius: 2mm; }
+  .print-meta { margin-top: 4mm; color: #766c60; font-size: 9.5pt; }
+  .meeting-print section { margin: 0 0 10mm; }
+  .meeting-print section > h2 { margin: 0 0 4mm; padding-top: 3mm; border-top: .35mm solid #d9cfc1; color: #8c4f31; font-size: 15pt; letter-spacing: -.015em; break-after: avoid; }
+  .meeting-print .md h3 { margin: 6mm 0 2mm; color: #766052; font-size: 9pt; letter-spacing: .12em; text-transform: uppercase; break-after: avoid; }
+  .meeting-print .md p, .meeting-print .md li, .print-notes { font-size: 10.5pt; line-height: 1.58; }
+  .meeting-print .md p { margin: 0 0 3mm; }
+  .meeting-print .md ul { margin: 0 0 4mm; padding-left: 5mm; }
+  .print-notes { white-space: pre-wrap; }
+  .print-transcript p { display: grid; grid-template-columns: 25mm 14mm 1fr; gap: 2mm; margin: 0; padding: 2.5mm 0; border-bottom: .25mm solid #e3dbcf; font-size: 9.5pt; line-height: 1.45; break-inside: avoid; }
+  .print-transcript p span { color: #9a8d7e; font-variant-numeric: tabular-nums; }
+  .meeting-print footer { margin-top: 12mm; padding-top: 3mm; border-top: .35mm solid #d9cfc1; color: #9a8d7e; font-size: 8.5pt; }
+}
 .meeting-summary .md h3 { font-size: 13px; font-weight: 620; letter-spacing: 0.03em; text-transform: uppercase; color: var(--faint); margin: 20px 0 8px; }
 .meeting-summary .md p { margin: 0 0 10px; font-size: 14px; line-height: 1.65; }
 .meeting-summary .md ul { margin: 0 0 10px; padding-left: 20px; display: flex; flex-direction: column; gap: 5px; }

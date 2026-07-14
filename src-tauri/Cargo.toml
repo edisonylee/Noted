@@ -27,6 +27,7 @@ tauri = { version = "2", features = ["macos-private-api", "protocol-asset"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+printpdf = "0.7"
 
 # Local DB + vector search (pinned compatible combo — see sqlite-vec rust docs)
 rusqlite = { version = "0.32.1", features = ["bundled"] }
@@ -76,4 +77,3 @@ hound = "3"
 cidre = "0.16"
 # Native window vibrancy: the sidebar's dark-glass look (desktop shows through).
 window-vibrancy = "0.6"
-

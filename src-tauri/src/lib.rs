@@ -1555,6 +1555,15 @@ async fn meeting_start(
     let title = title
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| "Meeting".to_string());
+    if let Some(ref eid) = event_id {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        if let Some(id) = meeting::store::find_meeting_by_event(&conn, eid)
+            .map_err(|e| e.to_string())?
+        {
+            return Ok(id);
+        }
+    }
     let retain = retain_audio.unwrap_or_else(|| meeting::cfg().retain_audio);
     meeting::start(&app, title, event_id, event_json, retain, source_bundle)
         .map_err(|e| e.to_string())
@@ -1712,8 +1721,34 @@ async fn meeting_export_md(app: tauri::AppHandle, id: i64) -> Result<String, Str
     Ok(path.to_string_lossy().to_string())
 }
 
-/// Generate a summary tab with the given (or default) template. PLAUD-style:
-/// each run adds a tab; the first one also files the meeting note.
+/// Render a polished, self-contained meeting PDF into Downloads.
+#[tauri::command]
+async fn meeting_export_pdf(app: tauri::AppHandle, id: i64) -> Result<String, String> {
+    let meeting = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        meeting::store::get_meeting(&conn, id).map_err(|e| e.to_string())?
+    };
+    let dir = app.path().download_dir().map_err(|e| e.to_string())?;
+    let title: String = meeting["title"]
+        .as_str().unwrap_or("Meeting").chars()
+        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let date: String = meeting["started_at"].as_str()
+        .map(|s| s.chars().take(10).collect()).unwrap_or_default();
+    let base = if date.is_empty() { title.trim().to_string() } else { format!("{date} {}", title.trim()) };
+    let mut path = dir.join(format!("{base}.pdf"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{base} ({n}).pdf"));
+        n += 1;
+    }
+    meeting::pdf::export(&meeting, &path).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Generate a summary tab with the given (or default) template. Each template
+/// has one refreshable tab; the first summary also files the meeting note.
 #[tauri::command]
 async fn meeting_summarize(
     app: tauri::AppHandle,
@@ -3016,6 +3051,7 @@ pub fn run() {
             meeting_rename_speaker,
             meeting_suggest_speakers,
             meeting_export_md,
+            meeting_export_pdf,
             meeting_start,
             meeting_stop,
             meeting_state,

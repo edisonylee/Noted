@@ -10,6 +10,7 @@ import {
   ChevronDown,
   Copy,
   Download,
+  FileDown,
   Loader,
   Mic,
   Pause,
@@ -22,6 +23,7 @@ import {
   Video,
 } from "lucide-react";
 import { listen } from "./events";
+import { openPath } from "@tauri-apps/plugin-opener";
 import {
   api,
   isDesktop,
@@ -253,7 +255,8 @@ export function MeetingPage({
     try {
       await api.meetingSummarize(id, template);
       await load();
-      setTab((detail?.summaries.length ?? 0)); // the tab just added
+      const existing = summaries.findIndex((s) => s.template === template);
+      setTab(existing >= 0 ? existing : summaries.length);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -303,6 +306,20 @@ export function MeetingPage({
       setExportMsg(`Saved to ${path.split("/").slice(-2).join("/")}`);
       window.setTimeout(() => setExportMsg(null), 4000);
     } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const exportPdf = async () => {
+    if (id == null) return;
+    try {
+      setExportMsg("Creating PDF…");
+      const path = await api.meetingExportPdf(id);
+      setExportMsg(`PDF saved to ${path.split("/").slice(-2).join("/")}`);
+      await openPath(path);
+      window.setTimeout(() => setExportMsg(null), 6000);
+    } catch (e) {
+      setExportMsg(null);
       setError(String(e));
     }
   };
@@ -394,6 +411,11 @@ export function MeetingPage({
             <Loader size={14} className="spin" /> enhancing notes…
           </span>
         ) : null}
+        {id != null && !recording && (summaries.length > 0 || notes.trim().length > 0) && (
+          <button className="btn ghost meeting-export-pdf" onClick={exportPdf}>
+            <FileDown size={15} /> Export PDF
+          </button>
+        )}
         {isDesktop && id != null && !recording && liveSegments.length > 0 && (
           <button
             className="icon-btn"
@@ -406,7 +428,7 @@ export function MeetingPage({
         )}
       </header>
 
-      {exportMsg && <div className="meeting-hint">{exportMsg}</div>}
+      {exportMsg && <div className="meeting-hint meeting-export-status" role="status">{exportMsg}</div>}
       {error && <div className="error">{error}</div>}
       {id == null && (
         <p className="meeting-hint">
@@ -433,7 +455,7 @@ export function MeetingPage({
             {s.template}
           </button>
         ))}
-        {id != null && !recording && liveSegments.length > 0 && (
+        {id != null && !recording && liveSegments.length > 0 && templates.some((t) => !summaries.some((s) => s.template === t.name)) && (
           <div className="tab-add">
             <button
               onClick={() => setPickTemplate((v) => !v)}
@@ -446,7 +468,7 @@ export function MeetingPage({
             </button>
             {pickTemplate && (
               <div className="tab-menu">
-                {templates.map((t) => (
+                {templates.filter((t) => !summaries.some((s) => s.template === t.name)).map((t) => (
                   <button key={t.name} onClick={() => generate(t.name)}>
                     {t.name}
                   </button>
@@ -588,9 +610,40 @@ export function MeetingPage({
         </>
       ) : (
         <div className="meeting-summary">
-          {summaries[tab as number] ? <MdBlock md={summaries[tab as number].content_md} /> : null}
+          {summaries[tab as number] ? (
+            <>
+              <button
+                className="summary-refresh"
+                onClick={() => generate(summaries[tab as number].template)}
+                disabled={generating != null}
+              >
+                {generating ? <Loader size={13} className="spin" /> : <Sparkles size={13} />}
+                Refresh
+              </button>
+              <MdBlock md={summaries[tab as number].content_md} />
+            </>
+          ) : null}
         </div>
       )}
+      <article className="meeting-print" aria-hidden="true">
+        <header>
+          <span className="print-kicker">NOTED / MEETING NOTES</span>
+          <h1>{title}</h1>
+          <div className="print-rule" />
+          <p className="print-meta">
+            {detail?.started_at ? new Date(detail.started_at).toLocaleString([], { dateStyle: "long", timeStyle: "short" }) : ""}
+            {attendees.length ? ` · ${attendees.map((a) => a.name || a.email).join(", ")}` : ""}
+          </p>
+        </header>
+        {summaries.map((s) => <section key={s.id}><h2>{s.template}</h2><MdBlock md={s.content_md} /></section>)}
+        {notes.trim() && <section><h2>Notes</h2><p className="print-notes">{notes}</p></section>}
+        {liveSegments.length > 0 && (
+          <section className="print-transcript"><h2>Transcript</h2>
+            {liveSegments.map((s) => <p key={s.id}><b>{s.channel === "me" ? "Me" : s.speaker || "Them"}</b><span>{mmss(s.t0_ms)}</span>{s.text}</p>)}
+          </section>
+        )}
+        <footer>{title} · Generated locally with Noted</footer>
+      </article>
     </div>
   );
 }

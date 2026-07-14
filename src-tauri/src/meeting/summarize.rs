@@ -477,8 +477,8 @@ pub async fn suggest_speaker_names(app: &tauri::AppHandle, meeting_id: i64) -> R
     Ok(applied)
 }
 
-/// Generate one summary tab for a meeting. Files the meeting note on first
-/// summarize; later regenerations only add tabs. Returns the markdown.
+/// Generate or refresh one template summary for a meeting. Files the meeting
+/// note on first summarize; later runs replace that template's existing tab.
 pub async fn run(app: &tauri::AppHandle, meeting_id: i64, template_name: Option<String>) -> Result<String> {
     // Snapshot everything under one short lock.
     let (meeting, segments, template, prompt) = {

@@ -9,6 +9,7 @@ pub mod asr;
 pub mod capture;
 pub mod detect;
 pub mod diarize;
+pub mod pdf;
 pub mod store;
 pub mod summarize;
 

@@ -4,7 +4,7 @@
 // summarize.rs) so search/embeddings/KG stay unchanged.
 
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 pub fn create_meeting(
@@ -327,6 +327,26 @@ pub fn insert_summary(
     content_md: &str,
     now: &str,
 ) -> Result<i64> {
+    let existing = conn
+        .query_row(
+            "SELECT id FROM meeting_summaries WHERE meeting_id = ?1 AND template = ?2
+             ORDER BY id ASC LIMIT 1",
+            rusqlite::params![meeting_id, template],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        conn.execute(
+            "UPDATE meeting_summaries SET content_md = ?2, created_at = ?3 WHERE id = ?1",
+            rusqlite::params![id, content_md, now],
+        )?;
+        conn.execute(
+            "DELETE FROM meeting_summaries
+             WHERE meeting_id = ?1 AND template = ?2 AND id <> ?3",
+            rusqlite::params![meeting_id, template, id],
+        )?;
+        return Ok(id);
+    }
     conn.execute(
         "INSERT INTO meeting_summaries (meeting_id, template, content_md, created_at)
          VALUES (?1, ?2, ?3, ?4)",
@@ -335,10 +355,23 @@ pub fn insert_summary(
     Ok(conn.last_insert_rowid())
 }
 
+pub fn find_meeting_by_event(conn: &Connection, event_id: &str) -> Result<Option<i64>> {
+    Ok(conn.query_row(
+        "SELECT id FROM meetings WHERE event_id = ?1 ORDER BY id DESC LIMIT 1",
+        [event_id],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
 pub fn list_summaries(conn: &Connection, meeting_id: i64) -> Result<Vec<Value>> {
     let mut stmt = conn.prepare(
         "SELECT id, template, content_md, created_at FROM meeting_summaries
-         WHERE meeting_id = ?1 ORDER BY id ASC",
+         WHERE meeting_id = ?1
+           AND id = (SELECT MAX(newer.id) FROM meeting_summaries newer
+                     WHERE newer.meeting_id = meeting_summaries.meeting_id
+                       AND newer.template = meeting_summaries.template)
+         ORDER BY id ASC",
     )?;
     let rows = stmt
         .query_map([meeting_id], |r| {
@@ -358,7 +391,7 @@ pub fn list_meetings(conn: &Connection, limit: i64) -> Result<Vec<Value>> {
     let mut stmt = conn.prepare(
         "SELECT m.id, m.title, m.started_at, m.ended_at, m.status, m.note_id, m.event_json,
                 (SELECT COUNT(*) FROM meeting_segments s WHERE s.meeting_id = m.id),
-                (SELECT COUNT(*) FROM meeting_summaries y WHERE y.meeting_id = m.id)
+                (SELECT COUNT(DISTINCT y.template) FROM meeting_summaries y WHERE y.meeting_id = m.id)
          FROM meetings m ORDER BY m.id DESC LIMIT ?1",
     )?;
     let rows = stmt

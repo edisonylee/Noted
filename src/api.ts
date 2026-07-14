@@ -649,6 +649,7 @@ export const api = {
     invoke<number>("meeting_suggest_speakers", { id }),
   // Writes "<date> <title>.md" into ~/Downloads; resolves to the path.
   meetingExportMd: (id: number) => invoke<string>("meeting_export_md", { id }),
+  meetingExportPdf: (id: number) => invoke<string>("meeting_export_pdf", { id }),
   meetingTemplates: () => invoke<MeetingTemplate[]>("meeting_templates"),
   meetingTemplateSave: (name: string, prompt: string) =>
     invoke<void>("meeting_template_save", { name, prompt }),

@@ -63,12 +63,16 @@ export function ComingUp({
   const upcoming = useMemo(() => {
     if (!events) return [];
     const today = easternDay();
+    const recordedEventIds = new Set(
+      meetings.map((m) => m.event_json?.id).filter((id): id is string => Boolean(id))
+    );
     return events
       .filter((e) => !e.declined && !e.all_day && e.start_min != null)
       // Meetings only — a call link or other people. Plain calendar blocks
       // (including noted's own pushed schedule/tasks) stay in the schedule
       // below; this strip is for things that get recorded.
       .filter((e) => e.calendar.toLowerCase() !== "noted")
+      .filter((e) => !recordedEventIds.has(e.id))
       .filter((e) => e.meet_link != null || e.attendee_count >= 2)
       .filter((e) => {
         // Still relevant: hasn't ended yet (with 5 min grace) or is tomorrow.
@@ -77,7 +81,7 @@ export function ComingUp({
         return end > nowMin - 5;
       })
       .sort((a, b) => (a.date === b.date ? (a.start_min ?? 0) - (b.start_min ?? 0) : a.date < b.date ? -1 : 1));
-  }, [events, nowMin]);
+  }, [events, meetings, nowMin]);
 
   const pages = Math.max(1, Math.ceil(upcoming.length / PAGE));
   const view = upcoming.slice(page * PAGE, page * PAGE + PAGE);

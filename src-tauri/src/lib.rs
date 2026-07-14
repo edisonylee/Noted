@@ -1778,7 +1778,8 @@ async fn meeting_capture_probe(app: tauri::AppHandle, seconds: Option<u64>) -> R
     }
     {
         let (b, s) = (me.clone(), stop.clone());
-        threads.push(std::thread::spawn(move || meeting::capture::run_mic(b, s)));
+        let aec = meeting::cfg().mic_aec;
+        threads.push(std::thread::spawn(move || meeting::capture::run_mic(b, s, aec)));
     }
     tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
     stop.store(true, Ordering::Relaxed);

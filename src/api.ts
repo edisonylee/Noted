@@ -404,6 +404,8 @@ export type MeetingsCfg = {
   default_template: string;
   vocabulary: string[];
   asr_engine: "whisper" | "parakeet";
+  /** macOS voice-processing (AEC) on the mic — strips speaker playback from the mic signal. */
+  mic_aec: boolean;
 };
 
 // The Journal agent's response: a companion reply (null if the local model was

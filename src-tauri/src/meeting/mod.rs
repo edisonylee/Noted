@@ -69,6 +69,11 @@ pub struct MeetingsCfg {
     /// missing files fall back to whisper rather than failing the recording.
     #[serde(default = "d_engine")]
     pub asr_engine: String,
+    /// macOS voice-processing (AEC) on the mic: the OS subtracts what the
+    /// speakers play from the mic signal, so the other side of a call never
+    /// lands on the "me" channel. Off = raw cpal mic.
+    #[serde(default = "d_true")]
+    pub mic_aec: bool,
 }
 
 fn d_true() -> bool {
@@ -119,6 +124,7 @@ impl Default for MeetingsCfg {
             default_template: d_template(),
             vocabulary: Vec::new(),
             asr_engine: d_engine(),
+            mic_aec: true,
         }
     }
 }
@@ -297,7 +303,8 @@ pub fn start(
     }
     {
         let (b, s) = (me.clone(), stop.clone());
-        threads.push(std::thread::spawn(move || capture::run_mic(b, s)));
+        let aec = cfg().mic_aec;
+        threads.push(std::thread::spawn(move || capture::run_mic(b, s, aec)));
     }
     {
         let args = asr::WorkerArgs {

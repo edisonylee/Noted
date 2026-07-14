@@ -948,6 +948,21 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               </em>
             </span>
           </label>
+          <label className="vault-auto">
+            <input
+              type="checkbox"
+              checked={mcfg?.mic_aec ?? true}
+              onChange={(e) => mcfg && saveMcfg({ ...mcfg, mic_aec: e.target.checked })}
+            />
+            <span>
+              Echo cancellation on the microphone
+              <em>
+                macOS voice processing removes what your speakers are playing from the mic, so
+                the other side of a call never shows up as you — essential without headphones.
+                Applies from the next recording.
+              </em>
+            </span>
+          </label>
           <label className="field">
             <span className="field-label">Default summary template</span>
             <select

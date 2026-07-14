@@ -88,12 +88,36 @@ pub fn downmix_mono(data: &[f32], channels: usize) -> Vec<f32> {
 }
 
 // ---------------------------------------------------------------------------
-// Mic capture (cpal), on its own thread.
+// Mic capture, on its own thread. Preferred path (macOS, `aec` on): Apple's
+// VoiceProcessingIO AudioUnit — the OS subtracts everything the Mac is
+// playing (i.e. the call's remote audio) from the mic signal, which kills
+// speaker echo at the source for no-headphones calls. Falls back to a plain
+// cpal stream when VPIO can't initialize (odd devices, denied component).
 // ---------------------------------------------------------------------------
 
-pub fn run_mic(buf: Arc<ChannelBuf>, stop: Arc<AtomicBool>) {
+pub fn run_mic(buf: Arc<ChannelBuf>, stop: Arc<AtomicBool>, aec: bool) {
     while !stop.load(Ordering::Relaxed) {
-        match mic_session(&buf, &stop) {
+        let result = if aec && cfg!(target_os = "macos") {
+            #[cfg(target_os = "macos")]
+            {
+                match vp::vp_session(&buf, &stop) {
+                    Err(e) if !vp::started(&e) => {
+                        // VPIO never came up — this session runs on raw cpal;
+                        // the next rebuild tries VPIO again.
+                        eprintln!("[noted] mic AEC unavailable, using raw mic: {e}");
+                        mic_session(&buf, &stop)
+                    }
+                    r => r,
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                mic_session(&buf, &stop)
+            }
+        } else {
+            mic_session(&buf, &stop)
+        };
+        match result {
             Ok(()) => break, // clean stop
             Err(e) => {
                 eprintln!("[noted] mic capture error (retrying in 2s): {e}");
@@ -144,6 +168,195 @@ fn mic_session(buf: &Arc<ChannelBuf>, stop: &Arc<AtomicBool>) -> Result<()> {
         std::thread::sleep(Duration::from_millis(250));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Mic capture via VoiceProcessingIO (macOS): input-only AUVoiceIO with the
+// default output device as the echo-cancellation reference.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+mod vp {
+    use super::*;
+    use cidre::{at::au, cat, core_audio as ca, os};
+
+    /// Errors after "started:" mean VPIO ran and then broke (device change,
+    /// stall) — rebuild VPIO. Anything else is an init failure — fall back.
+    const STARTED: &str = "started:";
+
+    pub fn started(e: &anyhow::Error) -> bool {
+        e.to_string().starts_with(STARTED)
+    }
+
+    struct Ctx {
+        buf: Arc<ChannelBuf>,
+        /// The opaque AudioComponentInstance; stable across Output moves.
+        /// Null until resources are allocated — callbacks can't fire before
+        /// start(), but guard anyway.
+        unit: *mut au::Unit,
+        scratch: Vec<f32>,
+        render_err: Arc<AtomicBool>,
+        callbacks: u64,
+    }
+
+    extern "C-unwind" fn input_cb(
+        ctx: *mut Ctx,
+        _flags: &mut au::RenderActionFlags,
+        ts: &cat::AudioTimeStamp,
+        bus: u32,
+        n_frames: u32,
+        _io_data: *mut cat::AudioBufList<1>,
+    ) -> os::Status {
+        let Some(ctx) = (unsafe { ctx.as_mut() }) else {
+            return os::Status::NO_ERR;
+        };
+        if ctx.unit.is_null() {
+            return os::Status::NO_ERR;
+        }
+        ctx.callbacks += 1;
+        let n = n_frames as usize;
+        if ctx.scratch.len() < n {
+            ctx.scratch.resize(n, 0.0);
+        }
+        let mut list = cat::AudioBufList::<1> {
+            number_buffers: 1,
+            buffers: [cat::audio::Buf {
+                number_channels: 1,
+                data_bytes_size: (n * std::mem::size_of::<f32>()) as u32,
+                data: ctx.scratch.as_mut_ptr() as *mut u8,
+            }],
+        };
+        let unit = unsafe { &mut *ctx.unit };
+        match unit.render(ts, bus, n_frames, &mut list) {
+            Ok(()) => {
+                ctx.buf.push(&ctx.scratch[..n]);
+                if ctx.callbacks == 1 {
+                    eprintln!("[noted] mic vp: first callback, {n} samples");
+                }
+                os::Status::NO_ERR
+            }
+            Err(e) => {
+                ctx.render_err.store(true, Ordering::Relaxed);
+                e.status()
+            }
+        }
+    }
+
+    /// One VPIO lifetime: build → run until stop / stall / device change.
+    /// Ok(()) = clean stop; Err("started:…") = rebuild; other Err = fall back.
+    pub fn vp_session(buf: &Arc<ChannelBuf>, stop: &Arc<AtomicBool>) -> Result<()> {
+        let e = |what: &'static str| move |err| anyhow!("vp {what}: {err:?}");
+
+        // The callback reads Ctx behind a raw pointer, so it must be declared
+        // before (= dropped after) the Output that drives the callbacks.
+        let render_err = Arc::new(AtomicBool::new(false));
+        let mut ctx = Box::new(Ctx {
+            buf: buf.clone(),
+            unit: std::ptr::null_mut(),
+            scratch: vec![0.0; 8192],
+            render_err: render_err.clone(),
+            callbacks: 0,
+        });
+
+        let mut output = au::Output::new_apple_vp().map_err(e("open"))?;
+        output
+            .set_io_enabled(au::Scope::INPUT, 1, true)
+            .map_err(e("enable input"))?;
+        output
+            .set_io_enabled(au::Scope::OUTPUT, 0, false)
+            .map_err(e("disable output"))?;
+
+        // VPIO's default behavior DUCKS all other audio while voice is
+        // detected — that would turn the actual call down under the user.
+        // Best-effort: the property is newer than the unit itself.
+        let duck = au::VoiceIoOtherAudioDuckingCfg {
+            enable_advanced_ducking: false,
+            ducking_level: au::voice_io_other_audio_ducking_level::MIN,
+        };
+        if let Err(err) = output.vp_set_other_audio_ducking_cfg(&duck) {
+            eprintln!("[noted] mic vp: ducking cfg not applied ({err:?})");
+        }
+        // Natural levels: the ASR energy gate (ChunkerCfg thresholds) was
+        // tuned on a raw mic; AGC pumping would move the floor under it.
+        if let Err(err) = output.vp_set_enable_agc(false) {
+            eprintln!("[noted] mic vp: agc off not applied ({err:?})");
+        }
+
+        let input_device = ca::System::default_input_device().map_err(e("input device"))?;
+        output.set_input_device(&input_device).map_err(e("bind input"))?;
+        let input_uid = input_device.uid().map_err(e("input uid"))?;
+        // The echo reference is the default output device (what the call
+        // plays through); if it changes (AirPods!) we rebuild to re-anchor.
+        let output_uid = ca::System::default_output_device()
+            .and_then(|d| d.uid())
+            .map_err(e("output uid"))?;
+
+        // Client format: mono f32 at the unit's own rate — the ASR worker
+        // resamples, so no rate negotiation to get wrong.
+        let fmt = output.input_stream_format(1).map_err(e("format"))?;
+        let desired = cat::audio::StreamBasicDesc {
+            sample_rate: fmt.sample_rate,
+            format: cat::audio::Format::LINEAR_PCM,
+            format_flags: cat::audio::FormatFlags::IS_FLOAT
+                | cat::audio::FormatFlags::IS_PACKED
+                | cat::audio::FormatFlags::IS_NON_INTERLEAVED,
+            bytes_per_packet: 4,
+            frames_per_packet: 1,
+            bytes_per_frame: 4,
+            channels_per_frame: 1,
+            bits_per_channel: 32,
+            reserved: 0,
+        };
+        output
+            .set_input_stream_format(&desired)
+            .map_err(e("set format"))?;
+        output
+            .set_input_cb(input_cb, &*ctx as *const Ctx)
+            .map_err(e("callback"))?;
+
+        let mut output = output.allocate_resources().map_err(e("init"))?;
+        ctx.unit = output.unit_mut() as *mut au::Unit;
+        buf.sample_rate
+            .store(fmt.sample_rate as u32, Ordering::Relaxed);
+        output.start().map_err(e("start"))?;
+        eprintln!(
+            "[noted] mic: VoiceProcessingIO running ({} Hz, AEC on)",
+            fmt.sample_rate as u32
+        );
+
+        buf.last_callback.store(epoch_ms(), Ordering::Relaxed);
+        let result = loop {
+            if stop.load(Ordering::Relaxed) {
+                break Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(250));
+
+            if render_err.load(Ordering::Relaxed) {
+                break Err(anyhow!("{STARTED} render error"));
+            }
+            let stale_ms = epoch_ms().saturating_sub(buf.last_callback.load(Ordering::Relaxed));
+            if stale_ms > 10_000 {
+                break Err(anyhow!("{STARTED} no callbacks for {stale_ms}ms"));
+            }
+            if let Ok(uid) = ca::System::default_input_device().and_then(|d| d.uid()) {
+                if !uid.equal(&input_uid) {
+                    break Err(anyhow!("{STARTED} default input device changed"));
+                }
+            }
+            if let Ok(uid) = ca::System::default_output_device().and_then(|d| d.uid()) {
+                if !uid.equal(&output_uid) {
+                    break Err(anyhow!("{STARTED} default output device changed"));
+                }
+            }
+        };
+        let _ = output.stop();
+        eprintln!(
+            "[noted] mic vp session ended: {} callbacks ({})",
+            ctx.callbacks,
+            if result.is_ok() { "clean stop" } else { "rebuilding" }
+        );
+        result
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -361,5 +574,34 @@ mod macos {
             if result.is_ok() { "clean stop" } else { "rebuilding" }
         );
         result
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    /// Live smoke test: builds a real VoiceProcessingIO session, records 3s,
+    /// and asserts callbacks arrived. Grabs the actual microphone (and needs
+    /// the host terminal's mic permission), so it stays ignored:
+    ///   cargo test --lib vp_smoke -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn vp_smoke() {
+        let buf = ChannelBuf::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (b, s) = (buf.clone(), stop.clone());
+        let t = std::thread::spawn(move || vp::vp_session(&b, &s));
+        std::thread::sleep(Duration::from_secs(3));
+        stop.store(true, Ordering::Relaxed);
+        t.join().unwrap().expect("vp session failed");
+        let (samples, rate) = buf.drain();
+        eprintln!("vp_smoke: {} samples @ {} Hz", samples.len(), rate);
+        assert!(rate > 0, "no sample rate reported");
+        assert!(
+            samples.len() as u32 > rate, // > 1s of audio over a 3s run
+            "too few samples: {}",
+            samples.len()
+        );
     }
 }

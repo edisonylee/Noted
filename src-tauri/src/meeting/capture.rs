@@ -40,6 +40,12 @@ pub struct ChannelBuf {
     pub last_callback: AtomicU64,
     /// epoch ms of the last clearly non-silent buffer (drives silence auto-stop).
     pub last_signal: AtomicU64,
+    /// Total mono samples ever pushed (across session rebuilds). The tap
+    /// watchdog checks it against wall time × declared rate: a stream can't
+    /// legitimately deliver faster than real time, so sustained over-delivery
+    /// proves the format is being misread (48 kHz/stereo taken for 16 kHz/mono
+    /// turns speech into rumble that whisper hallucinates over).
+    pub pushed_total: AtomicU64,
 }
 
 impl ChannelBuf {
@@ -49,6 +55,7 @@ impl ChannelBuf {
             sample_rate: AtomicU32::new(0),
             last_callback: AtomicU64::new(0),
             last_signal: AtomicU64::new(0),
+            pushed_total: AtomicU64::new(0),
         })
     }
 
@@ -61,6 +68,8 @@ impl ChannelBuf {
         if mono.iter().any(|s| s.abs() > 0.004) {
             self.last_signal.store(now, Ordering::Relaxed);
         }
+        self.pushed_total
+            .fetch_add(mono.len() as u64, Ordering::Relaxed);
         let cap = (self.sample_rate.load(Ordering::Relaxed).max(16_000) as usize) * 120;
         let mut buf = self.samples.lock().unwrap();
         if buf.len() + mono.len() > cap {
@@ -433,6 +442,19 @@ mod macos {
             return Default::default();
         };
         ctx.callbacks += 1;
+        // The stream format can change under a live session — VoiceProcessingIO
+        // spinning up on the mic reconfigures the output device this aggregate
+        // is built on. The buffer header carries the channel count actually
+        // delivered; trust it over the format cached at creation, or interleaved
+        // stereo gets pushed as double-speed mono (L,R,L,R… as one stream).
+        let live_ch = input_data.buffers[0].number_channels as usize;
+        if live_ch >= 1 && live_ch != ctx.channels {
+            eprintln!(
+                "[noted] tap: buffer channel count changed {} -> {live_ch}",
+                ctx.channels
+            );
+            ctx.channels = live_ch;
+        }
         if let Some(view) = av::AudioPcmBuf::with_buf_list_no_copy(&ctx.format, input_data, None) {
             if let Some(data) = view.data_f32_at(0) {
                 // Mono tap → channel 0 is the whole signal. (If the format ever
@@ -543,8 +565,11 @@ mod macos {
         let started = ca::device_start(&*agg_device, Some(proc_id))
             .map_err(|e| anyhow!("device start: {e:?}"))?;
 
-        // Poll loop: clean stop, watchdog stall, or output-device switch.
+        // Poll loop: clean stop, watchdog stall, format drift, or output-device
+        // switch.
         buf.last_callback.store(epoch_ms(), Ordering::Relaxed);
+        let session_t0 = epoch_ms();
+        let pushed_t0 = buf.pushed_total.load(Ordering::Relaxed);
         let result = loop {
             if stop.load(Ordering::Relaxed) {
                 break Ok(());
@@ -554,6 +579,22 @@ mod macos {
             let stale_ms = epoch_ms().saturating_sub(buf.last_callback.load(Ordering::Relaxed));
             if stale_ms > 10_000 {
                 break Err(anyhow!("tap delivered no callbacks for {stale_ms}ms"));
+            }
+            // Format-drift watchdog: more samples than wall time × declared
+            // rate is physically impossible for a live stream, so the declared
+            // rate is stale (device reconfigured under us) — rebuild to pick
+            // up the real format. Under-delivery is NOT checked: the tap
+            // legitimately goes quiet whenever no app plays audio.
+            let elapsed_ms = epoch_ms().saturating_sub(session_t0);
+            if elapsed_ms > 10_000 {
+                let pushed = buf.pushed_total.load(Ordering::Relaxed) - pushed_t0;
+                let expected = (asbd.sample_rate as u64) * elapsed_ms / 1000;
+                if pushed > expected + expected / 4 {
+                    break Err(anyhow!(
+                        "tap over-delivering ({pushed} samples in {elapsed_ms}ms at a declared {} Hz) — stream format changed",
+                        asbd.sample_rate as u32
+                    ));
+                }
             }
             if let Ok(current) = ca::System::default_output_device() {
                 if let Ok(uid) = current.uid() {

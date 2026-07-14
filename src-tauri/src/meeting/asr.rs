@@ -312,6 +312,41 @@ pub fn is_junk(text: &str) -> bool {
     })
 }
 
+/// Samples quieter than this don't vote in the zero-crossing count (below the
+/// chunker's close threshold — gate hang and near-silence must not dilute it).
+const ZC_FLOOR: f32 = 0.004;
+/// Speech crosses zero hundreds of times a second — even a low male hum at
+/// 85 Hz manages ~170/s, and harmonics/fricatives push real speech far higher.
+/// Mains hum, rumble, and format-mangled audio (a stereo/48 kHz stream misread
+/// as mono/16 kHz) sit well below.
+const ZC_SPEECH_PER_SEC: f32 = 100.0;
+
+/// Deterministic non-speech gate on a closed segment. The energy gate passes
+/// anything loud enough, but whisper hallucinates fluent text ("Thank you.")
+/// over low-frequency junk; energy can't tell hum from voice — zero-crossing
+/// density can. Rate is measured over the significant samples only, so a
+/// segment that is mostly gate hang still judges its voiced core.
+pub fn looks_like_speech(samples: &[f32]) -> bool {
+    let mut significant = 0u64;
+    let mut crossings = 0u64;
+    let mut last_sign = 0i8;
+    for &s in samples {
+        if s.abs() < ZC_FLOOR {
+            continue;
+        }
+        significant += 1;
+        let sign = if s > 0.0 { 1 } else { -1 };
+        if last_sign != 0 && sign != last_sign {
+            crossings += 1;
+        }
+        last_sign = sign;
+    }
+    if significant == 0 {
+        return false;
+    }
+    crossings as f32 * SR as f32 / significant as f32 >= ZC_SPEECH_PER_SEC
+}
+
 // ---------------------------------------------------------------------------
 // Vocabulary: whisper knows English, not this user's world — "a16z" comes out
 // "a sixteen z" and colleague names get respelled. Two defenses: an
@@ -696,6 +731,14 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                 segments.extend(pipe.chunker.flush());
             }
             for seg in segments {
+                if !looks_like_speech(&seg.samples) {
+                    eprintln!(
+                        "[noted] {}: non-speech segment skipped ({} ms)",
+                        pipe.name,
+                        seg.t1_ms - seg.t0_ms
+                    );
+                    continue;
+                }
                 let text = match transcriber.transcribe(&seg.samples) {
                     Ok(t) => apply_vocab(&t, &args.vocab),
                     Err(e) => {
@@ -1045,6 +1088,42 @@ mod tests {
         assert!(!is_junk("- Cool."));
         assert!(!is_junk("(music) hello everyone"));
         assert!(!is_junk("let's ship the meeting recorder"));
+    }
+
+    #[test]
+    fn speech_gate_rejects_rumble_passes_speech() {
+        let sine = |hz: f32, secs: f32, amp: f32| -> Vec<f32> {
+            (0..(secs * SR as f32) as usize)
+                .map(|i| amp * (2.0 * std::f32::consts::PI * hz * i as f32 / SR as f32).sin())
+                .collect()
+        };
+        // Low-frequency junk: mains-hum territory and below. Loud enough to
+        // open the energy gate, but nothing like a voice.
+        assert!(!looks_like_speech(&sine(13.0, 2.0, 0.05)));
+        assert!(!looks_like_speech(&sine(45.0, 2.0, 0.3)));
+        // Voiced-range tones and up: crossing density is speech-plausible.
+        assert!(looks_like_speech(&sine(120.0, 2.0, 0.05)));
+        assert!(looks_like_speech(&sine(300.0, 2.0, 0.05)));
+        // Speech-shaped mix: an F0 with strong upper harmonics.
+        let voiced: Vec<f32> = sine(110.0, 1.0, 0.04)
+            .iter()
+            .zip(sine(880.0, 1.0, 0.02))
+            .map(|(a, b)| a + b)
+            .collect();
+        assert!(looks_like_speech(&voiced));
+        // Silence and sub-floor noise never pass.
+        assert!(!looks_like_speech(&vec![0.0; SR]));
+        assert!(!looks_like_speech(&sine(500.0, 1.0, 0.002)));
+        // Regression: meeting 5's broken tap stream — interleaved dual-mono
+        // stereo misread as mono (adjacent duplicate samples on a slow ramp).
+        // Whisper turned ~35 of these into "Thank you."
+        let ramp: Vec<f32> = (0..SR * 2)
+            .flat_map(|i| {
+                let v = 0.02 * (2.0 * std::f32::consts::PI * 6.5 * i as f32 / SR as f32).sin();
+                [v, v]
+            })
+            .collect();
+        assert!(!looks_like_speech(&ramp));
     }
 
     #[test]

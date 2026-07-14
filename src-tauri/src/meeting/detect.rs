@@ -279,7 +279,7 @@ fn run(app: tauri::AppHandle) {
 
         // ── Auto-stop checks for the active recording ────────────────────
         if recording_id.is_some() {
-            let (source, silence_ms, elapsed_ms, sched_end, ev_date) = {
+            let (stopping, source, silence_ms, elapsed_ms, sched_end, ev_date) = {
                 let state = app.state::<MeetingState>();
                 let guard = state.0.lock().unwrap();
                 let a = guard.as_ref().unwrap();
@@ -289,6 +289,7 @@ fn run(app: tauri::AppHandle) {
                     .load(Ordering::Relaxed)
                     .max(a.them.last_signal.load(Ordering::Relaxed));
                 (
+                    a.stopping,
                     a.source_bundle.clone(),
                     if sig == 0 {
                         now.saturating_sub(a.started_epoch_ms)
@@ -300,6 +301,11 @@ fn run(app: tauri::AppHandle) {
                     a.event_date.clone(),
                 )
             };
+            // Already draining: don't re-fire stop, and still never prompt.
+            if stopping {
+                mic_first_seen.clear();
+                continue;
+            }
             // No known source app? Adopt the first non-ignored one that holds
             // the mic during this recording (that's the call).
             if source.is_none() && adopted_source.is_none() {

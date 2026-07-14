@@ -40,6 +40,11 @@ pub struct Active {
     /// Scheduled end (minutes from Eastern midnight) + day, when calendar-born.
     pub event_end_min: Option<i64>,
     pub event_date: Option<String>,
+    /// True from the moment stop() is accepted until the drain finishes. The
+    /// slot stays occupied for that whole window (whisper on the tail can take
+    /// a minute) so a prompt click can't start a second tap/mic session over
+    /// one that is still tearing down.
+    pub stopping: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +341,7 @@ pub fn start(
         source_bundle,
         event_end_min,
         event_date,
+        stopping: false,
     });
     detect::close_prompt(app); // an accepted (or now-moot) prompt goes away
     let _ = app.emit("meeting-started", json!({ "meetingId": id, "title": title }));
@@ -345,27 +351,44 @@ pub fn start(
 /// Stop the active meeting: join capture/ASR (flushes the final segments),
 /// stamp the row, then summarize in the background with the default template.
 pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
-    let active = {
+    // Mark stopping but leave the slot occupied until the drain completes:
+    // start() keeps refusing and detect keeps treating us as recording, so a
+    // repeated prompt/join click can't spawn a second concurrent capture.
+    let (id, title, threads, audio_dir, stop_flag) = {
         let state = app.state::<MeetingState>();
         let mut guard = state.0.lock().unwrap();
-        guard.take()
+        let Some(active) = guard.as_mut() else {
+            return Ok(None);
+        };
+        if active.stopping {
+            return Ok(None); // a second stop while the first is draining
+        }
+        active.stopping = true;
+        (
+            active.id,
+            active.title.clone(),
+            std::mem::take(&mut active.threads),
+            active.audio_dir.clone(),
+            active.stop.clone(),
+        )
     };
-    let Some(active) = active else {
-        return Ok(None);
-    };
-    let id = active.id;
-    let title = active.title.clone();
-    active.stop.store(true, Ordering::Relaxed);
+    stop_flag.store(true, Ordering::Relaxed);
 
     // Joins block (worker drains + transcribes the tail) — off the async runtime.
-    let audio_dir = active.audio_dir.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        for t in active.threads {
+        for t in threads {
             let _ = t.join();
         }
     })
     .await
     .map_err(|e| anyhow!("join: {e}"))?;
+    {
+        let state = app.state::<MeetingState>();
+        let mut guard = state.0.lock().unwrap();
+        if guard.as_ref().map_or(false, |a| a.id == id) {
+            *guard = None;
+        }
+    }
 
     let now = chrono::Utc::now().to_rfc3339();
     {
@@ -457,6 +480,7 @@ pub fn state_json(app: &tauri::AppHandle) -> Value {
                 "title": a.title,
                 "elapsed_ms": now.saturating_sub(a.started_epoch_ms),
                 "last_signal_ms_ago": signal_ago,
+                "stopping": a.stopping,
             })
         }
         None => json!({ "active": false }),

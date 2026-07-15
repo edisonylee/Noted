@@ -222,6 +222,72 @@ fn speakers() {
     std::fs::write(format!("{out}/strong_ref.tsv"), strong_line).unwrap();
 }
 
+/// Dump one embedding per them-row for offline analysis (re-clustering at
+/// other cutoffs, per-row profile matching). Writes OUT/row_embs.tsv as
+/// `t0 \t t1 \t emb-csv`, plus OUT/profiles.tsv with every stored
+/// speaker_profiles print for side-by-side cosine work.
+///
+///   SPEAKER_MODEL=… NOTED_DB=… MEETING_ID=8 MEET_DIR=…/8 SHIFT_MS=0 OUT=… \
+///   cargo test --test meeting_repair dump_embs -- --ignored --nocapture
+#[test]
+#[ignore]
+fn dump_embs() {
+    let speaker_model = std::env::var("SPEAKER_MODEL").expect("SPEAKER_MODEL");
+    let db = std::env::var("NOTED_DB").expect("NOTED_DB");
+    let dir = std::env::var("MEET_DIR").expect("MEET_DIR");
+    let out = std::env::var("OUT").expect("OUT");
+    let meeting_id: i64 = std::env::var("MEETING_ID").expect("MEETING_ID").parse().unwrap();
+    let shift: i64 = std::env::var("SHIFT_MS").expect("SHIFT_MS").parse().unwrap();
+
+    let conn = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .expect("db");
+    let mut embedder = Embedder::new(Path::new(&speaker_model)).expect("model");
+    let wav = read_wav(&format!("{dir}/them.wav"));
+    let rows: Vec<(i64, i64)> = conn
+        .prepare(
+            "SELECT t0_ms, t1_ms FROM meeting_segments
+             WHERE meeting_id = ?1 AND channel = 'them' ORDER BY t0_ms",
+        )
+        .unwrap()
+        .query_map([meeting_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let mut tsv = String::new();
+    for (t0, t1) in &rows {
+        let s0 = (((t0 - shift).max(0) * 16) as usize).min(wav.len());
+        let s1 = (((t1 - shift).max(0) * 16) as usize).min(wav.len());
+        if let Some(e) = embedder.embed(&wav[s0..s1]) {
+            tsv.push_str(&format!(
+                "{t0}\t{t1}\t{}\n",
+                e.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+            ));
+        }
+    }
+    std::fs::write(format!("{out}/row_embs.tsv"), tsv).unwrap();
+    let mut profs = String::new();
+    let mut stmt = conn
+        .prepare("SELECT name, embedding FROM speaker_profiles")
+        .unwrap();
+    let named: Vec<(String, Vec<u8>)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    for (name, blob) in &named {
+        let e = blob_to_emb(blob);
+        profs.push_str(&format!(
+            "{name}\t{}\n",
+            e.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+        ));
+    }
+    std::fs::write(format!("{out}/profiles.tsv"), profs).unwrap();
+    println!("dumped {} row embeddings, {} profiles", rows.len(), named.len());
+}
+
 #[test]
 #[ignore]
 fn plan() {

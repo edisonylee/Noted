@@ -54,6 +54,13 @@ pub struct PendingSegment {
     pub samples: Vec<f32>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RetainedSegment {
+    pub t0_ms: i64,
+    pub t1_ms: i64,
+    pub text: String,
+}
+
 fn rms(frame: &[f32]) -> f32 {
     if frame.is_empty() {
         return 0.0;
@@ -312,6 +319,27 @@ pub fn is_junk(text: &str) -> bool {
     })
 }
 
+fn decode_key(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Preserve the first short utterance but reject an identical immediate repeat.
+/// This is a last-line defense against decoder loops such as silence repeatedly
+/// becoming "Thank you"; real longer repeated statements remain untouched.
+fn repeated_short_decode(last: Option<(&str, i64)>, text: &str, t0_ms: i64) -> bool {
+    let key = decode_key(text);
+    key.split_whitespace().count() <= 4
+        && last.is_some_and(|(previous, previous_t1)| {
+            t0_ms - previous_t1 <= 30_000 && key == decode_key(previous)
+        })
+}
+
 /// Samples quieter than this don't vote in the zero-crossing count (below the
 /// chunker's close threshold — gate hang and near-silence must not dilute it).
 const ZC_FLOOR: f32 = 0.004;
@@ -345,6 +373,71 @@ pub fn looks_like_speech(samples: &[f32]) -> bool {
         return false;
     }
     crossings as f32 * SR as f32 / significant as f32 >= ZC_SPEECH_PER_SEC
+}
+
+/// Re-run the meeting VAD + ASR pipeline over a retained 16 kHz mono WAV.
+/// This is intentionally DB-free: recovery can be inspected and backed up as
+/// JSON before a caller chooses to replace any persisted transcript rows.
+pub fn transcribe_retained_wav(
+    engine: &EngineSpec,
+    wav_path: &Path,
+    hint: Option<String>,
+    vocab: &[String],
+) -> Result<Vec<RetainedSegment>> {
+    let mut reader = hound::WavReader::open(wav_path)?;
+    let spec = reader.spec();
+    if spec.channels != 1
+        || spec.sample_rate != SR as u32
+        || spec.bits_per_sample != 16
+        || spec.sample_format != hound::SampleFormat::Int
+    {
+        return Err(anyhow!("retained meeting WAV must be 16 kHz mono i16"));
+    }
+    let mut transcriber = Transcriber::new(engine, hint)?;
+    let mut chunker = Chunker::new(ChunkerCfg::default());
+    let mut out = Vec::new();
+    let mut pcm = Vec::with_capacity(SR);
+
+    let decode = |segments: Vec<PendingSegment>,
+                  transcriber: &mut Transcriber,
+                  out: &mut Vec<RetainedSegment>|
+     -> Result<()> {
+        for seg in segments {
+            if !looks_like_speech(&seg.samples) {
+                continue;
+            }
+            let text = apply_vocab(&transcriber.transcribe(&seg.samples)?, vocab);
+            if is_junk(&text) {
+                continue;
+            }
+            if repeated_short_decode(
+                out.last().map(|s| (s.text.as_str(), s.t1_ms)),
+                &text,
+                seg.t0_ms,
+            ) {
+                continue;
+            }
+            out.push(RetainedSegment {
+                t0_ms: seg.t0_ms,
+                t1_ms: seg.t1_ms,
+                text,
+            });
+        }
+        Ok(())
+    };
+
+    for sample in reader.samples::<i16>() {
+        pcm.push(sample? as f32 / 32768.0);
+        if pcm.len() == SR {
+            decode(chunker.push(&pcm), &mut transcriber, &mut out)?;
+            pcm.clear();
+        }
+    }
+    if !pcm.is_empty() {
+        decode(chunker.push(&pcm), &mut transcriber, &mut out)?;
+    }
+    decode(chunker.flush().into_iter().collect(), &mut transcriber, &mut out)?;
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +660,7 @@ struct ChannelPipe {
     buf: Arc<ChannelBuf>,
     chunker: Chunker,
     wav: Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>>,
+    last_decode: Option<(String, i64)>,
 }
 
 fn wav_writer(path: &Path) -> Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>> {
@@ -677,12 +771,14 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
             buf: args.them.clone(),
             chunker: Chunker::new(ChunkerCfg::default()),
             wav: them_wav,
+            last_decode: None,
         },
         ChannelPipe {
             name: "me",
             buf: args.me.clone(),
             chunker: Chunker::new(ChunkerCfg::default()),
             wav: me_wav,
+            last_decode: None,
         },
     ];
     let mut recent_them: Vec<RecentSeg> = Vec::new();
@@ -749,6 +845,14 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                 if is_junk(&text) {
                     continue;
                 }
+                if repeated_short_decode(
+                    pipe.last_decode.as_ref().map(|(t, end)| (t.as_str(), *end)),
+                    &text,
+                    seg.t0_ms,
+                ) {
+                    eprintln!("[noted] {}: repeated short decode skipped: {text}", pipe.name);
+                    continue;
+                }
                 // Voice work happens BEFORE insert: a them-segment that is the
                 // note-taker's own voice echoed back through the call is not a
                 // speaker — it never enters the transcript at all.
@@ -797,6 +901,7 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                     )
                 };
                 let Ok(id) = seg_id else { continue };
+                pipe.last_decode = Some((text.clone(), seg.t1_ms));
                 let _ = app.emit(
                     "meeting-segment",
                     json!({
@@ -1088,6 +1193,17 @@ mod tests {
         assert!(!is_junk("- Cool."));
         assert!(!is_junk("(music) hello everyone"));
         assert!(!is_junk("let's ship the meeting recorder"));
+    }
+
+    #[test]
+    fn repeated_short_decode_keeps_first_and_suppresses_immediate_loop() {
+        assert!(repeated_short_decode(Some(("Thank you.", 1_000)), "- thank you", 2_000));
+        assert!(!repeated_short_decode(Some(("Thank you.", 1_000)), "thank you", 40_000));
+        assert!(!repeated_short_decode(
+            Some(("we should ship the new recorder", 1_000)),
+            "we should ship the new recorder",
+            2_000,
+        ));
     }
 
     #[test]

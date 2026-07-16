@@ -1685,8 +1685,45 @@ async fn meeting_suggest_speakers(app: tauri::AppHandle, id: i64) -> Result<usiz
         .map_err(|e| e.to_string())
 }
 
+/// Where a meeting export lands: ~/Documents/Notes/Meeting/<title>/<date title>.<ext>,
+/// deduped with " (n)" so recurring meetings collect in one folder per title.
+fn meeting_export_path(
+    app: &tauri::AppHandle,
+    meeting: &serde_json::Value,
+    ext: &str,
+) -> Result<std::path::PathBuf, String> {
+    let title: String = meeting["title"]
+        .as_str()
+        .unwrap_or("Meeting")
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let title = title.trim().to_string();
+    let folder = if title.is_empty() { "Meeting" } else { title.as_str() };
+    let dir = app
+        .path()
+        .document_dir()
+        .map_err(|e| e.to_string())?
+        .join("Notes")
+        .join("Meeting")
+        .join(folder);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let date: String = meeting["started_at"]
+        .as_str()
+        .map(|s| s.chars().take(10).collect())
+        .unwrap_or_default();
+    let base = if date.is_empty() { title } else { format!("{date} {title}") };
+    let mut path = dir.join(format!("{base}.{ext}"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{base} ({n}).{ext}"));
+        n += 1;
+    }
+    Ok(path)
+}
+
 /// Export the whole meeting (summaries + notes + labeled transcript) as one
-/// Markdown file in ~/Downloads; returns the written path.
+/// Markdown file under ~/Documents/Notes/Meeting; returns the written path.
 #[tauri::command]
 async fn meeting_export_md(app: tauri::AppHandle, id: i64) -> Result<String, String> {
     let meeting = {
@@ -1695,33 +1732,12 @@ async fn meeting_export_md(app: tauri::AppHandle, id: i64) -> Result<String, Str
         meeting::store::get_meeting(&conn, id).map_err(|e| e.to_string())?
     };
     let md = meeting::summarize::export_markdown(&meeting);
-    let dir = app.path().download_dir().map_err(|e| e.to_string())?;
-    let title: String = meeting["title"]
-        .as_str()
-        .unwrap_or("Meeting")
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '-' })
-        .collect();
-    let date: String = meeting["started_at"]
-        .as_str()
-        .map(|s| s.chars().take(10).collect())
-        .unwrap_or_default();
-    let base = if date.is_empty() {
-        title.trim().to_string()
-    } else {
-        format!("{date} {}", title.trim())
-    };
-    let mut path = dir.join(format!("{base}.md"));
-    let mut n = 2;
-    while path.exists() {
-        path = dir.join(format!("{base} ({n}).md"));
-        n += 1;
-    }
+    let path = meeting_export_path(&app, &meeting, "md")?;
     std::fs::write(&path, md).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
 
-/// Render a polished, self-contained meeting PDF into Downloads.
+/// Render a polished, self-contained meeting PDF under ~/Documents/Notes/Meeting.
 #[tauri::command]
 async fn meeting_export_pdf(app: tauri::AppHandle, id: i64) -> Result<String, String> {
     let meeting = {
@@ -1729,20 +1745,7 @@ async fn meeting_export_pdf(app: tauri::AppHandle, id: i64) -> Result<String, St
         let conn = state.0.lock().unwrap();
         meeting::store::get_meeting(&conn, id).map_err(|e| e.to_string())?
     };
-    let dir = app.path().download_dir().map_err(|e| e.to_string())?;
-    let title: String = meeting["title"]
-        .as_str().unwrap_or("Meeting").chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '-' })
-        .collect();
-    let date: String = meeting["started_at"].as_str()
-        .map(|s| s.chars().take(10).collect()).unwrap_or_default();
-    let base = if date.is_empty() { title.trim().to_string() } else { format!("{date} {}", title.trim()) };
-    let mut path = dir.join(format!("{base}.pdf"));
-    let mut n = 2;
-    while path.exists() {
-        path = dir.join(format!("{base} ({n}).pdf"));
-        n += 1;
-    }
+    let path = meeting_export_path(&app, &meeting, "pdf")?;
     meeting::pdf::export(&meeting, &path).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
@@ -1809,7 +1812,8 @@ async fn meeting_capture_probe(app: tauri::AppHandle, seconds: Option<u64>) -> R
     let mut threads = Vec::new();
     if meeting::capture::tap_supported() {
         let (b, s) = (them.clone(), stop.clone());
-        threads.push(std::thread::spawn(move || meeting::capture::run_system_tap(b, s)));
+        let log = Some(dir.join("probe-capture.log"));
+        threads.push(std::thread::spawn(move || meeting::capture::run_system_tap(b, s, log)));
     }
     {
         let (b, s) = (me.clone(), stop.clone());
@@ -1853,6 +1857,7 @@ async fn meeting_capture_probe(app: tauri::AppHandle, seconds: Option<u64>) -> R
             json!({
                 "path": path.to_string_lossy(),
                 "seconds": pcm.len() as f32 / 16_000.0,
+                "duration_ratio": pcm.len() as f32 / 16_000.0 / secs as f32,
                 "native_rate": rate,
                 "rms": rms,
             }),

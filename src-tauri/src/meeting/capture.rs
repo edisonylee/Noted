@@ -21,6 +21,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::{io::Write, path::Path};
 
 use anyhow::{anyhow, Result};
 
@@ -94,6 +95,50 @@ pub fn downmix_mono(data: &[f32], channels: usize) -> Vec<f32> {
     data.chunks_exact(channels)
         .map(|frame| frame.iter().sum::<f32>() / channels as f32)
         .collect()
+}
+
+/// Number of mono frames represented by a Core Audio callback buffer. The
+/// callback's byte count and live channel count are authoritative; deriving
+/// this through an AVAudioPCMBuffer built from a cached startup format is what
+/// previously stretched remote audio when VoiceProcessingIO changed formats.
+fn callback_mono_frames(byte_size: u32, channels: usize) -> Option<usize> {
+    if channels == 0 || byte_size as usize % std::mem::size_of::<f32>() != 0 {
+        return None;
+    }
+    let samples = byte_size as usize / std::mem::size_of::<f32>();
+    (samples % channels == 0).then_some(samples / channels)
+}
+
+fn callback_overdelivers(frames: usize, previous_sample_time: f64, sample_time: f64) -> bool {
+    let clock_frames = sample_time - previous_sample_time;
+    clock_frames > 0.0 && frames as f64 > clock_frames * 1.25 + 4.0
+}
+
+fn infer_callback_layout(
+    total_samples: usize,
+    previous_sample_time: f64,
+    sample_time: f64,
+) -> Option<(usize, usize)> {
+    let clock_frames = sample_time - previous_sample_time;
+    let frames = clock_frames.round() as usize;
+    (clock_frames > 0.0
+        && (clock_frames - frames as f64).abs() < 0.01
+        && frames > 0
+        && total_samples % frames == 0)
+        .then_some((frames, total_samples / frames))
+        .filter(|(_, channels)| (1..=32).contains(channels))
+}
+
+fn capture_log(path: Option<&Path>, message: &str) {
+    let Some(path) = path else { return };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = writeln!(file, "{now} {message}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -394,12 +439,17 @@ pub fn tap_supported() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-pub fn run_system_tap(buf: Arc<ChannelBuf>, stop: Arc<AtomicBool>) {
+pub fn run_system_tap(
+    buf: Arc<ChannelBuf>,
+    stop: Arc<AtomicBool>,
+    log_path: Option<std::path::PathBuf>,
+) {
     while !stop.load(Ordering::Relaxed) {
-        match macos::tap_session(&buf, &stop) {
+        match macos::tap_session(&buf, &stop, log_path.as_deref()) {
             Ok(()) => break, // clean stop
             Err(e) => {
                 eprintln!("[noted] system tap error (rebuilding in 2s): {e}");
+                capture_log(log_path.as_deref(), &format!("tap rebuild: {e}"));
                 for _ in 0..8 {
                     if stop.load(Ordering::Relaxed) {
                         return;
@@ -412,28 +462,42 @@ pub fn run_system_tap(buf: Arc<ChannelBuf>, stop: Arc<AtomicBool>) {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn run_system_tap(_buf: Arc<ChannelBuf>, _stop: Arc<AtomicBool>) {}
+pub fn run_system_tap(
+    _buf: Arc<ChannelBuf>,
+    _stop: Arc<AtomicBool>,
+    _log_path: Option<std::path::PathBuf>,
+) {
+}
 
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
     use cidre::core_audio::aggregate_device_keys as agg_keys;
     use cidre::core_audio::sub_device_keys as sub_keys;
-    use cidre::{arc, av, cat, cf, core_audio as ca, ns, os};
+    use cidre::{cat, cf, core_audio as ca, ns, os};
 
     struct Ctx {
         buf: Arc<ChannelBuf>,
-        format: arc::R<av::AudioFormat>,
         channels: usize,
+        last_sample_time: Option<f64>,
+        last_rate_clock: Option<(f64, u64)>,
+        host_clock_hz: f64,
+        format_mismatches: Arc<AtomicU64>,
         callbacks: u64,
-        pushed: u64,
+        pushed_frames: u64,
+        first_bytes: u32,
+        max_bytes: u32,
+        invalid_callbacks: u64,
+        channel_changes: u64,
+        clock_layout_corrections: u64,
+        rate_changes: u64,
     }
 
     extern "C" fn io_proc(
         _device: ca::Device,
         _now: &cat::AudioTimeStamp,
         input_data: &cat::AudioBufList<1>,
-        _input_time: &cat::AudioTimeStamp,
+        input_time: &cat::AudioTimeStamp,
         _output_data: &mut cat::AudioBufList<1>,
         _output_time: &cat::AudioTimeStamp,
         ctx: Option<&mut Ctx>,
@@ -442,47 +506,91 @@ mod macos {
             return Default::default();
         };
         ctx.callbacks += 1;
-        // The stream format can change under a live session — VoiceProcessingIO
-        // spinning up on the mic reconfigures the output device this aggregate
-        // is built on. The buffer header carries the channel count actually
-        // delivered; trust it over the format cached at creation, or interleaved
-        // stereo gets pushed as double-speed mono (L,R,L,R… as one stream).
-        let live_ch = input_data.buffers[0].number_channels as usize;
-        if live_ch >= 1 && live_ch != ctx.channels {
-            eprintln!(
-                "[noted] tap: buffer channel count changed {} -> {live_ch}",
-                ctx.channels
-            );
-            ctx.channels = live_ch;
+        // Read exactly mDataByteSize from the callback. Do not wrap this in an
+        // AVAudioPCMBuffer using the tap's creation-time format: after VPIO
+        // reconfigures the output device, that wrapper can report a stale frame
+        // length and expose several times the valid samples.
+        let b = &input_data.buffers[0];
+        if ctx.callbacks == 1 {
+            ctx.first_bytes = b.data_bytes_size;
         }
-        if let Some(view) = av::AudioPcmBuf::with_buf_list_no_copy(&ctx.format, input_data, None) {
-            if let Some(data) = view.data_f32_at(0) {
-                // Mono tap → channel 0 is the whole signal. (If the format ever
-                // comes back interleaved multi-channel, downmix.)
-                ctx.pushed += data.len() as u64;
-                if ctx.channels <= 1 {
-                    ctx.buf.push(data);
-                } else {
-                    ctx.buf.push(&downmix_mono(data, ctx.channels));
+        ctx.max_bytes = ctx.max_bytes.max(b.data_bytes_size);
+        let header_channels = b.number_channels as usize;
+        let Some(mut frames) = callback_mono_frames(b.data_bytes_size, header_channels) else {
+            ctx.invalid_callbacks += 1;
+            return Default::default();
+        };
+        let total_samples = b.data_bytes_size as usize / std::mem::size_of::<f32>();
+        let mut channels = header_channels;
+        let previous_sample_time = ctx.last_sample_time;
+        // Core Audio's sample clock gives an independent frame count. If the
+        // buffer header lies about its live channel layout, infer the actual
+        // interleave count and downmix correctly. This is the Discord failure:
+        // the header stayed mono while four channels' bytes were delivered.
+        if input_time.flags.0 & cat::AudioTimeStampFlags::SAMPLE_TIME_VALID.0 != 0 {
+            if let Some(previous) = previous_sample_time {
+                if let Some((clock_frames, inferred)) =
+                    infer_callback_layout(total_samples, previous, input_time.sample_time)
+                {
+                    frames = clock_frames;
+                    channels = inferred;
+                    if inferred != header_channels {
+                        ctx.clock_layout_corrections += 1;
+                    }
+                } else if callback_overdelivers(frames, previous, input_time.sample_time) {
+                    ctx.format_mismatches.fetch_add(1, Ordering::Relaxed);
+                    ctx.last_sample_time = Some(input_time.sample_time);
+                    return Default::default();
                 }
-                if ctx.callbacks == 1 {
-                    eprintln!("[noted] tap: first callback, {} samples", data.len());
-                }
-                return Default::default();
             }
         }
-        // Fallback: raw first-buffer read (Meetily's path for odd formats).
-        let b = &input_data.buffers[0];
-        let n = b.data_bytes_size as usize / std::mem::size_of::<f32>();
-        if n > 0 && !b.data.is_null() {
-            let data = unsafe { std::slice::from_raw_parts(b.data as *const f32, n) };
-            ctx.pushed += n as u64;
-            ctx.buf.push(&downmix_mono(data, ctx.channels.max(1)));
+
+        // The same timestamps reveal a live sample-rate change. Keep the
+        // resampler synchronized instead of trusting the creation-time ASBD.
+        let time_flags = cat::AudioTimeStampFlags::SAMPLE_HOST_TIME_VALID.0;
+        if input_time.flags.0 & time_flags == time_flags {
+            if let Some((previous_sample, previous_host)) = ctx.last_rate_clock {
+                let sample_delta = input_time.sample_time - previous_sample;
+                let host_delta = input_time.host_time.saturating_sub(previous_host);
+                if sample_delta > 0.0 && host_delta > 0 {
+                    let measured = sample_delta * ctx.host_clock_hz / host_delta as f64;
+                    if measured.is_finite() && (8_000.0..=384_000.0).contains(&measured) {
+                        let measured = measured.round() as u32;
+                        let current = ctx.buf.sample_rate.load(Ordering::Relaxed);
+                        if current.abs_diff(measured) > current.max(1) / 100 {
+                            ctx.buf.sample_rate.store(measured, Ordering::Relaxed);
+                            ctx.rate_changes += 1;
+                        }
+                    }
+                }
+            }
+            ctx.last_rate_clock = Some((input_time.sample_time, input_time.host_time));
+        }
+        if input_time.flags.0 & cat::AudioTimeStampFlags::SAMPLE_TIME_VALID.0 != 0 {
+            ctx.last_sample_time = Some(input_time.sample_time);
+        }
+
+        if channels != ctx.channels {
+            eprintln!(
+                "[noted] tap: effective channel count changed {} -> {channels} (header={header_channels})",
+                ctx.channels
+            );
+            ctx.channels = channels;
+            ctx.channel_changes += 1;
+        }
+        if frames > 0 && !b.data.is_null() {
+            let data = unsafe { std::slice::from_raw_parts(b.data as *const f32, total_samples) };
+            ctx.pushed_frames += frames as u64;
+            if channels == 1 {
+                ctx.buf.push(data);
+            } else {
+                ctx.buf.push(&downmix_mono(data, channels));
+            }
         }
         if ctx.callbacks == 1 {
             eprintln!(
-                "[noted] tap: first callback via fallback path, {} bytes",
-                b.data_bytes_size
+                "[noted] tap: first callback, {} bytes / {frames} mono frames / {} ch",
+                b.data_bytes_size, channels
             );
         }
         Default::default()
@@ -490,7 +598,11 @@ mod macos {
 
     /// One tap lifetime: build → run until stop / stall / device change.
     /// Ok(()) = clean stop; Err = rebuild wanted.
-    pub fn tap_session(buf: &Arc<ChannelBuf>, stop: &Arc<AtomicBool>) -> Result<()> {
+    pub fn tap_session(
+        buf: &Arc<ChannelBuf>,
+        stop: &Arc<AtomicBool>,
+        log_path: Option<&Path>,
+    ) -> Result<()> {
         let output_device = ca::System::default_output_device()
             .map_err(|e| anyhow!("no default output device: {e:?}"))?;
         let output_uid = output_device
@@ -508,6 +620,16 @@ mod macos {
             .map_err(|e| anyhow!("create tap failed (permission denied or unsupported): {e:?}"))?;
 
         let asbd = tap.asbd().map_err(|e| anyhow!("tap format: {e:?}"))?;
+        if asbd.bits_per_channel != 32
+            || !asbd
+                .format_flags
+                .contains(cat::AudioFormatFlags::IS_FLOAT)
+            || asbd.channels_per_frame == 0
+            || !asbd.sample_rate.is_finite()
+            || asbd.sample_rate <= 0.0
+        {
+            return Err(anyhow!("unsupported tap PCM format: {asbd:?}"));
+        }
         buf.sample_rate
             .store(asbd.sample_rate as u32, Ordering::Relaxed);
         let channels = asbd.channels_per_frame as usize;
@@ -515,8 +637,13 @@ mod macos {
             "[noted] tap created: {} Hz, {} ch, {} bits",
             asbd.sample_rate, channels, asbd.bits_per_channel
         );
-        let format =
-            av::AudioFormat::with_asbd(&asbd).ok_or_else(|| anyhow!("bad tap format"))?;
+        capture_log(
+            log_path,
+            &format!(
+                "tap created: {} Hz, {} ch, {} bits, flags={:?}",
+                asbd.sample_rate, channels, asbd.bits_per_channel, asbd.format_flags
+            ),
+        );
 
         let sub_device =
             cf::DictionaryOf::with_keys_values(&[sub_keys::uid()], &[output_uid.as_type_ref()]);
@@ -552,12 +679,22 @@ mod macos {
         let agg_device = ca::AggregateDevice::with_desc(&dict)
             .map_err(|e| anyhow!("aggregate device: {e:?}"))?;
 
+        let format_mismatches = Arc::new(AtomicU64::new(0));
         let mut ctx = Ctx {
             buf: buf.clone(),
-            format,
             channels,
+            last_sample_time: None,
+            last_rate_clock: None,
+            host_clock_hz: cidre::cv::host_clock_frequency(),
+            format_mismatches: format_mismatches.clone(),
             callbacks: 0,
-            pushed: 0,
+            pushed_frames: 0,
+            first_bytes: 0,
+            max_bytes: 0,
+            invalid_callbacks: 0,
+            channel_changes: 0,
+            clock_layout_corrections: 0,
+            rate_changes: 0,
         };
         let proc_id = agg_device
             .create_io_proc_id(io_proc, Some(&mut ctx))
@@ -576,6 +713,13 @@ mod macos {
             }
             std::thread::sleep(Duration::from_millis(250));
 
+            let mismatches = format_mismatches.load(Ordering::Relaxed);
+            if mismatches > 0 {
+                break Err(anyhow!(
+                    "tap callback frame count disagreed with the Core Audio clock ({mismatches} callbacks rejected)"
+                ));
+            }
+
             let stale_ms = epoch_ms().saturating_sub(buf.last_callback.load(Ordering::Relaxed));
             if stale_ms > 10_000 {
                 break Err(anyhow!("tap delivered no callbacks for {stale_ms}ms"));
@@ -586,13 +730,13 @@ mod macos {
             // up the real format. Under-delivery is NOT checked: the tap
             // legitimately goes quiet whenever no app plays audio.
             let elapsed_ms = epoch_ms().saturating_sub(session_t0);
-            if elapsed_ms > 10_000 {
+            if elapsed_ms > 2_000 {
                 let pushed = buf.pushed_total.load(Ordering::Relaxed) - pushed_t0;
-                let expected = (asbd.sample_rate as u64) * elapsed_ms / 1000;
+                let live_rate = buf.sample_rate.load(Ordering::Relaxed).max(1) as u64;
+                let expected = live_rate * elapsed_ms / 1000;
                 if pushed > expected + expected / 4 {
                     break Err(anyhow!(
-                        "tap over-delivering ({pushed} samples in {elapsed_ms}ms at a declared {} Hz) — stream format changed",
-                        asbd.sample_rate as u32
+                        "tap over-delivering ({pushed} samples in {elapsed_ms}ms at {live_rate} Hz) — stream format changed"
                     ));
                 }
             }
@@ -609,10 +753,27 @@ mod macos {
         // (StartedDevice → proc id → aggregate device → tap).
         let _ = started.stop();
         eprintln!(
-            "[noted] tap session ended: {} callbacks, {} samples pushed ({})",
+            "[noted] tap session ended: {} callbacks, {} mono frames pushed ({})",
             ctx.callbacks,
-            ctx.pushed,
+            ctx.pushed_frames,
             if result.is_ok() { "clean stop" } else { "rebuilding" }
+        );
+        capture_log(
+            log_path,
+            &format!(
+                "tap ended: callbacks={}, mono_frames={}, first_bytes={}, max_bytes={}, channels={}, channel_changes={}, clock_layout_corrections={}, rate_changes={}, invalid_callbacks={}, format_mismatches={}, result={}",
+                ctx.callbacks,
+                ctx.pushed_frames,
+                ctx.first_bytes,
+                ctx.max_bytes,
+                ctx.channels,
+                ctx.channel_changes,
+                ctx.clock_layout_corrections,
+                ctx.rate_changes,
+                ctx.invalid_callbacks,
+                ctx.format_mismatches.load(Ordering::Relaxed),
+                if result.is_ok() { "clean" } else { "rebuild" },
+            ),
         );
         result
     }
@@ -621,6 +782,20 @@ mod macos {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callback_frames_use_live_bytes_and_channels() {
+        // 512 stereo f32 frames = 4096 bytes. A stale mono format would call
+        // this 1024 frames and reproduce the double-speed/over-delivery bug.
+        assert_eq!(callback_mono_frames(4096, 2), Some(512));
+        assert_eq!(callback_mono_frames(2048, 1), Some(512));
+        assert_eq!(callback_mono_frames(2047, 1), None);
+        assert_eq!(callback_mono_frames(2048, 0), None);
+        assert!(!callback_overdelivers(512, 1_000.0, 1_512.0));
+        assert!(callback_overdelivers(2_048, 1_000.0, 1_512.0));
+        assert_eq!(infer_callback_layout(512, 1_000.0, 1_512.0), Some((512, 1)));
+        assert_eq!(infer_callback_layout(2_048, 1_000.0, 1_512.0), Some((512, 4)));
+    }
 
     /// Live smoke test: builds a real VoiceProcessingIO session, records 3s,
     /// and asserts callbacks arrived. Grabs the actual microphone (and needs

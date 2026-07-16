@@ -117,7 +117,14 @@ fn mic_users() -> Vec<String> {
 
 fn ignored(bundle: &str, ignore: &[String]) -> bool {
     let b = bundle.to_lowercase();
-    ignore.iter().any(|tok| b.contains(&tok.to_lowercase()))
+    // Apple speech and ReplayKit daemons can hold the microphone on behalf of
+    // Siri, Dictation, screen capture, or system-audio capture. They are never
+    // call apps, so keep them ignored even for existing meetings.json files
+    // that predate their addition to the user-visible default list.
+    super::ALWAYS_IGNORED_BUNDLES
+        .iter()
+        .any(|tok| b.contains(tok))
+        || ignore.iter().any(|tok| b.contains(&tok.to_lowercase()))
 }
 
 /// Today's call-like calendar events (join link or ≥2 attendees; never the
@@ -140,6 +147,23 @@ async fn call_events(app: &tauri::AppHandle) -> Vec<Value> {
             })
             .collect(),
         Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ignored;
+
+    #[test]
+    fn apple_audio_daemons_are_never_treated_as_calls() {
+        assert!(ignored("com.apple.corespeech.corespeechd", &[]));
+        assert!(ignored("com.apple.replayd", &[]));
+    }
+
+    #[test]
+    fn configured_ignores_remain_case_insensitive() {
+        assert!(ignored("US.Zoom.xos", &["zoom".to_string()]));
+        assert!(!ignored("com.microsoft.teams2", &[]));
     }
 }
 

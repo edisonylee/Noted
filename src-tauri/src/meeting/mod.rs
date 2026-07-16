@@ -94,8 +94,12 @@ fn d_engine() -> String {
 
 /// Dictation, recording, and voice-assistant apps that hold the mic without
 /// being a meeting (the superwhisper class of false positives).
+pub const ALWAYS_IGNORED_BUNDLES: &[&str] = &["corespeech", "replayd"];
+
 pub fn default_ignore() -> Vec<String> {
     [
+        "corespeech",
+        "replayd",
         "superwhisper",
         "wispr",
         "voiceink",
@@ -303,7 +307,8 @@ pub fn start(
 
     if capture::tap_supported() {
         let (b, s) = (them.clone(), stop.clone());
-        threads.push(std::thread::spawn(move || capture::run_system_tap(b, s)));
+        let log = audio_dir.as_ref().map(|d| d.join("capture.log"));
+        threads.push(std::thread::spawn(move || capture::run_system_tap(b, s, log)));
     } else {
         eprintln!("[noted] system-audio tap needs macOS 14.4+; recording mic only");
     }

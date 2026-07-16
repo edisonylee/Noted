@@ -1960,10 +1960,16 @@ a.cal-btn { text-decoration: none; }
 .rec-pill {
   display: inline-flex; align-items: center; gap: 7px;
   border: var(--border-width, 1px) solid var(--line); border-radius: 999px; padding: 5px 12px;
-  background: var(--surface); color: var(--good); font-size: 12.5px; font-weight: 550;
+  background: var(--surface); color: var(--muted); font-size: 12.5px; font-weight: 550;
   cursor: pointer;
 }
 .rec-pill:hover { background: var(--hover-soft); }
+.rec-pill.active { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+.rec-pill:disabled { opacity: 0.65; cursor: wait; }
+.sidebar-record-error {
+  margin: -4px 10px 8px; color: var(--bad); font-size: 10.5px; line-height: 1.35;
+  text-align: center; overflow-wrap: anywhere;
+}
 
 /* Coming up strip */
 .comingup { margin-bottom: 18px; }

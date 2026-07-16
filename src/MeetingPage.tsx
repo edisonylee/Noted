@@ -272,7 +272,20 @@ export function MeetingPage({
   }, [detail?.talk_ms]);
 
   const summaries = detail?.summaries ?? [];
-  const speakers = detail?.speakers ?? [];
+  const storedSpeakers = detail?.speakers ?? [];
+  // Old/manual/recovered recordings may have remote transcript lines without
+  // a usable voiceprint cluster. Still expose a rename chip: the backend's
+  // "Them" path relabels those rows without persisting a bogus voiceprint.
+  const fallbackSpeakerCounts = new Map<string, number>();
+  for (const segment of liveSegments) {
+    if (segment.channel !== "them") continue;
+    const label = segment.speaker || "Them";
+    fallbackSpeakerCounts.set(label, (fallbackSpeakerCounts.get(label) ?? 0) + 1);
+  }
+  const speakers =
+    storedSpeakers.length > 0
+      ? storedSpeakers
+      : [...fallbackSpeakerCounts].map(([label, seg_count]) => ({ label, suggested: null, seg_count }));
   const unnamed = (l: string) => l.startsWith("Speaker ") || l === "Them";
 
   const renameSpeaker = async (from: string, to: string) => {
@@ -316,7 +329,11 @@ export function MeetingPage({
       setExportMsg("Creating PDF…");
       const path = await api.meetingExportPdf(id);
       setExportMsg(`PDF saved to ${path.split("/").slice(-2).join("/")}`);
-      await openPath(path);
+      try {
+        await openPath(path);
+      } catch {
+        // the export succeeded; opening the file is best-effort
+      }
       window.setTimeout(() => setExportMsg(null), 6000);
     } catch (e) {
       setExportMsg(null);
@@ -420,7 +437,7 @@ export function MeetingPage({
           <button
             className="icon-btn"
             onClick={exportMd}
-            title="Export summaries + notes + transcript as Markdown (to Downloads)"
+            title="Export summaries + notes + transcript as Markdown (to Documents/Notes/Meeting)"
             aria-label="Export as Markdown"
           >
             <Download size={16} />
@@ -535,7 +552,7 @@ export function MeetingPage({
                   </span>
                 )
               )}
-              {speakers.some((sp) => unnamed(sp.label) && !sp.suggested) && (
+              {storedSpeakers.some((sp) => unnamed(sp.label) && !sp.suggested) && (
                 <button className="chip-action" onClick={suggestNames} disabled={suggesting}>
                   {suggesting ? <Loader size={12} className="spin" /> : <Sparkles size={12} />}
                   Suggest names

@@ -151,6 +151,8 @@ export default function App() {
     event?: Partial<RangeEvent>;
   } | null>(null);
   const [recMeeting, setRecMeeting] = useState<{ id: number; title: string } | null>(null);
+  const [meetingControlAction, setMeetingControlAction] = useState<"starting" | "stopping" | null>(null);
+  const [meetingControlError, setMeetingControlError] = useState<string | null>(null);
   useEffect(() => {
     api
       .meetingState()
@@ -161,6 +163,7 @@ export default function App() {
       .catch(() => {});
     const subs = [
       listen<{ meetingId: number; title: string }>("meeting-started", (e) => {
+        setMeetingControlError(null);
         setRecMeeting({ id: e.payload.meetingId, title: e.payload.title });
         // Granola opens the note when recording starts — so do we.
         setView("today");
@@ -172,6 +175,29 @@ export default function App() {
       subs.forEach((p) => p.then((un) => un()));
     };
   }, []);
+
+  // The sidebar control is the always-available manual path: it starts an
+  // event-less recording immediately, then becomes the matching stop button.
+  // Calendar meetings still keep their richer pre-meeting page and metadata.
+  async function toggleMeetingRecording() {
+    if (meetingControlAction) return;
+    const action = recMeeting ? "stopping" : "starting";
+    setMeetingControlAction(action);
+    setMeetingControlError(null);
+    try {
+      if (recMeeting) {
+        await api.meetingStop();
+      } else {
+        const id = await api.meetingStart({ title: "Meeting" });
+        setView("today");
+        setMeetingOpen({ id });
+      }
+    } catch (e) {
+      setMeetingControlError(String(e));
+    } finally {
+      setMeetingControlAction(null);
+    }
+  }
 
   // Once today's schedule exists, the composer's "what's your schedule?" moment
   // has passed — it collapses to a slim pill and expands on demand (or when a
@@ -644,22 +670,35 @@ export default function App() {
           </button>
         </nav>
         <span className="spacer" data-tauri-drag-region />
-        {recMeeting && (
-          <button
-            className="rec-pill"
-            onClick={() => {
-              setView("today");
-              setMeetingOpen({ id: recMeeting.id });
-            }}
-            title={`Recording: ${recMeeting.title}`}
-          >
+        <button
+          className={"rec-pill" + (recMeeting ? " active" : "")}
+          onClick={toggleMeetingRecording}
+          disabled={meetingControlAction != null}
+          title={recMeeting ? `Stop recording: ${recMeeting.title}` : "Start a recording"}
+        >
+          {meetingControlAction ? (
+            <Loader size={13} className="spin" />
+          ) : recMeeting ? (
             <span className="bars" aria-hidden>
               <i />
               <i />
               <i />
             </span>
-            Recording
-          </button>
+          ) : (
+            <Mic size={14} />
+          )}
+          {meetingControlAction
+            ? meetingControlAction === "stopping"
+              ? "Stopping…"
+              : "Starting…"
+            : recMeeting
+              ? "Stop recording"
+              : "Start recording"}
+        </button>
+        {meetingControlError && (
+          <span className="sidebar-record-error" role="alert">
+            {meetingControlError}
+          </span>
         )}
         <div className="side-foot">
           <button

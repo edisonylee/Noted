@@ -79,12 +79,18 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
     setProbeMsg("Recording 8 seconds — talk, and play some audio…");
     try {
       const r = (await api.meetingCaptureProbe(8)) as unknown as {
-        me?: { seconds: number; rms: number };
-        them?: { seconds: number; rms: number };
+        me?: { seconds: number; duration_ratio: number; rms: number };
+        them?: { seconds: number; duration_ratio: number; rms: number };
         tap_supported?: boolean;
       };
-      const fmt = (c?: { seconds: number; rms: number }) =>
-        !c || c.seconds < 0.5 ? "no audio ✗" : c.rms > 0.002 ? "signal ✓" : "captured, but silent";
+      const fmt = (c?: { seconds: number; duration_ratio: number; rms: number }) =>
+        !c || c.seconds < 0.5
+          ? "no audio ✗"
+          : c.duration_ratio > 1.25
+            ? `format error ✗ (${c.seconds.toFixed(1)}s captured in 8s)`
+            : c.rms > 0.002
+              ? "signal ✓"
+              : "captured, but silent";
       setProbeMsg(
         `Mic: ${fmt(r.me)} · System audio: ${fmt(r.them)}` +
           (r.them && r.them.seconds < 0.5

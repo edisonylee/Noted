@@ -228,6 +228,9 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     ensure_column(&conn, "notes", "content_hash", "TEXT")?;
     ensure_column(&conn, "notes", "synced_at", "TEXT")?;
     ensure_column(&conn, "entities", "home_note_id", "INTEGER")?;
+    // Person naming: AI-proposed display name awaiting the user's confirm
+    // (people filed from meeting attendees start out named by raw email).
+    ensure_column(&conn, "entities", "suggested_name", "TEXT")?;
     // Note: the reserved catch-all "misc" is not pre-seeded — the classifier is
     // told about it by name in the prompt, and it's created on first real use
     // (so an unused misc never clutters the catalog/UI).
@@ -1075,12 +1078,15 @@ pub struct EntityRow {
     pub name: String,
     pub r#type: String,
     pub mention_count: i64,
+    pub last_seen: Option<String>,
+    pub suggested_name: Option<String>,
 }
 
 /// All entities, most-mentioned first.
 pub fn list_entities(conn: &Connection) -> Result<Vec<EntityRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, type, mention_count FROM entities ORDER BY mention_count DESC, name",
+        "SELECT id, name, type, mention_count, last_seen, suggested_name
+         FROM entities ORDER BY mention_count DESC, name",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(EntityRow {
@@ -1088,6 +1094,8 @@ pub fn list_entities(conn: &Connection) -> Result<Vec<EntityRow>> {
             name: r.get(1)?,
             r#type: r.get(2)?,
             mention_count: r.get(3)?,
+            last_seen: r.get(4)?,
+            suggested_name: r.get(5)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1405,6 +1413,51 @@ pub fn set_entity_relationship(conn: &Connection, id: i64, rel: &str) -> Result<
     Ok(())
 }
 
+/// Store (or clear) an AI-proposed display name for an entity. Suggestions are
+/// advisory only — the entity's real name changes exclusively through
+/// `rename_entity` on the user's explicit confirm.
+pub fn set_suggested_name(conn: &Connection, id: i64, name: Option<&str>) -> Result<()> {
+    conn.execute(
+        "UPDATE entities SET suggested_name = ?2 WHERE id = ?1",
+        rusqlite::params![id, name],
+    )?;
+    Ok(())
+}
+
+/// Rename an entity: the old name joins the alias list (so future filings by
+/// the old key — e.g. an attendee email — still resolve here), the suggestion
+/// is consumed, and any alias equal to the new norm is dropped. The caller
+/// resolves UNIQUE(norm, type) collisions (via `merge_entities`) first.
+pub fn rename_entity(conn: &Connection, id: i64, new_name: &str, new_norm: &str) -> Result<()> {
+    let (old_name, aliases): (String, String) = conn.query_row(
+        "SELECT name, aliases FROM entities WHERE id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let mut set: Vec<String> = serde_json::from_str(&aliases).unwrap_or_default();
+    set.push(old_name);
+    set.retain(|a| a.to_lowercase() != new_norm);
+    set.sort();
+    set.dedup();
+    conn.execute(
+        "UPDATE entities SET name = ?2, norm = ?3, aliases = ?4, suggested_name = NULL
+         WHERE id = ?1",
+        rusqlite::params![id, new_name, new_norm, serde_json::to_string(&set)?],
+    )?;
+    Ok(())
+}
+
+/// Person entities still named by a raw email address and without a pending
+/// suggestion — the pool the name-suggestion pass works through.
+pub fn email_named_people(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name FROM entities
+         WHERE type = 'person' AND name LIKE '%@%' AND suggested_name IS NULL",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 // ---------------------------------------------------------------------------
 // People view: person-typed entities + their dated mentions (curated facts).
 // ---------------------------------------------------------------------------
@@ -1425,6 +1478,7 @@ pub struct PersonProfile {
     pub first_seen: Option<String>,
     pub last_seen: Option<String>,
     pub aliases: Vec<String>,
+    pub suggested_name: Option<String>,
     pub mentions: Vec<PersonMention>,
 }
 
@@ -1510,7 +1564,7 @@ pub fn entity_profile(conn: &Connection, entity_id: i64) -> Result<EntityProfile
 /// Most-mentioned first, mirroring `list_entities`.
 pub fn person_profiles(conn: &Connection) -> Result<Vec<PersonProfile>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, relationship, mention_count, first_seen, last_seen, aliases
+        "SELECT id, name, relationship, mention_count, first_seen, last_seen, aliases, suggested_name
          FROM entities WHERE type = 'person'
          ORDER BY mention_count DESC, last_seen DESC, name",
     )?;
@@ -1525,12 +1579,13 @@ pub fn person_profiles(conn: &Connection) -> Result<Vec<PersonProfile>> {
                 r.get::<_, Option<String>>(4)?,
                 r.get::<_, Option<String>>(5)?,
                 aliases,
+                r.get::<_, Option<String>>(7)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut out = Vec::with_capacity(rows.len());
-    for (id, name, relationship, mention_count, first_seen, last_seen, aliases) in rows {
+    for (id, name, relationship, mention_count, first_seen, last_seen, aliases, suggested_name) in rows {
         out.push(PersonProfile {
             id,
             name,
@@ -1539,6 +1594,7 @@ pub fn person_profiles(conn: &Connection) -> Result<Vec<PersonProfile>> {
             first_seen,
             last_seen,
             aliases: serde_json::from_str(&aliases).unwrap_or_default(),
+            suggested_name,
             mentions: mentions_for(conn, id)?,
         });
     }

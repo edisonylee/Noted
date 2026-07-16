@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Users, Network, Briefcase, Search } from "lucide-react";
+import { KnowledgeGraph } from "./KnowledgeGraph";
 import { PeopleView } from "./PeopleView";
 import { SelfView } from "./Self";
 import { WorkView } from "./Work";
@@ -11,7 +12,7 @@ import { colorForType } from "./entityColors";
 // graph, and the Work lens over imported brain vaults — behind one destination
 // with a section toggle, plus a search bar and a per-entity page reachable from
 // anywhere.
-type Section = "people" | "self" | "work";
+type Section = "graph" | "people" | "self" | "work";
 
 // Self + Work are parked while Knowledge refocuses on the meeting-fed graph;
 // the views and their data stay — this only hides the tabs.
@@ -30,7 +31,7 @@ export function KnowledgeView({
   openEntityId?: number | null; // jump straight to an entity page (e.g. from a related chip)
   onOpenedEntity?: () => void;
 }) {
-  const [section, setSection] = useState<Section>("people");
+  const [section, setSection] = useState<Section>("graph");
   const [selectedEntityId, setSelectedEntityId] = useState<number | null>(null);
 
   // External request to open a specific entity (consumed once, then cleared).
@@ -139,6 +140,12 @@ export function KnowledgeView({
         <>
           <div className="kn-tabs">
             <button
+              className={"kn-tab" + (section === "graph" ? " on" : "")}
+              onClick={() => setSection("graph")}
+            >
+              <Network size={15} /> Graph
+            </button>
+            <button
               className={"kn-tab" + (section === "people" ? " on" : "")}
               onClick={() => setSection("people")}
             >
@@ -161,7 +168,9 @@ export function KnowledgeView({
               </>
             )}
           </div>
-          {section === "people" ? (
+          {section === "graph" ? (
+            <KnowledgeGraph theme={theme} onOpenEntity={setSelectedEntityId} />
+          ) : section === "people" ? (
             <PeopleView onOpenPerson={setSelectedEntityId} />
           ) : section === "self" ? (
             <SelfView theme={theme} onOpenEntity={setSelectedEntityId} />

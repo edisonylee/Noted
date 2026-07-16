@@ -340,6 +340,14 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "entity_detail" => crate::entity_detail(a, iarg(b, "entityId")).await,
         "entity_profile" => crate::entity_profile(a, iarg(b, "entityId")).await,
         "list_people" => crate::list_people(a).await,
+        "suggest_person_names" => crate::suggest_person_names(a).await,
+        "confirm_person_name" => {
+            crate::confirm_person_name(a, iarg(b, "entityId"), sarg(b, "name")).await.map(|_| Value::Null)
+        }
+        "dismiss_person_name" => {
+            crate::dismiss_person_name(a, iarg(b, "entityId")).await.map(|_| Value::Null)
+        }
+        "kg_reindex_meetings" => crate::kg_reindex_meetings(a).await,
         "get_provider_settings" => Ok(crate::get_provider_settings()),
         // Keys are camelCase — they must match what api.ts sends (the old
         // snake_case reads silently dropped every optional arg to None).

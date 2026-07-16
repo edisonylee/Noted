@@ -88,7 +88,14 @@ export type EntityCandidate = {
 };
 
 // A stored entity node (for the graph view / management).
-export type EntityRow = { id: number; name: string; type: string; mention_count: number };
+export type EntityRow = {
+  id: number;
+  name: string;
+  type: string;
+  mention_count: number;
+  last_seen?: string | null;
+  suggested_name?: string | null;
+};
 
 // A likely-duplicate entity pair from the retro merge scan (People view panel).
 export type MergeSuggestion = {
@@ -102,8 +109,16 @@ export type MergeSuggestion = {
   similarity: number;
 };
 
-// Knowledge-graph ("Self" view) shapes. Work-graph nodes also carry `vault`.
-export type GraphNode = { id: number; name: string; type: string; mention_count: number; vault?: string };
+// Knowledge-graph shapes. Work-graph nodes also carry `vault`.
+export type GraphNode = {
+  id: number;
+  name: string;
+  type: string;
+  mention_count: number;
+  last_seen?: string | null;
+  suggested_name?: string | null;
+  vault?: string;
+};
 export type GraphEdge = { source: number; target: number; weight: number };
 export type GraphData = { nodes: GraphNode[]; edges: GraphEdge[] };
 
@@ -162,6 +177,7 @@ export type PersonProfile = {
   first_seen: string | null;
   last_seen: string | null;
   aliases: string[];
+  suggested_name: string | null;
   mentions: PersonMention[];
 };
 
@@ -496,6 +512,15 @@ export const api = {
   entityProfile: (entityId: number) => invoke<EntityProfile>("entity_profile", { entityId }),
   backfillEntities: () => invoke<number>("backfill_entities"),
   listPeople: () => invoke<PersonProfile[]>("list_people"),
+  // Person naming: AI proposes display names for email-named people; the user
+  // confirms (or types their own) — confirm renames + keeps the email as alias.
+  suggestPersonNames: () => invoke<number>("suggest_person_names"),
+  confirmPersonName: (entityId: number, name: string) =>
+    invoke<void>("confirm_person_name", { entityId, name }),
+  dismissPersonName: (entityId: number) => invoke<void>("dismiss_person_name", { entityId }),
+  // Rebuild the meeting-fed knowledge layer over all recorded meetings.
+  kgReindexMeetings: () =>
+    invoke<{ meetings: number; mentions: number; name_suggestions: number }>("kg_reindex_meetings"),
   listNotes: () => invoke<NoteRow[]>("list_notes"),
   listCategories: () => invoke<CategoryInfo[]>("list_categories"),
   // `scope` (a brain vault name) restricts retrieval to that vault; `entityId`

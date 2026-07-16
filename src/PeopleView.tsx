@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { GitMerge, Loader2, Users } from "lucide-react";
+import { Check, GitMerge, Loader2, Pencil, Users, X } from "lucide-react";
 import { api, type MergeSuggestion, type PersonProfile } from "./api";
 import { relativeDay } from "./day";
 
@@ -25,6 +25,31 @@ export function PeopleView({ onOpenPerson }: { onOpenPerson?: (id: number) => vo
     refresh();
     loadSuggestions();
   }, []);
+
+  // Naming flow: confirm the AI-suggested display name, dismiss it, or type a
+  // name directly. Confirm renames the entity and keeps the email as an alias.
+  const [renaming, setRenaming] = useState<number | null>(null);
+  const [renameText, setRenameText] = useState("");
+
+  async function confirmName(p: PersonProfile, name: string) {
+    setErr(null);
+    try {
+      await api.confirmPersonName(p.id, name);
+      setRenaming(null);
+      await refresh();
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
+  async function dismissName(p: PersonProfile) {
+    try {
+      await api.dismissPersonName(p.id);
+      setPeople((all) => all.map((o) => (o.id === p.id ? { ...o, suggested_name: null } : o)));
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
 
   async function mergeInto(dropId: number, keepId: number) {
     if (!keepId || keepId === dropId) return;
@@ -103,12 +128,66 @@ export function PeopleView({ onOpenPerson }: { onOpenPerson?: (id: number) => vo
             role={onOpenPerson ? "button" : undefined}
           >
             <div className="person-head">
-              <h3 className="person-name">{p.name}</h3>
+              {renaming === p.id ? (
+                <form
+                  className="person-rename"
+                  onClick={(e) => e.stopPropagation()}
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (renameText.trim()) confirmName(p, renameText.trim());
+                  }}
+                >
+                  <input
+                    autoFocus
+                    value={renameText}
+                    onChange={(e) => setRenameText(e.target.value)}
+                    placeholder="Display name"
+                  />
+                  <button type="submit" className="icon-btn" title="Save name">
+                    <Check size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    title="Cancel"
+                    onClick={() => setRenaming(null)}
+                  >
+                    <X size={13} />
+                  </button>
+                </form>
+              ) : (
+                <>
+                  <h3 className="person-name">{p.name}</h3>
+                  <button
+                    className="icon-btn person-rename-btn"
+                    title="Rename this person"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setRenameText(p.suggested_name ?? (p.name.includes("@") ? "" : p.name));
+                      setRenaming(p.id);
+                    }}
+                  >
+                    <Pencil size={12} />
+                  </button>
+                </>
+              )}
               {p.relationship && <span className="badge routed">{p.relationship}</span>}
               <span className="badge existing">
                 {p.mention_count} {p.mention_count === 1 ? "mention" : "mentions"}
               </span>
             </div>
+
+            {p.suggested_name && renaming !== p.id && (
+              <div className="name-suggest" onClick={(e) => e.stopPropagation()}>
+                Call them <strong>{p.suggested_name}</strong>?
+                <button className="link" onClick={() => confirmName(p, p.suggested_name!)}>
+                  confirm
+                </button>
+                <button className="link" onClick={() => dismissName(p)}>
+                  dismiss
+                </button>
+              </div>
+            )}
 
             {p.last_seen && (
               <div className="person-meta">

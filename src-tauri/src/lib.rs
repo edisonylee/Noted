@@ -1946,6 +1946,189 @@ async fn list_people(app: tauri::AppHandle) -> Result<Value, String> {
     serde_json::to_value(people).map_err(|e| e.to_string())
 }
 
+/// Title-case an email localpart into a name guess: "edison.lee" -> "Edison Lee".
+/// The floor the name-suggestion pass never does worse than.
+fn name_from_localpart(email: &str) -> String {
+    let local = email.split('@').next().unwrap_or(email);
+    local
+        .split(|c: char| c == '.' || c == '_' || c == '-' || c == '+' || c.is_ascii_digit())
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut cs = w.chars();
+            match cs.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + cs.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Propose display names for person entities still named by a raw email.
+/// Deterministic first: a calendar attendee pairing that email with a real
+/// display name wins outright. The local model refines the leftovers (email +
+/// known speaker names as context) over a localpart-derived floor. Suggestions
+/// are stored for the user to confirm — this never renames anything by itself.
+#[tauri::command]
+async fn suggest_person_names(app: tauri::AppHandle) -> Result<Value, String> {
+    // Pool + evidence under one lock.
+    let (pool, pairs, known) = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        let pool = db::email_named_people(&conn).map_err(|e| e.to_string())?;
+        if pool.is_empty() {
+            return Ok(json!(0));
+        }
+        let mut pairs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for m in meeting::store::list_meetings(&conn, 500).unwrap_or_default() {
+            if let Some(atts) = m["event_json"]["attendees"].as_array() {
+                for a in atts {
+                    let email = a["email"].as_str().unwrap_or("").to_lowercase();
+                    let name = a["name"].as_str().unwrap_or("");
+                    if !email.is_empty() && !name.is_empty() && !name.contains('@') {
+                        pairs.entry(email).or_insert_with(|| name.to_string());
+                    }
+                }
+            }
+        }
+        let known: Vec<String> = meeting::store::speaker_profiles(&conn)
+            .map(|v| v.into_iter().map(|(n, _, _)| n).collect())
+            .unwrap_or_default();
+        (pool, pairs, known)
+    };
+
+    // Start every unresolved email at its localpart floor; the model may refine.
+    let mut proposed: Vec<(i64, String, String)> = Vec::new(); // (id, email, name)
+    let mut ask_model: Vec<(i64, String)> = Vec::new();
+    for (id, email) in &pool {
+        match pairs.get(&email.to_lowercase()) {
+            Some(name) => proposed.push((*id, email.clone(), name.clone())),
+            None => ask_model.push((*id, email.clone())),
+        }
+    }
+    if !ask_model.is_empty() {
+        let emails: Vec<String> = ask_model.iter().map(|(_, e)| e.clone()).collect();
+        let schema = json!({
+            "type": "object",
+            "properties": { "suggestions": { "type": "array", "items": {
+                "type": "object",
+                "properties": { "email": { "type": "string" }, "name": { "type": "string" } },
+                "required": ["email", "name"]
+            }}},
+            "required": ["suggestions"]
+        });
+        let system = "You match email addresses to people's display names. For each email, \
+            propose the person's likely display name. If a known name clearly corresponds to \
+            the email's local part (e.g. jasmin@x.com and a known 'Jasmine'), use that known \
+            name; otherwise title-case the local part into a plausible name. Names only — \
+            never return an email address. JSON: {\"suggestions\":[{\"email\",\"name\"}]}";
+        let user = format!("Emails:\n{}\n\nKnown people from meetings: {}",
+            emails.join("\n"),
+            if known.is_empty() { "(none)".to_string() } else { known.join(", ") });
+        let mut by_email: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        if let Ok(v) = ollama::chat_json_local(&ollama::text_model(), system, &user, None, Some(schema)).await {
+            if let Some(arr) = v["suggestions"].as_array() {
+                for s in arr {
+                    let (e, n) = (s["email"].as_str().unwrap_or(""), s["name"].as_str().unwrap_or("").trim());
+                    if !e.is_empty() && !n.is_empty() && !n.contains('@') && n.len() <= 40 {
+                        by_email.insert(e.to_lowercase(), n.to_string());
+                    }
+                }
+            }
+        }
+        for (id, email) in ask_model {
+            let name = by_email
+                .get(&email.to_lowercase())
+                .cloned()
+                .unwrap_or_else(|| name_from_localpart(&email));
+            if !name.is_empty() {
+                proposed.push((id, email, name));
+            }
+        }
+    }
+
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let mut applied = 0i64;
+    for (id, _, name) in &proposed {
+        if db::set_suggested_name(&conn, *id, Some(name)).is_ok() {
+            applied += 1;
+        }
+    }
+    Ok(json!(applied))
+}
+
+/// The user confirmed (or typed) a display name for a person entity. Rename it,
+/// folding the old name (usually an email) into the aliases so future filings
+/// still resolve to the same person; if another person already owns that name,
+/// merge the two first. Voiceprints are untouched — this is KG-side identity.
+#[tauri::command]
+async fn confirm_person_name(app: tauri::AppHandle, entity_id: i64, name: String) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() || name.contains('@') {
+        return Err("Enter a display name (not an email).".into());
+    }
+    let norm = entities::normalize(&name);
+    if norm.is_empty() {
+        return Err("Enter a display name.".into());
+    }
+    // Embed off-lock so the rename re-indexes the entity under one lock.
+    let emb = entities::embed_entity(&name, "person").await.ok();
+    let state = app.state::<Db>();
+    let mut conn = state.0.lock().unwrap();
+    if let Ok(Some(other)) = db::entity_exact(&conn, &norm, "person") {
+        if other != entity_id {
+            db::merge_entities(&mut conn, entity_id, other).map_err(|e| e.to_string())?;
+        }
+    }
+    db::rename_entity(&conn, entity_id, &name, &norm).map_err(|e| e.to_string())?;
+    if let Some(v) = emb {
+        let _ = db::insert_entity_embedding(&conn, entity_id, &v);
+    }
+    Ok(())
+}
+
+/// "Don't call them that" — clear a pending name suggestion.
+#[tauri::command]
+async fn dismiss_person_name(app: tauri::AppHandle, entity_id: i64) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    db::set_suggested_name(&conn, entity_id, None).map_err(|e| e.to_string())
+}
+
+/// Rebuild the meeting-fed knowledge layer: run the knowledge-extraction pass
+/// over every meeting with a filed note (mention guard keeps it idempotent),
+/// then propose display names for email-named people.
+#[tauri::command]
+async fn kg_reindex_meetings(app: tauri::AppHandle) -> Result<Value, String> {
+    let ids: Vec<i64> = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        meeting::store::list_meetings(&conn, 1000)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|m| m["note_id"].as_i64().is_some())
+            .filter_map(|m| m["id"].as_i64())
+            .collect()
+    };
+    let (mut meetings_done, mut mentions) = (0i64, 0i64);
+    for id in ids {
+        match meeting::summarize::extract_knowledge(&app, id).await {
+            Ok(n) => {
+                meetings_done += 1;
+                mentions += n as i64;
+            }
+            Err(e) => eprintln!("kg_reindex_meetings: meeting {id}: {e}"),
+        }
+    }
+    let suggestions = suggest_person_names(app.clone())
+        .await
+        .ok()
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    Ok(json!({ "meetings": meetings_done, "mentions": mentions, "name_suggestions": suggestions }))
+}
+
 // ---------------------------------------------------------------------------
 // Brain sync (Phase 1: Obsidian -> noted, read path). Mirror brain vault files
 // into the KG: each file becomes a brain-origin note, its subject an entity, its
@@ -3081,6 +3264,10 @@ pub fn run() {
             entity_detail,
             entity_profile,
             list_people,
+            suggest_person_names,
+            confirm_person_name,
+            dismiss_person_name,
+            kg_reindex_meetings,
             get_provider_settings,
             set_provider_settings,
             test_provider,

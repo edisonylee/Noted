@@ -613,7 +613,105 @@ pub async fn run(app: &tauri::AppHandle, meeting_id: i64, template_name: Option<
         "meeting-summarized",
         json!({ "meetingId": meeting_id, "template": template }),
     );
+
+    // Feed the knowledge graph from the fresh summary (mention guard keeps it
+    // idempotent across re-summarizes), then propose display names for any
+    // attendee people still filed under a raw email. Both best-effort — a
+    // knowledge hiccup never fails the summary the user is waiting on.
+    if let Err(e) = extract_knowledge(app, meeting_id).await {
+        eprintln!("[noted] knowledge extraction failed: {e}");
+    }
+    let _ = crate::suggest_person_names(app.clone()).await;
+
     Ok(md)
+}
+
+/// Post-summarize knowledge pass: mine the (already distilled) summary for the
+/// projects, orgs, and topics the meeting discussed and link them to the
+/// meeting's filed note as entity mentions — the meeting-fed food source for
+/// the knowledge graph. Local model only, like everything meeting-side.
+pub async fn extract_knowledge(app: &tauri::AppHandle, meeting_id: i64) -> Result<usize> {
+    let (note_id, title, date, attendees, summary_md) = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        let meeting = store::get_meeting(&conn, meeting_id)?;
+        let Some(note_id) = meeting["note_id"].as_i64() else {
+            return Ok(0); // nothing filed yet — the first summarize will loop back here
+        };
+        let title = meeting["title"].as_str().unwrap_or("Meeting").to_string();
+        let date: String = meeting["started_at"]
+            .as_str()
+            .map(|s| s.chars().take(10).collect())
+            .unwrap_or_else(crate::today_local);
+        let attendees = attendee_names(&meeting["event_json"]);
+        // Richest tab wins: the longest summary carries the most extractable detail.
+        let md = meeting["summaries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s["content_md"].as_str())
+            .max_by_key(|c| c.len())
+            .unwrap_or("")
+            .to_string();
+        (note_id, title, date, attendees, md)
+    };
+    if summary_md.is_empty() {
+        return Ok(0);
+    }
+
+    let schema = json!({
+        "type": "object",
+        "properties": { "entities": { "type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "type": { "type": "string", "enum": ["project", "org", "topic"] },
+                "fact": { "type": "string" }
+            },
+            "required": ["name", "type", "fact"]
+        }}},
+        "required": ["entities"]
+    });
+    let system = "You mine a meeting summary for knowledge-graph entities. Extract the \
+        distinct projects, organizations/companies/products, and recurring topics the \
+        meeting actually discussed. Rules: 3-12 entities total, most important first; \
+        names are short canonical noun phrases of 1-4 words (never a sentence); skip \
+        generic words (meeting, update, team, discussion), dates, and people — people \
+        are handled separately. For each entity give a one-sentence fact stating what \
+        THIS meeting said about it. JSON: {\"entities\":[{\"name\",\"type\",\"fact\"}]}";
+    let mut body = summary_md;
+    body.truncate(12_000);
+    let user = format!(
+        "Meeting: {title} ({date})\nAttendees: {}\n\nSummary:\n{body}",
+        if attendees.is_empty() { "(unknown)".to_string() } else { attendees.join(", ") }
+    );
+    let v = ollama::chat_json_local(&ollama::text_model(), system, &user, None, Some(schema)).await?;
+
+    let candidates: Vec<crate::EntityCandidate> = v["entities"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| {
+            let name = e["name"].as_str()?.trim();
+            let etype = e["type"].as_str()?.trim().to_lowercase();
+            if name.is_empty() || name.len() > 60 {
+                return None;
+            }
+            Some(crate::EntityCandidate {
+                name: name.to_string(),
+                etype,
+                fact: e["fact"].as_str().map(|f| f.trim().to_string()).filter(|f| !f.is_empty()),
+                relationship: None,
+            })
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let added =
+        crate::persist_entities(app, note_id, &date, &title, &now, candidates, true).await;
+    Ok(added as usize)
 }
 
 #[cfg(test)]

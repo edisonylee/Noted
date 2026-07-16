@@ -13,6 +13,10 @@ import { colorForType } from "./entityColors";
 // anywhere.
 type Section = "people" | "self" | "work";
 
+// Self + Work are parked while Knowledge refocuses on the meeting-fed graph;
+// the views and their data stay — this only hides the tabs.
+const SHOW_SELF_WORK = false;
+
 const TYPES = ["person", "place", "activity", "food", "item", "org", "topic", "project", "decision", "reference", "doc"];
 
 export function KnowledgeView({
@@ -140,18 +144,22 @@ export function KnowledgeView({
             >
               <Users size={15} /> People
             </button>
-            <button
-              className={"kn-tab" + (section === "self" ? " on" : "")}
-              onClick={() => setSection("self")}
-            >
-              <Network size={15} /> Self
-            </button>
-            <button
-              className={"kn-tab" + (section === "work" ? " on" : "")}
-              onClick={() => setSection("work")}
-            >
-              <Briefcase size={15} /> Work
-            </button>
+            {SHOW_SELF_WORK && (
+              <>
+                <button
+                  className={"kn-tab" + (section === "self" ? " on" : "")}
+                  onClick={() => setSection("self")}
+                >
+                  <Network size={15} /> Self
+                </button>
+                <button
+                  className={"kn-tab" + (section === "work" ? " on" : "")}
+                  onClick={() => setSection("work")}
+                >
+                  <Briefcase size={15} /> Work
+                </button>
+              </>
+            )}
           </div>
           {section === "people" ? (
             <PeopleView onOpenPerson={setSelectedEntityId} />

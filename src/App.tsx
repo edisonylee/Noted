@@ -27,6 +27,10 @@ import "./App.css";
 
 type Phase = "idle" | "thinking" | "review";
 type View = "today" | "ask" | "capture" | "notes" | "calendar" | "journal" | "knowledge" | "settings";
+
+// Journal is parked while the meeting recorder + knowledge graph stabilize;
+// the view, commands, and data all stay — this only hides the nav entry.
+const SHOW_JOURNAL = false;
 type Source = "text" | "photo";
 // One editable review card per extracted entry.
 type ReviewCard = {
@@ -662,9 +666,11 @@ export default function App() {
           <button className={view === "calendar" ? "on" : ""} onClick={() => setView("calendar")}>
             <CalendarDays size={16} /> Calendar
           </button>
-          <button className={view === "journal" ? "on" : ""} onClick={() => setView("journal")}>
-            <BookOpen size={16} /> Journal
-          </button>
+          {SHOW_JOURNAL && (
+            <button className={view === "journal" ? "on" : ""} onClick={() => setView("journal")}>
+              <BookOpen size={16} /> Journal
+            </button>
+          )}
           <button className={view === "knowledge" ? "on" : ""} onClick={() => setView("knowledge")}>
             <Network size={16} /> Knowledge
           </button>

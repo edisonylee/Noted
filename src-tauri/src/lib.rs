@@ -900,11 +900,13 @@ async fn chat(
     // (relevance — this is what surfaces brain/reference notes). Context is
     // recent-first; the SOURCES we attribute are relevance-first, so the note
     // that actually answered (often a brain note) is credited, not the latest
-    // bagel.
-    let (hits, sources) = {
+    // bagel. A third, graph-guided set rides along: entities matched from the
+    // question pull in their own notes plus a structured relationship digest.
+    let (hits, sources, graph_digest, graph_entities) = {
         let conn = state.0.lock().unwrap();
         let recent = db::recent_entries(&conn, 15).map_err(|e| e.to_string())?;
         let semantic = db::search_notes(&conn, &qv, 8).map_err(|e| e.to_string())?;
+        let (graph_digest, graph_entities, graph_hits) = graph_context(&conn, &question, &qv);
         let mut src_seen = HashSet::new();
         let sources: Vec<Value> = semantic
             .iter()
@@ -928,12 +930,12 @@ async fn chat(
             .collect();
         let mut seen = HashSet::new();
         let mut hits = Vec::new();
-        for h in recent.into_iter().chain(semantic.into_iter()) {
+        for h in recent.into_iter().chain(semantic.into_iter()).chain(graph_hits.into_iter()) {
             if seen.insert(h.note_id) {
                 hits.push(h);
             }
         }
-        (hits, sources)
+        (hits, sources, graph_digest, graph_entities)
     };
     if hits.is_empty() {
         return Ok(json!({
@@ -1122,15 +1124,114 @@ async fn chat(
         let role = if m.role == "assistant" { "assistant" } else { "user" };
         messages.push(json!({ "role": role, "content": m.content }));
     }
-    messages.push(json!({
-        "role": "user",
-        "content": format!("Entries:\n{context}\nQuestion: {question}")
-    }));
+    let user_turn = if graph_digest.is_empty() {
+        format!("Entries:\n{context}\nQuestion: {question}")
+    } else {
+        format!("Knowledge graph:\n{graph_digest}\nEntries:\n{context}\nQuestion: {question}")
+    };
+    messages.push(json!({ "role": "user", "content": user_turn }));
     let answer = ollama::chat_messages(&ollama::text_model(), messages, 0.2)
         .await
         .map_err(|e| e.to_string())?;
 
-    Ok(json!({ "kind": "answer", "answer": answer.trim(), "sources": sources }))
+    Ok(json!({
+        "kind": "answer",
+        "answer": answer.trim(),
+        "sources": sources,
+        "entities": graph_entities,
+    }))
+}
+
+/// Match a chat question against the knowledge graph and assemble the graph's
+/// contribution to the answer: a compact structured digest (who/what matched,
+/// their co-mention neighbors, their most recent dated facts), the matched
+/// entities for the UI's "from the graph" chips, and those entities' own notes
+/// as extra retrieval hits. Matching is name/alias word-hit first (precise),
+/// then embedding nearest-neighbor (fuzzy), capped small so the digest stays a
+/// digest. Empty results everywhere when the graph has nothing to say.
+fn graph_context(
+    conn: &rusqlite::Connection,
+    question: &str,
+    qv: &[f32],
+) -> (String, Vec<Value>, Vec<db::SearchHit>) {
+    const MAX_ENTITIES: usize = 4;
+    const EMBED_SIM_FLOOR: f32 = 0.55;
+
+    let q = question.to_lowercase();
+    let word_hit = |needle: &str| -> bool {
+        if needle.len() < 3 {
+            return false;
+        }
+        let mut start = 0;
+        while let Some(pos) = q[start..].find(needle) {
+            let at = start + pos;
+            let before_ok = at == 0 || !q[..at].chars().next_back().unwrap().is_alphanumeric();
+            let after = at + needle.len();
+            let after_ok = after >= q.len() || !q[after..].chars().next().unwrap().is_alphanumeric();
+            if before_ok && after_ok {
+                return true;
+            }
+            start = at + 1;
+        }
+        false
+    };
+
+    let mut matched: Vec<i64> = Vec::new();
+    if let Ok(all) = db::entities_for_matching(conn) {
+        for (id, name, _t, aliases) in &all {
+            if word_hit(&name.to_lowercase())
+                || aliases.iter().any(|a| word_hit(&a.to_lowercase()))
+            {
+                matched.push(*id);
+            }
+        }
+    }
+    // Fuzzy fill: embedding neighbors of the question, only above a floor so an
+    // unrelated question doesn't drag random entities into every answer.
+    if matched.len() < MAX_ENTITIES {
+        if let Ok(nn) = db::nearest_entities_any(conn, qv, 6) {
+            for (id, dist) in nn {
+                let sim = 1.0 - dist * dist / 2.0;
+                if sim >= EMBED_SIM_FLOOR && !matched.contains(&id) {
+                    matched.push(id);
+                }
+            }
+        }
+    }
+    matched.truncate(MAX_ENTITIES);
+    if matched.is_empty() {
+        return (String::new(), Vec::new(), Vec::new());
+    }
+
+    let mut digest = String::new();
+    let mut chips: Vec<Value> = Vec::new();
+    let mut extra_hits: Vec<db::SearchHit> = Vec::new();
+    for id in matched {
+        let Ok(p) = db::entity_profile(conn, id) else { continue };
+        chips.push(json!({ "id": p.id, "name": p.name, "type": p.r#type }));
+        digest.push_str(&format!("- {} ({}, {} mentions", p.name, p.r#type, p.mention_count));
+        if let Some(last) = &p.last_seen {
+            digest.push_str(&format!(", last {last}"));
+        }
+        digest.push(')');
+        if let Ok(neigh) = db::entity_neighbors(conn, id, 6) {
+            if !neigh.is_empty() {
+                let list: Vec<String> = neigh
+                    .iter()
+                    .map(|(n, _t, w)| format!("{n} ({w} shared)"))
+                    .collect();
+                digest.push_str(&format!(" — linked to: {}", list.join(", ")));
+            }
+        }
+        digest.push('\n');
+        for m in p.mentions.iter().filter(|m| !m.text.trim().is_empty()).take(3) {
+            digest.push_str(&format!("    • {}: {}\n", m.date, m.text.trim()));
+        }
+        if let Ok(notes) = db::notes_for_entity(conn, id, 3) {
+            extra_hits.extend(notes);
+        }
+    }
+    (digest, chips, extra_hits)
 }
 
 /// Proactive surfacing: given in-progress capture text, return related brain

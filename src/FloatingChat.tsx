@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowUp, Check, Mic, Palette, Sparkles, Square, Volume2, VolumeX, X } from "lucide-react";
-import { api, isDesktop, type AskSource, type BrainVaultStatus, type ChatProposal } from "./api";
+import { api, isDesktop, type AskEntity, type AskSource, type BrainVaultStatus, type ChatProposal } from "./api";
+import { colorForType } from "./entityColors";
 import { applyProposal, proposalText } from "./chatActions";
 import { startRecording, type Recorder } from "./audio";
 import { DataView } from "./DataView";
@@ -11,6 +12,7 @@ type Msg = {
   role: "user" | "assistant";
   content: string;
   sources?: AskSource[];
+  entities?: AskEntity[]; // knowledge-graph nodes that informed the answer
   proposal?: ChatProposal; // when set, render Confirm/Cancel
   resolved?: "confirmed" | "cancelled";
 };
@@ -100,7 +102,10 @@ export function FloatingChat({
           { role: "assistant", content: proposalText(res.proposal), proposal: res.proposal },
         ]);
       } else {
-        setMessages((p) => [...p, { role: "assistant", content: res.answer, sources: res.sources }]);
+        setMessages((p) => [
+          ...p,
+          { role: "assistant", content: res.answer, sources: res.sources, entities: res.entities },
+        ]);
         if (!muted && isDesktop) api.speak(res.answer).catch(() => {});
       }
     } catch (e) {
@@ -226,6 +231,16 @@ export function FloatingChat({
         {messages.map((m, i) => (
           <div className={"bubble " + m.role} key={i}>
             <p>{m.content}</p>
+            {m.entities && m.entities.length > 0 && (
+              <div className="sources graph-refs">
+                {m.entities.map((e) => (
+                  <span className="source-chip entity-chip" key={e.id}>
+                    <span className="ldot" style={{ background: colorForType(e.type) }} />
+                    {e.name}
+                  </span>
+                ))}
+              </div>
+            )}
             {m.sources && m.sources.length > 0 && (
               <div className="sources">
                 {m.sources.slice(0, 4).map((s) => (

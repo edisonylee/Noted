@@ -455,9 +455,12 @@ export type ChatProposal =
       summary: string;
     };
 
+// An entity the graph contributed to an answer ("from the graph" chips).
+export type AskEntity = { id: number; name: string; type: string };
+
 // chat() returns either a grounded answer or a proposal awaiting confirmation.
 export type AskResult =
-  | { kind: "answer"; answer: string; sources: AskSource[] }
+  | { kind: "answer"; answer: string; sources: AskSource[]; entities?: AskEntity[] }
   | { kind: "proposal"; proposal: ChatProposal };
 
 export type Recap = {

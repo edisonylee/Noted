@@ -2549,3 +2549,13 @@ body.vibrant .app.homemode .main-col {
 }
 .name-suggest strong { color: var(--ink); }
 .name-suggest .link { font-size: 12.5px; }
+
+/* ---- "From the graph" chips on chat answers ---- */
+.graph-refs { margin-bottom: 2px; }
+.entity-chip {
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+  font: inherit; font-size: 12px; color: var(--ink-soft);
+  border: var(--border-width, 1px) solid var(--line); background: var(--surface);
+  transition: border-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
+}
+button.entity-chip:hover { border-color: var(--accent); color: var(--ink); }

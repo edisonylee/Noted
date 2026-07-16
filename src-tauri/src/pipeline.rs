@@ -23,6 +23,9 @@ their reference knowledge — notes, people, projects, and decisions imported fr
 base (\"brain\"). \
 Today is {today}. You are given the user's recent and most-relevant entries, each tagged with its \
 DATE (YYYY-MM-DD) and CATEGORY. Answer using ONLY these entries.\n\
+- A \"Knowledge graph\" block may precede the entries: people/projects/topics matched from the \
+question, each with its connections (\"linked to\") and dated facts from meetings and notes. Use it \
+for who/what relationships and timelines; the entries stay the ground truth for details.\n\
 - Resolve relative dates yourself: \"yesterday\" is the day before today; \"last workout\" is the \
 most recent entry in a gym/workout category; prefer the most recent matching entry.\n\
 - Talk about dates the way a person would: say the month and day like \"June 1st\" — NEVER output \

@@ -19,7 +19,8 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { api, type AskSource, type ChatProposal } from "./api";
+import { api, type AskEntity, type AskSource, type ChatProposal } from "./api";
+import { colorForType } from "./entityColors";
 import { applyProposal, proposalText } from "./chatActions";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg, type Img } from "./image";
@@ -31,6 +32,7 @@ type Msg = {
   role: "user" | "assistant";
   content: string;
   sources?: AskSource[];
+  entities?: AskEntity[]; // knowledge-graph nodes that informed the answer
   proposal?: ChatProposal;
   resolved?: "confirmed" | "cancelled";
   attachedImg?: string; // dataUrl thumbnail on user messages
@@ -69,9 +71,11 @@ const RECIPES: { label: string; icon: "todo" | "recap" | "meetings" | "event"; p
 export function AskView({
   onMutated,
   onSaveNote,
+  onOpenEntity,
 }: {
   onMutated?: () => void;
   onSaveNote?: (draft: { text: string; img: Img | null }) => Promise<void>;
+  onOpenEntity?: (id: number) => void; // jump into the knowledge graph
 }) {
   const { themes, previewTheme, clearPreview, activateTheme } = useTheme();
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -130,7 +134,10 @@ export function AskView({
           { role: "assistant", content: proposalText(res.proposal), proposal: res.proposal },
         ]);
       } else {
-        setMessages((p) => [...p, { role: "assistant", content: res.answer, sources: res.sources }]);
+        setMessages((p) => [
+          ...p,
+          { role: "assistant", content: res.answer, sources: res.sources, entities: res.entities },
+        ]);
       }
     } catch (e) {
       setMessages((p) => [...p, { role: "assistant", content: `Sorry — ${e}` }]);
@@ -347,6 +354,21 @@ export function AskView({
           <div className={"ask-bubble " + m.role} key={i}>
             {m.attachedImg && <img className="ask-bubble-img" src={m.attachedImg} alt="attached" />}
             <p>{m.content}</p>
+            {m.entities && m.entities.length > 0 && (
+              <div className="sources graph-refs">
+                {m.entities.map((e) => (
+                  <button
+                    className="source-chip entity-chip"
+                    key={e.id}
+                    title={`Open ${e.name} in the knowledge graph`}
+                    onClick={() => onOpenEntity?.(e.id)}
+                  >
+                    <span className="ldot" style={{ background: colorForType(e.type) }} />
+                    {e.name}
+                  </button>
+                ))}
+              </div>
+            )}
             {m.sources && m.sources.length > 0 && (
               <div className="sources">
                 {m.sources.slice(0, 4).map((s) => (

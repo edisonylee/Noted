@@ -1127,6 +1127,59 @@ pub fn entity_edges(conn: &Connection) -> Result<Vec<GraphEdge>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Cross-type KNN over entity embeddings — question→entity matching for the
+/// graph-aware chat. Returns (entity_id, L2 distance), nearest first.
+pub fn nearest_entities_any(conn: &Connection, qvec: &[f32], k: i64) -> Result<Vec<(i64, f32)>> {
+    let json = serde_json::to_string(qvec)?;
+    let mut stmt = conn.prepare(
+        "SELECT entity_id, distance FROM entity_embeddings
+         WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![json, k], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// An entity's strongest co-mention neighbors: (name, type, shared-note count),
+/// heaviest edge first — the "linked to" line in the chat's graph digest.
+pub fn entity_neighbors(
+    conn: &Connection,
+    entity_id: i64,
+    k: i64,
+) -> Result<Vec<(String, String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT ent.name, ent.type, COUNT(DISTINCT a.note_id) AS w
+         FROM entity_mentions a
+         JOIN entity_mentions b ON a.note_id = b.note_id AND b.entity_id != a.entity_id
+         JOIN entities ent ON ent.id = b.entity_id
+         WHERE a.entity_id = ?1
+         GROUP BY b.entity_id
+         ORDER BY w DESC, ent.mention_count DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![entity_id, k], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Every entity with its aliases: (id, name, type, aliases). The catalog is
+/// small (a personal KB), so chat-question matching happens in memory.
+pub fn entities_for_matching(
+    conn: &Connection,
+) -> Result<Vec<(i64, String, String, Vec<String>)>> {
+    let mut stmt = conn.prepare("SELECT id, name, type, aliases FROM entities")?;
+    let rows = stmt.query_map([], |r| {
+        let aliases: String = r.get(3)?;
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            serde_json::from_str(&aliases).unwrap_or_default(),
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 #[derive(Serialize)]
 pub struct EntityMentionRow {
     pub note_id: i64,

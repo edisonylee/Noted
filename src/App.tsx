@@ -740,6 +740,10 @@ export default function App() {
             <AskView
               onMutated={() => refresh().catch(handleErr)}
               onSaveNote={beginNoteReview}
+              onOpenEntity={(id) => {
+                setKnowledgeEntity(id);
+                setView("knowledge");
+              }}
             />
           </WeatherHome>
         ) : view === "notes" ? (

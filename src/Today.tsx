@@ -973,19 +973,17 @@ export function TodayView({
     setEditIdx(idx);
   };
 
+  // A quiet pill at the foot of the schedule — photo capture is an entry
+  // point, not a headline section competing with the schedule itself.
   const PhotoEntry = () => (
     <button
       type="button"
-      className="today-photo-entry"
+      className="today-addrow"
       onClick={() => fileRef.current?.click()}
       disabled={busy}
+      title="Turn handwriting or a screenshot into today’s plan"
     >
-      <span className="today-photo-entry-icon" aria-hidden><Camera size={18} /></span>
-      <span className="today-photo-entry-copy">
-        <strong>Add a schedule photo</strong>
-        <small>Turn handwriting or a screenshot into today’s plan.</small>
-      </span>
-      <span className="today-photo-entry-action">Choose photo</span>
+      <Camera size={15} /> Add a photo
     </button>
   );
 
@@ -1214,7 +1212,6 @@ export function TodayView({
     return (
       <div className="today">
         {Head(true)}
-        <PhotoEntry />
         {showCal && (
           <div className="today-empty">
             <div className="today-cal">
@@ -1248,6 +1245,9 @@ export function TodayView({
             </button>
           </div>
         )}
+        <div className="today-footrow">
+          <PhotoEntry />
+        </div>
       </div>
     );
   }
@@ -1263,7 +1263,6 @@ export function TodayView({
   return (
     <div className="today">
       {Head(true)}
-      <PhotoEntry />
 
       <div className="today-agenda">
         {rows.map((r, i) => {
@@ -1373,15 +1372,18 @@ export function TodayView({
             onCancel={() => setAdding(false)}
           />
         ) : (
-          <button
-            className="today-addrow"
-            onClick={() => {
-              setEditIdx(null);
-              setAdding(true);
-            }}
-          >
-            <Plus size={15} /> Add to schedule
-          </button>
+          <div className="today-footrow">
+            <button
+              className="today-addrow"
+              onClick={() => {
+                setEditIdx(null);
+                setAdding(true);
+              }}
+            >
+              <Plus size={15} /> Add to schedule
+            </button>
+            <PhotoEntry />
+          </div>
         )}
       </div>
 

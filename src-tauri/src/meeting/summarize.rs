@@ -631,7 +631,7 @@ pub async fn run(app: &tauri::AppHandle, meeting_id: i64, template_name: Option<
 /// meeting's filed note as entity mentions — the meeting-fed food source for
 /// the knowledge graph. Local model only, like everything meeting-side.
 pub async fn extract_knowledge(app: &tauri::AppHandle, meeting_id: i64) -> Result<usize> {
-    let (note_id, title, date, attendees, summary_md) = {
+    let (note_id, title, date, attendees, speakers, summary_md) = {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
         let meeting = store::get_meeting(&conn, meeting_id)?;
@@ -644,6 +644,18 @@ pub async fn extract_knowledge(app: &tauri::AppHandle, meeting_id: i64) -> Resul
             .map(|s| s.chars().take(10).collect())
             .unwrap_or_else(crate::today_local);
         let attendees = attendee_names(&meeting["event_json"]);
+        // Named speakers are people the KG must know even when they weren't on
+        // the invite (voiceprint-matched or user-renamed — never "Speaker N").
+        let speakers: Vec<String> = meeting["speakers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s["label"].as_str())
+            .filter(|l| {
+                !l.is_empty() && *l != "Me" && *l != "Them" && !l.starts_with("Speaker ")
+            })
+            .map(|l| l.to_string())
+            .collect();
         // Richest tab wins: the longest summary carries the most extractable detail.
         let md = meeting["summaries"]
             .as_array()
@@ -653,7 +665,7 @@ pub async fn extract_knowledge(app: &tauri::AppHandle, meeting_id: i64) -> Resul
             .max_by_key(|c| c.len())
             .unwrap_or("")
             .to_string();
-        (note_id, title, date, attendees, md)
+        (note_id, title, date, attendees, speakers, md)
     };
     if summary_md.is_empty() {
         return Ok(0);
@@ -685,26 +697,57 @@ pub async fn extract_knowledge(app: &tauri::AppHandle, meeting_id: i64) -> Resul
         "Meeting: {title} ({date})\nAttendees: {}\n\nSummary:\n{body}",
         if attendees.is_empty() { "(unknown)".to_string() } else { attendees.join(", ") }
     );
-    let v = ollama::chat_json_local(&ollama::text_model(), system, &user, None, Some(schema)).await?;
+    // People first — attendees AND named speakers — deduped by normalized name.
+    // These file even when the content extraction below has a bad day, and the
+    // mention guard keeps re-runs (reindex, re-summarize) from double-counting.
+    let mut candidates: Vec<crate::EntityCandidate> = Vec::new();
+    let mut seen_people = std::collections::HashSet::new();
+    for name in attendees.iter().chain(speakers.iter()) {
+        let name = name.trim();
+        if name.is_empty() || !seen_people.insert(crate::entities::normalize(name)) {
+            continue;
+        }
+        candidates.push(crate::EntityCandidate {
+            name: name.to_string(),
+            etype: "person".into(),
+            // Curated context so their card reads "Meeting: <title>", not a
+            // raw-markdown snippet of the filed note.
+            fact: Some(format!("Meeting: {title}")),
+            relationship: None,
+        });
+    }
 
-    let candidates: Vec<crate::EntityCandidate> = v["entities"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|e| {
-            let name = e["name"].as_str()?.trim();
-            let etype = e["type"].as_str()?.trim().to_lowercase();
-            if name.is_empty() || name.len() > 60 {
-                return None;
+    // Content extraction is best-effort: a failed model call must not cost the
+    // meeting its people.
+    let extracted =
+        match ollama::chat_json_local(&ollama::text_model(), system, &user, None, Some(schema))
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[noted] knowledge extraction model call failed: {e}");
+                json!({})
             }
-            Some(crate::EntityCandidate {
-                name: name.to_string(),
-                etype,
-                fact: e["fact"].as_str().map(|f| f.trim().to_string()).filter(|f| !f.is_empty()),
-                relationship: None,
-            })
-        })
-        .collect();
+        };
+    candidates.extend(
+        extracted["entities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| {
+                let name = e["name"].as_str()?.trim();
+                let etype = e["type"].as_str()?.trim().to_lowercase();
+                if name.is_empty() || name.len() > 60 {
+                    return None;
+                }
+                Some(crate::EntityCandidate {
+                    name: name.to_string(),
+                    etype,
+                    fact: e["fact"].as_str().map(|f| f.trim().to_string()).filter(|f| !f.is_empty()),
+                    relationship: None,
+                })
+            }),
+    );
     if candidates.is_empty() {
         return Ok(0);
     }

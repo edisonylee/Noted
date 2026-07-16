@@ -2559,3 +2559,6 @@ body.vibrant .app.homemode .main-col {
   transition: border-color var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
 }
 button.entity-chip:hover { border-color: var(--accent); color: var(--ink); }
+
+/* Quiet footer actions under the schedule (add row + add photo). */
+.today-footrow { display: flex; align-items: center; }

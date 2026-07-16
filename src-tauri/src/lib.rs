@@ -355,7 +355,7 @@ async fn save_entry(app: tauri::AppHandle, args: SaveArgs) -> Result<i64, String
         }
     }
     if !candidates.is_empty() {
-        let snippet: String = raw.chars().take(200).collect();
+        let snippet = plain_text(&raw, 200);
         persist_entities(&app, note_id, &event_date, &snippet, &now, candidates, false).await;
     }
 
@@ -489,11 +489,31 @@ fact the reflection reveals about them, and the relationship when stated. [] if 
 /// the text starts with a YAML frontmatter block — skip it so the snippet shows
 /// real content, not `---\nname: …`.
 fn note_snippet(raw: &str) -> String {
+    plain_text(raw, 140)
+}
+
+/// Flatten note text for snippet display: drop YAML frontmatter and markdown
+/// syntax (headings, emphasis, bullets, code ticks) so UI chips and stored
+/// mention contexts read as prose, not `# Daily Stand Up ## Summary`.
+fn plain_text(raw: &str, n: usize) -> String {
     let body = match raw.strip_prefix("---\n") {
         Some(rest) => rest.split_once("\n---").map(|(_, b)| b).unwrap_or(rest),
         None => raw,
     };
-    body.replace('\n', " ").trim().chars().take(140).collect()
+    let mut out = String::new();
+    for line in body.lines() {
+        let line = line.trim_start_matches(['#', '>', ' ']);
+        let line = line.strip_prefix("- ").unwrap_or(line);
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&line.replace(['*', '`'], ""));
+    }
+    out.chars().take(n).collect()
 }
 
 /// A resolved entity to attach to a note: a name + type, plus optional curated
@@ -534,8 +554,13 @@ async fn persist_entities(
     let mut added = 0;
     for (name, etype, emb, fact, rel) in &embedded {
         let id = match entities::resolve_with_embedding(&conn, name, etype, emb) {
-            Ok(entities::Resolution::Exact(id)) | Ok(entities::Resolution::Suggest(id, _)) => id,
-            Ok(entities::Resolution::New) => {
+            Ok(entities::Resolution::Exact(id)) => id,
+            // Fuzzy snap is for spelling drift ("Sara"/"Sarah") — never for
+            // emails: two addresses at one domain embed nearly identically, so
+            // snapping would pool different people onto one entity (it did,
+            // before this guard).
+            Ok(entities::Resolution::Suggest(id, _)) if !name.contains('@') => id,
+            Ok(entities::Resolution::Suggest(_, _)) | Ok(entities::Resolution::New) => {
                 let norm = entities::normalize(name);
                 match db::create_entity(&conn, name, &norm, etype, "[]", event_date, now) {
                     Ok(id) => {

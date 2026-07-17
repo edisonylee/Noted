@@ -383,6 +383,7 @@ export type MeetingDetail = MeetingListRow & {
   raw_notes: string;
   audio_me_path: string | null;
   audio_them_path: string | null;
+  video_path: string | null; // window recording; null = off/expired/deleted
   segments: MeetingSegment[];
   summaries: MeetingSummary[];
   talk_ms: { me: number; them: number };
@@ -422,6 +423,10 @@ export type MeetingsCfg = {
   asr_engine: "whisper" | "parakeet";
   /** macOS voice-processing (AEC) on the mic — strips speaker playback from the mic signal. */
   mic_aec: boolean;
+  /** Record the meeting app's window as video (ScreenCaptureKit, macOS 15+). */
+  record_video: boolean;
+  /** Days before the launch-time sweep deletes window videos; 0 = keep forever. */
+  video_keep_days: number;
 };
 
 // The Journal agent's response: a companion reply (null if the local model was
@@ -679,6 +684,8 @@ export const api = {
   // before diarization existed or interrupted by a crash. Resolves to the
   // voice count (0 = nothing to do).
   meetingRediarize: (id: number) => invoke<number>("meeting_rediarize", { id }),
+  // Delete the window video now instead of waiting out the retention window.
+  meetingVideoDelete: (id: number) => invoke<void>("meeting_video_delete", { id }),
   // Writes "<date> <title>.md" into ~/Downloads; resolves to the path.
   meetingExportMd: (id: number) => invoke<string>("meeting_export_md", { id }),
   meetingExportPdf: (id: number) => invoke<string>("meeting_export_pdf", { id }),

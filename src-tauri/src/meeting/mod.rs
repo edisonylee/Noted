@@ -12,6 +12,7 @@ pub mod diarize;
 pub mod pdf;
 pub mod store;
 pub mod summarize;
+pub mod video;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -80,6 +81,19 @@ pub struct MeetingsCfg {
     /// lands on the "me" channel. Off = raw cpal mic.
     #[serde(default = "d_true")]
     pub mic_aec: bool,
+    /// Record the meeting app's WINDOW as video (ScreenCaptureKit, macOS 15+;
+    /// follows the window even when covered or on another Space). Needs the
+    /// one-time Screen Recording permission.
+    #[serde(default = "d_true")]
+    pub record_video: bool,
+    /// Days to keep window videos before the launch-time sweep deletes them
+    /// (transcripts and summaries are kept forever). 0 = keep forever.
+    #[serde(default = "d_video_days")]
+    pub video_keep_days: i64,
+}
+
+fn d_video_days() -> i64 {
+    14
 }
 
 fn d_true() -> bool {
@@ -135,6 +149,8 @@ impl Default for MeetingsCfg {
             vocabulary: Vec::new(),
             asr_engine: d_engine(),
             mic_aec: true,
+            record_video: true,
+            video_keep_days: d_video_days(),
         }
     }
 }
@@ -332,6 +348,21 @@ pub fn start(
         };
         let h = app.clone();
         threads.push(std::thread::spawn(move || asr::run_worker(h, args)));
+    }
+    // Window video rides along when enabled (its own dir derivation — audio
+    // retention off shouldn't disable video). Fire-and-forget: the worker
+    // stamps video_path itself; stop() doesn't wait on it.
+    if cfg().record_video {
+        if let Ok(base) = app.path().app_data_dir() {
+            video::spawn(
+                app.clone(),
+                id,
+                base.join("meetings").join(id.to_string()),
+                stop.clone(),
+                source_bundle.clone(),
+                cfg().ignore_bundles,
+            );
+        }
     }
 
     *guard = Some(Active {

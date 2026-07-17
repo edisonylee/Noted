@@ -90,7 +90,7 @@ function MdBlock({ md }: { md: string }) {
   return <div className="md">{out}</div>;
 }
 
-type Tab = "notes" | "transcript" | number; // number = summary index
+type Tab = "notes" | "transcript" | "video" | number; // number = summary index
 
 export function MeetingPage({
   id,
@@ -177,6 +177,10 @@ export function MeetingPage({
         if (e.payload.meetingId === id) load();
       }),
       listen<{ meetingId: number }>("meeting-summarized", (e) => {
+        if (e.payload.meetingId === id) load();
+      }),
+      // The window video finalizes shortly after stop, off the stop path.
+      listen<{ meetingId: number }>("meeting-video-ready", (e) => {
         if (e.payload.meetingId === id) load();
       }),
       listen<{ meetingId: number }>("meeting-speakers-suggested", (e) => {
@@ -373,6 +377,18 @@ export function MeetingPage({
   // paths land at stop, so playback is a post-meeting affordance).
   const meAudio = localFileUrl(detail?.audio_me_path);
   const themAudio = localFileUrl(detail?.audio_them_path);
+  const videoSrc = localFileUrl(detail?.video_path);
+
+  const deleteVideo = async () => {
+    if (id == null) return;
+    try {
+      await api.meetingVideoDelete(id);
+      setTab("transcript");
+      await load();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
   const playLine = (s: MeetingSegment) => {
     const src = s.channel === "me" ? meAudio : themAudio;
     const el = audioRef.current;
@@ -493,6 +509,11 @@ export function MeetingPage({
           >
             <AudioLines size={13} /> Transcript
             {liveSegments.length > 0 ? ` (${liveSegments.length})` : ""}
+          </button>
+        )}
+        {videoSrc && (
+          <button className={tab === "video" ? "on" : ""} onClick={() => setTab("video")}>
+            <Video size={13} /> Video
           </button>
         )}
         {summaries.map((s, i) => (
@@ -664,6 +685,29 @@ export function MeetingPage({
           </div>
           <audio ref={audioRef} onEnded={() => setPlayingSeg(null)} style={{ display: "none" }} />
         </>
+      ) : tab === "video" ? (
+        <div className="meeting-video">
+          {videoSrc ? (
+            <>
+              <video src={videoSrc} controls playsInline />
+              <div className="video-tools">
+                <span className="quiet-empty">
+                  The call window, recorded even while covered by other apps. Auto-deletes per
+                  Settings → Meetings.
+                </span>
+                <button
+                  className="chip-action"
+                  onClick={deleteVideo}
+                  title="Delete the video file now to free space (transcript and summaries stay)"
+                >
+                  Delete video
+                </button>
+              </div>
+            </>
+          ) : (
+            <p className="quiet-empty">No video for this meeting.</p>
+          )}
+        </div>
       ) : (
         <div className="meeting-summary">
           {summaries[tab as number] ? (

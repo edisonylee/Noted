@@ -96,8 +96,10 @@ fn attribution(bundle: &str) -> (&'static str, String) {
 }
 
 /// Bundle ids of processes currently holding the microphone (macOS 14+).
+/// Also used by the window-video worker to attribute calendar-started
+/// meetings to their call app.
 #[cfg(target_os = "macos")]
-fn mic_users() -> Vec<String> {
+pub(crate) fn mic_users() -> Vec<String> {
     use cidre::core_audio as ca;
     let Ok(procs) = ca::Process::list() else {
         return Vec::new();

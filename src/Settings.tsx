@@ -957,6 +957,34 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           <label className="vault-auto">
             <input
               type="checkbox"
+              checked={mcfg?.record_video ?? true}
+              onChange={(e) => mcfg && saveMcfg({ ...mcfg, record_video: e.target.checked })}
+            />
+            <span>
+              Record the meeting window as video
+              <em>
+                Captures the call app's window itself (macOS 15+, one-time Screen Recording
+                permission) — covering it with other apps or switching Spaces doesn't interrupt
+                it. Videos auto-delete after{" "}
+                <input
+                  className="inline-days"
+                  type="number"
+                  min={0}
+                  max={365}
+                  value={mcfg?.video_keep_days ?? 14}
+                  onClick={(e) => e.preventDefault()}
+                  onChange={(e) =>
+                    mcfg &&
+                    saveMcfg({ ...mcfg, video_keep_days: Math.max(0, Number(e.target.value) || 0) })
+                  }
+                />{" "}
+                days to save space (0 = keep forever); transcripts and summaries are kept.
+              </em>
+            </span>
+          </label>
+          <label className="vault-auto">
+            <input
+              type="checkbox"
               checked={mcfg?.mic_aec ?? true}
               onChange={(e) => mcfg && saveMcfg({ ...mcfg, mic_aec: e.target.checked })}
             />

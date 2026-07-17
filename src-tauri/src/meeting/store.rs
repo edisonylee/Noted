@@ -76,6 +76,26 @@ pub fn set_audio_paths(conn: &Connection, id: i64, me: Option<&str>, them: Optio
     Ok(())
 }
 
+/// Window-video mp4 path for a meeting; None clears it (file deleted).
+pub fn set_video_path(conn: &Connection, id: i64, path: Option<&str>) -> Result<()> {
+    conn.execute(
+        "UPDATE meetings SET video_path = ?2 WHERE id = ?1",
+        rusqlite::params![id, path],
+    )?;
+    Ok(())
+}
+
+/// (id, video_path) of every meeting still holding a window video — feeds
+/// the launch-time retention sweep.
+pub fn meetings_with_video(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT id, video_path FROM meetings WHERE video_path IS NOT NULL")?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub fn set_note_id(conn: &Connection, id: i64, note_id: i64) -> Result<()> {
     conn.execute(
         "UPDATE meetings SET note_id = ?2 WHERE id = ?1",
@@ -441,7 +461,7 @@ pub fn list_meetings(conn: &Connection, limit: i64) -> Result<Vec<Value>> {
 pub fn get_meeting(conn: &Connection, id: i64) -> Result<Value> {
     let meta = conn.query_row(
         "SELECT id, title, event_id, event_json, started_at, ended_at, status, raw_notes,
-                audio_me_path, audio_them_path, note_id
+                audio_me_path, audio_them_path, note_id, video_path
          FROM meetings WHERE id = ?1",
         [id],
         |r| {
@@ -458,6 +478,7 @@ pub fn get_meeting(conn: &Connection, id: i64) -> Result<Value> {
                 "audio_me_path": r.get::<_, Option<String>>(8)?,
                 "audio_them_path": r.get::<_, Option<String>>(9)?,
                 "note_id": r.get::<_, Option<i64>>(10)?,
+                "video_path": r.get::<_, Option<String>>(11)?,
             }))
         },
     )?;

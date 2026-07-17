@@ -231,6 +231,7 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     // Person naming: AI-proposed display name awaiting the user's confirm
     // (people filed from meeting attendees start out named by raw email).
     ensure_column(&conn, "entities", "suggested_name", "TEXT")?;
+    ensure_column(&conn, "meetings", "video_path", "TEXT")?;
     // Note: the reserved catch-all "misc" is not pre-seeded — the classifier is
     // told about it by name in the prompt, and it's created on first real use
     // (so an unused misc never clutters the catalog/UI).

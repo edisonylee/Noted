@@ -1844,6 +1844,21 @@ async fn meeting_suggest_speakers(app: tauri::AppHandle, id: i64) -> Result<usiz
         .map_err(|e| e.to_string())
 }
 
+/// Delete a meeting's window video now (retention would get it eventually;
+/// this is the "free the space today" button).
+#[tauri::command]
+async fn meeting_video_delete(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let path: Option<String> = conn
+        .query_row("SELECT video_path FROM meetings WHERE id = ?1", [id], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    if let Some(p) = path {
+        meeting::video::delete_video(&conn, id, &p);
+    }
+    Ok(())
+}
+
 /// Rebuild a meeting's speaker labels from its retained audio — heals
 /// meetings recorded before diarization existed or interrupted by a crash.
 /// Returns the voice count (0 = nothing to do / already diarized).
@@ -3263,6 +3278,8 @@ pub fn run() {
             meeting::detect::spawn(app.handle().clone());
             // Recover meetings a previous process left mid-recording.
             meeting::reconcile(&app.handle().clone());
+            // Retention sweep: expired meeting window videos free their space.
+            meeting::video::cleanup_old(&app.handle().clone(), meeting::cfg().video_keep_days);
 
             // Load model-provider config (mode + models from disk, key from Keychain).
             provider::init(&dir);
@@ -3423,6 +3440,7 @@ pub fn run() {
             meeting_rename_speaker,
             meeting_suggest_speakers,
             meeting_rediarize,
+            meeting_video_delete,
             meeting_export_md,
             meeting_export_pdf,
             meeting_start,

@@ -31,9 +31,44 @@ most recent entry in a gym/workout category; prefer the most recent matching ent
 - Talk about dates the way a person would: say the month and day like \"June 1st\" — NEVER output \
 an ISO date like 2026-06-01, and omit the year unless it is a different year than today. If a date \
 is today or the day before today, say \"today\" or \"yesterday\" instead of the date.\n\
+- When the question asks about one specific day (\"today\", \"tomorrow\", \"yesterday\", or a \
+date), answer ONLY from entries dated that exact day — never pad the answer with other days.\n\
 - Be concise and specific; cite the concrete numbers. If the entries don't contain the answer, \
 say you don't have that logged."
     )
+}
+
+/// Detect a chat question that is explicitly about ONE day ("what's my
+/// schedule today?") so retrieval can be pinned to that date — the date filter
+/// is code, not the model. Returns (YYYY-MM-DD, label). Conservative:
+/// cumulative phrasings ("as of today", "so far today") and questions naming
+/// more than one day (comparisons) return None and keep broad retrieval.
+pub fn day_scope(question: &str, today: &str) -> Option<(String, &'static str)> {
+    let today_d = NaiveDate::parse_from_str(today, "%Y-%m-%d").ok()?;
+    let mut q = question.to_lowercase();
+    // Cumulative idioms mention "today" without asking about the day itself.
+    for idiom in ["as of today", "up to today", "until today", "through today", "so far today", "before today"] {
+        q = q.replace(idiom, " ");
+    }
+    let has = |words: &[&str]| {
+        words.iter().any(|w| {
+            q.match_indices(w).any(|(at, _)| {
+                let before_ok = at == 0 || !q.as_bytes()[at - 1].is_ascii_alphanumeric();
+                let after = at + w.len();
+                let after_ok = after >= q.len() || !q.as_bytes()[after].is_ascii_alphanumeric();
+                before_ok && after_ok
+            })
+        })
+    };
+    let today_hit = has(&["today", "tonight", "this morning", "this afternoon", "this evening"]);
+    let tomorrow_hit = has(&["tomorrow", "tmrw"]);
+    let yesterday_hit = has(&["yesterday"]);
+    match (today_hit, tomorrow_hit, yesterday_hit) {
+        (true, false, false) => Some((today_d.to_string(), "today")),
+        (false, true, false) => today_d.succ_opt().map(|d| (d.to_string(), "tomorrow")),
+        (false, false, true) => today_d.pred_opt().map(|d| (d.to_string(), "yesterday")),
+        _ => None,
+    }
 }
 
 /// Format retrieved entries into a compact, dated context block for the LLM.

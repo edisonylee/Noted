@@ -29,6 +29,35 @@ fn snaps_category_to_existing() {
 }
 
 #[test]
+fn day_scope_pins_single_day_questions() {
+    use pipeline::day_scope;
+    // pure unit checks, no model
+    assert_eq!(day_scope("What's on my schedule today?", TODAY), Some(("2026-06-15".into(), "today")));
+    assert_eq!(day_scope("what am I doing tonight", TODAY), Some(("2026-06-15".into(), "today")));
+    assert_eq!(day_scope("anything this morning?", TODAY), Some(("2026-06-15".into(), "today")));
+    assert_eq!(day_scope("What's my schedule tomorrow?", TODAY), Some(("2026-06-16".into(), "tomorrow")));
+    assert_eq!(day_scope("free tmrw?", TODAY), Some(("2026-06-16".into(), "tomorrow")));
+    assert_eq!(day_scope("what did I eat yesterday", TODAY), Some(("2026-06-14".into(), "yesterday")));
+    // month rollover
+    assert_eq!(day_scope("plans for tomorrow?", "2026-06-30"), Some(("2026-07-01".into(), "tomorrow")));
+}
+
+#[test]
+fn day_scope_stays_broad_when_ambiguous() {
+    use pipeline::day_scope;
+    // cumulative idioms mention "today" without asking about the day
+    assert_eq!(day_scope("how many workouts have I done as of today?", TODAY), None);
+    assert_eq!(day_scope("what have I eaten so far today", TODAY), None);
+    // comparisons name two days -> keep broad retrieval
+    assert_eq!(day_scope("compare today and yesterday", TODAY), None);
+    assert_eq!(day_scope("was yesterday busier than tomorrow will be?", TODAY), None);
+    // no day word at all
+    assert_eq!(day_scope("what have I been working on?", TODAY), None);
+    // day words inside larger words don't count
+    assert_eq!(day_scope("notes about todays-specials-menu.pdf", TODAY), None);
+}
+
+#[test]
 fn scrapes_dates_from_text() {
     // the exact case from the gym-log photo
     assert_eq!(

@@ -921,6 +921,26 @@ async fn chat(
         return Ok(json!({ "kind": "answer", "answer": answer.trim(), "sources": sources }));
     }
 
+    // Day-scoped question ("what's my schedule today?"): pin retrieval to that
+    // one date so the answer can't drift into other days — the date filter is
+    // code, not the model. Broad questions keep the hybrid retrieval below.
+    let day_scope = pipeline::day_scope(&question, &today_local());
+
+    // Label brain notes by their vault ("baro"/"profound") for clear
+    // provenance; capture notes keep their category.
+    let source_json = |h: &db::SearchHit| {
+        let label = match h.origin.as_deref() {
+            Some(o) if o.starts_with("brain:") => Some(o.trim_start_matches("brain:").to_string()),
+            _ => h.category.clone(),
+        };
+        json!({
+            "note_id": h.note_id,
+            "category": label,
+            "event_date": h.event_date,
+            "snippet": note_snippet(&h.raw_text),
+        })
+    };
+
     // Two retrieval sets: recent-by-date (recency questions) and semantic
     // (relevance — this is what surfaces brain/reference notes). Context is
     // recent-first; the SOURCES we attribute are relevance-first, so the note
@@ -929,40 +949,37 @@ async fn chat(
     // question pull in their own notes plus a structured relationship digest.
     let (hits, sources, graph_digest, graph_entities) = {
         let conn = state.0.lock().unwrap();
-        let recent = db::recent_entries(&conn, 15).map_err(|e| e.to_string())?;
-        let semantic = db::search_notes(&conn, &qv, 8).map_err(|e| e.to_string())?;
-        let (graph_digest, graph_entities, graph_hits) = graph_context(&conn, &question, &qv);
-        let mut src_seen = HashSet::new();
-        let sources: Vec<Value> = semantic
-            .iter()
-            .chain(recent.iter())
-            .filter(|h| src_seen.insert(h.note_id))
-            .take(6)
-            .map(|h| {
-                // Label brain notes by their vault ("baro"/"profound") for clear
-                // provenance; capture notes keep their category.
-                let label = match h.origin.as_deref() {
-                    Some(o) if o.starts_with("brain:") => Some(o.trim_start_matches("brain:").to_string()),
-                    _ => h.category.clone(),
-                };
-                json!({
-                    "note_id": h.note_id,
-                    "category": label,
-                    "event_date": h.event_date,
-                    "snippet": note_snippet(&h.raw_text),
-                })
-            })
-            .collect();
-        let mut seen = HashSet::new();
-        let mut hits = Vec::new();
-        for h in recent.into_iter().chain(semantic.into_iter()).chain(graph_hits.into_iter()) {
-            if seen.insert(h.note_id) {
-                hits.push(h);
+        if let Some((day, _)) = &day_scope {
+            // The graph digest is skipped here: its dated facts span other
+            // days and would leak them back into the answer.
+            let day_hits = db::notes_on_date(&conn, day, 15).map_err(|e| e.to_string())?;
+            let sources: Vec<Value> = day_hits.iter().take(6).map(source_json).collect();
+            (day_hits, sources, String::new(), Vec::new())
+        } else {
+            let recent = db::recent_entries(&conn, 15).map_err(|e| e.to_string())?;
+            let semantic = db::search_notes(&conn, &qv, 8).map_err(|e| e.to_string())?;
+            let (graph_digest, graph_entities, graph_hits) = graph_context(&conn, &question, &qv);
+            let mut src_seen = HashSet::new();
+            let sources: Vec<Value> = semantic
+                .iter()
+                .chain(recent.iter())
+                .filter(|h| src_seen.insert(h.note_id))
+                .take(6)
+                .map(source_json)
+                .collect();
+            let mut seen = HashSet::new();
+            let mut hits = Vec::new();
+            for h in recent.into_iter().chain(semantic.into_iter()).chain(graph_hits.into_iter()) {
+                if seen.insert(h.note_id) {
+                    hits.push(h);
+                }
             }
+            (hits, sources, graph_digest, graph_entities)
         }
-        (hits, sources, graph_digest, graph_entities)
     };
-    if hits.is_empty() {
+    // A day-scoped question with an empty day still goes through the router —
+    // "schedule dinner tomorrow at 7" must reach create_event.
+    if hits.is_empty() && day_scope.is_none() {
         return Ok(json!({
             "kind": "answer",
             "answer": "I don't have any notes yet — log a few and ask again.",
@@ -1143,13 +1160,29 @@ async fn chat(
     // 3) Default: grounded free-text answer (unchanged behavior). We deliberately
     // ignore the router's `clarify` field — a 7B over-eagerly fills it even on
     // plain questions, which would hijack normal answers.
+    if let Some((_, label)) = &day_scope {
+        // Nothing logged that day: answer deterministically instead of letting
+        // the model improvise from an empty context.
+        if hits.is_empty() {
+            return Ok(json!({
+                "kind": "answer",
+                "answer": format!("You don't have anything logged for {label}."),
+                "sources": [],
+            }));
+        }
+    }
     let context = pipeline::qa_context(&hits);
     let mut messages = vec![json!({ "role": "system", "content": pipeline::qa_system(&today_local()) })];
     for m in &history {
         let role = if m.role == "assistant" { "assistant" } else { "user" };
         messages.push(json!({ "role": role, "content": m.content }));
     }
-    let user_turn = if graph_digest.is_empty() {
+    let user_turn = if let Some((day, label)) = &day_scope {
+        format!(
+            "Entries dated {day} ({label}) — the ONLY day the question asks about; \
+do not mention any other day:\n{context}\nQuestion: {question}"
+        )
+    } else if graph_digest.is_empty() {
         format!("Entries:\n{context}\nQuestion: {question}")
     } else {
         format!("Knowledge graph:\n{graph_digest}\nEntries:\n{context}\nQuestion: {question}")

@@ -545,6 +545,38 @@ pub fn recent_entries(conn: &Connection, limit: i64) -> Result<Vec<SearchHit>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Capture notes with an entry dated `day` — backs day-scoped chat questions
+/// ("what's on my schedule today?") so the answer can't drift to other dates.
+/// The inner JOIN filters before grouping, so `data` carries only that day's
+/// entries even when a multi-section note spans several dates.
+pub fn notes_on_date(conn: &Connection, day: &str, limit: i64) -> Result<Vec<SearchHit>> {
+    let mut stmt = conn.prepare(
+        "SELECT n.id, ?1, pc.name, n.raw_text,
+                json_group_array(json(e.data_json)) AS data, n.origin
+         FROM notes n
+         LEFT JOIN categories pc ON pc.id = n.category_id
+         JOIN entries e ON e.note_id = n.id
+         WHERE (n.origin = 'capture' OR n.origin IS NULL)
+           AND COALESCE(e.event_date, date(e.created_at)) = ?1
+         GROUP BY n.id
+         ORDER BY n.id DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![day, limit], |r| {
+        let data_str: Option<String> = r.get(4)?;
+        Ok(SearchHit {
+            note_id: r.get(0)?,
+            distance: 0.0,
+            event_date: r.get(1)?,
+            category: r.get(2)?,
+            raw_text: r.get(3)?,
+            data: data_str.and_then(|s| serde_json::from_str(&s).ok()),
+            origin: r.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// Semantic search restricted to a single origin (e.g. 'brain:baro') — backs
 /// vault-scoped chat. Pulls a wide KNN candidate pool, then filters to the
 /// origin and ranks. (Fine at personal-KB scale; widen the pool if it grows.)

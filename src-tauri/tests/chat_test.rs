@@ -35,23 +35,36 @@ async fn save_and_embed(conn: &mut rusqlite::Connection, id: i64, cat: &str, raw
     db::insert_embedding(conn, id, &v).unwrap();
 }
 
-// Mirror of the `chat` command's retrieval + answer.
+// Mirror of the `chat` command's retrieval + answer: a day-scoped question is
+// pinned to that date's entries; anything else gets the recent+semantic merge.
 async fn answer(conn: &rusqlite::Connection, question: &str, history: &[(&str, &str)]) -> String {
-    let qv = norm(ollama::embed(question).await.unwrap());
-    let recent = db::recent_entries(conn, 15).unwrap();
-    let semantic = db::search_notes(conn, &qv, 8).unwrap();
-    let mut seen = HashSet::new();
-    let mut hits = Vec::new();
-    for h in recent.into_iter().chain(semantic.into_iter()) {
-        if seen.insert(h.note_id) {
-            hits.push(h);
+    let day_scope = pipeline::day_scope(question, TODAY);
+    let hits = if let Some((day, _)) = &day_scope {
+        db::notes_on_date(conn, day, 15).unwrap()
+    } else {
+        let qv = norm(ollama::embed(question).await.unwrap());
+        let recent = db::recent_entries(conn, 15).unwrap();
+        let semantic = db::search_notes(conn, &qv, 8).unwrap();
+        let mut seen = HashSet::new();
+        let mut hits = Vec::new();
+        for h in recent.into_iter().chain(semantic.into_iter()) {
+            if seen.insert(h.note_id) {
+                hits.push(h);
+            }
         }
-    }
+        hits
+    };
     let mut messages = vec![json!({"role":"system","content": pipeline::qa_system(TODAY)})];
     for (r, c) in history {
         messages.push(json!({"role": r, "content": c}));
     }
-    messages.push(json!({"role":"user","content": format!("Entries:\n{}\nQuestion: {question}", pipeline::qa_context(&hits))}));
+    let context = pipeline::qa_context(&hits);
+    let user_turn = if let Some((day, label)) = &day_scope {
+        format!("Entries dated {day} ({label}) — the ONLY day the question asks about; do not mention any other day:\n{context}\nQuestion: {question}")
+    } else {
+        format!("Entries:\n{context}\nQuestion: {question}")
+    };
+    messages.push(json!({"role":"user","content": user_turn}));
     ollama::chat_messages(ollama::TEXT_MODEL, messages, 0.2).await.unwrap()
 }
 
@@ -74,6 +87,17 @@ async fn answers_recency_and_followups() {
     println!("yesterday -> {yest}");
     let yl = yest.to_lowercase();
     assert!(yl.contains("squat") || yl.contains("leg") || yest.contains("245"), "yesterday=6/1 leg day: {yest}");
+
+    // the day-scope bug: "today" must show ONLY 6/2 — no leakage of the 5/30
+    // bench day or 6/1 leg day into the answer
+    let today_q = answer(&conn, "what's on my schedule today?", &[]).await;
+    println!("today -> {today_q}");
+    let tl = today_q.to_lowercase();
+    assert!(tl.contains("coding") || tl.contains("class"), "today=6/2 coding+classes: {today_q}");
+    assert!(
+        !tl.contains("squat") && !tl.contains("bench"),
+        "must not leak other days' entries: {today_q}"
+    );
 
     // follow-up relies on conversation history
     let followup = answer(

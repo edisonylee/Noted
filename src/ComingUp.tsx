@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AudioLines, ChevronLeft, ChevronRight, FileText, Loader, Mic, Users, Video } from "lucide-react";
 import { api, type MeetingListRow, type RangeEvent } from "./api";
 import { easternDay, easternMinutes, relativeDay } from "./day";
+import { joinUrl } from "./joinUrl";
 
 const PAGE = 5;
 
@@ -157,7 +158,7 @@ export function ComingUp({
                   {ev.meet_link && (
                     <a
                       className="cu-join"
-                      href={ev.meet_link}
+                      href={joinUrl(ev.meet_link, ev.account)}
                       target="_blank"
                       rel="noreferrer"
                       onClick={(e) => e.stopPropagation()}

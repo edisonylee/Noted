@@ -24,6 +24,7 @@ import {
   type RangeEvent,
 } from "./api";
 import { dayDiff, easternDay, easternMinutes, formatDay } from "./day";
+import { joinUrl } from "./joinUrl";
 
 const HOUR_PX_MAX = 48; // grid scale ceiling: one hour of the day
 // The default visible window is the working day, 8 AM – 9 PM. It's a FIXED
@@ -996,7 +997,7 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
           {sel.ev.meet_link && (
             <a
               className="cal-btn primary cal-evcard-join"
-              href={sel.ev.meet_link}
+              href={joinUrl(sel.ev.meet_link, sel.ev.account)}
               target="_blank"
               rel="noreferrer"
             >

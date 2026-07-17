@@ -9,6 +9,7 @@ import { Mic, Video } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen } from "./events";
 import { api, type PromptPayload } from "./api";
+import { joinUrl } from "./joinUrl";
 
 export function RecordPrompt() {
   const [p, setP] = useState<PromptPayload | null>(null);
@@ -33,7 +34,7 @@ export function RecordPrompt() {
     setError(null);
     try {
       if (p.kind === "calendar" && p.event?.meet_link) {
-        openUrl(p.event.meet_link).catch(() => {});
+        openUrl(joinUrl(p.event.meet_link, p.event.account)).catch(() => {});
       }
       await api.meetingStart({
         title: p.meetingTitle,

@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { listen } from "./events";
 import { openPath } from "@tauri-apps/plugin-opener";
+import { joinUrl } from "./joinUrl";
 import {
   api,
   isDesktop,
@@ -224,7 +225,7 @@ export function MeetingPage({
   const ev = detail?.event_json ?? event ?? null;
   const title = detail?.title ?? ev?.title ?? "Meeting";
   const attendees = (ev?.attendees ?? []).filter((a) => !a.self);
-  const meetLink = ev?.meet_link ?? null;
+  const meetLink = ev?.meet_link ? joinUrl(ev.meet_link, ev.account) : null;
 
   const notesRef = useRef(notes);
   notesRef.current = notes;

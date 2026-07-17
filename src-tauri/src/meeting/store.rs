@@ -317,11 +317,47 @@ pub fn rename_speaker(conn: &Connection, meeting_id: i64, from: &str, to: &str) 
     let Some((blob, seg_count)) = row else {
         return Ok(()); // pre-voiceprint meeting: relabel only
     };
-    conn.execute(
-        "UPDATE OR REPLACE meeting_speakers SET label = ?3, suggested = NULL
-         WHERE meeting_id = ?1 AND label = ?2",
-        rusqlite::params![meeting_id, from, to],
-    )?;
+    // Renaming onto a label that already exists in this meeting ("Speaker 2"
+    // recognized as an already-named voice) must MERGE the two rows. UPDATE
+    // OR REPLACE would resolve the key conflict by silently DELETING the
+    // existing row — destroying the named voice's centroid (learned the hard
+    // way when a mis-confirmed suggestion vaporized a meeting's real cluster).
+    let existing: Option<(Vec<u8>, i64)> = conn
+        .query_row(
+            "SELECT centroid, seg_count FROM meeting_speakers
+             WHERE meeting_id = ?1 AND label = ?2",
+            rusqlite::params![meeting_id, to],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    if let Some((to_blob, to_n)) = existing {
+        let merged = super::diarize::merge_centroid(
+            &super::diarize::blob_to_emb(&to_blob),
+            to_n,
+            &super::diarize::blob_to_emb(&blob),
+            seg_count,
+        );
+        conn.execute(
+            "UPDATE meeting_speakers SET centroid = ?3, seg_count = ?4, suggested = NULL
+             WHERE meeting_id = ?1 AND label = ?2",
+            rusqlite::params![
+                meeting_id,
+                to,
+                super::diarize::emb_to_blob(&merged),
+                to_n + seg_count
+            ],
+        )?;
+        conn.execute(
+            "DELETE FROM meeting_speakers WHERE meeting_id = ?1 AND label = ?2",
+            rusqlite::params![meeting_id, from],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE meeting_speakers SET label = ?3, suggested = NULL
+             WHERE meeting_id = ?1 AND label = ?2",
+            rusqlite::params![meeting_id, from, to],
+        )?;
+    }
     merge_profile(conn, to, &super::diarize::blob_to_emb(&blob), seg_count)
 }
 

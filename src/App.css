@@ -391,6 +391,29 @@ input, textarea { font-family: inherit; }
 .weather-home .ask-bubble.assistant { color: var(--ink); background: rgba(255,255,255,0.9); border-color: rgba(255,255,255,0.58); }
 .ask-file-error { margin: -12px 0 0; color: #fff; font-size: 12px; }
 
+/* Dark theme: the home's frosted glass goes dark — the light rules above pin
+   white backgrounds while --ink flips light, which made typed text and answer
+   bubbles white-on-white. */
+:root[data-theme="dark"] .weather-home .ask-composer {
+  background: rgba(23, 21, 17, 0.82); border-color: rgba(255, 255, 255, 0.16);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.45);
+}
+:root[data-theme="dark"] .weather-home .ask-composer:focus-within {
+  border-color: rgba(255, 255, 255, 0.4); box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.1);
+}
+:root[data-theme="dark"] .weather-home .ask-bubble.assistant {
+  background: rgba(26, 24, 19, 0.9); border-color: rgba(255, 255, 255, 0.14);
+}
+:root[data-theme="dark"] .weather-home .ask-bubble.user {
+  background: rgba(19, 36, 51, 0.55); border-color: rgba(255, 255, 255, 0.16);
+}
+:root[data-theme="dark"] .weather-home .ask-recipe {
+  background: rgba(12, 16, 22, 0.45); border-color: rgba(255, 255, 255, 0.18);
+}
+:root[data-theme="dark"] .weather-home .ask-recipe:hover {
+  background: rgba(255, 255, 255, 0.12); border-color: rgba(255, 255, 255, 0.34);
+}
+
 @keyframes weather-drift-far {
   from { transform: translate3d(-3%, -1%, 0) scale(1.02); }
   to { transform: translate3d(4%, 1%, 0) scale(1.07); }

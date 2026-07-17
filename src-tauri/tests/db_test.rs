@@ -120,3 +120,62 @@ fn suggest_merges_finds_near_duplicates_and_respects_dismissals() {
 
     let _ = std::fs::remove_file(&tmp);
 }
+
+#[test]
+fn rename_speaker_onto_existing_label_merges_rows() {
+    use tauri_app_lib::meeting::{diarize, store};
+    let tmp = std::env::temp_dir().join(format!("noted_rename_{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::init(&tmp).unwrap();
+    let id = store::create_meeting(&conn, "Standup", None, None, "2026-07-17T15:00:00Z").unwrap();
+    let s1 = store::insert_segment(&conn, id, "them", 0, 5_000, "hello").unwrap();
+    let s2 = store::insert_segment(&conn, id, "them", 6_000, 9_000, "yes").unwrap();
+    store::set_segment_speakers(&conn, &[(s1, "Brian".into()), (s2, "Speaker 2".into())]).unwrap();
+    // Brian's real cluster (10 segments at 1.0) + a small mislabelable one (5 at 0.0).
+    store::save_meeting_speakers(
+        &conn,
+        id,
+        &[
+            ("Brian".into(), vec![1.0, 0.0], 10),
+            ("Speaker 2".into(), vec![0.0, 1.0], 5),
+        ],
+    )
+    .unwrap();
+
+    // The bug: this used to UPDATE OR REPLACE, deleting Brian's real row.
+    store::rename_speaker(&conn, id, "Speaker 2", "Brian").unwrap();
+
+    let rows = store::list_meeting_speakers(&conn, id).unwrap();
+    assert_eq!(rows.len(), 1, "one merged row, not a vanished one: {rows:?}");
+    assert_eq!(rows[0]["label"], "Brian");
+    assert_eq!(rows[0]["seg_count"], 15);
+    // Weighted centroid: (1.0*10 + 0.0*5)/15, (0.0*10 + 1.0*5)/15
+    let cent: Vec<f32> = conn
+        .query_row(
+            "SELECT centroid FROM meeting_speakers WHERE meeting_id = ?1 AND label = 'Brian'",
+            [id],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .map(|b| diarize::blob_to_emb(&b))
+        .unwrap();
+    assert!((cent[0] - 10.0 / 15.0).abs() < 1e-6 && (cent[1] - 5.0 / 15.0).abs() < 1e-6, "{cent:?}");
+    // Both segments carry the merged name.
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM meeting_segments WHERE meeting_id = ?1 AND speaker = 'Brian'",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 2);
+    // Plain rename (no existing target) still works.
+    store::save_meeting_speakers(&conn, id, &[("Speaker 9".into(), vec![0.5, 0.5], 3)]).unwrap();
+    store::rename_speaker(&conn, id, "Speaker 9", "Vivian").unwrap();
+    let labels: Vec<String> = store::list_meeting_speakers(&conn, id)
+        .unwrap()
+        .iter()
+        .map(|r| r["label"].as_str().unwrap().to_string())
+        .collect();
+    assert!(labels.contains(&"Vivian".to_string()) && labels.contains(&"Brian".to_string()));
+    let _ = std::fs::remove_file(&tmp);
+}

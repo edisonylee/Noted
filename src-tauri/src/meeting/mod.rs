@@ -430,9 +430,31 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
     Ok(Some(id))
 }
 
+/// Recovery diarization for one interrupted meeting (labels are written only
+/// by the live stop path, which a crash never reaches): rebuild them from the
+/// retained wall-anchored WAV so a killed app can't leave a multi-speaker
+/// meeting reading "Them" forever.
+fn rediarize_interrupted(app: &tauri::AppHandle, id: i64) {
+    let Some(model) = diarize::model_path(app) else {
+        return;
+    };
+    let Ok(data_dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let dir = data_dir.join("meetings").join(id.to_string());
+    let db = app.state::<Db>();
+    let conn = db.0.lock().unwrap();
+    match asr::rediarize_from_wav(&conn, Some(app), &model, &dir, id) {
+        Ok(n) if n > 0 => println!("[noted] recovered speaker labels for meeting {id} ({n} voices)"),
+        Ok(_) => {}
+        Err(e) => eprintln!("[noted] recovery diarization failed for {id}: {e}"),
+    }
+}
+
 /// Startup reconciliation: a crash or dev-rebuild mid-recording leaves rows
 /// stuck in 'recording'/'summarizing' forever. Anything with a transcript
-/// gets summarized now; empty ones are marked failed.
+/// gets its speaker labels rebuilt from the retained audio, then summarized;
+/// empty ones are marked failed.
 pub fn reconcile(app: &tauri::AppHandle) {
     let stuck = {
         let db = app.state::<Db>();
@@ -452,11 +474,25 @@ pub fn reconcile(app: &tauri::AppHandle) {
         println!("[noted] recovering interrupted meeting {id} ({segments} segments)");
         let h = app.clone();
         tauri::async_runtime::spawn(async move {
-            if let Err(e) = summarize::run(&h, id, None).await {
-                eprintln!("[noted] recovery summarize failed for {id}: {e}");
-                let db = h.state::<Db>();
-                let conn = db.0.lock().unwrap();
-                let _ = store::set_status(&conn, id, "failed");
+            // Labels first (blocking: onnx over the whole WAV), so the
+            // summary and the reloaded transcript see speaker names.
+            let h2 = h.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                rediarize_interrupted(&h2, id);
+            })
+            .await;
+            match summarize::run(&h, id, None).await {
+                Ok(_) => {
+                    if let Err(e) = summarize::suggest_speaker_names(&h, id).await {
+                        eprintln!("[noted] speaker-name suggestions failed: {e}");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[noted] recovery summarize failed for {id}: {e}");
+                    let db = h.state::<Db>();
+                    let conn = db.0.lock().unwrap();
+                    let _ = store::set_status(&conn, id, "failed");
+                }
             }
         });
     }

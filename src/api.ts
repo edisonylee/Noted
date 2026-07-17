@@ -675,6 +675,10 @@ export const api = {
     invoke<void>("meeting_rename_speaker", { id, from, to }),
   meetingSuggestSpeakers: (id: number) =>
     invoke<number>("meeting_suggest_speakers", { id }),
+  // Rebuild speaker labels from the retained audio — for meetings recorded
+  // before diarization existed or interrupted by a crash. Resolves to the
+  // voice count (0 = nothing to do).
+  meetingRediarize: (id: number) => invoke<number>("meeting_rediarize", { id }),
   // Writes "<date> <title>.md" into ~/Downloads; resolves to the path.
   meetingExportMd: (id: number) => invoke<string>("meeting_export_md", { id }),
   meetingExportPdf: (id: number) => invoke<string>("meeting_export_pdf", { id }),

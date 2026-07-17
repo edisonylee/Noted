@@ -159,6 +159,12 @@ pub(crate) fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// (`segs` must be in timeline order). May return a single cluster — the
 /// naming stage decides what that means.
 pub fn cluster(segs: &[SegEmb]) -> Vec<SpeakerCluster> {
+    cluster_at(segs, CUTOFF)
+}
+
+/// `cluster` with an explicit merge floor — the tuning harness sweeps this to
+/// see where a recording's voice structure actually separates.
+pub fn cluster_at(segs: &[SegEmb], cutoff: f32) -> Vec<SpeakerCluster> {
     let segs: Vec<&SegEmb> = segs.iter().filter(|s| !s.emb.is_empty()).collect();
     let mut seed_idx: Vec<usize> = (0..segs.len())
         .filter(|&i| segs[i].dur_ms >= SEED_MS)
@@ -186,7 +192,7 @@ pub fn cluster(segs: &[SegEmb]) -> Vec<SpeakerCluster> {
     let mut members: Vec<Option<Vec<usize>>> =
         seed_idx.iter().map(|&i| Some(vec![i])).collect();
     loop {
-        let mut best = (usize::MAX, usize::MAX, CUTOFF);
+        let mut best = (usize::MAX, usize::MAX, cutoff);
         for a in 0..n {
             if members[a].is_none() {
                 continue;
@@ -449,6 +455,36 @@ mod tests {
                 segs.push(SegEmb { seg_id: id, dur_ms: t1 - t0, emb });
             }
         }
+        // Where does this recording's voice structure separate? Sweep the
+        // merge floor and show the pairwise-similarity distribution — the gap
+        // between within-speaker and cross-speaker links is what CUTOFF must
+        // sit inside.
+        let seeds: Vec<&SegEmb> = segs.iter().filter(|s| s.dur_ms >= 2_500).collect();
+        let mut sims: Vec<f32> = Vec::new();
+        for a in 0..seeds.len() {
+            for b in (a + 1)..seeds.len() {
+                sims.push(cosine(&seeds[a].emb, &seeds[b].emb));
+            }
+        }
+        sims.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        if !sims.is_empty() {
+            println!(
+                "pairwise sims over {} seeds: min {:.2}  p25 {:.2}  median {:.2}  p75 {:.2}  max {:.2}",
+                seeds.len(),
+                sims[0],
+                sims[sims.len() / 4],
+                sims[sims.len() / 2],
+                sims[3 * sims.len() / 4],
+                sims[sims.len() - 1],
+            );
+        }
+        for cutoff in [0.45f32, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75] {
+            let c = cluster_at(&segs, cutoff);
+            let mut sizes: Vec<usize> = c.iter().map(|x| x.seg_ids.len()).collect();
+            sizes.sort_unstable_by(|a, b| b.cmp(a));
+            println!("cutoff {cutoff:.2} → {} clusters {:?}", c.len(), sizes);
+        }
+
         let named = assign_names(cluster(&segs), &[]);
         for s in &named {
             for id in &s.seg_ids {

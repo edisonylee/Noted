@@ -637,6 +637,14 @@ fn matched_is_foreign(matched: &[&RecentSeg], me_ready: bool) -> bool {
 /// pulling the centroid toward the remote voice until the remote voice itself
 /// clears the bar — the gate then eats the entire "them" channel. So an
 /// own-voice call must also BEAT the best match against every known foreign
+/// The user's mic voiceprint is trustworthy once it has folded in this many
+/// segments — before that, own-voice echo checks stay off.
+const ME_READY_MIN: i64 = 5;
+
+fn me_ready(n: i64) -> bool {
+    n >= ME_READY_MIN
+}
+
 /// voiceprint; with no foreign prints stored it falls back to the threshold.
 fn is_own_voice(me_sim: Option<f32>, best_foreign_sim: Option<f32>) -> bool {
     me_sim.map_or(false, |s| {
@@ -751,7 +759,19 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
     // at stop doesn't double-count the seed).
     let mut me_meeting_sum: Vec<f32> = Vec::new();
     let mut me_meeting_n: i64 = 0;
-    let me_ready = |n: i64| n >= 5;
+    // 1:1 calendar rule, known at start: with exactly one external attendee,
+    // provisional labels can use the real name immediately.
+    let lone_external: Option<String> = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        store::meeting_event_json(&conn, args.meeting_id)
+            .ok()
+            .flatten()
+            .map(|ev| super::summarize::external_attendees(&ev))
+            .filter(|v| v.len() == 1)
+            .map(|v| v[0].clone())
+    };
+    let mut prints_since_relabel = 0usize;
 
     let (me_wav, them_wav) = match &args.audio_dir {
         Some(dir) => {
@@ -921,6 +941,7 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                             dur_ms: seg.t1_ms - seg.t0_ms,
                             emb,
                         });
+                        prints_since_relabel += 1;
                     }
                     recent_them.retain(|r| r.t1 >= seg.t1_ms - 90_000);
                     recent_them.push(recent);
@@ -1000,6 +1021,39 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                 }
             }
         }
+        // Provisional live labels: full-context clustering is cheap at meeting
+        // scale, so rerun it as voices accumulate and stream the labels out —
+        // the transcript shows who's talking DURING the call instead of "Them"
+        // until stop. The stop pass below stays authoritative (echo deletion,
+        // meeting_speakers rows, and profile writes happen only there; it
+        // resets the channel first so no provisional label survives it).
+        if !stopping && prints_since_relabel >= LIVE_RELABEL_EVERY {
+            prints_since_relabel = 0;
+            let labels = provisional_labels(
+                &voice_prints,
+                &me_print,
+                me_n,
+                &foreign_prints,
+                lone_external.as_deref(),
+            );
+            if !labels.is_empty() {
+                {
+                    let state = app.state::<Db>();
+                    let conn = state.0.lock().unwrap();
+                    let _ = store::set_segment_speakers(&conn, &labels);
+                }
+                let _ = app.emit(
+                    "meeting-speakers-updated",
+                    json!({
+                        "meetingId": args.meeting_id,
+                        "labels": labels
+                            .iter()
+                            .map(|(id, l)| json!({ "id": id, "label": l }))
+                            .collect::<Vec<_>>(),
+                    }),
+                );
+            }
+        }
         if stopping {
             break;
         }
@@ -1009,105 +1063,18 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
     // Full-context speaker clustering; lands before stop() emits
     // meeting-stopped, so the reloaded transcript and the summary see names.
     // Known voiceprints resolve to real names; the rest become "Speaker N".
-    if !voice_prints.is_empty() {
-        let mut clusters = super::diarize::cluster(&voice_prints);
-        // Purge own-voice echo that slipped in before the mic voiceprint was
-        // ready (the live check needs a few mic segments to warm up).
-        if me_ready(me_n) {
-            let (echo, keep): (Vec<_>, Vec<_>) = clusters.into_iter().partition(|c| {
-                is_own_voice(
-                    Some(super::diarize::cosine(&c.centroid, &me_print)),
-                    best_foreign_sim(&c.centroid, &foreign_prints),
-                )
-            });
-            clusters = keep;
-            for c in &echo {
-                eprintln!(
-                    "[noted] own-voice echo cluster purged ({} segments)",
-                    c.seg_ids.len()
-                );
-                for &sid in &c.seg_ids {
-                    let removed = {
-                        let state = app.state::<Db>();
-                        let conn = state.0.lock().unwrap();
-                        store::delete_segment(&conn, sid)
-                    };
-                    if removed.is_ok() {
-                        let _ = app.emit(
-                            "meeting-segment-removed",
-                            json!({ "meetingId": args.meeting_id, "id": sid }),
-                        );
-                    }
-                }
-            }
-        }
-        if !clusters.is_empty() {
-            let state = app.state::<Db>();
-            let conn = state.0.lock().unwrap();
-            let profiles: Vec<(String, Vec<f32>)> = store::speaker_profiles(&conn)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(name, emb, _)| (name, emb))
-                .collect();
-            let mut named = super::diarize::assign_names(clusters, &profiles);
-            // 1:1 rule: with exactly one external attendee on the calendar
-            // event, every voice that didn't match a stored profile IS that
-            // person — no model, no guessing.
-            let external = store::meeting_event_json(&conn, args.meeting_id)
-                .ok()
-                .flatten()
-                .map(|ev| super::summarize::external_attendees(&ev))
-                .unwrap_or_default();
-            if external.len() == 1 {
-                for s in named.iter_mut() {
-                    let generic =
-                        s.label.as_deref().map_or(true, |l| l.starts_with("Speaker "));
-                    if generic {
-                        s.label = Some(external[0].clone());
-                    }
-                }
-            }
-            let mut labels: Vec<(i64, String)> = Vec::new();
-            let mut rows: Vec<(String, Vec<f32>, i64)> = Vec::new();
-            for s in &named {
-                if let Some(l) = &s.label {
-                    labels.extend(s.seg_ids.iter().map(|&id| (id, l.clone())));
-                }
-                rows.push((
-                    s.label.clone().unwrap_or_else(|| "Them".into()),
-                    s.centroid.clone(),
-                    s.seg_ids.len() as i64,
-                ));
-            }
-            let _ = store::save_meeting_speakers(&conn, args.meeting_id, &rows);
-            // Calendar-derived names are ground truth enough to persist: the
-            // next call with this person auto-labels even without an event.
-            if external.len() == 1 {
-                for s in &named {
-                    if s.label.as_deref() == Some(external[0].as_str()) {
-                        let _ = store::merge_profile(
-                            &conn,
-                            &external[0],
-                            &s.centroid,
-                            s.seg_ids.len() as i64,
-                        );
-                    }
-                }
-            }
-            match store::set_segment_speakers(&conn, &labels) {
-                Ok(()) => eprintln!(
-                    "[noted] diarization: {} voices, {} segments labeled",
-                    named.len(),
-                    labels.len()
-                ),
-                Err(e) => eprintln!("[noted] diarization write failed: {e}"),
-            }
-            // Short reactions ("Mm-hmm.") embed too briefly to cluster; in a
-            // 1:1 they can only be the one other person — no third "Them".
-            if external.len() == 1 {
-                let _ = store::label_unlabeled_them(&conn, args.meeting_id, &external[0]);
-            }
-        }
+    {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        finalize_speakers(
+            &conn,
+            Some(&app),
+            args.meeting_id,
+            &voice_prints,
+            &me_print,
+            me_n,
+            &foreign_prints,
+        );
     }
     // Refresh the note-taker's own voiceprint with this meeting's mic voice.
     if me_meeting_n > 0 {
@@ -1127,6 +1094,260 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
     }
 }
 
+/// Recluster for live labels after this many new voice embeddings — often
+/// enough to feel live, rare enough that whisper never waits on it.
+const LIVE_RELABEL_EVERY: usize = 4;
+
+/// Cluster the embeddings collected so far into provisional labels for the
+/// live transcript. Mirrors the naming policy of `finalize_speakers` minus
+/// its side effects: own-voice clusters are left unlabeled (not deleted), no
+/// meeting_speakers rows, no profile writes. Labels may shift between passes;
+/// the stop pass rewrites everything from the full context.
+fn provisional_labels(
+    voice_prints: &[super::diarize::SegEmb],
+    me_print: &[f32],
+    me_n: i64,
+    foreign_prints: &[(String, Vec<f32>)],
+    lone_external: Option<&str>,
+) -> Vec<(i64, String)> {
+    if voice_prints.len() < 2 {
+        return Vec::new();
+    }
+    let clusters = super::diarize::cluster(voice_prints);
+    let keep: Vec<_> = if me_ready(me_n) {
+        clusters
+            .into_iter()
+            .filter(|c| {
+                !is_own_voice(
+                    Some(super::diarize::cosine(&c.centroid, me_print)),
+                    best_foreign_sim(&c.centroid, foreign_prints),
+                )
+            })
+            .collect()
+    } else {
+        clusters
+    };
+    let mut named = super::diarize::assign_names(keep, foreign_prints);
+    if let Some(name) = lone_external {
+        for s in named.iter_mut() {
+            if s.label.as_deref().map_or(true, |l| l.starts_with("Speaker ")) {
+                s.label = Some(name.to_string());
+            }
+        }
+    }
+    let mut labels = Vec::new();
+    for s in &named {
+        if let Some(l) = &s.label {
+            labels.extend(s.seg_ids.iter().map(|&id| (id, l.clone())));
+        }
+    }
+    labels
+}
+
+/// Full-context diarization for one meeting: purge own-voice echo clusters,
+/// cluster the rest, name them (voiceprints → real names, 1:1 calendar rule,
+/// "Speaker N"), and persist labels + centroids. Shared by the live stop path
+/// and startup recovery — the policy must be identical so a crash can't
+/// produce different labels than a clean stop. Returns the voice count.
+/// `app` carries the event channel for retro-deleted echo segments; None in
+/// headless use.
+pub fn finalize_speakers(
+    conn: &rusqlite::Connection,
+    app: Option<&tauri::AppHandle>,
+    meeting_id: i64,
+    voice_prints: &[super::diarize::SegEmb],
+    me_print: &[f32],
+    me_n: i64,
+    foreign_prints: &[(String, Vec<f32>)],
+) -> usize {
+    if voice_prints.is_empty() {
+        return 0;
+    }
+    let mut clusters = super::diarize::cluster(voice_prints);
+    // Purge own-voice echo that slipped in before the mic voiceprint was
+    // ready (the live check needs a few mic segments to warm up).
+    if me_ready(me_n) {
+        let (echo, keep): (Vec<_>, Vec<_>) = clusters.into_iter().partition(|c| {
+            is_own_voice(
+                Some(super::diarize::cosine(&c.centroid, me_print)),
+                best_foreign_sim(&c.centroid, foreign_prints),
+            )
+        });
+        clusters = keep;
+        for c in &echo {
+            eprintln!(
+                "[noted] own-voice echo cluster purged ({} segments)",
+                c.seg_ids.len()
+            );
+            for &sid in &c.seg_ids {
+                if store::delete_segment(conn, sid).is_ok() {
+                    if let Some(app) = app {
+                        let _ = app.emit(
+                            "meeting-segment-removed",
+                            json!({ "meetingId": meeting_id, "id": sid }),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // Provisional live labels may disagree with the final clustering (a voice
+    // that merged away, an echo cluster) — reset the channel and rewrite from
+    // the full-context result so no stale label survives.
+    let _ = store::clear_them_speakers(conn, meeting_id);
+    if clusters.is_empty() {
+        return 0;
+    }
+    let profiles: Vec<(String, Vec<f32>)> = store::speaker_profiles(conn)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, emb, _)| (name, emb))
+        .collect();
+    let mut named = super::diarize::assign_names(clusters, &profiles);
+    // 1:1 rule: with exactly one external attendee on the calendar
+    // event, every voice that didn't match a stored profile IS that
+    // person — no model, no guessing.
+    let external = store::meeting_event_json(conn, meeting_id)
+        .ok()
+        .flatten()
+        .map(|ev| super::summarize::external_attendees(&ev))
+        .unwrap_or_default();
+    if external.len() == 1 {
+        for s in named.iter_mut() {
+            let generic = s.label.as_deref().map_or(true, |l| l.starts_with("Speaker "));
+            if generic {
+                s.label = Some(external[0].clone());
+            }
+        }
+    }
+    let mut labels: Vec<(i64, String)> = Vec::new();
+    let mut rows: Vec<(String, Vec<f32>, i64)> = Vec::new();
+    for s in &named {
+        if let Some(l) = &s.label {
+            labels.extend(s.seg_ids.iter().map(|&id| (id, l.clone())));
+        }
+        rows.push((
+            s.label.clone().unwrap_or_else(|| "Them".into()),
+            s.centroid.clone(),
+            s.seg_ids.len() as i64,
+        ));
+    }
+    let _ = store::save_meeting_speakers(conn, meeting_id, &rows);
+    // Calendar-derived names are ground truth enough to persist: the
+    // next call with this person auto-labels even without an event.
+    if external.len() == 1 {
+        for s in &named {
+            if s.label.as_deref() == Some(external[0].as_str()) {
+                let _ = store::merge_profile(conn, &external[0], &s.centroid, s.seg_ids.len() as i64);
+            }
+        }
+    }
+    match store::set_segment_speakers(conn, &labels) {
+        Ok(()) => eprintln!(
+            "[noted] diarization: {} voices, {} segments labeled",
+            named.len(),
+            labels.len()
+        ),
+        Err(e) => eprintln!("[noted] diarization write failed: {e}"),
+    }
+    // Short reactions ("Mm-hmm.") embed too briefly to cluster; in a
+    // 1:1 they can only be the one other person — no third "Them".
+    if external.len() == 1 {
+        let _ = store::label_unlabeled_them(conn, meeting_id, &external[0]);
+    }
+    named.len()
+}
+
+/// Read a 16 kHz mono 16-bit WAV written by `wav_writer`, tolerating a file
+/// whose header was never finalized: a crash mid-recording leaves the RIFF
+/// sizes zeroed, but the PCM after the canonical 44-byte header is intact.
+fn read_wav_16k(path: &Path) -> Result<Vec<f32>> {
+    if let Ok(mut r) = hound::WavReader::open(path) {
+        let spec = r.spec();
+        if r.duration() > 0 {
+            if spec.sample_rate != SR as u32
+                || spec.channels != 1
+                || spec.sample_format != hound::SampleFormat::Int
+            {
+                return Err(anyhow!("unexpected wav format in {}", path.display()));
+            }
+            return Ok(r
+                .samples::<i16>()
+                .map(|s| s.map(|v| v as f32 / 32768.0))
+                .collect::<std::result::Result<Vec<_>, _>>()?);
+        }
+    }
+    let bytes = std::fs::read(path)?;
+    if bytes.len() <= 44 {
+        return Ok(Vec::new());
+    }
+    Ok(bytes[44..]
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+        .collect())
+}
+
+/// Recovery diarization for a meeting whose worker died before the stop path
+/// ran (crash / force-quit mid-recording): the live embeddings were only in
+/// memory, so labels were never written and every remote line reads "Them".
+/// Re-embed each them-segment from the retained wall-anchored them.wav and run
+/// the exact same finalize policy as a clean stop. No-op when the meeting was
+/// already diarized, the speaker model is missing, or audio wasn't retained.
+pub fn rediarize_from_wav(
+    conn: &rusqlite::Connection,
+    app: Option<&tauri::AppHandle>,
+    model: &Path,
+    meeting_dir: &Path,
+    meeting_id: i64,
+) -> Result<usize> {
+    if !store::list_meeting_speakers(conn, meeting_id)?.is_empty() {
+        return Ok(0); // already diarized (crash happened after the stop path)
+    }
+    let wav_path = meeting_dir.join("them.wav");
+    if !wav_path.exists() {
+        return Ok(0);
+    }
+    let wav = read_wav_16k(&wav_path)?;
+    if wav.is_empty() {
+        return Ok(0);
+    }
+    let segs = store::them_segment_times(conn, meeting_id)?;
+    if segs.is_empty() {
+        return Ok(0);
+    }
+    let mut embedder = super::diarize::Embedder::new(model)?;
+    let mut voice_prints: Vec<super::diarize::SegEmb> = Vec::new();
+    for (seg_id, t0, t1) in segs {
+        // The WAV is wall-anchored (delivery gaps are written as zeros), so
+        // segment times map straight to sample offsets. Gaps beyond
+        // WAV_GAP_CAP_MS are truncated in the file — anything past the end of
+        // the audio is unrecoverable, skip it.
+        let s0 = (t0.max(0) as usize).saturating_mul(SR / 1000);
+        let s1 = (t1.max(0) as usize).saturating_mul(SR / 1000).min(wav.len());
+        if s0 >= s1 {
+            continue;
+        }
+        if let Some(emb) = embedder.embed(&wav[s0..s1]) {
+            voice_prints.push(super::diarize::SegEmb { seg_id, dur_ms: t1 - t0, emb });
+        }
+    }
+    let (me_print, me_n) = store::get_profile(conn, super::diarize::ME_PROFILE)?
+        .unwrap_or((Vec::new(), 0));
+    let foreign_prints: Vec<(String, Vec<f32>)> = store::speaker_profiles(conn)?
+        .into_iter()
+        .map(|(name, emb, _)| (name, emb))
+        .collect();
+    Ok(finalize_speakers(
+        conn,
+        app,
+        meeting_id,
+        &voice_prints,
+        &me_print,
+        me_n,
+        &foreign_prints,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1138,6 +1359,56 @@ mod tests {
     }
     fn quiet(ms: usize) -> Vec<f32> {
         vec![0.0; ms * (SR / 1000)]
+    }
+
+    // Deterministic "voice" embedding, mirroring diarize.rs's test helper.
+    fn voice(base: usize, jitter: u64) -> Vec<f32> {
+        let mut v = vec![0.0f32; 8];
+        v[base] = 1.0;
+        let mut x = jitter.wrapping_mul(6364136223846793005).wrapping_add(1);
+        for (i, s) in v.iter_mut().enumerate() {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(i as u64);
+            *s += ((x >> 33) as f32 / u32::MAX as f32 - 0.25) * 0.2;
+        }
+        v
+    }
+
+    fn vp(id: i64, base: usize, jitter: u64) -> super::super::diarize::SegEmb {
+        super::super::diarize::SegEmb { seg_id: id, dur_ms: 5_000, emb: voice(base, jitter) }
+    }
+
+    #[test]
+    fn provisional_labels_name_multiple_voices_live() {
+        let prints = vec![vp(1, 0, 1), vp(2, 1, 2), vp(3, 0, 3), vp(4, 1, 4)];
+        let labels = provisional_labels(&prints, &[], 0, &[], None);
+        let by_id: std::collections::HashMap<i64, String> = labels.into_iter().collect();
+        assert_eq!(by_id.get(&1).map(String::as_str), Some("Speaker 1"));
+        assert_eq!(by_id.get(&2).map(String::as_str), Some("Speaker 2"));
+        assert_eq!(by_id.get(&3).map(String::as_str), Some("Speaker 1"));
+    }
+
+    #[test]
+    fn provisional_labels_keep_lone_voice_unlabeled_unless_1to1() {
+        let prints = vec![vp(1, 2, 1), vp(2, 2, 2), vp(3, 2, 3)];
+        // lone unknown voice: no live label (channel default "Them" reads better)
+        assert!(provisional_labels(&prints, &[], 0, &[], None).is_empty());
+        // …but a 1:1 calendar event names it immediately
+        let labels = provisional_labels(&prints, &[], 0, &[], Some("Brian"));
+        assert_eq!(labels.len(), 3);
+        assert!(labels.iter().all(|(_, l)| l == "Brian"));
+    }
+
+    #[test]
+    fn provisional_labels_skip_own_voice_cluster() {
+        // Voice at base 0 is the note-taker's own echo; base 1 is a real peer.
+        let me = voice(0, 99);
+        let prints = vec![vp(1, 0, 1), vp(2, 1, 2), vp(3, 0, 3), vp(4, 1, 4)];
+        let labels = provisional_labels(&prints, &me, ME_READY_MIN, &[], None);
+        let by_id: std::collections::HashMap<i64, String> = labels.into_iter().collect();
+        assert!(!by_id.contains_key(&1), "echo cluster must not get a live label");
+        assert!(!by_id.contains_key(&3));
+        // The surviving lone real voice stays unlabeled (assign_names lone rule)
+        assert!(by_id.is_empty());
     }
 
     #[test]

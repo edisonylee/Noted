@@ -117,6 +117,7 @@ export function MeetingPage({
   const [renameFor, setRenameFor] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
   const [suggesting, setSuggesting] = useState(false);
+  const [rediarizing, setRediarizing] = useState(false);
   const [query, setQuery] = useState("");
   const [playingSeg, setPlayingSeg] = useState<number | null>(null);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
@@ -160,6 +161,18 @@ export function MeetingPage({
         if (e.payload.meetingId !== id) return;
         setLiveSegments((prev) => prev.filter((s) => s.id !== e.payload.id));
       }),
+      // Provisional speaker labels stream in as diarization clusters live;
+      // the final pass at stop triggers a full reload anyway.
+      listen<{ meetingId: number; labels: { id: number; label: string }[] }>(
+        "meeting-speakers-updated",
+        (e) => {
+          if (e.payload.meetingId !== id) return;
+          const byId = new Map(e.payload.labels.map((l) => [l.id, l.label]));
+          setLiveSegments((prev) =>
+            prev.map((s) => (byId.has(s.id) ? { ...s, speaker: byId.get(s.id)! } : s)),
+          );
+        },
+      ),
       listen<{ meetingId: number }>("meeting-stopped", (e) => {
         if (e.payload.meetingId === id) load();
       }),
@@ -309,6 +322,21 @@ export function MeetingPage({
       setError(String(e));
     } finally {
       setSuggesting(false);
+    }
+  };
+
+  // Rebuild labels from the retained audio — meetings recorded before
+  // diarization existed (or interrupted by a crash) have none.
+  const rediarize = async () => {
+    if (id == null) return;
+    setRediarizing(true);
+    try {
+      const n = await api.meetingRediarize(id);
+      if (n > 0) await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRediarizing(false);
     }
   };
 
@@ -556,6 +584,17 @@ export function MeetingPage({
                 <button className="chip-action" onClick={suggestNames} disabled={suggesting}>
                   {suggesting ? <Loader size={12} className="spin" /> : <Sparkles size={12} />}
                   Suggest names
+                </button>
+              )}
+              {storedSpeakers.length === 0 && detail?.status === "done" && (
+                <button
+                  className="chip-action"
+                  onClick={rediarize}
+                  disabled={rediarizing}
+                  title="Rebuild speaker labels from the recorded audio"
+                >
+                  {rediarizing ? <Loader size={12} className="spin" /> : <AudioLines size={12} />}
+                  Detect speakers
                 </button>
               )}
               <datalist id="attendee-names">

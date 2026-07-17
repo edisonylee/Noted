@@ -496,3 +496,40 @@ fn plan() {
     std::fs::write(format!("{out}/speakers.tsv"), spk).unwrap();
     println!("plan written to {out}/plan.tsv");
 }
+
+/// Recovery-diarization harness: run the production `rediarize_from_wav`
+/// against a real DB — the same call reconcile() makes at startup for a
+/// crash-interrupted meeting. Point NOTED_DB at a copy first to preview.
+///   SPEAKER_MODEL=… NOTED_DB=… MEET_DIR=…/meetings/12 MEETING_ID=12 \
+///   cargo test --test meeting_repair rediarize -- --ignored --nocapture
+#[test]
+#[ignore]
+fn rediarize() {
+    let model = std::env::var("SPEAKER_MODEL").expect("SPEAKER_MODEL");
+    let db = std::env::var("NOTED_DB").expect("NOTED_DB");
+    let dir = std::env::var("MEET_DIR").expect("MEET_DIR");
+    let id: i64 = std::env::var("MEETING_ID").expect("MEETING_ID").parse().unwrap();
+    let conn = rusqlite::Connection::open(&db).expect("db");
+    let n = tauri_app_lib::meeting::asr::rediarize_from_wav(
+        &conn,
+        None,
+        Path::new(&model),
+        Path::new(&dir),
+        id,
+    )
+    .expect("rediarize");
+    println!("→ {n} voices");
+    for row in tauri_app_lib::meeting::store::list_meeting_speakers(&conn, id).unwrap() {
+        println!("{row}");
+    }
+    let mut stmt = conn
+        .prepare("SELECT COALESCE(speaker, '(them)'), COUNT(*) FROM meeting_segments WHERE meeting_id = ?1 AND channel='them' GROUP BY 1")
+        .unwrap();
+    let rows = stmt
+        .query_map([id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .unwrap();
+    for r in rows {
+        let (label, count) = r.unwrap();
+        println!("{label}: {count} segments");
+    }
+}

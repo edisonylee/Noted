@@ -108,6 +108,30 @@ pub fn delete_segment(conn: &Connection, id: i64) -> Result<()> {
 }
 
 /// Stamp diarization labels ("Speaker 1..N") onto them-channel segments.
+/// Reset every them-segment's speaker — the stop pass calls this before
+/// writing final labels so no provisional live label survives it.
+pub fn clear_them_speakers(conn: &Connection, meeting_id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE meeting_segments SET speaker = NULL
+         WHERE meeting_id = ?1 AND channel = 'them'",
+        [meeting_id],
+    )?;
+    Ok(())
+}
+
+/// (id, t0_ms, t1_ms) of a meeting's them-segments in timeline order — feeds
+/// recovery diarization from the retained WAV.
+pub fn them_segment_times(conn: &Connection, meeting_id: i64) -> Result<Vec<(i64, i64, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, t0_ms, t1_ms FROM meeting_segments
+         WHERE meeting_id = ?1 AND channel = 'them' ORDER BY t0_ms",
+    )?;
+    let rows = stmt
+        .query_map([meeting_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub fn set_segment_speakers(conn: &Connection, labels: &[(i64, String)]) -> Result<()> {
     let mut stmt =
         conn.prepare("UPDATE meeting_segments SET speaker = ?2 WHERE id = ?1")?;

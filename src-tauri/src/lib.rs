@@ -1844,6 +1844,31 @@ async fn meeting_suggest_speakers(app: tauri::AppHandle, id: i64) -> Result<usiz
         .map_err(|e| e.to_string())
 }
 
+/// Rebuild a meeting's speaker labels from its retained audio — heals
+/// meetings recorded before diarization existed or interrupted by a crash.
+/// Returns the voice count (0 = nothing to do / already diarized).
+#[tauri::command]
+async fn meeting_rediarize(app: tauri::AppHandle, id: i64) -> Result<usize, String> {
+    let h = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(model) = meeting::diarize::model_path(&h) else {
+            return Err("speaker model not downloaded".to_string());
+        };
+        let dir = h
+            .path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?
+            .join("meetings")
+            .join(id.to_string());
+        let state = h.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        meeting::asr::rediarize_from_wav(&conn, Some(&h), &model, &dir, id)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Where a meeting export lands: ~/Documents/Notes/Meeting/<title>/<date title>.<ext>,
 /// deduped with " (n)" so recurring meetings collect in one folder per title.
 fn meeting_export_path(
@@ -3397,6 +3422,7 @@ pub fn run() {
             download_parakeet_model,
             meeting_rename_speaker,
             meeting_suggest_speakers,
+            meeting_rediarize,
             meeting_export_md,
             meeting_export_pdf,
             meeting_start,

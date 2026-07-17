@@ -3,6 +3,12 @@
 // Same grounded local-model agent as before — answers cite sources, and any
 // mutation (create event / category, edit an entry) is a confirm-first
 // proposal. Replaces the old bottom-right floating assistant on desktop.
+//
+// Saving is prompt-driven: there is no Save button — starting the message with
+// explicit save phrasing ("save …", "note that …", "log this …", "jot down …")
+// routes the draft into the capture review flow instead of the model. The
+// trigger is deterministic (code decides, not the model), so a question can
+// never be silently swallowed into a note.
 
 import { useEffect, useRef, useState } from "react";
 import {
@@ -12,7 +18,6 @@ import {
   Mic,
   Newspaper,
   Paperclip,
-  PenLine,
   AudioLines,
   CalendarPlus,
   Palette,
@@ -37,6 +42,31 @@ type Msg = {
   resolved?: "confirmed" | "cancelled";
   attachedImg?: string; // dataUrl thumbnail on user messages
 };
+
+// Explicit save phrasing at the START of a message. Bare "save"/"jot" read as
+// imperatives; "note"/"log" are everyday nouns, so they need a marker
+// ("note that …", "log this …", "note: …") before they count. "save me …"
+// ("save me some time and…") is excluded — that's a request, not a capture.
+const SAVE_TRIGGERS: RegExp[] = [
+  /^save\b(?!\s+me\b)(\s+(this|that|it|a\s+note|note|the\s+following))?\s*[:,]?\s*/i,
+  /^(note|log)\s+(this|that|down)\b\s*[:,]?\s*/i,
+  /^(note|log)\s*:\s*/i,
+  /^jot\b(\s+(this|that|down))?\s*[:,]?\s*/i,
+  /^add\s+a\s+note\b\s*(that\b)?\s*[:,]?\s*/i,
+];
+
+// Returns the text to file (trigger + polite lead-in stripped) when the
+// message asks to save, else null. Deterministic on purpose.
+export function saveIntent(raw: string): string | null {
+  let s = raw.trim();
+  const polite = /^(please|pls|hey|can\s+you|could\s+you|would\s+you)[,\s]+/i;
+  for (let m = s.match(polite); m; m = s.match(polite)) s = s.slice(m[0].length);
+  for (const t of SAVE_TRIGGERS) {
+    const m = s.match(t);
+    if (m) return s.slice(m[0].length).trim();
+  }
+  return null;
+}
 
 // Recipes: saved prompts, one click away (Granola's recipes). `send: false`
 // prefills the composer for prompts that need details filled in.
@@ -98,6 +128,15 @@ export function AskView({
   async function send(text: string) {
     const raw = text.trim();
     if ((!raw && !img) || asking || filing) return;
+    // Explicit save phrasing files the draft instead of asking the model. A
+    // bare trigger with nothing to save ("save?") falls through to chat.
+    if (onSaveNote) {
+      const toFile = saveIntent(raw);
+      if (toFile !== null && (toFile || img)) {
+        await fileNote(toFile);
+        return;
+      }
+    }
     setInput("");
     setAsking(true);
     const attached = img;
@@ -208,8 +247,9 @@ export function AskView({
     }
   }
 
-  async function fileNote() {
-    const raw = input.trim();
+  // File `raw` (the message with its save trigger stripped) through the
+  // capture review flow. The draft stays in the composer if filing fails.
+  async function fileNote(raw: string) {
     if ((!raw && !img) || asking || filing || !onSaveNote) return;
     setFiling(true);
     setFileError(null);
@@ -249,7 +289,7 @@ export function AskView({
         ref={inputRef}
         rows={1}
         value={input}
-        placeholder="Ask anything, or write something to save"
+        placeholder={onSaveNote ? "Ask anything — start with “save” to file a note" : "Ask anything"}
         onChange={(e) => setInput(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
@@ -285,16 +325,6 @@ export function AskView({
             e.target.value = "";
           }}
         />
-        {onSaveNote && (
-          <button
-            className="ask-save-note"
-            onClick={fileNote}
-            disabled={asking || filing || recording || (!input.trim() && !img)}
-            title="File this in your knowledge base"
-          >
-            <PenLine size={13} /> {filing ? "Filing…" : "Save note"}
-          </button>
-        )}
         <span className="spacer" />
         <button
           className={"icon-btn ask-mic" + (recording ? " recording" : "")}
@@ -341,7 +371,7 @@ export function AskView({
             ))}
           </div>
         </div>
-        {asking && <p className="quiet-empty">thinking…</p>}
+        {(asking || filing) && <p className="quiet-empty">{filing ? "filing…" : "thinking…"}</p>}
         {fileError && <p className="ask-file-error">{fileError}</p>}
       </div>
     );
@@ -402,9 +432,9 @@ export function AskView({
             {m.proposal && m.resolved && <span className="proposal-state">{m.resolved}</span>}
           </div>
         ))}
-        {asking && !recording && (
+        {(asking || filing) && !recording && (
           <div className="ask-bubble assistant">
-            <p className="muted">thinking…</p>
+            <p className="muted">{filing ? "filing…" : "thinking…"}</p>
           </div>
         )}
       </div>

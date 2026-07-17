@@ -389,13 +389,6 @@ input, textarea { font-family: inherit; }
 .weather-home .ask-recipe:hover { color: #fff; background: rgba(255,255,255,0.18); border-color: rgba(255,255,255,0.42); }
 .weather-home .ask-bubble.user { color: #fff; background: rgba(20, 48, 66, 0.25); border: var(--border-width, 1px) solid rgba(255,255,255,0.18); }
 .weather-home .ask-bubble.assistant { color: var(--ink); background: rgba(255,255,255,0.9); border-color: rgba(255,255,255,0.58); }
-.ask-save-note {
-  display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 5px 10px;
-  color: var(--ink-soft); background: var(--surface-2); border: var(--border-width, 1px) solid var(--line);
-  border-radius: 999px; font-size: 11.5px; font-weight: 560;
-}
-.ask-save-note:hover:not(:disabled) { color: var(--ink); border-color: var(--line-strong); }
-.ask-save-note:disabled { cursor: default; opacity: 0.45; }
 .ask-file-error { margin: -12px 0 0; color: #fff; font-size: 12px; }
 
 @keyframes weather-drift-far {

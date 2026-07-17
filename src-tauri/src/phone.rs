@@ -325,6 +325,9 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "meeting_video_delete" => crate::meeting_video_delete(a, iarg(b, "id"))
             .await
             .map(|_| Value::Null),
+        // Assist answers run on the desktop's model; asking from the phone is
+        // a remote control, like summarize.
+        "meeting_assist" => crate::meeting_assist(a, iarg(b, "id"), sarg(b, "question")).await,
         "meetings_settings_get" => Ok(crate::meetings_settings_get()),
         // Stopping works from the phone too — it's a remote control for the
         // desktop recorder (capture itself always runs on the Mac).

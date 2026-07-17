@@ -1844,6 +1844,73 @@ async fn meeting_suggest_speakers(app: tauri::AppHandle, id: i64) -> Result<usiz
         .map_err(|e| e.to_string())
 }
 
+/// Live Assist A0 (LIVE_ASSIST_PLAN.md): answer a question against ONE
+/// meeting's transcript-so-far + the user's typed notes. Works mid-recording
+/// (the rolling transcript) and on finished meetings. Always the local model —
+/// like Journal and summaries, the transcript never routes to a cloud path.
+#[tauri::command]
+async fn meeting_assist(app: tauri::AppHandle, id: i64, question: String) -> Result<Value, String> {
+    if question.trim().is_empty() {
+        return Err("empty question".into());
+    }
+    let (transcript, notes, title) = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        let meeting = meeting::store::get_meeting(&conn, id).map_err(|e| e.to_string())?;
+        let title = meeting["title"].as_str().unwrap_or("Meeting").to_string();
+        let notes = meeting["raw_notes"].as_str().unwrap_or("").to_string();
+        let mut lines: Vec<String> = Vec::new();
+        if let Some(segs) = meeting["segments"].as_array() {
+            for s in segs {
+                let t0 = s["t0_ms"].as_i64().unwrap_or(0);
+                let who = if s["channel"].as_str() == Some("me") {
+                    "Me".to_string()
+                } else {
+                    s["speaker"].as_str().unwrap_or("Them").to_string()
+                };
+                let text = s["text"].as_str().unwrap_or("");
+                lines.push(format!("[{:02}:{:02}] {who}: {text}", t0 / 60_000, (t0 / 1_000) % 60));
+            }
+        }
+        // Tail-cap the context: the last ~8k chars is roughly the last ten
+        // minutes of a lively call — what "just now" questions are about.
+        let mut budget = 8_000usize;
+        let mut tail: Vec<&String> = Vec::new();
+        for l in lines.iter().rev() {
+            if budget < l.len() {
+                break;
+            }
+            budget -= l.len();
+            tail.push(l);
+        }
+        tail.reverse();
+        let transcript = tail.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
+        (transcript, notes, title)
+    };
+    if transcript.is_empty() {
+        return Ok(json!({ "answer": "Nothing has been said yet — the transcript is empty." }));
+    }
+    let system = "You are the user's live meeting copilot. You see the transcript of the \
+meeting so far — 'Me' is the user; named speakers or 'Them' are the other participants — plus \
+the user's own typed notes. Answer the question from that context only. Be concise and \
+specific; quote who said something when it matters; give ready-to-say wording when the user \
+asks how to respond. If the transcript doesn't contain the answer, say so plainly.";
+    let notes_block = if notes.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\nMy notes:\n{notes}\n")
+    };
+    let user = format!("Meeting: {title}\nTranscript so far:\n{transcript}\n{notes_block}\nQuestion: {question}");
+    let messages = vec![
+        json!({ "role": "system", "content": system }),
+        json!({ "role": "user", "content": user }),
+    ];
+    let answer = ollama::chat_messages(&ollama::text_model(), messages, 0.2)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(json!({ "answer": answer.trim() }))
+}
+
 /// Delete a meeting's window video now (retention would get it eventually;
 /// this is the "free the space today" button).
 #[tauri::command]
@@ -3441,6 +3508,7 @@ pub fn run() {
             meeting_suggest_speakers,
             meeting_rediarize,
             meeting_video_delete,
+            meeting_assist,
             meeting_export_md,
             meeting_export_pdf,
             meeting_start,

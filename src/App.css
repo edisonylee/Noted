@@ -2114,6 +2114,24 @@ a.cal-btn { text-decoration: none; }
   display: flex; flex-direction: column; gap: 8px; padding: 8px 2px;
 }
 
+.assist-row { display: flex; flex-direction: column; gap: 8px; padding: 6px 2px 2px; }
+.assist-answer {
+  display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px;
+  background: var(--accent-tint); border: var(--border-width, 1px) solid var(--line);
+  border-radius: var(--r-lg); font-size: 13px;
+}
+.assist-answer p { margin: 0; white-space: pre-wrap; flex: 1; }
+.assist-input {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  border: var(--border-width, 1px) solid var(--line); border-radius: 999px;
+  background: var(--surface); color: var(--faint);
+}
+.assist-input input {
+  flex: 1; border: none; outline: none; background: none; color: var(--ink);
+  font: inherit; font-size: 13px;
+}
+.assist-input:focus-within { border-color: var(--line-strong); }
+
 .meeting-video { display: flex; flex-direction: column; gap: 10px; padding: 8px 2px; }
 .meeting-video video {
   width: 100%; max-height: 62vh; background: #000;

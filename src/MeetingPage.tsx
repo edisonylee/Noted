@@ -118,6 +118,9 @@ export function MeetingPage({
   const [renameText, setRenameText] = useState("");
   const [suggesting, setSuggesting] = useState(false);
   const [rediarizing, setRediarizing] = useState(false);
+  const [assistQ, setAssistQ] = useState("");
+  const [assistA, setAssistA] = useState<string | null>(null);
+  const [assistBusy, setAssistBusy] = useState(false);
   const [query, setQuery] = useState("");
   const [playingSeg, setPlayingSeg] = useState<number | null>(null);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
@@ -326,6 +329,23 @@ export function MeetingPage({
       setError(String(e));
     } finally {
       setSuggesting(false);
+    }
+  };
+
+  // Live Assist A0: ask against this meeting's transcript-so-far (works
+  // mid-recording — the model sees the rolling tail).
+  const askAssist = async () => {
+    const q = assistQ.trim();
+    if (id == null || !q || assistBusy) return;
+    setAssistBusy(true);
+    try {
+      const res = await api.meetingAssist(id, q);
+      setAssistA(res.answer);
+      setAssistQ("");
+    } catch (e) {
+      setAssistA(String(e));
+    } finally {
+      setAssistBusy(false);
     }
   };
 
@@ -683,6 +703,46 @@ export function MeetingPage({
             })
           )}
           </div>
+          {liveSegments.length > 0 && (
+            <div className="assist-row">
+              {assistA && (
+                <div className="assist-answer">
+                  <p>{assistA}</p>
+                  <button
+                    className="icon-btn"
+                    onClick={() => setAssistA(null)}
+                    aria-label="Dismiss answer"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
+              <div className="assist-input">
+                <Sparkles size={13} />
+                <input
+                  value={assistQ}
+                  onChange={(e) => setAssistQ(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") askAssist();
+                  }}
+                  placeholder={
+                    recording
+                      ? "Ask about the meeting so far — “what did they just ask me?”"
+                      : "Ask about this meeting…"
+                  }
+                  spellCheck={false}
+                  disabled={assistBusy}
+                />
+                <button
+                  className="chip-action"
+                  onClick={askAssist}
+                  disabled={assistBusy || !assistQ.trim()}
+                >
+                  {assistBusy ? <Loader size={12} className="spin" /> : "Ask"}
+                </button>
+              </div>
+            </div>
+          )}
           <audio ref={audioRef} onEnded={() => setPlayingSeg(null)} style={{ display: "none" }} />
         </>
       ) : tab === "video" ? (

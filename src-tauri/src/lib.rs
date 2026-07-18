@@ -3,6 +3,7 @@ pub mod brain;
 pub mod db;
 pub mod entities;
 pub mod gcal;
+pub mod hosted;
 pub mod meeting;
 pub mod ollama;
 pub mod phone;
@@ -1528,8 +1529,9 @@ fn voice_model_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
 
 #[tauri::command]
 fn voice_status(app: tauri::AppHandle) -> Value {
-    let ready = voice_model_path(&app).map(|p| p.exists()).unwrap_or(false);
-    json!({ "ready": ready })
+    let local_ready = voice_model_path(&app).map(|p| p.exists()).unwrap_or(false);
+    let hosted_ready = meeting::cfg().asr_engine == "hosted" && hosted::has_key();
+    json!({ "ready": local_ready || hosted_ready, "hosted": hosted_ready })
 }
 
 /// Download the whisper model (~148MB) once, into app data.
@@ -1557,10 +1559,6 @@ async fn transcribe(
     sample_rate: u32,
 ) -> Result<String, String> {
     use base64::Engine;
-    let model = voice_model_path(&app)?;
-    if !model.exists() {
-        return Err("voice model not downloaded".into());
-    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(audio_b64.as_bytes())
         .map_err(|e| e.to_string())?;
@@ -1573,6 +1571,13 @@ async fn transcribe(
     // The user's custom vocabulary applies to all speech-to-text, not just
     // meetings — quick captures mishear "a16z" the same way.
     let vocab = meeting::cfg().vocabulary;
+    if meeting::cfg().asr_engine == "hosted" {
+        return hosted::transcribe_batch(&samples, &vocab).await.map_err(|e| e.to_string());
+    }
+    let model = voice_model_path(&app)?;
+    if !model.exists() {
+        return Err("voice model not downloaded".into());
+    }
     let hint = meeting::asr::vocab_hint(&[], &vocab);
 
     // whisper is CPU/Metal-bound and blocking; run off the async runtime.
@@ -1605,6 +1610,7 @@ fn meeting_model_status(app: tauri::AppHandle) -> Value {
         "base": dir.join("ggml-base.en.bin").exists(),
         "speaker": dir.join(meeting::diarize::MODEL_FILE).exists(),
         "parakeet": meeting::parakeet_ready(&app),
+        "hosted": hosted::has_key(),
         "tap_supported": meeting::capture::tap_supported(),
     })
 }
@@ -1754,6 +1760,18 @@ fn meeting_dismiss_prompt(app: tauri::AppHandle, bundle_id: Option<String>) {
 #[tauri::command]
 fn meetings_settings_get() -> Value {
     serde_json::to_value(meeting::cfg()).unwrap_or(Value::Null)
+}
+
+#[tauri::command]
+fn hosted_key_set(value: String) -> Result<(), String> {
+    if value.trim().is_empty() {
+        hosted::delete_key();
+        return Ok(());
+    }
+    if !value.starts_with("ntd_test_") && !value.starts_with("ntd_live_") {
+        return Err("Noted API keys start with ntd_test_ or ntd_live_".into());
+    }
+    hosted::write_key(value.trim()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3526,6 +3544,7 @@ pub fn run() {
             meeting_dismiss_prompt,
             meetings_settings_get,
             meetings_settings_set,
+            hosted_key_set,
             set_chrome_theme,
             list_entities,
             merge_entities,

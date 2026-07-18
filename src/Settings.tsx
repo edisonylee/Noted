@@ -916,8 +916,9 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           <>
         <h3>Meetings</h3>
         <p className="settings-sub">
-          noted records meetings bot-free: your mic + system audio, transcribed and summarized
-          100% on this Mac. Nothing is captured unless you accept a prompt or hit Record.
+          noted records meetings bot-free using your mic + system audio. Choose private local
+          transcription or hosted Parakeet with no model download. Nothing is captured unless
+          you accept a prompt or hit Record.
         </p>
 
         <div className="settings-fields">
@@ -1211,13 +1212,17 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               value={mcfg?.asr_engine ?? "whisper"}
               onChange={(e) =>
                 mcfg &&
-                saveMcfg({ ...mcfg, asr_engine: e.target.value as "whisper" | "parakeet" })
+                saveMcfg({ ...mcfg, asr_engine: e.target.value as "whisper" | "parakeet" | "hosted" })
               }
             >
               <option value="whisper">Whisper</option>
               <option value="parakeet" disabled={!mModel?.parakeet}>
                 Parakeet — faster, better with names
                 {mModel?.parakeet ? "" : " (download below)"}
+              </option>
+              <option value="hosted" disabled={!mModel?.hosted}>
+                Hosted Parakeet — no local model download
+                {mModel?.hosted ? "" : " (activation required)"}
               </option>
             </select>
           </label>

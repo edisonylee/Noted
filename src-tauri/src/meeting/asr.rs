@@ -208,6 +208,7 @@ pub enum EngineSpec {
     Whisper { model: PathBuf },
     /// Directory holding encoder/decoder/joiner int8 ONNX + tokens.txt.
     Parakeet { dir: PathBuf },
+    Hosted { vocabulary: Vec<String> },
 }
 
 /// Model stays loaded for the whole meeting. Calls are serialized by the
@@ -222,6 +223,7 @@ pub enum Transcriber {
     /// so sherpa hotwords can't be used — `apply_vocab` still canonicalizes
     /// vocabulary terms after decode.
     Parakeet { rec: sherpa_rs::transducer::TransducerRecognizer },
+    Hosted { session: crate::hosted::Session },
 }
 
 impl Transcriber {
@@ -257,6 +259,9 @@ impl Transcriber {
                 .map_err(|e| anyhow!("parakeet load failed: {e}"))?;
                 Ok(Self::Parakeet { rec })
             }
+            EngineSpec::Hosted { vocabulary } => Ok(Self::Hosted {
+                session: crate::hosted::Session::open(vocabulary.clone())?,
+            }),
         }
     }
 
@@ -293,6 +298,13 @@ impl Transcriber {
                 Ok(out.trim().to_string())
             }
             Self::Parakeet { rec } => Ok(rec.transcribe(SR as u32, samples).trim().to_string()),
+            Self::Hosted { session } => session.transcribe(samples),
+        }
+    }
+
+    pub fn finish(&self) {
+        if let Self::Hosted { session } = self {
+            session.finalize();
         }
     }
 }
@@ -1092,6 +1104,7 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
             let _ = w.finalize();
         }
     }
+    transcriber.finish();
 }
 
 /// Recluster for live labels after this many new voice embeddings — often

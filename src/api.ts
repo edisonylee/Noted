@@ -228,9 +228,9 @@ export type CategoryInfo = {
 export type Health = { models: string[]; vec_version: string };
 
 // Model-provider settings. "local" = 100% Ollama; "balanced" routes the
-// extract/OCR hot path to the chosen cloud provider while keeping
-// embeddings + chat local.
-export type ProviderMode = "local" | "balanced";
+// extract/OCR hot path to a chosen cloud provider; "hosted" routes every
+// model-dependent feature through the authenticated Noted API.
+export type ProviderMode = "local" | "balanced" | "hosted";
 export type CloudProvider = "gemini" | "openai" | "anthropic";
 export type ProviderSettings = {
   mode: ProviderMode;
@@ -247,6 +247,7 @@ export type ProviderSettings = {
   has_gemini_key: boolean;
   has_openai_key: boolean;
   has_anthropic_key: boolean;
+  has_hosted_key: boolean;
 };
 
 export type ThemeState = {
@@ -402,6 +403,7 @@ export type MeetingModelStatus = {
   base: boolean;
   speaker: boolean; // voice-embedding model for per-speaker labels
   parakeet: boolean; // Parakeet-TDT ASR engine files present
+  hosted: boolean; // scoped Noted API key exists in macOS Keychain
   tap_supported: boolean;
 };
 // What the record-prompt popup shows: calendar T-60s / mic-in-use detection,
@@ -420,7 +422,7 @@ export type MeetingsCfg = {
   ignore_bundles: string[];
   default_template: string;
   vocabulary: string[];
-  asr_engine: "whisper" | "parakeet";
+  asr_engine: "whisper" | "parakeet" | "hosted";
   /** macOS voice-processing (AEC) on the mic — strips speaker playback from the mic signal. */
   mic_aec: boolean;
   /** Record the meeting app's window as video (ScreenCaptureKit, macOS 15+). */
@@ -664,6 +666,7 @@ export const api = {
   meetingsSettingsGet: () => invoke<MeetingsCfg>("meetings_settings_get"),
   meetingsSettingsSet: (settings: MeetingsCfg) =>
     invoke<void>("meetings_settings_set", { settings }),
+  hostedKeySet: (value: string) => invoke<void>("hosted_key_set", { value }),
   // Native window chrome (vibrancy material + NSAppearance) follows the theme.
   setChromeTheme: (dark: boolean) => invoke<void>("set_chrome_theme", { dark }),
   meetingStop: () => invoke<number | null>("meeting_stop"),

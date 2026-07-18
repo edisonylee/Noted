@@ -72,8 +72,8 @@ pub struct MeetingsCfg {
     /// canonicalize near-miss spellings after decode.
     #[serde(default)]
     pub vocabulary: Vec<String>,
-    /// "whisper" (default) or "parakeet". Parakeet needs its model download;
-    /// missing files fall back to whisper rather than failing the recording.
+    /// "whisper", "parakeet", or "hosted". Hosted uses the scoped Noted API
+    /// key in macOS Keychain and keeps local engines as offline fallbacks.
     #[serde(default = "d_engine")]
     pub asr_engine: String,
     /// macOS voice-processing (AEC) on the mic: the OS subtracts what the
@@ -239,6 +239,12 @@ pub fn parakeet_ready(app: &tauri::AppHandle) -> bool {
 /// Parakeet with missing files degrades to whisper (recording must never
 /// fail over a settings/download mismatch).
 pub fn engine_spec(app: &tauri::AppHandle) -> Result<asr::EngineSpec> {
+    if cfg().asr_engine == "hosted" {
+        if crate::hosted::has_key() {
+            return Ok(asr::EngineSpec::Hosted { vocabulary: cfg().vocabulary });
+        }
+        eprintln!("[noted] hosted ASR selected but no API key is configured — using local ASR");
+    }
     if cfg().asr_engine == "parakeet" {
         if parakeet_ready(app) {
             return Ok(asr::EngineSpec::Parakeet { dir: parakeet_dir(app)? });

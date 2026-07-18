@@ -27,6 +27,9 @@ pub fn vision_model() -> String {
 
 /// Which models are pulled — used for the M0 health check / setup screen.
 pub async fn tags() -> Result<Value> {
+    if crate::provider::use_hosted() {
+        return crate::hosted::models().await;
+    }
     let resp = reqwest::get(format!("{BASE}/api/tags")).await?;
     Ok(resp.json::<Value>().await?)
 }
@@ -41,6 +44,9 @@ pub async fn chat_json(
     images: Option<Vec<String>>,
     format: Option<Value>,
 ) -> Result<Value> {
+    if crate::provider::use_hosted() {
+        return crate::hosted::chat_json(system, user, images, format).await;
+    }
     // Balanced mode: route the latency-sensitive structured calls (note extract
     // + photo OCR) to the configured cloud provider. On any failure (bad key,
     // offline, rate limit, refusal) we fall through to the local model so
@@ -55,8 +61,8 @@ pub async fn chat_json(
     chat_json_local(model, system, user, images, format).await
 }
 
-/// Structured chat that NEVER leaves the machine, even in Balanced mode — for
-/// privacy-sensitive text such as Journal reflections and imported theme briefs.
+/// Structured chat that stays local in Local/Balanced mode. Hosted mode is an
+/// explicit account-wide choice, so journal and theme calls use the Noted API.
 pub async fn chat_json_local(
     model: &str,
     system: &str,
@@ -82,6 +88,9 @@ pub async fn chat_json_local_ctx(
     format: Option<Value>,
     num_ctx: u32,
 ) -> Result<Value> {
+    if crate::provider::use_hosted() {
+        return crate::hosted::chat_json(system, user, images, format).await;
+    }
     let mut user_msg = json!({ "role": "user", "content": user });
     if let Some(imgs) = images {
         user_msg["images"] = json!(imgs);
@@ -132,6 +141,9 @@ pub async fn chat_json_local_ctx(
 
 /// Plain prose chat turn (no JSON constraint) — used for grounded RAG answers.
 pub async fn chat_text(model: &str, system: &str, user: &str) -> Result<String> {
+    if crate::provider::use_hosted() {
+        return crate::hosted::chat_text(system, user).await;
+    }
     let body = json!({
         "model": model,
         "stream": false,
@@ -160,6 +172,9 @@ pub async fn chat_text(model: &str, system: &str, user: &str) -> Result<String> 
 /// Multi-message chat turn — used by the conversational Q&A assistant so prior
 /// turns are remembered. `messages` is a full Ollama messages array.
 pub async fn chat_messages(model: &str, messages: Vec<Value>, temperature: f32) -> Result<String> {
+    if crate::provider::use_hosted() {
+        return crate::hosted::chat_messages(messages, temperature).await;
+    }
     let body = json!({
         "model": model,
         "stream": false,
@@ -184,6 +199,9 @@ pub async fn chat_messages(model: &str, messages: Vec<Value>, temperature: f32) 
 
 /// Embed text with nomic-embed-text (768-dim). Used by semantic search (M3).
 pub async fn embed(input: &str) -> Result<Vec<f32>> {
+    if crate::provider::use_hosted() {
+        return crate::hosted::embed(input).await;
+    }
     // keep_alive -1 (a NUMBER, not "-1") keeps the tiny embed model resident.
     let body = json!({ "model": EMBED_MODEL, "input": input, "keep_alive": -1 });
     let client = reqwest::Client::new();

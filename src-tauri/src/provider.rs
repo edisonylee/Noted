@@ -1,5 +1,6 @@
 // Model-provider routing. noted is local-first ($0, private) by default; the
-// "Balanced" mode offloads only the latency-sensitive *structured* calls
+// "Balanced" mode offloads only the latency-sensitive *structured* calls;
+// "Hosted" routes every model-dependent feature through the Noted API.
 // (note extraction + photo OCR) to Gemini so a busy/wedged local Ollama never
 // leaves a note stuck on "reading". Embeddings and the conversational assistant
 // deliberately stay local (cheap + most personal).
@@ -35,12 +36,15 @@ pub enum Mode {
     Local,
     /// Local embeddings + chat, but extract/OCR go to the cloud (fast + cheap).
     Balanced,
+    /// No local model requirement: chat, vision, embeddings, and ASR use the Noted API.
+    Hosted,
 }
 
 impl Mode {
     fn parse(s: &str) -> Mode {
         match s.to_ascii_lowercase().as_str() {
             "balanced" => Mode::Balanced,
+            "hosted" => Mode::Hosted,
             _ => Mode::Local,
         }
     }
@@ -183,6 +187,10 @@ fn active_cloud_key(c: &Config) -> Option<&str> {
 pub fn use_cloud_for_extract() -> bool {
     let c = get();
     c.mode == Mode::Balanced && active_cloud_key(&c).is_some()
+}
+
+pub fn use_hosted() -> bool {
+    get().mode == Mode::Hosted && crate::hosted::has_key()
 }
 
 // ── Keychain (via the macOS `security` CLI) ─────────────────────────────────

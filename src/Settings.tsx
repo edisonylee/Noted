@@ -200,7 +200,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
         (cfg.cloud_provider === "openai" && cfg.has_openai_key) ||
         (cfg.cloud_provider === "anthropic" && cfg.has_anthropic_key) ||
         ((cfg.cloud_provider ?? "gemini") === "gemini" && cfg.has_gemini_key);
-      if (cfg.mode === "balanced" && hasActiveKey) {
+      if ((cfg.mode === "balanced" && hasActiveKey) || (cfg.mode === "hosted" && cfg.has_hosted_key)) {
         // Pass overrides: this closure captured first-render state, and
         // saving with a stale mode would silently flip Balanced off.
         checkConnection({ mode: cfg.mode, cloud_provider: cfg.cloud_provider ?? "gemini" });
@@ -386,7 +386,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
       await api.setProviderSettings(settingsPayload());
       // Confirm the save landed against a working connection before leaving —
       // surfaces a bad key instead of closing on a silent failure.
-      if (mode === "balanced" && hasKey) {
+      if ((mode === "balanced" && hasKey) || (mode === "hosted" && s?.has_hosted_key)) {
         await checkConnection();
       } else if (page) {
         setSavedHint(true);
@@ -454,9 +454,8 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           <>
         <h3>Models</h3>
         <p className="settings-sub">
-          noted runs entirely on your machine by default — free and private. Switch to Balanced
-          if local feels slow: only note extraction and photo OCR go to Gemini (fast + cheap);
-          your embeddings and chat stay local.
+          Choose Local for private offline inference, Balanced for cloud-assisted extraction, or
+          Hosted to run transcription, chat, summaries, vision, and search through your Noted account.
         </p>
 
         <div className="pill-group settings-seg">
@@ -466,9 +465,17 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           <button className={"pill" + (mode === "balanced" ? " on" : "")} onClick={() => setMode("balanced")}>
             Balanced <em>Gemini hot path</em>
           </button>
+          <button
+            className={"pill" + (mode === "hosted" ? " on" : "")}
+            onClick={() => setMode("hosted")}
+            disabled={!s?.has_hosted_key}
+            title={s?.has_hosted_key ? "Use your Noted hosted account" : "Activate a Noted account first"}
+          >
+            Hosted <em>no model downloads</em>
+          </button>
         </div>
 
-        <div className="settings-fields">
+        {mode !== "hosted" && <div className="settings-fields">
           <div className="field-row">
             <label className="field">
               <span className="field-label">Local text model</span>
@@ -499,7 +506,32 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
             Any Ollama model you've pulled works (recommended: qwen2.5:7b-instruct + qwen2.5vl:7b).
             Embeddings stay on nomic-embed-text — the search index is built with it.
           </span>
-        </div>
+        </div>}
+
+        {mode === "hosted" && (
+          <div className="settings-fields">
+            <div className={"conn-status " + conn.state}>
+              {conn.state === "checking" && <Loader2 size={13} className="spin" />}
+              {conn.state === "ok" && <Wifi size={13} />}
+              {conn.state !== "ok" && conn.state !== "checking" && <WifiOff size={13} />}
+              <span className="conn-label">
+                {conn.state === "checking"
+                  ? "Checking Noted Hosted…"
+                  : conn.state === "ok"
+                    ? conn.msg
+                    : "Ready to connect"}
+              </span>
+            </div>
+            {conn.state === "err" && <div className="conn-detail">{conn.msg}</div>}
+            <span className="field-hint">
+              Your activation credential is stored in macOS Keychain. No Ollama, Gemma, Parakeet,
+              Whisper, or embedding-model download is required.
+            </span>
+            <button className="ghost-btn test-btn" onClick={() => checkConnection({ mode: "hosted" })}>
+              Test hosted connection
+            </button>
+          </div>
+        )}
 
         {mode === "balanced" && (
           <div className="settings-fields">
@@ -916,8 +948,9 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           <>
         <h3>Meetings</h3>
         <p className="settings-sub">
-          noted records meetings bot-free: your mic + system audio, transcribed and summarized
-          100% on this Mac. Nothing is captured unless you accept a prompt or hit Record.
+          noted records meetings bot-free using your mic + system audio. Choose private local
+          transcription or hosted Parakeet with no model download. Nothing is captured unless
+          you accept a prompt or hit Record.
         </p>
 
         <div className="settings-fields">
@@ -1211,13 +1244,17 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               value={mcfg?.asr_engine ?? "whisper"}
               onChange={(e) =>
                 mcfg &&
-                saveMcfg({ ...mcfg, asr_engine: e.target.value as "whisper" | "parakeet" })
+                saveMcfg({ ...mcfg, asr_engine: e.target.value as "whisper" | "parakeet" | "hosted" })
               }
             >
               <option value="whisper">Whisper</option>
               <option value="parakeet" disabled={!mModel?.parakeet}>
                 Parakeet — faster, better with names
                 {mModel?.parakeet ? "" : " (download below)"}
+              </option>
+              <option value="hosted" disabled={!mModel?.hosted}>
+                Hosted Parakeet — no local model download
+                {mModel?.hosted ? "" : " (activation required)"}
               </option>
             </select>
           </label>

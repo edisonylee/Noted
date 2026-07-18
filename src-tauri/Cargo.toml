@@ -35,7 +35,7 @@ sqlite-vec = "=0.1.9"
 zerocopy = "0.7"
 
 # Talk to local Ollama (text + vision + embeddings)
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "multipart", "blocking"] }
 base64 = "0.22"
 
 # Shared async runtime / error helpers ("rt" for JoinSet — the multi-calendar

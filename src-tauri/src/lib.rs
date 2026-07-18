@@ -1577,6 +1577,15 @@ async fn transcribe(
     // The user's custom vocabulary applies to all speech-to-text, not just
     // meetings — quick captures mishear "a16z" the same way.
     let vocab = meeting::cfg().vocabulary;
+    if provider::use_byok() {
+        return tauri::async_runtime::spawn_blocking(move || {
+            provider::byok_transcribe_blocking(&samples, &vocab)
+                .map(|t| meeting::asr::apply_vocab(&t, &vocab))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string());
+    }
     if meeting::cfg().asr_engine == "hosted" {
         return hosted::transcribe_batch(&samples, &vocab).await.map_err(|e| e.to_string());
     }
@@ -2948,6 +2957,7 @@ fn get_provider_settings() -> Value {
     let c = provider::get();
     let has = |k: &Option<String>| k.as_deref().map(|k| !k.is_empty()).unwrap_or(false);
     json!({
+        "version": c.version,
         "mode": c.mode,
         "cloud_provider": c.cloud_provider,
         "text_model": c.text_model,
@@ -2963,7 +2973,49 @@ fn get_provider_settings() -> Value {
         "has_openai_key": has(&c.openai_api_key),
         "has_anthropic_key": has(&c.anthropic_api_key),
         "has_hosted_key": hosted::has_key(),
+        "byok": c.byok,
+        "has_groq_key": has(&c.groq_api_key),
+        "has_openai_compatible_key": has(&c.openai_compatible_api_key),
     })
+}
+
+#[tauri::command]
+fn set_byok_settings(
+    app: tauri::AppHandle,
+    settings: provider::ByokConfig,
+    groq_api_key: Option<String>,
+    openai_compatible_api_key: Option<String>,
+    confirm_embedding_rebuild: bool,
+) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let new_fingerprint = provider::embedding_fingerprint(&settings.embeddings);
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let count = db::embedding_count(&conn).map_err(|e| e.to_string())?;
+    let old_fingerprint = db::embedding_fingerprint(&conn).map_err(|e| e.to_string())?;
+    drop(conn);
+    let needs_rebuild = old_fingerprint.as_deref() != Some(&new_fingerprint) && count > 0;
+    if needs_rebuild {
+        if !confirm_embedding_rebuild {
+            return Err("EMBEDDING_REBUILD_REQUIRED: Changing the embedding provider or model requires rebuilding semantic search.".into());
+        }
+    }
+    provider::update(
+        &dir,
+        provider::SettingsPatch {
+            mode: Some("byok".into()),
+            byok: Some(settings),
+            groq_api_key,
+            openai_compatible_api_key,
+            ..Default::default()
+        },
+    ).map_err(|e| e.to_string())?;
+    if needs_rebuild || old_fingerprint.is_none() {
+        let state = app.state::<Db>();
+        let mut conn = state.0.lock().unwrap();
+        db::reset_embedding_space(&mut conn, &new_fingerprint).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -3003,6 +3055,9 @@ fn set_provider_settings(
             anthropic_api_key,
             anthropic_text_model,
             anthropic_vision_model,
+            byok: None,
+            groq_api_key: None,
+            openai_compatible_api_key: None,
         },
     )
     .map_err(|e| e.to_string())?;
@@ -3016,6 +3071,14 @@ fn set_provider_settings(
 
 #[tauri::command]
 async fn test_provider() -> Result<String, String> {
+    if provider::use_byok() {
+        let results = provider::test_byok_capabilities().await;
+        let summary = results.to_string();
+        if summary.contains("failed:") {
+            return Err(summary);
+        }
+        return Ok(summary);
+    }
     if provider::get().mode == provider::Mode::Hosted {
         return hosted::test_connection().await.map_err(|e| e.to_string());
     }
@@ -3576,6 +3639,7 @@ pub fn run() {
             kg_reindex_meetings,
             get_provider_settings,
             set_provider_settings,
+            set_byok_settings,
             test_provider,
             gcal_auth_status,
             gcal_set_client,

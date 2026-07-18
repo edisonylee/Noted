@@ -402,6 +402,7 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
             sarg(b, "calendarId"),
             b.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
         ),
+        "set_byok_settings" => Err("this action runs on the desktop app only".into()),
         "gcal_refresh_calendars" => crate::gcal_refresh_calendars(a).await,
         "gcal_set_sync_account" => crate::gcal_set_sync_account(a, sarg(b, "email")),
         "gcal_contacts" => Ok(crate::gcal_contacts()),

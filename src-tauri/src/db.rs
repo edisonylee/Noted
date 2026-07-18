@@ -56,6 +56,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0(
   embedding FLOAT[768]
 );
 
+CREATE TABLE IF NOT EXISTS app_metadata (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS recaps (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   period       TEXT NOT NULL,            -- 'day' | 'week'
@@ -383,6 +388,28 @@ pub fn insert_embedding(conn: &Connection, note_id: i64, vec: &[f32]) -> Result<
         "INSERT OR REPLACE INTO embeddings(note_id, embedding) VALUES (?1, ?2)",
         rusqlite::params![note_id, json],
     )?;
+    Ok(())
+}
+
+pub fn embedding_count(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))?)
+}
+
+pub fn embedding_fingerprint(conn: &Connection) -> Result<Option<String>> {
+    let mut stmt = conn.prepare("SELECT value FROM app_metadata WHERE key = 'embedding_space'")?;
+    let mut rows = stmt.query([])?;
+    Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+}
+
+pub fn reset_embedding_space(conn: &mut Connection, fingerprint: &str) -> Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM embeddings", [])?;
+    tx.execute("DELETE FROM entity_embeddings", [])?;
+    tx.execute(
+        "INSERT OR REPLACE INTO app_metadata(key, value) VALUES ('embedding_space', ?1)",
+        [fingerprint],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 

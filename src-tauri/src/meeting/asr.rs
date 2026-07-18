@@ -209,6 +209,7 @@ pub enum EngineSpec {
     /// Directory holding encoder/decoder/joiner int8 ONNX + tokens.txt.
     Parakeet { dir: PathBuf },
     Hosted { vocabulary: Vec<String> },
+    Byok { vocabulary: Vec<String> },
 }
 
 /// Model stays loaded for the whole meeting. Calls are serialized by the
@@ -224,6 +225,7 @@ pub enum Transcriber {
     /// vocabulary terms after decode.
     Parakeet { rec: sherpa_rs::transducer::TransducerRecognizer },
     Hosted { session: crate::hosted::Session },
+    Byok { vocabulary: Vec<String> },
 }
 
 impl Transcriber {
@@ -262,6 +264,7 @@ impl Transcriber {
             EngineSpec::Hosted { vocabulary } => Ok(Self::Hosted {
                 session: crate::hosted::Session::open(vocabulary.clone())?,
             }),
+            EngineSpec::Byok { vocabulary } => Ok(Self::Byok { vocabulary: vocabulary.clone() }),
         }
     }
 
@@ -299,6 +302,7 @@ impl Transcriber {
             }
             Self::Parakeet { rec } => Ok(rec.transcribe(SR as u32, samples).trim().to_string()),
             Self::Hosted { session } => session.transcribe(samples),
+            Self::Byok { vocabulary } => crate::provider::byok_transcribe_blocking(samples, vocabulary),
         }
     }
 

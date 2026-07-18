@@ -4,7 +4,7 @@ A local-first personal notes app that turns messy capture into structured, searc
 
 You jot, speak, or photograph a note; a local model categorizes it, extracts the structured bits, and files it. Over time noted builds a personal knowledge base you can search semantically, a daily schedule, recaps and trends, and a lightweight knowledge graph of the people and things in your life.
 
-By default everything runs **100% locally** through [Ollama](https://ollama.com) — text, vision, and embeddings never leave your computer. An optional "Balanced" mode offloads only the latency-sensitive OCR/extract calls to Google Gemini.
+Noted supports three complete inference profiles: **Noted Hosted** requires no model downloads, **Use my API keys** routes each capability to providers you choose, and **Local** keeps inference on your Mac through [Ollama](https://ollama.com). The legacy "Balanced" mode remains available for cloud-assisted extraction.
 
 ## Features
 
@@ -27,6 +27,7 @@ By default everything runs **100% locally** through [Ollama](https://ollama.com)
 - **Speech-to-text:** `whisper-rs` (whisper.cpp), in-process and offline
 - **LAN server:** `tiny_http` over self-signed TLS (`rcgen`) — a secure context is required for phone mic/camera
 - **Optional cloud (Balanced mode):** Google Gemini (`gemini-2.5-flash` / `gemini-2.5-flash-lite`)
+- **Bring your own keys:** OpenAI, Gemini, Anthropic, Groq speech, Noted Hosted, and HTTPS/loopback OpenAI-compatible endpoints. Intelligence, vision, 768-dimensional embeddings, and transcription are configured independently.
 
 Secrets (the Gemini API key, Google Calendar OAuth tokens) are stored in the macOS Keychain, never in the repo or the database.
 
@@ -61,6 +62,7 @@ Frontend-only scripts (`vite`) are also available via `npm run dev` / `npm run b
 ## Optional setup
 
 - **Balanced mode (Gemini):** open Settings, switch to *Balanced*, and paste a Gemini API key. Only OCR/extract calls go to Gemini; chat and embeddings stay local. The connection badge confirms the key is live.
+- **Use my API keys:** open Settings → Models, select each provider and model, review the routing summary, then save. Credentials go to macOS Keychain. Anthropic must be paired with another embedding and transcription provider. Changing the embedding provider asks before rebuilding semantic search from your preserved notes.
 - **Google Calendar:** in Settings, connect your Google account (OAuth with PKCE). Today can then push the day's schedule one-way into a dedicated "noted" calendar.
 - **Phone access:** open the phone panel in the app to get a QR code / URL and token; your phone joins over the LAN and runs the full client.
 - **Themes:** open Settings → Themes to search 50 bundled presets. You can also paste or upload a `DESIGN.md`; the local text model creates a safe preview before you apply it. See [`THEMES.md`](THEMES.md) for the pack contract.

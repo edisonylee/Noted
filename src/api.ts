@@ -228,9 +228,9 @@ export type CategoryInfo = {
 export type Health = { models: string[]; vec_version: string };
 
 // Model-provider settings. "local" = 100% Ollama; "balanced" routes the
-// extract/OCR hot path to the chosen cloud provider while keeping
-// embeddings + chat local.
-export type ProviderMode = "local" | "balanced";
+// extract/OCR hot path to a chosen cloud provider; "hosted" routes every
+// model-dependent feature through the authenticated Noted API.
+export type ProviderMode = "local" | "balanced" | "hosted";
 export type CloudProvider = "gemini" | "openai" | "anthropic";
 export type ProviderSettings = {
   mode: ProviderMode;
@@ -247,6 +247,7 @@ export type ProviderSettings = {
   has_gemini_key: boolean;
   has_openai_key: boolean;
   has_anthropic_key: boolean;
+  has_hosted_key: boolean;
 };
 
 export type ThemeState = {

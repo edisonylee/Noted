@@ -59,12 +59,13 @@ The Windows host was configured with scheduled tasks named:
 
 These were last described as starting at user logon. True pre-login Windows services require a one-time elevated setup. Reboot-survival verification remained an explicit follow-up item in the supplied deployment history.
 
-## Noted connection plan
+## Noted connection
 
-The present Noted application has two provider modes:
+Noted has three provider modes:
 
 - Local: all work uses the Mac's local Ollama instance.
 - Balanced: extraction and OCR can use an OpenAI-compatible endpoint; embeddings, chat, meeting summaries, and other features remain local.
+- Hosted: all model-dependent features use `api.entersymphony.com`; customers do not need Ollama or local model downloads.
 
 The existing Balanced mode can use the hosted gateway for extraction and OCR with:
 
@@ -75,7 +76,7 @@ The existing Balanced mode can use the hosted gateway for extraction and OCR wit
 
 Do not paste a production key into documentation, source control, logs, screenshots, or support conversations.
 
-To run every Noted AI feature through the hosted service, the app still needs a dedicated hosted-provider mode that routes chat, embeddings, meeting summaries, recaps, and answers through the gateway's `/v1` endpoints. Until that is implemented, Balanced mode is only a partial connection.
+Hosted mode routes structured extraction, OCR/vision, meeting summaries, recaps, journal responses, general chat, theme assistance, Q&A, and 768-dimensional embeddings through the authenticated OpenAI-compatible gateway. Hosted Parakeet handles dictation and live meeting transcription. Local mode remains available as an optional offline/privacy configuration.
 
 ## Remaining checks
 

@@ -115,10 +115,16 @@ async fn health(app: tauri::AppHandle) -> Result<Value, String> {
     let tags = ollama::tags().await.map_err(|e| e.to_string())?;
     let models: Vec<String> = tags
         .get("models")
+        .or_else(|| tags.get("data"))
         .and_then(|m| m.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                .filter_map(|m| {
+                    m.get("name")
+                        .or_else(|| m.get("id"))
+                        .and_then(|n| n.as_str())
+                        .map(String::from)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -2956,6 +2962,7 @@ fn get_provider_settings() -> Value {
         "has_gemini_key": has(&c.gemini_api_key),
         "has_openai_key": has(&c.openai_api_key),
         "has_anthropic_key": has(&c.anthropic_api_key),
+        "has_hosted_key": hosted::has_key(),
     })
 }
 
@@ -2998,11 +3005,20 @@ fn set_provider_settings(
             anthropic_vision_model,
         },
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    if provider::get().mode == provider::Mode::Hosted {
+        let mut meetings = meeting::cfg();
+        meetings.asr_engine = "hosted".into();
+        meeting::cfg_update(&dir, meetings).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 async fn test_provider() -> Result<String, String> {
+    if provider::get().mode == provider::Mode::Hosted {
+        return hosted::test_connection().await.map_err(|e| e.to_string());
+    }
     provider::test_cloud().await.map_err(|e| e.to_string())
 }
 

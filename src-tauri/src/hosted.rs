@@ -5,6 +5,9 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 
 pub const BASE_URL: &str = "https://api.entersymphony.com";
+pub const TEXT_MODEL: &str = "gemma3:4b";
+pub const VISION_MODEL: &str = "gemma3:4b";
+pub const EMBED_MODEL: &str = "nomic-embed-text";
 const KEYCHAIN_SERVICE: &str = "com.noted.app";
 const KEYCHAIN_ACCOUNT: &str = "hosted_api_key";
 
@@ -59,6 +62,131 @@ pub fn wav_bytes(samples: &[f32]) -> Vec<u8> {
         out.extend_from_slice(&((sample.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
     }
     out
+}
+
+fn mime_for_image(b64: &str) -> &'static str {
+    if b64.starts_with("iVBOR") { "image/png" }
+    else if b64.starts_with("R0lGOD") { "image/gif" }
+    else if b64.starts_with("UklGR") { "image/webp" }
+    else { "image/jpeg" }
+}
+
+fn parse_json_content(content: &str) -> Result<Value> {
+    let trimmed = content.trim();
+    let trimmed = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(|s| s.strip_suffix("```").unwrap_or(s))
+        .unwrap_or(trimmed)
+        .trim();
+    serde_json::from_str(trimmed).map_err(|e| anyhow!("hosted model returned invalid JSON: {e}"))
+}
+
+fn async_client(timeout_secs: u64) -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder().timeout(Duration::from_secs(timeout_secs)).build()?)
+}
+
+pub async fn models() -> Result<Value> {
+    let key = key().ok_or_else(|| anyhow!("hosted API key is not configured"))?;
+    let response = async_client(30)?.get(format!("{BASE_URL}/v1/models"))
+        .bearer_auth(key).send().await?;
+    let status = response.status();
+    let body: Value = response.json().await?;
+    if !status.is_success() {
+        return Err(anyhow!("hosted models failed ({status}): {}", error_message(&body)));
+    }
+    Ok(body)
+}
+
+pub async fn chat_json(
+    system: &str,
+    user: &str,
+    images: Option<Vec<String>>,
+    format: Option<Value>,
+) -> Result<Value> {
+    let user_content = match images {
+        Some(images) if !images.is_empty() => {
+            let mut parts = vec![serde_json::json!({"type":"text", "text":user})];
+            for image in images {
+                parts.push(serde_json::json!({
+                    "type":"image_url",
+                    "image_url":{"url":format!("data:{};base64,{image}", mime_for_image(&image))}
+                }));
+            }
+            Value::Array(parts)
+        }
+        _ => Value::String(user.to_string()),
+    };
+    let response_format = match format {
+        Some(schema) => serde_json::json!({"type":"json_schema", "json_schema":{"name":"noted_result", "schema":schema}}),
+        None => serde_json::json!({"type":"json_object"}),
+    };
+    let body = serde_json::json!({
+        "model": if user_content.is_array() { VISION_MODEL } else { TEXT_MODEL },
+        "temperature": 0.3,
+        "messages":[{"role":"system","content":system},{"role":"user","content":user_content}],
+        "response_format":response_format
+    });
+    parse_chat_response(send_chat(body, 300).await?, true)
+}
+
+pub async fn chat_text(system: &str, user: &str) -> Result<String> {
+    let body = serde_json::json!({
+        "model":TEXT_MODEL, "temperature":0.2,
+        "messages":[{"role":"system","content":system},{"role":"user","content":user}]
+    });
+    parse_chat_response(send_chat(body, 300).await?, false)?.as_str()
+        .map(str::to_string).ok_or_else(|| anyhow!("hosted chat returned no content"))
+}
+
+pub async fn chat_messages(messages: Vec<Value>, temperature: f32) -> Result<String> {
+    let body = serde_json::json!({"model":TEXT_MODEL,"temperature":temperature,"messages":messages});
+    parse_chat_response(send_chat(body, 300).await?, false)?.as_str()
+        .map(str::to_string).ok_or_else(|| anyhow!("hosted chat returned no content"))
+}
+
+async fn send_chat(body: Value, timeout_secs: u64) -> Result<Value> {
+    let key = key().ok_or_else(|| anyhow!("hosted API key is not configured"))?;
+    let response = async_client(timeout_secs)?.post(format!("{BASE_URL}/v1/chat/completions"))
+        .bearer_auth(key).json(&body).send().await?;
+    let status = response.status();
+    let body: Value = response.json().await?;
+    if !status.is_success() {
+        return Err(anyhow!("hosted chat failed ({status}): {}", error_message(&body)));
+    }
+    Ok(body)
+}
+
+fn parse_chat_response(body: Value, json_mode: bool) -> Result<Value> {
+    let content = body.pointer("/choices/0/message/content").and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("hosted chat response missing content"))?;
+    if json_mode { parse_json_content(content) } else { Ok(Value::String(content.to_string())) }
+}
+
+pub async fn embed(input: &str) -> Result<Vec<f32>> {
+    let key = key().ok_or_else(|| anyhow!("hosted API key is not configured"))?;
+    let response = async_client(60)?.post(format!("{BASE_URL}/v1/embeddings"))
+        .bearer_auth(key).json(&serde_json::json!({"model":EMBED_MODEL,"input":input})).send().await?;
+    let status = response.status();
+    let body: Value = response.json().await?;
+    if !status.is_success() {
+        return Err(anyhow!("hosted embedding failed ({status}): {}", error_message(&body)));
+    }
+    let values = body.pointer("/data/0/embedding").and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("hosted embedding response missing vector"))?;
+    let vector: Vec<f32> = values.iter().filter_map(|v| v.as_f64().map(|n| n as f32)).collect();
+    if vector.len() != 768 { return Err(anyhow!("hosted embedding dimension was {}, expected 768", vector.len())); }
+    Ok(vector)
+}
+
+pub async fn test_connection() -> Result<String> {
+    let catalog = models().await?;
+    let ids: Vec<&str> = catalog["data"].as_array().into_iter().flatten()
+        .filter_map(|m| m["id"].as_str()).collect();
+    for required in [TEXT_MODEL, VISION_MODEL, EMBED_MODEL] {
+        if !ids.contains(&required) { return Err(anyhow!("hosted API is missing required model {required}")); }
+    }
+    Ok("Connected to Noted Hosted (chat, vision, embeddings, and transcription).".into())
 }
 
 pub async fn transcribe_batch(samples: &[f32], vocabulary: &[String]) -> Result<String> {

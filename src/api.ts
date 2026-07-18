@@ -230,9 +230,27 @@ export type Health = { models: string[]; vec_version: string };
 // Model-provider settings. "local" = 100% Ollama; "balanced" routes the
 // extract/OCR hot path to a chosen cloud provider; "hosted" routes every
 // model-dependent feature through the authenticated Noted API.
-export type ProviderMode = "local" | "balanced" | "hosted";
+export type ProviderMode = "local" | "balanced" | "hosted" | "byok";
 export type CloudProvider = "gemini" | "openai" | "anthropic";
+export type ProviderId =
+  | "noted_hosted"
+  | "local"
+  | "openai"
+  | "gemini"
+  | "anthropic"
+  | "openai_compatible"
+  | "groq"
+  | "system";
+export type CapabilityChoice = { provider: ProviderId; model: string; base_url: string };
+export type ByokConfig = {
+  intelligence: CapabilityChoice;
+  vision: CapabilityChoice;
+  embeddings: CapabilityChoice;
+  transcription: CapabilityChoice;
+  speech: CapabilityChoice;
+};
 export type ProviderSettings = {
+  version: number;
   mode: ProviderMode;
   cloud_provider: CloudProvider;
   text_model: string; // local Ollama text model (any pulled model)
@@ -248,6 +266,9 @@ export type ProviderSettings = {
   has_openai_key: boolean;
   has_anthropic_key: boolean;
   has_hosted_key: boolean;
+  byok: ByokConfig;
+  has_groq_key: boolean;
+  has_openai_compatible_key: boolean;
 };
 
 export type ThemeState = {
@@ -597,12 +618,14 @@ export const api = {
     anthropic_vision_model?: string;
     text_model?: string;
     vision_model?: string;
+    confirm_embedding_rebuild?: boolean;
   }) =>
     // Tauri maps camelCase JS args → snake_case Rust params, so the payload keys
     // MUST be camelCase. Sending snake_case silently drops them to None — which
     // is why the API key never reached the Keychain.
     invoke<void>("set_provider_settings", {
       mode: args.mode,
+      confirmEmbeddingRebuild: args.confirm_embedding_rebuild ?? false,
       cloudProvider: args.cloud_provider,
       geminiApiKey: args.gemini_api_key,
       geminiTextModel: args.gemini_text_model,
@@ -618,6 +641,18 @@ export const api = {
       visionModel: args.vision_model,
     }),
   testProvider: () => invoke<string>("test_provider"),
+  setByokSettings: (
+    settings: ByokConfig,
+    groqApiKey?: string,
+    openaiCompatibleApiKey?: string,
+    confirmEmbeddingRebuild = false
+  ) => invoke<void>("set_byok_settings", { settings, groqApiKey, openaiCompatibleApiKey, confirmEmbeddingRebuild }),
+  listByokModels: (provider: ProviderId, baseUrl = "") =>
+    invoke<string[]>("list_byok_models", { provider, baseUrl }),
+  testByokSettings: (settings: ByokConfig, keys: {
+    openaiApiKey?: string; geminiApiKey?: string; anthropicApiKey?: string;
+    groqApiKey?: string; openaiCompatibleApiKey?: string;
+  }) => invoke<Record<string, string>>("test_byok_settings", { settings, ...keys }),
   readInboxImage: (path: string) =>
     invoke<{ base64: string; ext: string }>("read_inbox_image", { path }),
   // Google Calendar sync. camelCase arg keys (Tauri maps them → snake_case).

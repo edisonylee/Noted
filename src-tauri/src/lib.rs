@@ -1445,6 +1445,36 @@ async fn embed_missing(app: &tauri::AppHandle) -> i64 {
 
 #[tauri::command]
 async fn reindex(app: tauri::AppHandle) -> Result<i64, String> {
+    {
+        let fingerprint = provider::active_embedding_fingerprint();
+        let (notes, entities, current) = {
+            let state = app.state::<Db>();
+            let conn = state.0.lock().unwrap();
+            (
+                db::all_note_embedding_inputs(&conn).map_err(|e| e.to_string())?,
+                db::all_entity_embedding_inputs(&conn).map_err(|e| e.to_string())?,
+                db::embedding_fingerprint(&conn).map_err(|e| e.to_string())?,
+            )
+        };
+        if current.as_deref() != Some(&fingerprint) {
+            let mut note_vectors = Vec::with_capacity(notes.len());
+            for (id, text) in notes {
+                let vector = normalize(ollama::embed(&text).await.map_err(|e| e.to_string())?);
+                note_vectors.push((id, vector));
+            }
+            let mut entity_vectors = Vec::with_capacity(entities.len());
+            for (id, text) in entities {
+                let vector = normalize(ollama::embed(&text).await.map_err(|e| e.to_string())?);
+                entity_vectors.push((id, vector));
+            }
+            let count = note_vectors.len() as i64;
+            let state = app.state::<Db>();
+            let mut conn = state.0.lock().unwrap();
+            db::replace_embedding_space(&mut conn, &fingerprint, &note_vectors, &entity_vectors)
+                .map_err(|e| e.to_string())?;
+            return Ok(count);
+        }
+    }
     Ok(embed_missing(&app).await)
 }
 
@@ -1577,6 +1607,15 @@ async fn transcribe(
     // The user's custom vocabulary applies to all speech-to-text, not just
     // meetings — quick captures mishear "a16z" the same way.
     let vocab = meeting::cfg().vocabulary;
+    if provider::use_byok() {
+        return tauri::async_runtime::spawn_blocking(move || {
+            provider::byok_transcribe_blocking(&samples, &vocab)
+                .map(|t| meeting::asr::apply_vocab(&t, &vocab))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string());
+    }
     if meeting::cfg().asr_engine == "hosted" {
         return hosted::transcribe_batch(&samples, &vocab).await.map_err(|e| e.to_string());
     }
@@ -2948,6 +2987,7 @@ fn get_provider_settings() -> Value {
     let c = provider::get();
     let has = |k: &Option<String>| k.as_deref().map(|k| !k.is_empty()).unwrap_or(false);
     json!({
+        "version": c.version,
         "mode": c.mode,
         "cloud_provider": c.cloud_provider,
         "text_model": c.text_model,
@@ -2963,7 +3003,48 @@ fn get_provider_settings() -> Value {
         "has_openai_key": has(&c.openai_api_key),
         "has_anthropic_key": has(&c.anthropic_api_key),
         "has_hosted_key": hosted::has_key(),
+        "byok": c.byok,
+        "has_groq_key": has(&c.groq_api_key),
+        "has_openai_compatible_key": has(&c.openai_compatible_api_key),
     })
+}
+
+#[tauri::command]
+fn set_byok_settings(
+    app: tauri::AppHandle,
+    settings: provider::ByokConfig,
+    groq_api_key: Option<String>,
+    openai_compatible_api_key: Option<String>,
+    confirm_embedding_rebuild: bool,
+) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let new_fingerprint = provider::embedding_fingerprint(&settings.embeddings);
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let count = db::embedding_count(&conn).map_err(|e| e.to_string())?;
+    let old_fingerprint = db::embedding_fingerprint(&conn).map_err(|e| e.to_string())?;
+    drop(conn);
+    let needs_rebuild = old_fingerprint.as_deref() != Some(&new_fingerprint) && count > 0;
+    if needs_rebuild && !confirm_embedding_rebuild {
+        return Err("EMBEDDING_REBUILD_REQUIRED: Changing the embedding provider or model requires rebuilding semantic search.".into());
+    }
+    provider::update(
+        &dir,
+        provider::SettingsPatch {
+            mode: Some("byok".into()),
+            byok: Some(settings),
+            groq_api_key,
+            openai_compatible_api_key,
+            ..Default::default()
+        },
+    ).map_err(|e| e.to_string())?;
+    if old_fingerprint.is_none() && count == 0 {
+        let state = app.state::<Db>();
+        let mut conn = state.0.lock().unwrap();
+        db::replace_embedding_space(&mut conn, &new_fingerprint, &[], &[])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2971,6 +3052,7 @@ fn get_provider_settings() -> Value {
 fn set_provider_settings(
     app: tauri::AppHandle,
     mode: String,
+    confirm_embedding_rebuild: bool,
     cloud_provider: Option<String>,
     gemini_api_key: Option<String>,
     gemini_text_model: Option<String>,
@@ -2986,6 +3068,15 @@ fn set_provider_settings(
     vision_model: Option<String>,
 ) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let target_fingerprint = provider::profile_embedding_fingerprint(&mode, &provider::get().byok);
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let count = db::embedding_count(&conn).map_err(|e| e.to_string())?;
+    let current_fingerprint = db::embedding_fingerprint(&conn).map_err(|e| e.to_string())?;
+    drop(conn);
+    if count > 0 && current_fingerprint.as_deref() != Some(&target_fingerprint) && !confirm_embedding_rebuild {
+        return Err("EMBEDDING_REBUILD_REQUIRED: Changing profiles requires rebuilding semantic search.".into());
+    }
     provider::update(
         &dir,
         provider::SettingsPatch {
@@ -3003,6 +3094,9 @@ fn set_provider_settings(
             anthropic_api_key,
             anthropic_text_model,
             anthropic_vision_model,
+            byok: None,
+            groq_api_key: None,
+            openai_compatible_api_key: None,
         },
     )
     .map_err(|e| e.to_string())?;
@@ -3016,10 +3110,39 @@ fn set_provider_settings(
 
 #[tauri::command]
 async fn test_provider() -> Result<String, String> {
+    if provider::use_byok() {
+        let results = provider::test_byok_capabilities().await;
+        let summary = results.to_string();
+        if summary.contains("failed:") {
+            return Err(summary);
+        }
+        return Ok(summary);
+    }
     if provider::get().mode == provider::Mode::Hosted {
         return hosted::test_connection().await.map_err(|e| e.to_string());
     }
     provider::test_cloud().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_byok_models(provider: provider::ProviderId, base_url: String) -> Result<Vec<String>, String> {
+    provider::list_byok_models(provider, base_url).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn test_byok_settings(
+    settings: provider::ByokConfig,
+    openai_api_key: Option<String>,
+    gemini_api_key: Option<String>,
+    anthropic_api_key: Option<String>,
+    groq_api_key: Option<String>,
+    openai_compatible_api_key: Option<String>,
+) -> Result<Value, String> {
+    let results = provider::test_byok_candidate(
+        settings, openai_api_key, gemini_api_key, anthropic_api_key,
+        groq_api_key, openai_compatible_api_key,
+    ).await;
+    if results.to_string().contains("failed:") { Err(results.to_string()) } else { Ok(results) }
 }
 
 // ── Google Calendar sync (one-way push to a dedicated "noted" calendar) ──────
@@ -3359,6 +3482,9 @@ pub fn run() {
 
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
+            // Provider mode must be known before the DB seeds the legacy
+            // embedding-space marker.
+            provider::init(&dir);
             let conn = db::init(&dir.join("noted.db"))?;
             app.manage(Db(Mutex::new(conn)));
             // Meeting recorder: one-at-a-time session state + builtin templates
@@ -3382,8 +3508,8 @@ pub fn run() {
             // Retention sweep: expired meeting window videos free their space.
             meeting::video::cleanup_old(&app.handle().clone(), meeting::cfg().video_keep_days);
 
-            // Load model-provider config (mode + models from disk, key from Keychain).
-            provider::init(&dir);
+            // Model-provider config was loaded before DB initialization so the
+            // embedding-space marker can be migrated safely.
             // Load Google Calendar config (client id + calendar id from disk,
             // client secret + refresh token from Keychain).
             gcal::init(&dir);
@@ -3576,6 +3702,9 @@ pub fn run() {
             kg_reindex_meetings,
             get_provider_settings,
             set_provider_settings,
+            set_byok_settings,
+            list_byok_models,
+            test_byok_settings,
             test_provider,
             gcal_auth_status,
             gcal_set_client,

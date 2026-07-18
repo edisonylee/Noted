@@ -239,6 +239,9 @@ pub fn parakeet_ready(app: &tauri::AppHandle) -> bool {
 /// Parakeet with missing files degrades to whisper (recording must never
 /// fail over a settings/download mismatch).
 pub fn engine_spec(app: &tauri::AppHandle) -> Result<asr::EngineSpec> {
+    if crate::provider::use_byok() {
+        return Ok(asr::EngineSpec::Byok { vocabulary: cfg().vocabulary });
+    }
     if cfg().asr_engine == "hosted" {
         if crate::hosted::has_key() {
             return Ok(asr::EngineSpec::Hosted { vocabulary: cfg().vocabulary });

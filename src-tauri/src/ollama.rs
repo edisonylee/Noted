@@ -30,6 +30,15 @@ pub async fn tags() -> Result<Value> {
     if crate::provider::use_hosted() {
         return crate::hosted::models().await;
     }
+    if crate::provider::use_byok() {
+        let c = crate::provider::get();
+        return Ok(json!({ "models": [
+            { "name": c.byok.intelligence.model },
+            { "name": c.byok.vision.model },
+            { "name": c.byok.embeddings.model },
+            { "name": c.byok.transcription.model }
+        ] }));
+    }
     let resp = reqwest::get(format!("{BASE}/api/tags")).await?;
     Ok(resp.json::<Value>().await?)
 }
@@ -46,6 +55,9 @@ pub async fn chat_json(
 ) -> Result<Value> {
     if crate::provider::use_hosted() {
         return crate::hosted::chat_json(system, user, images, format).await;
+    }
+    if crate::provider::use_byok() {
+        return crate::provider::byok_chat_json(system, user, images, format).await;
     }
     // Balanced mode: route the latency-sensitive structured calls (note extract
     // + photo OCR) to the configured cloud provider. On any failure (bad key,
@@ -90,6 +102,9 @@ pub async fn chat_json_local_ctx(
 ) -> Result<Value> {
     if crate::provider::use_hosted() {
         return crate::hosted::chat_json(system, user, images, format).await;
+    }
+    if crate::provider::use_byok() {
+        return crate::provider::byok_chat_json(system, user, images, format).await;
     }
     let mut user_msg = json!({ "role": "user", "content": user });
     if let Some(imgs) = images {
@@ -144,6 +159,9 @@ pub async fn chat_text(model: &str, system: &str, user: &str) -> Result<String> 
     if crate::provider::use_hosted() {
         return crate::hosted::chat_text(system, user).await;
     }
+    if crate::provider::use_byok() {
+        return crate::provider::byok_chat_text(system, user).await;
+    }
     let body = json!({
         "model": model,
         "stream": false,
@@ -175,6 +193,9 @@ pub async fn chat_messages(model: &str, messages: Vec<Value>, temperature: f32) 
     if crate::provider::use_hosted() {
         return crate::hosted::chat_messages(messages, temperature).await;
     }
+    if crate::provider::use_byok() {
+        return crate::provider::byok_chat_messages(messages, temperature).await;
+    }
     let body = json!({
         "model": model,
         "stream": false,
@@ -201,6 +222,9 @@ pub async fn chat_messages(model: &str, messages: Vec<Value>, temperature: f32) 
 pub async fn embed(input: &str) -> Result<Vec<f32>> {
     if crate::provider::use_hosted() {
         return crate::hosted::embed(input).await;
+    }
+    if crate::provider::use_byok() {
+        return crate::provider::byok_embed(input).await;
     }
     // keep_alive -1 (a NUMBER, not "-1") keeps the tiny embed model resident.
     let body = json!({ "model": EMBED_MODEL, "input": input, "keep_alive": -1 });

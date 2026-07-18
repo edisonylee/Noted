@@ -1,6 +1,6 @@
 # Bring Your Own Provider plan
 
-Status: planned after the Hosted-mode stabilization pass.
+Status: implemented on `feature/byok-provider-integrations`; validation and publication tracked in the pull request.
 
 ## Product goal
 
@@ -196,3 +196,29 @@ BYOK usage is billed by the selected providers, not by Noted, except for separat
 - Changing embedding providers cannot silently corrupt semantic search.
 - No secret appears in JSON, SQLite, logs, crash reports, source control, or frontend state after save.
 - Every outbound data category and destination is visible before the user enables the profile.
+
+## Implemented behavior
+
+- Provider configuration is version 2 and migrates additively from existing Local, Balanced, and Hosted settings.
+- Feature code continues to call the existing vendor-neutral `ollama` command surface; the provider registry routes each capability.
+- OpenAI supports structured/text/vision generation, 768-dimensional embeddings, and transcription.
+- Gemini supports structured/text/vision generation, native 768-dimensional embeddings, and audio transcription.
+- Anthropic supports structured/text/vision generation and is excluded from embedding/transcription selectors.
+- Groq supports OpenAI-compatible intelligence and the dedicated transcription endpoint.
+- The OpenAI-compatible adapter accepts HTTPS endpoints and unauthenticated loopback endpoints for LM Studio, llama.cpp, and vLLM.
+- Noted Hosted remains selectable for individual BYOK capabilities; Local and Hosted profiles retain their existing behavior.
+- Meeting capture, dual-channel timing, VAD, echo suppression, speaker handling, and timestamps remain local. Only closed VAD chunks enter a remote transcription adapter, with bounded retries for transient failures.
+- Settings tests all four required capabilities with a non-personal image/audio fixture before activating a candidate profile. Typed keys are cleared from React state after persistence and only key-presence flags return from the backend.
+- Provider/model changes compute every note and entity vector first, then atomically replace both sqlite-vec indexes and their embedding-space fingerprint. Searches refuse to mix a configured provider with a stale index.
+- Model discovery is available where a provider exposes it; every model field remains manually editable.
+
+## Validation commands
+
+```sh
+bun run build
+cd src-tauri && cargo test --lib
+cd src-tauri && cargo test --test db_test
+bun run tauri build
+```
+
+Live provider validation is intentionally opt-in because it consumes customer quota. Configure keys in Settings and use Save; the candidate profile runs structured output, a 1-pixel non-personal vision fixture, an exact 768-dimensional embedding check, and a short non-personal audio fixture before activation. The installed macOS app is the authoritative end-to-end test surface because credentials are read from macOS Keychain.

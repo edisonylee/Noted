@@ -83,6 +83,29 @@ fn vec_loads_and_schema_evolves() {
 }
 
 #[test]
+fn embedding_space_replacement_is_atomic_and_fingerprinted() {
+    let tmp = std::env::temp_dir().join(format!("noted_embedding_swap_{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let mut conn = db::init(&tmp).unwrap();
+    save(&mut conn, "work", "", json!({"topic":"routing"}), "2026-06-02T00:00:00Z");
+    let note_id: i64 = conn.query_row("SELECT id FROM notes LIMIT 1", [], |r| r.get(0)).unwrap();
+
+    db::replace_embedding_space(&mut conn, "openai|a|768", &[(note_id, vec![0.1; 768])], &[]).unwrap();
+    assert_eq!(db::embedding_fingerprint(&conn).unwrap().as_deref(), Some("openai|a|768"));
+    assert_eq!(db::embedding_count(&conn).unwrap(), 1);
+
+    // sqlite-vec rejects the wrong dimension after DELETE has run inside the
+    // transaction. The rollback must preserve both the old index and marker.
+    assert!(db::replace_embedding_space(&mut conn, "openai|bad|768", &[(note_id, vec![0.1; 767])], &[]).is_err());
+    assert_eq!(db::embedding_fingerprint(&conn).unwrap().as_deref(), Some("openai|a|768"));
+    assert_eq!(db::embedding_count(&conn).unwrap(), 1);
+
+    db::replace_embedding_space(&mut conn, "gemini|b|768", &[(note_id, vec![0.2; 768])], &[]).unwrap();
+    assert_eq!(db::embedding_fingerprint(&conn).unwrap().as_deref(), Some("gemini|b|768"));
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
 fn suggest_merges_finds_near_duplicates_and_respects_dismissals() {
     let tmp = std::env::temp_dir().join(format!("noted_merge_test_{}.db", std::process::id()));
     let _ = std::fs::remove_file(&tmp);

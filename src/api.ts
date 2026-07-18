@@ -618,12 +618,14 @@ export const api = {
     anthropic_vision_model?: string;
     text_model?: string;
     vision_model?: string;
+    confirm_embedding_rebuild?: boolean;
   }) =>
     // Tauri maps camelCase JS args → snake_case Rust params, so the payload keys
     // MUST be camelCase. Sending snake_case silently drops them to None — which
     // is why the API key never reached the Keychain.
     invoke<void>("set_provider_settings", {
       mode: args.mode,
+      confirmEmbeddingRebuild: args.confirm_embedding_rebuild ?? false,
       cloudProvider: args.cloud_provider,
       geminiApiKey: args.gemini_api_key,
       geminiTextModel: args.gemini_text_model,
@@ -645,6 +647,12 @@ export const api = {
     openaiCompatibleApiKey?: string,
     confirmEmbeddingRebuild = false
   ) => invoke<void>("set_byok_settings", { settings, groqApiKey, openaiCompatibleApiKey, confirmEmbeddingRebuild }),
+  listByokModels: (provider: ProviderId, baseUrl = "") =>
+    invoke<string[]>("list_byok_models", { provider, baseUrl }),
+  testByokSettings: (settings: ByokConfig, keys: {
+    openaiApiKey?: string; geminiApiKey?: string; anthropicApiKey?: string;
+    groqApiKey?: string; openaiCompatibleApiKey?: string;
+  }) => invoke<Record<string, string>>("test_byok_settings", { settings, ...keys }),
   readInboxImage: (path: string) =>
     invoke<{ base64: string; ext: string }>("read_inbox_image", { path }),
   // Google Calendar sync. camelCase arg keys (Tauri maps them → snake_case).

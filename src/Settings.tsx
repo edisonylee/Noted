@@ -45,6 +45,8 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   const [byok, setByok] = useState<ByokConfig | null>(null);
   const [groqKey, setGroqKey] = useState("");
   const [compatibleKey, setCompatibleKey] = useState("");
+  const [discoveredModels, setDiscoveredModels] = useState<Record<string, string[]>>({});
+  const [discovering, setDiscovering] = useState("");
 
   // Google Calendar sync (one-way push to a dedicated "noted" calendar).
   const [gcal, setGcal] = useState<GcalStatus | null>(null);
@@ -369,6 +371,9 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
       await api.setProviderSettings(settingsPayload(overrides));
       const msg = await api.testProvider();
       setConn({ state: "ok", msg });
+      if (active === "gemini") setKey("");
+      if (active === "openai") setOpenaiKey("");
+      if (active === "anthropic") setAnthropicKey("");
       setS((prev) =>
         prev
           ? {
@@ -387,8 +392,16 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   async function save() {
     setSaving(true);
     try {
-      await api.setProviderSettings(settingsPayload());
       if (mode === "byok" && byok) {
+        setConn({ state: "checking" });
+        const results = await api.testByokSettings(byok, {
+          openaiApiKey: openaiKey.trim() || undefined,
+          geminiApiKey: key.trim() || undefined,
+          anthropicApiKey: anthropicKey.trim() || undefined,
+          groqApiKey: groqKey.trim() || undefined,
+          openaiCompatibleApiKey: compatibleKey.trim() || undefined,
+        });
+        await api.setProviderSettings(settingsPayload({ mode: s?.mode ?? "local" }));
         try {
           await api.setByokSettings(byok, groqKey.trim() || undefined, compatibleKey.trim() || undefined);
         } catch (e) {
@@ -397,8 +410,22 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           await api.setByokSettings(byok, groqKey.trim() || undefined, compatibleKey.trim() || undefined, true);
           await api.reindex();
         }
-        const msg = await api.testProvider();
-        setConn({ state: "ok", msg });
+        setConn({ state: "ok", msg: Object.entries(results).map(([cap, result]) => `${cap}: ${result}`).join(" · ") });
+        setOpenaiKey("");
+        setKey("");
+        setAnthropicKey("");
+        setGroqKey("");
+        setCompatibleKey("");
+        setS(await api.getProviderSettings());
+      } else {
+        try {
+          await api.setProviderSettings(settingsPayload());
+        } catch (e) {
+          if (!String(e).includes("EMBEDDING_REBUILD_REQUIRED") ||
+              !window.confirm("Changing model profiles requires rebuilding semantic search. Your notes stay intact. Rebuild now?")) throw e;
+          await api.setProviderSettings({ ...settingsPayload(), confirm_embedding_rebuild: true });
+          await api.reindex();
+        }
       }
       // Confirm the save landed against a working connection before leaving —
       // surfaces a bad key instead of closing on a silent failure.
@@ -410,6 +437,8 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
       } else {
         onClose();
       }
+    } catch (e) {
+      setConn({ state: "err", msg: String(e) });
     } finally {
       setSaving(false);
     }
@@ -438,6 +467,21 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           }
         : prev
     );
+  }
+
+  async function removeByokKey(providerId: ProviderId) {
+    if (!byok) return;
+    if (providerId === "groq" || providerId === "openai_compatible") {
+      await api.setByokSettings(byok, providerId === "groq" ? "" : undefined, providerId === "openai_compatible" ? "" : undefined);
+    } else {
+      await api.setProviderSettings({
+        mode: "byok",
+        openai_api_key: providerId === "openai" ? "" : undefined,
+        gemini_api_key: providerId === "gemini" ? "" : undefined,
+        anthropic_api_key: providerId === "anthropic" ? "" : undefined,
+      });
+    }
+    setS(await api.getProviderSettings());
   }
 
   const hasKey =
@@ -757,7 +801,17 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
                 </label>
                 <label className="field">
                   <span className="field-label">Model ID</span>
-                  <input value={choice.model} onChange={(e) => update({ model: e.target.value })} spellCheck={false} />
+                  <input list={`models-${slot}`} value={choice.model} onChange={(e) => update({ model: e.target.value })} spellCheck={false} />
+                  <datalist id={`models-${slot}`}>{(discoveredModels[slot] ?? []).map((m) => <option key={m} value={m} />)}</datalist>
+                  <button type="button" className="field-clear" disabled={discovering === slot} onClick={async () => {
+                    setDiscovering(slot);
+                    try {
+                      const models = await api.listByokModels(choice.provider, choice.base_url);
+                      setDiscoveredModels((prev) => ({ ...prev, [slot]: models }));
+                    }
+                    catch (e) { setConn({ state: "err", msg: `Model discovery: ${String(e)}` }); }
+                    finally { setDiscovering(""); }
+                  }}>{discovering === slot ? "loading…" : "discover models"}</button>
                 </label>
                 {choice.provider === "openai_compatible" && <label className="field">
                   <span className="field-label">Base URL</span>
@@ -766,23 +820,23 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               </div>;
             })}
             <label className="field">
-              <span className="field-label">OpenAI key {s?.has_openai_key && "· saved"}</span>
+              <span className="field-label">OpenAI key {s?.has_openai_key && <>· saved <button type="button" className="field-clear" onClick={() => removeByokKey("openai")}>remove</button></>}</span>
               <input type="password" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} placeholder="Leave blank to keep" autoComplete="off" />
             </label>
             <label className="field">
-              <span className="field-label">Gemini key {s?.has_gemini_key && "· saved"}</span>
+              <span className="field-label">Gemini key {s?.has_gemini_key && <>· saved <button type="button" className="field-clear" onClick={() => removeByokKey("gemini")}>remove</button></>}</span>
               <input type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder="Leave blank to keep" autoComplete="off" />
             </label>
             <label className="field">
-              <span className="field-label">Anthropic key {s?.has_anthropic_key && "· saved"}</span>
+              <span className="field-label">Anthropic key {s?.has_anthropic_key && <>· saved <button type="button" className="field-clear" onClick={() => removeByokKey("anthropic")}>remove</button></>}</span>
               <input type="password" value={anthropicKey} onChange={(e) => setAnthropicKey(e.target.value)} placeholder="Leave blank to keep" autoComplete="off" />
             </label>
             <label className="field">
-              <span className="field-label">Groq key {s?.has_groq_key && "· saved"}</span>
+              <span className="field-label">Groq key {s?.has_groq_key && <>· saved <button type="button" className="field-clear" onClick={() => removeByokKey("groq")}>remove</button></>}</span>
               <input type="password" value={groqKey} onChange={(e) => setGroqKey(e.target.value)} placeholder="Leave blank to keep" autoComplete="off" />
             </label>
             <label className="field">
-              <span className="field-label">OpenAI-compatible key {s?.has_openai_compatible_key && "· saved"}</span>
+              <span className="field-label">OpenAI-compatible key {s?.has_openai_compatible_key && <>· saved <button type="button" className="field-clear" onClick={() => removeByokKey("openai_compatible")}>remove</button></>}</span>
               <input type="password" value={compatibleKey} onChange={(e) => setCompatibleKey(e.target.value)} placeholder="Leave blank to keep" autoComplete="off" />
             </label>
             <div className="conn-detail">

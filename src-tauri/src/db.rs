@@ -237,6 +237,7 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     // (people filed from meeting attendees start out named by raw email).
     ensure_column(&conn, "entities", "suggested_name", "TEXT")?;
     ensure_column(&conn, "meetings", "video_path", "TEXT")?;
+    initialize_embedding_fingerprint(&conn, &crate::provider::active_embedding_fingerprint())?;
     // Note: the reserved catch-all "misc" is not pre-seeded — the classifier is
     // told about it by name in the prompt, and it's created on first real use
     // (so an unused misc never clutters the catalog/UI).
@@ -401,16 +402,74 @@ pub fn embedding_fingerprint(conn: &Connection) -> Result<Option<String>> {
     Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
 }
 
-pub fn reset_embedding_space(conn: &mut Connection, fingerprint: &str) -> Result<()> {
+pub fn initialize_embedding_fingerprint(conn: &Connection, fingerprint: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO app_metadata(key, value) VALUES ('embedding_space', ?1)",
+        [fingerprint],
+    )?;
+    Ok(())
+}
+
+fn ensure_embedding_space_ready(conn: &Connection) -> Result<()> {
+    let expected = crate::provider::active_embedding_fingerprint();
+    if embedding_fingerprint(conn)?.as_deref() != Some(&expected) {
+        return Err(anyhow::anyhow!("semantic search is rebuilding for the selected embedding model"));
+    }
+    Ok(())
+}
+
+pub fn replace_embedding_space(
+    conn: &mut Connection,
+    fingerprint: &str,
+    notes: &[(i64, Vec<f32>)],
+    entities: &[(i64, Vec<f32>)],
+) -> Result<()> {
     let tx = conn.transaction()?;
     tx.execute("DELETE FROM embeddings", [])?;
     tx.execute("DELETE FROM entity_embeddings", [])?;
+    for (id, embedding) in notes {
+        let encoded = serde_json::to_string(embedding)?;
+        tx.execute(
+            "INSERT INTO embeddings(note_id, embedding) VALUES (?1, ?2)",
+            rusqlite::params![id, encoded],
+        )?;
+    }
+    for (id, embedding) in entities {
+        let encoded = serde_json::to_string(embedding)?;
+        tx.execute(
+            "INSERT INTO entity_embeddings(entity_id, embedding) VALUES (?1, ?2)",
+            rusqlite::params![id, encoded],
+        )?;
+    }
     tx.execute(
         "INSERT OR REPLACE INTO app_metadata(key, value) VALUES ('embedding_space', ?1)",
         [fingerprint],
     )?;
     tx.commit()?;
     Ok(())
+}
+
+pub fn all_note_embedding_inputs(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT n.id,
+                COALESCE(group_concat(DISTINCT c.name), '') || char(10) || n.raw_text || char(10)
+                  || COALESCE(group_concat(e.data_json, char(10)), '')
+         FROM notes n
+         LEFT JOIN entries e ON e.note_id = n.id
+         LEFT JOIN categories c ON c.id = e.category_id
+         GROUP BY n.id ORDER BY n.id",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub fn all_entity_embedding_inputs(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name || char(10) || type || char(10) || COALESCE(aliases, '[]')
+         FROM entities ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 /// Notes that don't yet have an embedding, with the text to embed for each.
@@ -609,6 +668,7 @@ pub fn notes_on_date(conn: &Connection, day: &str, limit: i64) -> Result<Vec<Sea
 /// vault-scoped chat. Pulls a wide KNN candidate pool, then filters to the
 /// origin and ranks. (Fine at personal-KB scale; widen the pool if it grows.)
 pub fn search_notes_scoped(conn: &Connection, qvec: &[f32], k: i64, origin: &str) -> Result<Vec<SearchHit>> {
+    ensure_embedding_space_ready(conn)?;
     let json = serde_json::to_string(qvec)?;
     let mut stmt = conn.prepare(
         "SELECT e.note_id, e.distance, pc.name,
@@ -644,6 +704,7 @@ pub fn search_notes_scoped(conn: &Connection, qvec: &[f32], k: i64, origin: &str
 /// Semantic search across ALL brain notes (any vault) — backs proactive
 /// surfacing ("related in your brain" as you capture).
 pub fn search_notes_brain(conn: &Connection, qvec: &[f32], k: i64) -> Result<Vec<SearchHit>> {
+    ensure_embedding_space_ready(conn)?;
     let json = serde_json::to_string(qvec)?;
     let mut stmt = conn.prepare(
         "SELECT e.note_id, e.distance, pc.name,
@@ -719,6 +780,7 @@ pub fn entity_name_type(conn: &Connection, entity_id: i64) -> Result<Option<(Str
 }
 
 pub fn search_notes(conn: &Connection, qvec: &[f32], k: i64) -> Result<Vec<SearchHit>> {
+    ensure_embedding_space_ready(conn)?;
     let json = serde_json::to_string(qvec)?;
     let mut stmt = conn.prepare(
         "SELECT e.note_id, e.distance, pc.name,
@@ -1190,6 +1252,7 @@ pub fn entity_edges(conn: &Connection) -> Result<Vec<GraphEdge>> {
 /// Cross-type KNN over entity embeddings — question→entity matching for the
 /// graph-aware chat. Returns (entity_id, L2 distance), nearest first.
 pub fn nearest_entities_any(conn: &Connection, qvec: &[f32], k: i64) -> Result<Vec<(i64, f32)>> {
+    ensure_embedding_space_ready(conn)?;
     let json = serde_json::to_string(qvec)?;
     let mut stmt = conn.prepare(
         "SELECT entity_id, distance FROM entity_embeddings
@@ -1286,6 +1349,7 @@ pub fn entity_exact(conn: &Connection, norm: &str, etype: &str) -> Result<Option
 /// Nearest existing entity of the same type by embedding distance (for merge
 /// suggestions). Returns (entity_id, L2 distance) or None.
 pub fn nearest_entity(conn: &Connection, qvec: &[f32], etype: &str) -> Result<Option<(i64, f32)>> {
+    ensure_embedding_space_ready(conn)?;
     let json = serde_json::to_string(qvec)?;
     let hit = conn
         .query_row(

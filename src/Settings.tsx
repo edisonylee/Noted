@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { X, Check, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, Download, Mic, Plus, RefreshCw, Trash2, FolderPlus } from "lucide-react";
+import { X, Check, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, Download, Mic, Plus, RefreshCw, Trash2, FolderPlus, Laptop, Gauge, Cloud, KeyRound } from "lucide-react";
 import { api, type BrainVaultStatus, type ByokConfig, type CloudProvider, type GcalStatus, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type ProviderId, type ProviderMode, type ProviderSettings } from "./api";
 import { ThemesSettings } from "./ThemesSettings";
 
@@ -517,23 +517,33 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           Choose Hosted for the simplest setup, use your own API keys, or keep inference private and local.
         </p>
 
-        <div className="pill-group settings-seg">
-          <button className={"pill" + (mode === "local" ? " on" : "")} onClick={() => setMode("local")}>
-            Local <em>$0 · private</em>
+        <div className="provider-profiles" role="radiogroup" aria-label="Model profile">
+          <button role="radio" className={"provider-profile" + (mode === "local" ? " on" : "")} onClick={() => setMode("local")} aria-checked={mode === "local"}>
+            <span className="provider-profile-icon"><Laptop size={17} /></span>
+            <span className="provider-profile-copy"><strong>Local</strong><small>Private on this Mac</small></span>
+            {mode === "local" && <Check className="provider-profile-check" size={15} />}
           </button>
-          <button className={"pill" + (mode === "balanced" ? " on" : "")} onClick={() => setMode("balanced")}>
-            Balanced <em>Gemini hot path</em>
+          <button role="radio" className={"provider-profile" + (mode === "balanced" ? " on" : "")} onClick={() => setMode("balanced")} aria-checked={mode === "balanced"}>
+            <span className="provider-profile-icon"><Gauge size={17} /></span>
+            <span className="provider-profile-copy"><strong>Balanced</strong><small>Local with cloud assist</small></span>
+            {mode === "balanced" && <Check className="provider-profile-check" size={15} />}
           </button>
           <button
-            className={"pill" + (mode === "hosted" ? " on" : "")}
+            className={"provider-profile recommended" + (mode === "hosted" ? " on" : "")}
             onClick={() => setMode("hosted")}
             disabled={!s?.has_hosted_key}
             title={s?.has_hosted_key ? "Use your Noted hosted account" : "Activate a Noted account first"}
+            role="radio"
+            aria-checked={mode === "hosted"}
           >
-            Hosted <em>no model downloads</em>
+            <span className="provider-profile-icon"><Cloud size={17} /></span>
+            <span className="provider-profile-copy"><strong>Hosted <em>Recommended</em></strong><small>Everything included</small></span>
+            {mode === "hosted" && <Check className="provider-profile-check" size={15} />}
           </button>
-          <button className={"pill" + (mode === "byok" ? " on" : "")} onClick={() => setMode("byok")}>
-            My API keys <em>advanced</em>
+          <button role="radio" className={"provider-profile" + (mode === "byok" ? " on" : "")} onClick={() => setMode("byok")} aria-checked={mode === "byok"}>
+            <span className="provider-profile-icon"><KeyRound size={17} /></span>
+            <span className="provider-profile-copy"><strong>My API keys</strong><small>Choose every provider</small></span>
+            {mode === "byok" && <Check className="provider-profile-check" size={15} />}
           </button>
         </div>
 

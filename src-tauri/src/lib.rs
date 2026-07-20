@@ -1909,8 +1909,8 @@ async fn meeting_suggest_speakers(app: tauri::AppHandle, id: i64) -> Result<usiz
 
 /// Live Assist A0 (LIVE_ASSIST_PLAN.md): answer a question against ONE
 /// meeting's transcript-so-far + the user's typed notes. Works mid-recording
-/// (the rolling transcript) and on finished meetings. Always the local model —
-/// like Journal and summaries, the transcript never routes to a cloud path.
+/// (the rolling transcript) and on finished meetings. It follows the active
+/// provider profile: Hosted/BYOK route remotely, while Local/Balanced use Ollama.
 #[tauri::command]
 async fn meeting_assist(app: tauri::AppHandle, id: i64, question: String) -> Result<Value, String> {
     if question.trim().is_empty() {
@@ -1957,7 +1957,9 @@ async fn meeting_assist(app: tauri::AppHandle, id: i64, question: String) -> Res
 meeting so far — 'Me' is the user; named speakers or 'Them' are the other participants — plus \
 the user's own typed notes. Answer the question from that context only. Be concise and \
 specific; quote who said something when it matters; give ready-to-say wording when the user \
-asks how to respond. If the transcript doesn't contain the answer, say so plainly.";
+asks how to respond. Never invent a person, owner, date, fact, or commitment. If ownership is \
+missing, say that it is unassigned. Return only the useful answer — no preamble, markdown, or \
+offer to do more. If the transcript doesn't contain the answer, say so plainly.";
     let notes_block = if notes.trim().is_empty() {
         String::new()
     } else {

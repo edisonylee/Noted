@@ -725,7 +725,7 @@ export const api = {
   // Delete the window video now instead of waiting out the retention window.
   meetingVideoDelete: (id: number) => invoke<void>("meeting_video_delete", { id }),
   // Live Assist: answer a question against this meeting's transcript-so-far.
-  // Local model only; works mid-recording and on finished meetings.
+  // Uses the active text provider; works mid-recording and on finished meetings.
   meetingAssist: (id: number, question: string) =>
     invoke<{ answer: string }>("meeting_assist", { id, question }),
   // Writes "<date> <title>.md" into ~/Downloads; resolves to the path.

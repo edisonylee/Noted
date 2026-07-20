@@ -392,7 +392,9 @@ export function MeetingPage({
             "answer or ready-to-say response I may need next, (2) a risk, objection, or " +
             "contradiction worth flagging, (3) a decision or action item that could be missed, " +
             "or (4) a sharp follow-up question. Do not give a generic summary. Keep it to 1-3 " +
-            "short sentences. If there is nothing meaningfully useful yet, reply exactly NO_UPDATE." +
+            "short sentences. Never invent a person, owner, date, fact, or commitment; call out " +
+            "missing ownership explicitly. Give only the insight, with no preamble, markdown, or " +
+            "offer to do more. If there is nothing meaningfully useful yet, reply exactly NO_UPDATE." +
             previous,
         );
         const answer = res.answer.trim();

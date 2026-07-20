@@ -547,7 +547,7 @@ export default function App() {
     return (
       <div className="app repair-screen">
         <div className="repair-card">
-          <div className="brand">noted<span className="dot">.</span></div>
+          <div className="brand"><img className="brand-logo" src="/noted-logo.png" alt="" />noted</div>
           <h2>Reconnect to your Mac</h2>
           <p>
             This phone’s connection expired. Open <strong>noted</strong> on your Mac, click the
@@ -570,7 +570,7 @@ export default function App() {
         {reconnectingOverlay}
         <header className="mobile-topbar">
           <div className="brand">
-            noted<span className="dot">.</span>
+            <img className="brand-logo" src="/noted-logo.png" alt="" />noted
           </div>
           <button className="icon-btn" onClick={() => setShowSettings(true)} aria-label="Settings">
             <Settings size={18} />
@@ -640,7 +640,7 @@ export default function App() {
       <aside className="sidebar" data-tauri-drag-region="deep">
         <div className="side-head" data-tauri-drag-region>
           <div className="brand" data-tauri-drag-region>
-            noted<span className="dot">.</span>
+            <img className="brand-logo" src="/noted-logo.png" alt="" />noted
           </div>
         </div>
         <nav className="side-nav">

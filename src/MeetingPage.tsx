@@ -122,12 +122,23 @@ export function MeetingPage({
   const [assistQ, setAssistQ] = useState("");
   const [assistA, setAssistA] = useState<string | null>(null);
   const [assistBusy, setAssistBusy] = useState(false);
+  const [liveInsight, setLiveInsight] = useState<string | null>(null);
+  const [autoAssistOn, setAutoAssistOn] = useState(true);
+  const [autoAssistBusy, setAutoAssistBusy] = useState(false);
+  const [autoAssistError, setAutoAssistError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [playingSeg, setPlayingSeg] = useState<number | null>(null);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const notesTimer = useRef<number | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const assistInputRef = useRef<HTMLInputElement>(null);
+  const autoAssistTimer = useRef<number | null>(null);
+  const autoAssistBusyRef = useRef(false);
+  const lastAutoSegment = useRef(0);
+  const lastAutoAt = useRef(0);
+  const activeMeetingId = useRef(id);
+  activeMeetingId.current = id;
 
   const recording = detail?.status === "recording";
   const summarizing = detail?.status === "summarizing" || generating != null;
@@ -150,6 +161,20 @@ export function MeetingPage({
     load();
     api.meetingTemplates().then(setTemplates).catch(() => {});
   }, [load]);
+
+  // A meeting switch starts a fresh copilot session. Insights are deliberately
+  // ephemeral: they are prompts for the moment, not another source of notes.
+  useEffect(() => {
+    setLiveInsight(null);
+    setAssistA(null);
+    setAutoAssistError(null);
+    setAutoAssistOn(true);
+    setAutoAssistBusy(false);
+    autoAssistBusyRef.current = false;
+    if (autoAssistTimer.current) window.clearTimeout(autoAssistTimer.current);
+    lastAutoSegment.current = 0;
+    lastAutoAt.current = 0;
+  }, [id]);
 
   // Live updates: segments stream in; stopped/summarized refresh the page.
   useEffect(() => {
@@ -349,6 +374,92 @@ export function MeetingPage({
       setAssistBusy(false);
     }
   };
+
+  const requestLiveInsight = useCallback(
+    async (segmentCount: number) => {
+      if (id == null || autoAssistBusyRef.current) return;
+      autoAssistBusyRef.current = true;
+      setAutoAssistBusy(true);
+      setAutoAssistError(null);
+      try {
+        const previous = liveInsight
+          ? ` Your previous suggestion was: “${liveInsight}” Do not repeat it unless the new discussion changes it.`
+          : "";
+        const res = await api.meetingAssist(
+          id,
+          "Act as a proactive live meeting copilot. Based only on what has changed in the " +
+            "latest discussion, give me ONE immediately useful insight. Prefer: (1) a direct " +
+            "answer or ready-to-say response I may need next, (2) a risk, objection, or " +
+            "contradiction worth flagging, (3) a decision or action item that could be missed, " +
+            "or (4) a sharp follow-up question. Do not give a generic summary. Keep it to 1-3 " +
+            "short sentences. If there is nothing meaningfully useful yet, reply exactly NO_UPDATE." +
+            previous,
+        );
+        const answer = res.answer.trim();
+        if (activeMeetingId.current === id && answer && !/^NO_UPDATE[.!]?$/i.test(answer)) {
+          setLiveInsight(answer);
+        }
+      } catch {
+        // Keep the last useful card visible; a live transient should not replace
+        // it with a networking error or interrupt note-taking.
+        if (activeMeetingId.current === id) {
+          setAutoAssistError("Live suggestions will retry when more conversation arrives.");
+        }
+      } finally {
+        if (activeMeetingId.current === id) {
+          lastAutoSegment.current = segmentCount;
+          lastAutoAt.current = Date.now();
+          autoAssistBusyRef.current = false;
+          setAutoAssistBusy(false);
+        }
+      }
+    },
+    [id, liveInsight],
+  );
+
+  // Debounce natural speech bursts and cap model traffic. Two meaningful
+  // segments are enough to start, then at least two new segments prompt the
+  // next look. The 18-second floor keeps Hosted/BYOK usage predictable.
+  useEffect(() => {
+    if (autoAssistTimer.current) window.clearTimeout(autoAssistTimer.current);
+    if (!recording || !autoAssistOn || id == null || autoAssistBusy) return;
+
+    const meaningful = liveSegments.filter((s) => s.text.trim().split(/\s+/).length >= 3).length;
+    if (meaningful < 2) return;
+    const unseen = liveSegments.length - lastAutoSegment.current;
+    if (lastAutoSegment.current > 0 && unseen < 2) return;
+
+    const sinceLast = Date.now() - lastAutoAt.current;
+    const delay = Math.max(7_000, 18_000 - sinceLast);
+    const segmentCount = liveSegments.length;
+    autoAssistTimer.current = window.setTimeout(() => {
+      autoAssistTimer.current = null;
+      requestLiveInsight(segmentCount);
+    }, delay);
+    return () => {
+      if (autoAssistTimer.current) window.clearTimeout(autoAssistTimer.current);
+    };
+  }, [
+    autoAssistBusy,
+    autoAssistOn,
+    id,
+    liveSegments,
+    recording,
+    requestLiveInsight,
+  ]);
+
+  // The panel is always visible during a recording; this shortcut is only a
+  // convenience for asking without leaving the keyboard.
+  useEffect(() => {
+    const focusAssist = (e: KeyboardEvent) => {
+      if (recording && e.metaKey && e.shiftKey && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        assistInputRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", focusAssist);
+    return () => window.removeEventListener("keydown", focusAssist);
+  }, [recording]);
 
   // Rebuild labels from the retained audio — meetings recorded before
   // diarization existed (or interrupted by a crash) have none.
@@ -566,6 +677,86 @@ export function MeetingPage({
         )}
       </nav>
 
+      {id != null && (recording || liveSegments.length > 0) && (
+        <section className="meeting-copilot" aria-label="Meeting copilot">
+          <header className="copilot-head">
+            <span className="copilot-mark"><Sparkles size={14} /></span>
+            <div>
+              <strong>{recording ? "Live copilot" : "Meeting copilot"}</strong>
+              <span>
+                {recording
+                  ? autoAssistOn
+                    ? "Watching for useful moments"
+                    : "Automatic suggestions paused"
+                  : "Ask anything from this meeting"}
+              </span>
+            </div>
+            {recording && (
+              <button
+                className={`copilot-toggle${autoAssistOn ? " on" : ""}`}
+                onClick={() => setAutoAssistOn((on) => !on)}
+                aria-pressed={autoAssistOn}
+                title={autoAssistOn ? "Pause automatic suggestions" : "Resume automatic suggestions"}
+              >
+                <span className="copilot-pulse" />
+                {autoAssistOn ? "Live" : "Paused"}
+              </button>
+            )}
+          </header>
+
+          {recording && (
+            <div className={`copilot-insight${liveInsight ? " ready" : ""}`} aria-live="polite">
+              <span className="copilot-insight-label">
+                {autoAssistBusy ? (
+                  <><Loader size={12} className="spin" /> Thinking about the latest discussion</>
+                ) : liveInsight ? (
+                  "Suggested now"
+                ) : autoAssistOn ? (
+                  "Listening for enough context"
+                ) : (
+                  "Live suggestions are paused"
+                )}
+              </span>
+              {liveInsight ? (
+                <p>{liveInsight}</p>
+              ) : (
+                <p className="copilot-placeholder">
+                  I’ll surface a response, risk, decision, or follow-up when it becomes useful.
+                </p>
+              )}
+              {autoAssistError && <small>{autoAssistError}</small>}
+            </div>
+          )}
+
+          {assistA && (
+            <div className="assist-answer" aria-live="polite">
+              <p>{assistA}</p>
+              <button className="icon-btn" onClick={() => setAssistA(null)} aria-label="Dismiss answer">
+                ×
+              </button>
+            </div>
+          )}
+          <div className="assist-input">
+            <Sparkles size={13} />
+            <input
+              ref={assistInputRef}
+              value={assistQ}
+              onChange={(e) => setAssistQ(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") askAssist();
+              }}
+              placeholder={recording ? "Ask about what’s happening right now…" : "Ask about this meeting…"}
+              spellCheck={false}
+              disabled={assistBusy}
+            />
+            {recording && <kbd>⌘⇧A</kbd>}
+            <button className="chip-action" onClick={askAssist} disabled={assistBusy || !assistQ.trim()}>
+              {assistBusy ? <Loader size={12} className="spin" /> : "Ask"}
+            </button>
+          </div>
+        </section>
+      )}
+
       {tab === "notes" ? (
         <textarea
           className="meeting-notes"
@@ -704,46 +895,6 @@ export function MeetingPage({
             })
           )}
           </div>
-          {liveSegments.length > 0 && (
-            <div className="assist-row">
-              {assistA && (
-                <div className="assist-answer">
-                  <p>{assistA}</p>
-                  <button
-                    className="icon-btn"
-                    onClick={() => setAssistA(null)}
-                    aria-label="Dismiss answer"
-                  >
-                    ×
-                  </button>
-                </div>
-              )}
-              <div className="assist-input">
-                <Sparkles size={13} />
-                <input
-                  value={assistQ}
-                  onChange={(e) => setAssistQ(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") askAssist();
-                  }}
-                  placeholder={
-                    recording
-                      ? "Ask about the meeting so far — “what did they just ask me?”"
-                      : "Ask about this meeting…"
-                  }
-                  spellCheck={false}
-                  disabled={assistBusy}
-                />
-                <button
-                  className="chip-action"
-                  onClick={askAssist}
-                  disabled={assistBusy || !assistQ.trim()}
-                >
-                  {assistBusy ? <Loader size={12} className="spin" /> : "Ask"}
-                </button>
-              </div>
-            </div>
-          )}
           <audio ref={audioRef} onEnded={() => setPlayingSeg(null)} style={{ display: "none" }} />
         </>
       ) : tab === "video" ? (

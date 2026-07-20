@@ -2169,7 +2169,46 @@ a.cal-btn { text-decoration: none; }
   display: flex; flex-direction: column; gap: 8px; padding: 8px 2px;
 }
 
-.assist-row { display: flex; flex-direction: column; gap: 8px; padding: 6px 2px 2px; }
+.meeting-copilot {
+  position: relative; display: flex; flex-direction: column; gap: 9px;
+  padding: 12px; overflow: hidden;
+  border: var(--border-width, 1px) solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-radius: var(--r-lg);
+  background:
+    radial-gradient(circle at 0 0, color-mix(in srgb, var(--accent) 11%, transparent), transparent 42%),
+    var(--surface);
+  box-shadow: var(--shadow-1);
+}
+.copilot-head { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.copilot-mark {
+  width: 28px; height: 28px; flex: 0 0 28px; display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 9px; color: var(--accent); background: var(--accent-tint);
+}
+.copilot-head > div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.copilot-head strong { color: var(--ink); font-size: 12.5px; font-weight: 650; letter-spacing: -.01em; }
+.copilot-head > div > span { color: var(--faint); font-size: 11px; }
+.copilot-toggle {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px;
+  border: var(--border-width, 1px) solid var(--line); border-radius: 999px;
+  background: var(--surface); color: var(--muted); font: inherit; font-size: 10.5px; cursor: pointer;
+}
+.copilot-toggle:hover { border-color: var(--line-strong); color: var(--ink); }
+.copilot-toggle.on { color: var(--good); border-color: color-mix(in srgb, var(--good) 32%, var(--line)); }
+.copilot-pulse { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.copilot-toggle.on .copilot-pulse { box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 13%, transparent); }
+.copilot-insight {
+  display: flex; flex-direction: column; gap: 4px; padding: 9px 11px;
+  border: var(--border-width, 1px) dashed var(--line); border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
+}
+.copilot-insight.ready { border-style: solid; border-color: color-mix(in srgb, var(--accent) 28%, var(--line)); }
+.copilot-insight-label {
+  display: inline-flex; align-items: center; gap: 5px; color: var(--accent);
+  font-size: 10px; font-weight: 650; letter-spacing: .075em; text-transform: uppercase;
+}
+.copilot-insight p { margin: 0; color: var(--ink); font-size: 13px; line-height: 1.48; white-space: pre-wrap; }
+.copilot-insight p.copilot-placeholder { color: var(--faint); font-size: 12px; }
+.copilot-insight small { color: var(--faint); font-size: 10.5px; }
 .assist-answer {
   display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px;
   background: var(--accent-tint); border: var(--border-width, 1px) solid var(--line);
@@ -2186,6 +2225,16 @@ a.cal-btn { text-decoration: none; }
   font: inherit; font-size: 13px;
 }
 .assist-input:focus-within { border-color: var(--line-strong); }
+.assist-input kbd {
+  color: var(--faint); background: var(--surface-2); border: var(--border-width, 1px) solid var(--line);
+  border-radius: 5px; padding: 1px 5px; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@media (max-width: 640px) {
+  .meeting-copilot { padding: 10px; }
+  .copilot-head > div > span { display: none; }
+  .assist-input kbd { display: none; }
+}
 
 .meeting-video { display: flex; flex-direction: column; gap: 10px; padding: 8px 2px; }
 .meeting-video video {

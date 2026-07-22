@@ -717,14 +717,10 @@ export const api = {
     invoke<void>("meeting_set_notes", { id, notes }),
   meetingSummarize: (id: number, template?: string) =>
     invoke<string>("meeting_summarize", { id, template }),
-  // Rename propagates to the transcript and updates the voiceprint so future
-  // meetings auto-label this person; confirming a suggestion is just a rename.
+  // Rename propagates only within this meeting. Future meetings stay anonymous.
   meetingRenameSpeaker: (id: number, from: string, to: string) =>
     invoke<void>("meeting_rename_speaker", { id, from, to }),
-  meetingSuggestSpeakers: (id: number) =>
-    invoke<number>("meeting_suggest_speakers", { id }),
-  // Rebuild speaker labels from retained audio, including repairing existing
-  // labels under the current attendee-scoped naming policy.
+  // Rebuild anonymous speaker labels from retained audio.
   meetingRediarize: (id: number) => invoke<number>("meeting_rediarize", { id }),
   // Delete the window video now instead of waiting out the retention window.
   meetingVideoDelete: (id: number) => invoke<void>("meeting_video_delete", { id }),

@@ -1566,9 +1566,15 @@ fn voice_model_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
 
 #[tauri::command]
 fn voice_status(app: tauri::AppHandle) -> Value {
-    let local_ready = voice_model_path(&app).map(|p| p.exists()).unwrap_or(false);
-    let hosted_ready = meeting::cfg().asr_engine == "hosted" && hosted::has_key();
-    json!({ "ready": local_ready || hosted_ready, "hosted": hosted_ready })
+    let config = meeting::cfg();
+    let engine = if provider::use_byok() {
+        "byok".to_string()
+    } else {
+        config.asr_engine
+    };
+    let ready = meeting::engine_spec(&app).is_ok();
+    let hosted_ready = engine == "hosted" && hosted::has_key();
+    json!({ "ready": ready, "hosted": hosted_ready, "engine": engine })
 }
 
 /// Download the whisper model (~148MB) once, into app data.
@@ -1620,20 +1626,22 @@ async fn transcribe(
     if meeting::cfg().asr_engine == "hosted" {
         return hosted::transcribe_batch(&samples, &vocab).await.map_err(|e| e.to_string());
     }
-    let model = voice_model_path(&app)?;
-    if !model.exists() {
-        return Err("voice model not downloaded".into());
-    }
+    let spec = meeting::engine_spec(&app).map_err(|e| e.to_string())?;
     let hint = meeting::asr::vocab_hint(&[], &vocab);
 
-    // whisper is CPU/Metal-bound and blocking; run off the async runtime.
+    // Local ASR is CPU/Metal-bound and blocking; run it off the async runtime.
+    // Quick dictation deliberately shares the meeting engine setting so a
+    // downloaded turbo/Parakeet model works everywhere in the app.
     tauri::async_runtime::spawn_blocking(move || {
-        voice::transcribe(&model, &samples, hint.as_deref())
+        let mut transcriber = meeting::asr::Transcriber::new(&spec, hint)
+            .map_err(|e| e.to_string())?;
+        transcriber
+            .transcribe(&samples)
             .map(|t| meeting::asr::apply_vocab(&t, &vocab))
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1770,6 +1778,9 @@ async fn meeting_start(
     let title = title
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| "Meeting".to_string());
+    meeting::ensure_mic_permission()
+        .await
+        .map_err(|e| e.to_string())?;
     if let Some(ref eid) = event_id {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
@@ -1947,8 +1958,7 @@ async fn meeting_set_notes(app: tauri::AppHandle, id: i64, notes: String) -> Res
     meeting::store::set_notes(&conn, id, &notes).map_err(|e| e.to_string())
 }
 
-/// Rename a diarized voice ("Speaker 2" → "Mayan"): relabels the transcript
-/// and updates the persistent voiceprint so future meetings auto-label them.
+/// Rename a diarized voice ("Speaker 2" → "Mayan") for this meeting only.
 #[tauri::command]
 async fn meeting_rename_speaker(
     app: tauri::AppHandle,
@@ -1962,17 +1972,6 @@ async fn meeting_rename_speaker(
     let state = app.state::<Db>();
     let conn = state.0.lock().unwrap();
     meeting::store::rename_speaker(&conn, id, &from, &to).map_err(|e| e.to_string())
-}
-
-/// On-demand speaker-name suggestions (stop-time runs this automatically).
-#[tauri::command]
-async fn meeting_suggest_speakers(app: tauri::AppHandle, id: i64) -> Result<usize, String> {
-    if !release_profile::diarization() {
-        return Err(release_profile::disabled("speaker diarization"));
-    }
-    meeting::summarize::suggest_speaker_names(&app, id)
-        .await
-        .map_err(|e| e.to_string())
 }
 
 /// Live Assist A0 (LIVE_ASSIST_PLAN.md): answer a question against ONE
@@ -2083,7 +2082,7 @@ async fn meeting_rediarize(app: tauri::AppHandle, id: i64) -> Result<usize, Stri
             .join(id.to_string());
         let state = h.state::<Db>();
         let conn = state.0.lock().unwrap();
-        meeting::asr::rediarize_from_wav(&conn, Some(&h), &model, &dir, id, true)
+        meeting::asr::rediarize_from_wav(&conn, &model, &dir, id, true)
             .map_err(|e| e.to_string())
     })
     .await
@@ -2223,6 +2222,9 @@ async fn meeting_template_delete(app: tauri::AppHandle, name: String) -> Result<
 #[tauri::command]
 async fn meeting_capture_probe(app: tauri::AppHandle, seconds: Option<u64>) -> Result<Value, String> {
     use std::sync::atomic::Ordering;
+    meeting::ensure_mic_permission()
+        .await
+        .map_err(|e| e.to_string())?;
     let secs = seconds.unwrap_or(10).clamp(2, 30);
     let dir = app
         .path()
@@ -2244,7 +2246,9 @@ async fn meeting_capture_probe(app: tauri::AppHandle, seconds: Option<u64>) -> R
     {
         let (b, s) = (me.clone(), stop.clone());
         let aec = meeting::cfg().mic_aec;
-        threads.push(std::thread::spawn(move || meeting::capture::run_mic(b, s, aec)));
+        threads.push(std::thread::spawn(move || {
+            meeting::capture::run_mic(b, s, aec, None)
+        }));
     }
     tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
     stop.store(true, Ordering::Relaxed);
@@ -2398,7 +2402,7 @@ fn name_from_localpart(email: &str) -> String {
 #[tauri::command]
 async fn suggest_person_names(app: tauri::AppHandle) -> Result<Value, String> {
     // Pool + evidence under one lock.
-    let (pool, pairs, known) = {
+    let (pool, pairs) = {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
         let pool = db::email_named_people(&conn).map_err(|e| e.to_string())?;
@@ -2417,10 +2421,7 @@ async fn suggest_person_names(app: tauri::AppHandle) -> Result<Value, String> {
                 }
             }
         }
-        let known: Vec<String> = meeting::store::speaker_profiles(&conn)
-            .map(|v| v.into_iter().map(|(n, _, _)| n).collect())
-            .unwrap_or_default();
-        (pool, pairs, known)
+        (pool, pairs)
     };
 
     // Start every unresolved email at its localpart floor; the model may refine.
@@ -2444,13 +2445,9 @@ async fn suggest_person_names(app: tauri::AppHandle) -> Result<Value, String> {
             "required": ["suggestions"]
         });
         let system = "You match email addresses to people's display names. For each email, \
-            propose the person's likely display name. If a known name clearly corresponds to \
-            the email's local part (e.g. jasmin@x.com and a known 'Jasmine'), use that known \
-            name; otherwise title-case the local part into a plausible name. Names only — \
+            title-case the local part into a plausible name. Names only — \
             never return an email address. JSON: {\"suggestions\":[{\"email\",\"name\"}]}";
-        let user = format!("Emails:\n{}\n\nKnown people from meetings: {}",
-            emails.join("\n"),
-            if known.is_empty() { "(none)".to_string() } else { known.join(", ") });
+        let user = format!("Emails:\n{}", emails.join("\n"));
         let mut by_email: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         if let Ok(v) = ollama::chat_json_local(&ollama::text_model(), system, &user, None, Some(schema)).await {
             if let Some(arr) = v["suggestions"].as_array() {
@@ -3786,7 +3783,6 @@ pub fn run() {
             download_speaker_model,
             download_parakeet_model,
             meeting_rename_speaker,
-            meeting_suggest_speakers,
             meeting_rediarize,
             meeting_video_delete,
             meeting_assist,

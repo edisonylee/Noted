@@ -637,73 +637,6 @@ pub fn is_echo(mic_text: &str, system_text: &str) -> bool {
     hits as f32 / mic.len() as f32 >= 0.70
 }
 
-/// How far apart matching segments may sit across channels: chunk boundaries
-/// differ (the echo is quieter, so the mic's gate opens later and closes
-/// earlier) but the audio itself is simultaneous once timelines are
-/// wall-anchored.
-const ECHO_SLACK_MS: i64 = 2_500;
-
-struct RecentSeg {
-    id: i64,
-    t0: i64,
-    t1: i64,
-    text: String,
-    /// them-channel only: similarity of this segment's voice to the
-    /// note-taker's mic voiceprint (None = too short to embed / no model).
-    me_sim: Option<f32>,
-}
-
-/// Recent segments overlapping [t0, t1] ± slack.
-fn overlapping<'a>(recents: &'a [RecentSeg], t0: i64, t1: i64) -> Vec<&'a RecentSeg> {
-    recents
-        .iter()
-        .filter(|r| r.t1 >= t0 - ECHO_SLACK_MS && r.t0 <= t1 + ECHO_SLACK_MS)
-        .collect()
-}
-
-/// May this mic line be dropped as local echo of `matched` system audio?
-/// Only when the matched audio is provably ANOTHER voice: text similarity
-/// alone is symmetric — the mic line could equally be the original that the
-/// remote side echoed back — so voice identity is the tiebreak, and the mic
-/// wins every ambiguous case (deleting real speech is the worst failure).
-fn matched_is_foreign(matched: &[&RecentSeg], me_ready: bool) -> bool {
-    me_ready
-        && matched.iter().any(|r| r.me_sim.is_some())
-        && matched
-            .iter()
-            .all(|r| r.me_sim.map_or(true, |s| s < super::diarize::NOT_ME))
-}
-
-/// Is a system-audio voice the note-taker echoed back through the call?
-/// The ME_ECHO threshold alone is not enough: the mic centroid is built from
-/// mic audio, and without headphones that audio can carry the other side too,
-/// pulling the centroid toward the remote voice until the remote voice itself
-/// clears the bar — the gate then eats the entire "them" channel. So an
-/// own-voice call must also BEAT the best match against every known foreign
-/// The user's mic voiceprint is trustworthy once it has folded in this many
-/// segments — before that, own-voice echo checks stay off.
-const ME_READY_MIN: i64 = 5;
-
-fn me_ready(n: i64) -> bool {
-    n >= ME_READY_MIN
-}
-
-/// voiceprint; with no foreign prints stored it falls back to the threshold.
-fn is_own_voice(me_sim: Option<f32>, best_foreign_sim: Option<f32>) -> bool {
-    me_sim.map_or(false, |s| {
-        s >= super::diarize::ME_ECHO && best_foreign_sim.map_or(true, |f| s > f)
-    })
-}
-
-fn best_foreign_sim(emb: &[f32], prints: &[(String, Vec<f32>)]) -> Option<f32> {
-    prints
-        .iter()
-        .map(|(_, p)| super::diarize::cosine(emb, p))
-        .fold(None, |acc: Option<f32>, s| {
-            Some(acc.map_or(s, |a| a.max(s)))
-        })
-}
-
 // ---------------------------------------------------------------------------
 // Worker: the per-meeting loop tying capture → chunker → whisper → DB/UI.
 // ---------------------------------------------------------------------------
@@ -814,51 +747,6 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
 
     let mut voice_prints: Vec<super::diarize::SegEmb> = Vec::new();
 
-    // The note-taker's own voiceprint, built live from the mic channel (and
-    // seeded from previous meetings via the reserved __me__ profile). It is
-    // the ground truth that lets us recognize the user's voice coming back
-    // through the call — the remote side's speakers → their mic — which must
-    // never become a "them" speaker.
-    let (mut me_print, mut me_n): (Vec<f32>, i64) = {
-        let state = app.state::<Db>();
-        let conn = state.0.lock().unwrap();
-        store::get_profile(&conn, super::diarize::ME_PROFILE)
-            .ok()
-            .flatten()
-            .unwrap_or((Vec::new(), 0))
-    };
-    // Every stored voiceprint that isn't the user: the own-voice gate must
-    // beat these, not just clear ME_ECHO (see is_own_voice).
-    let foreign_prints: Vec<(String, Vec<f32>)> = {
-        let state = app.state::<Db>();
-        let conn = state.0.lock().unwrap();
-        store::speaker_profiles(&conn)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(name, emb, _)| (name, emb))
-            .collect()
-    };
-    // Voiceprints remain useful for separating the user's echo from a remote
-    // voice, but a stored real name is eligible for display only when that
-    // person is actually on this meeting's invite.  Cross-meeting nearest-
-    // voice guesses are not identity evidence.
-    let external_attendees = {
-        let state = app.state::<Db>();
-        let conn = state.0.lock().unwrap();
-        store::meeting_event_json(&conn, args.meeting_id)
-            .ok()
-            .flatten()
-            .map(|ev| super::summarize::external_attendees(&ev))
-            .unwrap_or_default()
-    };
-    let naming_profiles = profiles_for_attendees(&foreign_prints, &external_attendees);
-    // This meeting's own mic embeddings (kept separate so the profile merge
-    // at stop doesn't double-count the seed).
-    let mut me_meeting_sum: Vec<f32> = Vec::new();
-    let mut me_meeting_n: i64 = 0;
-    // 1:1 calendar rule, known at start: with exactly one external attendee,
-    // provisional labels can use the real name immediately.
-    let lone_external = (external_attendees.len() == 1).then(|| external_attendees[0].clone());
     let mut prints_since_relabel = 0usize;
 
     // "them" first: it's the clean digital copy, so its segments are already
@@ -879,9 +767,6 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
             last_decode: None,
         },
     ];
-    let mut recent_them: Vec<RecentSeg> = Vec::new();
-    let mut recent_me: Vec<RecentSeg> = Vec::new();
-
     loop {
         let stopping = args.stop.load(Ordering::Relaxed);
         for pipe in pipes.iter_mut() {
@@ -958,43 +843,10 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                     );
                     continue;
                 }
-                // Voice work happens BEFORE insert: a them-segment that is the
-                // note-taker's own voice echoed back through the call is not a
-                // speaker — it never enters the transcript at all.
                 let mut them_emb: Option<Vec<f32>> = None;
-                let mut me_sim: Option<f32> = None;
                 if pipe.name == "them" {
                     if let Some(embedder) = embedder.as_mut() {
                         them_emb = embedder.embed(&seg.samples);
-                        if let (Some(e), true) = (&them_emb, me_ready(me_n)) {
-                            me_sim = Some(super::diarize::cosine(e, &me_print));
-                        }
-                    }
-                    let foreign = them_emb
-                        .as_ref()
-                        .and_then(|e| best_foreign_sim(e, &foreign_prints));
-                    if is_own_voice(me_sim, foreign) {
-                        eprintln!(
-                            "[noted] own-voice echo skipped ({:.2}): {}",
-                            me_sim.unwrap(),
-                            text.chars().take(60).collect::<String>()
-                        );
-                        continue;
-                    }
-                }
-                if pipe.name == "me" {
-                    let matched = overlapping(&recent_them, seg.t0_ms, seg.t1_ms);
-                    let sys_text = matched
-                        .iter()
-                        .map(|r| r.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    if is_echo(&text, &sys_text) && matched_is_foreign(&matched, me_ready(me_n)) {
-                        eprintln!(
-                            "[noted] echo suppressed: {}",
-                            text.chars().take(60).collect::<String>()
-                        );
-                        continue;
                     }
                 }
                 let seg_id = {
@@ -1022,13 +874,6 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                         "text": text,
                     }),
                 );
-                let recent = RecentSeg {
-                    id,
-                    t0: seg.t0_ms,
-                    t1: seg.t1_ms,
-                    text,
-                    me_sim,
-                };
                 if pipe.name == "them" {
                     if let Some(emb) = them_emb {
                         voice_prints.push(super::diarize::SegEmb {
@@ -1038,85 +883,6 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                         });
                         prints_since_relabel += 1;
                     }
-                    recent_them.retain(|r| r.t1 >= seg.t1_ms - 90_000);
-                    recent_them.push(recent);
-                    // A mic segment can close before its system-audio source
-                    // does (the echo is quieter, so the mic's gate shuts
-                    // early) — re-check recent mic rows against this segment.
-                    // Same foreign-voice proof as at insert time: never delete
-                    // a mic line over system audio that might be the user.
-                    let mut echoed: Vec<usize> = Vec::new();
-                    for (i, m) in recent_me.iter().enumerate() {
-                        if m.t1 < seg.t0_ms - ECHO_SLACK_MS || m.t0 > seg.t1_ms + ECHO_SLACK_MS {
-                            continue;
-                        }
-                        let matched = overlapping(&recent_them, m.t0, m.t1);
-                        let sys_text = matched
-                            .iter()
-                            .map(|r| r.text.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        if is_echo(&m.text, &sys_text)
-                            && matched_is_foreign(&matched, me_ready(me_n))
-                        {
-                            echoed.push(i);
-                        }
-                    }
-                    for &i in echoed.iter().rev() {
-                        let m = recent_me.remove(i);
-                        eprintln!(
-                            "[noted] echo suppressed (late): {}",
-                            m.text.chars().take(60).collect::<String>()
-                        );
-                        let removed = {
-                            let state = app.state::<Db>();
-                            let conn = state.0.lock().unwrap();
-                            store::delete_segment(&conn, m.id)
-                        };
-                        if removed.is_ok() {
-                            let _ = app.emit(
-                                "meeting-segment-removed",
-                                json!({ "meetingId": args.meeting_id, "id": m.id }),
-                            );
-                        }
-                    }
-                } else {
-                    // Grow the note-taker's voiceprint from confident mic
-                    // segments — but only while the remote side is quiet.
-                    // Without headphones the mic also hears the speakers, and
-                    // the self-consistency gate below cannot stop a slow
-                    // drift: each mixed-voice segment passes the gate and
-                    // pulls the centroid a little further toward the remote
-                    // voice. No overlapping system audio → the mic is
-                    // provably just the user.
-                    let remote_quiet = overlapping(&recent_them, seg.t0_ms, seg.t1_ms).is_empty();
-                    if remote_quiet && seg.t1_ms - seg.t0_ms >= 2_500 {
-                        if let Some(embedder) = embedder.as_mut() {
-                            if let Some(emb) = embedder.embed(&seg.samples) {
-                                let consistent =
-                                    me_n == 0 || super::diarize::cosine(&emb, &me_print) >= 0.45;
-                                if consistent {
-                                    if me_print.is_empty() {
-                                        me_print = vec![0.0; emb.len()];
-                                    }
-                                    if me_meeting_sum.is_empty() {
-                                        me_meeting_sum = vec![0.0; emb.len()];
-                                    }
-                                    let n = me_n as f32;
-                                    for (c, e) in me_print.iter_mut().zip(&emb) {
-                                        *c = (*c * n + e) / (n + 1.0);
-                                    }
-                                    me_n += 1;
-                                    for (s, e) in me_meeting_sum.iter_mut().zip(&emb) {
-                                        *s += e;
-                                    }
-                                    me_meeting_n += 1;
-                                }
-                            }
-                        }
-                    }
-                    recent_me.retain(|r| r.t1 >= seg.t1_ms - 90_000);
-                    recent_me.push(recent);
                 }
             }
         }
@@ -1128,14 +894,7 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
         // resets the channel first so no provisional label survives it).
         if !stopping && prints_since_relabel >= LIVE_RELABEL_EVERY {
             prints_since_relabel = 0;
-            let labels = provisional_labels(
-                &voice_prints,
-                &me_print,
-                me_n,
-                &foreign_prints,
-                &naming_profiles,
-                lone_external.as_deref(),
-            );
+            let labels = provisional_labels(&voice_prints);
             if !labels.is_empty() {
                 {
                     let state = app.state::<Db>();
@@ -1166,25 +925,7 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
     {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
-        finalize_speakers(
-            &conn,
-            Some(&app),
-            args.meeting_id,
-            &voice_prints,
-            &me_print,
-            me_n,
-            &foreign_prints,
-        );
-    }
-    // Refresh the note-taker's own voiceprint with this meeting's mic voice.
-    if me_meeting_n > 0 {
-        let mean: Vec<f32> = me_meeting_sum
-            .iter()
-            .map(|s| s / me_meeting_n as f32)
-            .collect();
-        let state = app.state::<Db>();
-        let conn = state.0.lock().unwrap();
-        let _ = store::merge_profile(&conn, super::diarize::ME_PROFILE, &mean, me_meeting_n);
+        finalize_speakers(&conn, args.meeting_id, &voice_prints);
     }
 
     for pipe in pipes {
@@ -1199,87 +940,14 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
 /// enough to feel live, rare enough that whisper never waits on it.
 const LIVE_RELABEL_EVERY: usize = 4;
 
-fn person_key(name: &str) -> String {
-    name.chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Limit automatic real-name labels to people listed on this meeting.  A
-/// saved profile may use a first name ("Brian") while Calendar carries a
-/// display name ("Brian Smith"), so exact full-name or exact first-token
-/// matches are accepted; fuzzy/sub-string matches are deliberately not.
-fn profiles_for_attendees(
-    profiles: &[(String, Vec<f32>)],
-    attendees: &[String],
-) -> Vec<(String, Vec<f32>)> {
-    let allowed: Vec<(String, String)> = attendees
-        .iter()
-        .map(|name| {
-            let full = person_key(name);
-            let first = full.split_whitespace().next().unwrap_or("").to_string();
-            (full, first)
-        })
-        .collect();
-    profiles
-        .iter()
-        .filter(|(name, _)| {
-            let profile = person_key(name);
-            let first = profile.split_whitespace().next().unwrap_or("");
-            !profile.is_empty()
-                && allowed.iter().any(|(full, attendee_first)| {
-                    profile == *full || (!first.is_empty() && first == attendee_first)
-                })
-        })
-        .cloned()
-        .collect()
-}
-
-/// Cluster the embeddings collected so far into provisional labels for the
-/// live transcript. Mirrors the naming policy of `finalize_speakers` minus
-/// its side effects: own-voice clusters are left unlabeled (not deleted), no
-/// meeting_speakers rows, no profile writes. Labels may shift between passes;
-/// the stop pass rewrites everything from the full context.
-fn provisional_labels(
-    voice_prints: &[super::diarize::SegEmb],
-    me_print: &[f32],
-    me_n: i64,
-    foreign_prints: &[(String, Vec<f32>)],
-    naming_profiles: &[(String, Vec<f32>)],
-    lone_external: Option<&str>,
-) -> Vec<(i64, String)> {
+/// Cluster the current meeting into neutral live labels. No cross-meeting
+/// voiceprint or attendee name is consulted; real names are manual only.
+fn provisional_labels(voice_prints: &[super::diarize::SegEmb]) -> Vec<(i64, String)> {
     if voice_prints.len() < 2 {
         return Vec::new();
     }
     let clusters = super::diarize::cluster(voice_prints);
-    let keep: Vec<_> = if me_ready(me_n) {
-        clusters
-            .into_iter()
-            .filter(|c| {
-                !is_own_voice(
-                    Some(super::diarize::cosine(&c.centroid, me_print)),
-                    best_foreign_sim(&c.centroid, foreign_prints),
-                )
-            })
-            .collect()
-    } else {
-        clusters
-    };
-    let mut named = super::diarize::assign_names(keep, naming_profiles);
-    if let Some(name) = lone_external {
-        for s in named.iter_mut() {
-            if s.label
-                .as_deref()
-                .map_or(true, |l| l.starts_with("Speaker "))
-            {
-                s.label = Some(name.to_string());
-            }
-        }
-    }
+    let named = super::diarize::assign_names(clusters);
     let mut labels = Vec::new();
     for s in &named {
         if let Some(l) = &s.label {
@@ -1289,53 +957,17 @@ fn provisional_labels(
     labels
 }
 
-/// Full-context diarization for one meeting: purge own-voice echo clusters,
-/// cluster the rest, name them (voiceprints → real names, 1:1 calendar rule,
-/// "Speaker N"), and persist labels + centroids. Shared by the live stop path
-/// and startup recovery — the policy must be identical so a crash can't
-/// produce different labels than a clean stop. Returns the voice count.
-/// `app` carries the event channel for retro-deleted echo segments; None in
-/// headless use.
+/// Full-context diarization for one meeting. It only separates voices into
+/// neutral labels ("Speaker N" or "Them"); the user assigns real names.
 pub fn finalize_speakers(
     conn: &rusqlite::Connection,
-    app: Option<&tauri::AppHandle>,
     meeting_id: i64,
     voice_prints: &[super::diarize::SegEmb],
-    me_print: &[f32],
-    me_n: i64,
-    foreign_prints: &[(String, Vec<f32>)],
 ) -> usize {
     if voice_prints.is_empty() {
         return 0;
     }
-    let mut clusters = super::diarize::cluster(voice_prints);
-    // Purge own-voice echo that slipped in before the mic voiceprint was
-    // ready (the live check needs a few mic segments to warm up).
-    if me_ready(me_n) {
-        let (echo, keep): (Vec<_>, Vec<_>) = clusters.into_iter().partition(|c| {
-            is_own_voice(
-                Some(super::diarize::cosine(&c.centroid, me_print)),
-                best_foreign_sim(&c.centroid, foreign_prints),
-            )
-        });
-        clusters = keep;
-        for c in &echo {
-            eprintln!(
-                "[noted] own-voice echo cluster purged ({} segments)",
-                c.seg_ids.len()
-            );
-            for &sid in &c.seg_ids {
-                if store::delete_segment(conn, sid).is_ok() {
-                    if let Some(app) = app {
-                        let _ = app.emit(
-                            "meeting-segment-removed",
-                            json!({ "meetingId": meeting_id, "id": sid }),
-                        );
-                    }
-                }
-            }
-        }
-    }
+    let clusters = super::diarize::cluster(voice_prints);
     // Provisional live labels may disagree with the final clustering (a voice
     // that merged away, an echo cluster) — reset the channel and rewrite from
     // the full-context result so no stale label survives.
@@ -1344,27 +976,7 @@ pub fn finalize_speakers(
     if clusters.is_empty() {
         return 0;
     }
-    // 1:1 rule: with exactly one external attendee on the calendar
-    // event, every voice that didn't match a stored profile IS that
-    // person — no model, no guessing.
-    let external = store::meeting_event_json(conn, meeting_id)
-        .ok()
-        .flatten()
-        .map(|ev| super::summarize::external_attendees(&ev))
-        .unwrap_or_default();
-    let naming_profiles = profiles_for_attendees(foreign_prints, &external);
-    let mut named = super::diarize::assign_names(clusters, &naming_profiles);
-    if external.len() == 1 {
-        for s in named.iter_mut() {
-            let generic = s
-                .label
-                .as_deref()
-                .map_or(true, |l| l.starts_with("Speaker "));
-            if generic {
-                s.label = Some(external[0].clone());
-            }
-        }
-    }
+    let named = super::diarize::assign_names(clusters);
     let mut labels: Vec<(i64, String)> = Vec::new();
     let mut rows: Vec<(String, Vec<f32>, i64)> = Vec::new();
     for s in &named {
@@ -1378,16 +990,6 @@ pub fn finalize_speakers(
         ));
     }
     let _ = store::save_meeting_speakers(conn, meeting_id, &rows);
-    // Calendar-derived names are ground truth enough to persist: the
-    // next call with this person auto-labels even without an event.
-    if external.len() == 1 {
-        for s in &named {
-            if s.label.as_deref() == Some(external[0].as_str()) {
-                let _ =
-                    store::merge_profile(conn, &external[0], &s.centroid, s.seg_ids.len() as i64);
-            }
-        }
-    }
     match store::set_segment_speakers(conn, &labels) {
         Ok(()) => eprintln!(
             "[noted] diarization: {} voices, {} segments labeled",
@@ -1395,11 +997,6 @@ pub fn finalize_speakers(
             labels.len()
         ),
         Err(e) => eprintln!("[noted] diarization write failed: {e}"),
-    }
-    // Short reactions ("Mm-hmm.") embed too briefly to cluster; in a
-    // 1:1 they can only be the one other person — no third "Them".
-    if external.len() == 1 {
-        let _ = store::label_unlabeled_them(conn, meeting_id, &external[0]);
     }
     named.len()
 }
@@ -1441,7 +1038,6 @@ fn read_wav_16k(path: &Path) -> Result<Vec<f32>> {
 /// already diarized, the speaker model is missing, or audio wasn't retained.
 pub fn rediarize_from_wav(
     conn: &rusqlite::Connection,
-    app: Option<&tauri::AppHandle>,
     model: &Path,
     meeting_dir: &Path,
     meeting_id: i64,
@@ -1484,21 +1080,7 @@ pub fn rediarize_from_wav(
             });
         }
     }
-    let (me_print, me_n) =
-        store::get_profile(conn, super::diarize::ME_PROFILE)?.unwrap_or((Vec::new(), 0));
-    let foreign_prints: Vec<(String, Vec<f32>)> = store::speaker_profiles(conn)?
-        .into_iter()
-        .map(|(name, emb, _)| (name, emb))
-        .collect();
-    Ok(finalize_speakers(
-        conn,
-        app,
-        meeting_id,
-        &voice_prints,
-        &me_print,
-        me_n,
-        &foreign_prints,
-    ))
+    Ok(finalize_speakers(conn, meeting_id, &voice_prints))
 }
 
 #[cfg(test)]
@@ -1537,7 +1119,7 @@ mod tests {
     #[test]
     fn provisional_labels_name_multiple_voices_live() {
         let prints = vec![vp(1, 0, 1), vp(2, 1, 2), vp(3, 0, 3), vp(4, 1, 4)];
-        let labels = provisional_labels(&prints, &[], 0, &[], &[], None);
+        let labels = provisional_labels(&prints);
         let by_id: std::collections::HashMap<i64, String> = labels.into_iter().collect();
         assert_eq!(by_id.get(&1).map(String::as_str), Some("Speaker 1"));
         assert_eq!(by_id.get(&2).map(String::as_str), Some("Speaker 2"));
@@ -1545,48 +1127,10 @@ mod tests {
     }
 
     #[test]
-    fn provisional_labels_keep_lone_voice_unlabeled_unless_1to1() {
+    fn provisional_labels_keep_lone_voice_unlabeled() {
         let prints = vec![vp(1, 2, 1), vp(2, 2, 2), vp(3, 2, 3)];
         // lone unknown voice: no live label (channel default "Them" reads better)
-        assert!(provisional_labels(&prints, &[], 0, &[], &[], None).is_empty());
-        // …but a 1:1 calendar event names it immediately
-        let labels = provisional_labels(&prints, &[], 0, &[], &[], Some("Brian"));
-        assert_eq!(labels.len(), 3);
-        assert!(labels.iter().all(|(_, l)| l == "Brian"));
-    }
-
-    #[test]
-    fn remembered_names_are_only_eligible_when_invited() {
-        let profiles = vec![
-            ("Brian".to_string(), voice(0, 10)),
-            ("Jasmine Wu".to_string(), voice(1, 11)),
-        ];
-        assert!(profiles_for_attendees(&profiles, &[]).is_empty());
-        assert!(profiles_for_attendees(&profiles, &["Chris".into()]).is_empty());
-
-        let brian = profiles_for_attendees(&profiles, &["Brian Smith".into()]);
-        assert_eq!(brian.len(), 1);
-        assert_eq!(brian[0].0, "Brian");
-
-        let jasmine = profiles_for_attendees(&profiles, &["Jasmine Wu".into()]);
-        assert_eq!(jasmine.len(), 1);
-        assert_eq!(jasmine[0].0, "Jasmine Wu");
-    }
-
-    #[test]
-    fn provisional_labels_skip_own_voice_cluster() {
-        // Voice at base 0 is the note-taker's own echo; base 1 is a real peer.
-        let me = voice(0, 99);
-        let prints = vec![vp(1, 0, 1), vp(2, 1, 2), vp(3, 0, 3), vp(4, 1, 4)];
-        let labels = provisional_labels(&prints, &me, ME_READY_MIN, &[], &[], None);
-        let by_id: std::collections::HashMap<i64, String> = labels.into_iter().collect();
-        assert!(
-            !by_id.contains_key(&1),
-            "echo cluster must not get a live label"
-        );
-        assert!(!by_id.contains_key(&3));
-        // The surviving lone real voice stays unlabeled (assign_names lone rule)
-        assert!(by_id.is_empty());
+        assert!(provisional_labels(&prints).is_empty());
     }
 
     #[test]
@@ -1764,61 +1308,6 @@ mod tests {
             apply_vocab("give it a i mean look", &v),
             "give it a i mean look"
         );
-    }
-
-    #[test]
-    fn mic_lines_survive_unless_matched_audio_is_provably_foreign() {
-        let them = |sim: Option<f32>| RecentSeg {
-            id: 1,
-            t0: 0,
-            t1: 1000,
-            text: "x".into(),
-            me_sim: sim,
-        };
-        // Matched system audio is another voice → local echo, suppressible.
-        let foreign = [them(Some(0.30))];
-        assert!(matched_is_foreign(
-            &foreign.iter().collect::<Vec<_>>(),
-            true
-        ));
-        // Matched audio resembles the note-taker → their own remote echo; the
-        // mic line is the original and must survive.
-        let mine = [them(Some(0.62))];
-        assert!(!matched_is_foreign(&mine.iter().collect::<Vec<_>>(), true));
-        let mixed = [them(Some(0.30)), them(Some(0.55))];
-        assert!(!matched_is_foreign(&mixed.iter().collect::<Vec<_>>(), true));
-        // Unknown voice (too short to embed) or no voiceprint yet → keep mic.
-        let unknown = [them(None)];
-        assert!(!matched_is_foreign(
-            &unknown.iter().collect::<Vec<_>>(),
-            true
-        ));
-        assert!(!matched_is_foreign(
-            &foreign.iter().collect::<Vec<_>>(),
-            false
-        ));
-    }
-
-    #[test]
-    fn own_voice_must_beat_known_foreign_prints() {
-        // Bare threshold when nothing else is stored (first-ever meeting).
-        assert!(is_own_voice(Some(0.70), None));
-        assert!(!is_own_voice(Some(0.55), None));
-        // A polluted mic centroid can score a remote voice above ME_ECHO —
-        // but the remote voice matches their own stored print even better,
-        // so it is NOT the user and must reach the transcript.
-        assert!(!is_own_voice(Some(0.70), Some(0.80)));
-        assert!(is_own_voice(Some(0.80), Some(0.70)));
-        // Too short to embed / no voiceprint yet → never an own-voice call.
-        assert!(!is_own_voice(None, Some(0.10)));
-
-        let prints = vec![
-            ("Brian".into(), vec![1.0f32, 0.0]),
-            ("Ana".into(), vec![0.0f32, 1.0]),
-        ];
-        let best = best_foreign_sim(&[0.6, 0.8], &prints).unwrap();
-        assert!((best - 0.8).abs() < 1e-6);
-        assert!(best_foreign_sim(&[1.0, 0.0], &[]).is_none());
     }
 
     #[test]

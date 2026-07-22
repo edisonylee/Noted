@@ -324,9 +324,6 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
                 .await
                 .map(|_| Value::Null)
         }
-        "meeting_suggest_speakers" => crate::meeting_suggest_speakers(a, iarg(b, "id"))
-            .await
-            .map(|n| json!(n)),
         // Rediarize runs on the desktop's model but touches no capture
         // hardware — safe to trigger remotely, like re-summarize.
         "meeting_rediarize" => crate::meeting_rediarize(a, iarg(b, "id"))

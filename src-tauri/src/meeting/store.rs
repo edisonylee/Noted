@@ -253,78 +253,8 @@ pub fn set_segment_speakers(conn: &Connection, labels: &[(i64, String)]) -> Resu
     Ok(())
 }
 
-/// Saved voiceprints: (name, embedding, samples). Reserved internal profiles
-/// (double-underscore names, e.g. the note-taker's own __me__) are excluded —
-/// they must never label a "them" speaker.
-pub fn speaker_profiles(conn: &Connection) -> Result<Vec<(String, Vec<f32>, i64)>> {
-    let mut stmt = conn.prepare(
-        "SELECT name, embedding, samples FROM speaker_profiles WHERE substr(name, 1, 2) != '__'",
-    )?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                super::diarize::blob_to_emb(&r.get::<_, Vec<u8>>(1)?),
-                r.get::<_, i64>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-/// One profile by exact name (reserved names included).
-pub fn get_profile(conn: &Connection, name: &str) -> Result<Option<(Vec<f32>, i64)>> {
-    Ok(conn
-        .query_row(
-            "SELECT embedding, samples FROM speaker_profiles WHERE name = ?1",
-            [name],
-            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i64>(1)?)),
-        )
-        .ok()
-        .map(|(blob, n)| (super::diarize::blob_to_emb(&blob), n)))
-}
-
-/// Fold `centroid` (over `n` segments) into the named voiceprint as a
-/// samples-weighted running mean; creates the profile if new.
-pub fn merge_profile(conn: &Connection, name: &str, centroid: &[f32], n: i64) -> Result<()> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let (emb, samples) = match get_profile(conn, name)? {
-        Some((old, old_n)) => (
-            super::diarize::merge_centroid(&old, old_n, centroid, n),
-            old_n + n,
-        ),
-        None => (centroid.to_vec(), n),
-    };
-    conn.execute(
-        "INSERT OR REPLACE INTO speaker_profiles (name, embedding, samples, updated_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![name, super::diarize::emb_to_blob(&emb), samples, now],
-    )?;
-    Ok(())
-}
-
-/// The calendar-event snapshot captured at start, if this meeting had one.
-pub fn meeting_event_json(conn: &Connection, id: i64) -> Result<Option<Value>> {
-    let raw: Option<String> =
-        conn.query_row("SELECT event_json FROM meetings WHERE id = ?1", [id], |r| {
-            r.get(0)
-        })?;
-    Ok(raw.and_then(|s| serde_json::from_str(&s).ok()))
-}
-
-/// 1:1 meetings: them-segments too short to voice-fingerprint never joined a
-/// cluster — but with exactly one external attendee they can only be them.
-pub fn label_unlabeled_them(conn: &Connection, meeting_id: i64, name: &str) -> Result<usize> {
-    let n = conn.execute(
-        "UPDATE meeting_segments SET speaker = ?2
-         WHERE meeting_id = ?1 AND channel = 'them' AND speaker IS NULL",
-        rusqlite::params![meeting_id, name],
-    )?;
-    Ok(n)
-}
-
-/// Record a meeting's diarized voices (label + centroid) so a later rename can
-/// seed a voiceprint. An unlabeled lone voice is stored under "Them".
+/// Record a meeting's anonymous diarized voices (label + centroid). An
+/// unlabeled lone voice is stored under "Them" for manual renaming.
 pub fn save_meeting_speakers(
     conn: &Connection,
     meeting_id: i64,
@@ -362,23 +292,8 @@ pub fn list_meeting_speakers(conn: &Connection, meeting_id: i64) -> Result<Vec<V
     Ok(rows)
 }
 
-pub fn set_speaker_suggestion(
-    conn: &Connection,
-    meeting_id: i64,
-    label: &str,
-    suggested: &str,
-) -> Result<()> {
-    conn.execute(
-        "UPDATE meeting_speakers SET suggested = ?3 WHERE meeting_id = ?1 AND label = ?2",
-        rusqlite::params![meeting_id, label, suggested],
-    )?;
-    Ok(())
-}
-
-/// Rename a diarized voice: relabels its transcript lines and folds the
-/// meeting's cluster centroid into the persistent voiceprint for `to` (running
-/// mean), so future meetings auto-label this person. `from` = "Them" renames
-/// the lone-voice case (speaker still NULL on the segments).
+/// Rename a diarized voice within one meeting. `from` = "Them" renames the
+/// lone-voice case (speaker still NULL on the segments).
 pub fn rename_speaker(conn: &Connection, meeting_id: i64, from: &str, to: &str) -> Result<()> {
     let to = to.trim();
     if to.is_empty() || to == "Me" || to == "Them" || to.starts_with("__") {
@@ -449,7 +364,7 @@ pub fn rename_speaker(conn: &Connection, meeting_id: i64, from: &str, to: &str) 
             rusqlite::params![meeting_id, from, to],
         )?;
     }
-    merge_profile(conn, to, &super::diarize::blob_to_emb(&blob), seg_count)
+    Ok(())
 }
 
 /// Full transcript, timeline order, interleaved across channels.

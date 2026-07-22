@@ -14,9 +14,9 @@ type Conn =
 
 type SettingsSection = "models" | "themes" | "calendar" | "vaults" | "meetings";
 
-// Model-provider settings. noted runs 100% local by default; "Balanced" sends
-// only the latency-sensitive extract/OCR calls to Gemini so a busy local model
-// never leaves a note stuck on "reading". Embeddings + chat stay local.
+// Model-provider settings. noted runs 100% local by default; the internally
+// named "balanced" mode sends only new captures to a cloud extract/OCR model.
+// Storage, embeddings, chat, meetings, and Brain Vault stay local.
 // Rendered two ways: `page` (desktop — a real Settings view with a section
 // nav) or as the compact modal (mobile).
 export function SettingsModal({ onClose, page = false }: { onClose: () => void; page?: boolean }) {
@@ -498,6 +498,42 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
         ? Boolean(s?.has_anthropic_key) || anthropicKey.trim().length > 0
         : Boolean(s?.has_gemini_key) || key.trim().length > 0;
   const testing = conn.state === "checking";
+  const isEmbeddingModel = (name: string) => /embed|nomic/i.test(name);
+  const isVisionModel = (name: string) => /vl(?=[:_.-]|$)|vision|llava|bakllava|moondream/i.test(name);
+  const localTextModels = [...new Set([localTextModel, ...installedModels.filter((name) => !isEmbeddingModel(name) && !isVisionModel(name))])].filter(Boolean);
+  const localVisionModels = [...new Set([localVisionModel, ...installedModels.filter((name) => !isEmbeddingModel(name) && isVisionModel(name))])].filter(Boolean);
+
+  const speechEngineField = (label: string) => (
+    <label className="field">
+      <span className="field-label">{label}</span>
+      <select
+        value={mcfg?.asr_engine ?? "whisper"}
+        onChange={(e) =>
+          mcfg &&
+          saveMcfg({ ...mcfg, asr_engine: e.target.value as "whisper" | "parakeet" | "hosted" })
+        }
+      >
+        <option value="whisper">
+          {mModel?.turbo
+            ? "Whisper large-v3-turbo — accuracy-first"
+            : mModel?.base
+              ? "Whisper Base English — lighter fallback"
+              : "Whisper large-v3-turbo — accuracy-first (not installed)"}
+        </option>
+        <option value="parakeet" disabled={!mModel?.parakeet}>
+          Parakeet TDT 0.6B — speed-first, English only
+          {mModel?.parakeet ? "" : " (not installed)"}
+        </option>
+        {releaseProfile.notedHosted && (
+          <option value="hosted" disabled={!mModel?.hosted}>
+            Hosted Parakeet — cloud transcription
+            {mModel?.hosted ? "" : " (activation required)"}
+          </option>
+        )}
+      </select>
+      <span className="field-hint">Applies to quick dictation and meeting transcripts.</span>
+    </label>
+  );
 
   const sections: [SettingsSection, string][] = [
     ["models", "Models"],
@@ -535,7 +571,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           {releaseProfile.balancedInference && (
             <button role="radio" className={"provider-profile" + (mode === "balanced" ? " on" : "")} onClick={() => setMode("balanced")} aria-checked={mode === "balanced"}>
               <span className="provider-profile-icon"><Gauge size={17} /></span>
-              <span className="provider-profile-copy"><strong>Balanced</strong><small>Local with cloud assist</small></span>
+              <span className="provider-profile-copy"><strong>Cloud-assisted capture</strong><small>Cloud extraction, local library</small></span>
               {mode === "balanced" && <Check className="provider-profile-check" size={15} />}
             </button>
           )}
@@ -565,32 +601,48 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
             <label className="field">
               <span className="field-label">Local text model</span>
               <select value={localTextModel} onChange={(e) => setLocalTextModel(e.target.value)}>
-                {[...new Set([localTextModel, ...installedModels])]
-                  .filter(Boolean)
-                  .map((m) => (
+                {localTextModels.map((m) => (
                     <option key={m} value={m}>
                       {m}
                     </option>
                   ))}
               </select>
+              <span className="field-hint">Classifies notes, extracts structure, and powers local chat.</span>
             </label>
             <label className="field">
               <span className="field-label">Local vision model</span>
               <select value={localVisionModel} onChange={(e) => setLocalVisionModel(e.target.value)}>
-                {[...new Set([localVisionModel, ...installedModels])]
-                  .filter(Boolean)
-                  .map((m) => (
+                {localVisionModels.map((m) => (
                     <option key={m} value={m}>
                       {m}
                     </option>
                   ))}
               </select>
+              <span className="field-hint">Reads photos, screenshots, and handwriting.</span>
             </label>
           </div>
-          <span className="field-hint">
-            Any Ollama model you've pulled works (recommended: qwen2.5:7b-instruct + qwen2.5vl:7b).
-            Embeddings stay on nomic-embed-text — the search index is built with it.
-          </span>
+          <div className="field-row">
+            <span className="field-hint">
+              <Check size={13} /> Semantic search: nomic-embed-text (fixed, 768 dimensions)
+            </span>
+            <span className="field-hint">
+              Ollama currently reports {installedModels.length} installed model{installedModels.length === 1 ? "" : "s"}.
+            </span>
+          </div>
+          {speechEngineField("Local speech model")}
+          <div className="field-row">
+            <span className="field-hint">
+              {mModel?.turbo || mModel?.base ? <Check size={13} /> : null} Whisper {mModel?.turbo ? "large-v3-turbo installed" : mModel?.base ? "Base English installed" : "not installed"}
+            </span>
+            <span className="field-hint">
+              {mModel?.parakeet ? <Check size={13} /> : null} Parakeet TDT 0.6B {mModel?.parakeet ? "installed" : "not installed"}
+            </span>
+          </div>
+          {releaseProfile.diarization && (
+            <span className="field-hint">
+              {mModel?.speaker ? <Check size={13} /> : null} Speaker separation {mModel?.speaker ? "installed" : "not installed"} — separates voices; names are assigned manually per meeting.
+            </span>
+          )}
         </div>}
 
         {releaseProfile.notedHosted && mode === "hosted" && (
@@ -622,6 +674,11 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
 
         {releaseProfile.balancedInference && mode === "balanced" && (
           <div className="settings-fields">
+            <span className="field-hint">
+              <strong>Privacy boundary:</strong> only new note text and photos are sent to this provider for extraction and OCR.
+              Your database, semantic-search index, journal, Ask context, meetings, and Brain Vault stay on this Mac.
+              Ask itself remains local; context-free cloud questions are not enabled yet.
+            </span>
             <div className={"conn-status " + conn.state}>
               {conn.state === "checking" && <Loader2 size={13} className="spin" />}
               {conn.state === "ok" && <Wifi size={13} />}
@@ -1022,9 +1079,10 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           <>
         <h3>Brain vaults</h3>
         <p className="settings-sub">
-          Obsidian vaults under <code>~/Brain</code> sync into your knowledge graph (visible in
-          Knowledge → Work). Work vaults import one-way; the personal vault is generated by noted.
-          noted only writes inside a managed block, and every write is a git commit you can revert.
+          <strong>Experimental.</strong> Registered Obsidian vaults import Markdown and wikilinks into
+          your knowledge graph. Work vaults are one-way by default; the personal vault is generated
+          by noted. Write-back only changes noted-managed blocks. Git history is created only when
+          the vault is already a git repository.
         </p>
 
         <div className="settings-fields">
@@ -1038,7 +1096,8 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               Auto-propagate
               <em>
                 Every 10 min, write captures back into your vaults and refresh the personal vault
-                (git-committed). Import + embed always run regardless.
+                using noted-managed blocks. Import + embed always run regardless; writes are
+                committed only in vaults that already use git.
               </em>
             </span>
           </label>
@@ -1111,7 +1170,8 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
         <p className="settings-sub">
           noted records meetings bot-free using your mic + system audio. Choose private local
           transcription{releaseProfile.notedHosted ? " or hosted Parakeet with no model download" : " or your own transcription provider"}.
-          Nothing is captured unless you accept a prompt or hit Record.
+          Nothing is captured unless you accept a prompt or hit Record. Speaker separation groups
+          voices; participant names are assigned manually instead of recognized from voiceprints.
         </p>
 
         <div className="settings-fields">
@@ -1387,42 +1447,21 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           {releaseProfile.diarization && <div className="field-row">
             {mModel?.speaker ? (
               <span className="field-hint">
-                <Check size={13} /> Speaker ID ready — transcripts label who's speaking
+                <Check size={13} /> Speaker separation ready — rename speakers in each transcript
               </span>
             ) : (
               <button
                 className="ghost-btn test-btn"
                 onClick={downloadSpeakerModel}
                 disabled={sDownloading}
-                title="Voice-embedding model that tells call participants apart (labels appear when the meeting ends)"
+                title="Separates voices into neutral speaker labels; it does not recognize people across meetings"
               >
                 {sDownloading ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
-                {sDownloading ? "Downloading (29 MB)…" : "Download speaker ID model (29 MB)"}
+                {sDownloading ? "Downloading (29 MB)…" : "Download speaker separation model (29 MB)"}
               </button>
             )}
           </div>}
-          <label className="field">
-            <span className="field-label">Transcription engine</span>
-            <select
-              value={mcfg?.asr_engine ?? "whisper"}
-              onChange={(e) =>
-                mcfg &&
-                saveMcfg({ ...mcfg, asr_engine: e.target.value as "whisper" | "parakeet" | "hosted" })
-              }
-            >
-              <option value="whisper">Whisper</option>
-              <option value="parakeet" disabled={!mModel?.parakeet}>
-                Parakeet — faster, better with names
-                {mModel?.parakeet ? "" : " (download below)"}
-              </option>
-              {releaseProfile.notedHosted && (
-                <option value="hosted" disabled={!mModel?.hosted}>
-                  Hosted Parakeet — no local model download
-                  {mModel?.hosted ? "" : " (activation required)"}
-                </option>
-              )}
-            </select>
-          </label>
+          {speechEngineField("Transcription engine")}
           <div className="field-row">
             {mModel?.parakeet ? (
               <span className="field-hint">
@@ -1433,7 +1472,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
                 className="ghost-btn test-btn"
                 onClick={downloadParakeet}
                 disabled={pDownloading}
-                title="NVIDIA Parakeet-TDT 0.6B — noticeably faster than whisper large-v3-turbo and stronger on names and jargon. English only."
+                title="NVIDIA Parakeet-TDT 0.6B — speed-first local transcription. English only."
               >
                 {pDownloading ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
                 {pDownloading ? "Downloading (660 MB)…" : "Download Parakeet engine (660 MB)"}

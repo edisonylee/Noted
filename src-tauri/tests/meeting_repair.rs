@@ -512,7 +512,6 @@ fn rediarize() {
     let conn = rusqlite::Connection::open(&db).expect("db");
     let n = tauri_app_lib::meeting::asr::rediarize_from_wav(
         &conn,
-        None,
         Path::new(&model),
         Path::new(&dir),
         id,

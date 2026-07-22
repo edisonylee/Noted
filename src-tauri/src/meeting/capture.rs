@@ -141,6 +141,10 @@ fn capture_log(path: Option<&Path>, message: &str) {
     }
 }
 
+fn vpio_needs_raw_fallback(elapsed_ms: u64, nonzero_callbacks: u64) -> bool {
+    elapsed_ms > 2_000 && nonzero_callbacks == 0
+}
+
 // ---------------------------------------------------------------------------
 // Mic capture, on its own thread. Preferred path (macOS, `aec` on): Apple's
 // VoiceProcessingIO AudioUnit — the OS subtracts everything the Mac is
@@ -149,16 +153,26 @@ fn capture_log(path: Option<&Path>, message: &str) {
 // cpal stream when VPIO can't initialize (odd devices, denied component).
 // ---------------------------------------------------------------------------
 
-pub fn run_mic(buf: Arc<ChannelBuf>, stop: Arc<AtomicBool>, aec: bool) {
+pub fn run_mic(
+    buf: Arc<ChannelBuf>,
+    stop: Arc<AtomicBool>,
+    aec: bool,
+    log_path: Option<std::path::PathBuf>,
+) {
     while !stop.load(Ordering::Relaxed) {
         let result = if aec && cfg!(target_os = "macos") {
             #[cfg(target_os = "macos")]
             {
                 match vp::vp_session(&buf, &stop) {
                     Err(e) if !vp::started(&e) => {
-                        // VPIO never came up — this session runs on raw cpal;
-                        // the next rebuild tries VPIO again.
+                        // VPIO either failed to start or produced an all-zero
+                        // stream. Never let a healthy-looking callback loop
+                        // silently erase the user's entire mic channel.
                         eprintln!("[noted] mic AEC unavailable, using raw mic: {e}");
+                        capture_log(
+                            log_path.as_deref(),
+                            &format!("mic AEC unavailable; raw fallback: {e}"),
+                        );
                         mic_session(&buf, &stop)
                     }
                     r => r,
@@ -175,6 +189,7 @@ pub fn run_mic(buf: Arc<ChannelBuf>, stop: Arc<AtomicBool>, aec: bool) {
             Ok(()) => break, // clean stop
             Err(e) => {
                 eprintln!("[noted] mic capture error (retrying in 2s): {e}");
+                capture_log(log_path.as_deref(), &format!("mic capture retry: {e}"));
                 // Device unplugged / config change: retry until stopped.
                 for _ in 0..8 {
                     if stop.load(Ordering::Relaxed) {
@@ -250,6 +265,7 @@ mod vp {
         unit: *mut au::Unit,
         scratch: Vec<f32>,
         render_err: Arc<AtomicBool>,
+        nonzero_callbacks: Arc<AtomicU64>,
         callbacks: u64,
     }
 
@@ -283,6 +299,9 @@ mod vp {
         let unit = unsafe { &mut *ctx.unit };
         match unit.render(ts, bus, n_frames, &mut list) {
             Ok(()) => {
+                if ctx.scratch[..n].iter().any(|sample| *sample != 0.0) {
+                    ctx.nonzero_callbacks.fetch_add(1, Ordering::Relaxed);
+                }
                 ctx.buf.push(&ctx.scratch[..n]);
                 if ctx.callbacks == 1 {
                     eprintln!("[noted] mic vp: first callback, {n} samples");
@@ -304,11 +323,13 @@ mod vp {
         // The callback reads Ctx behind a raw pointer, so it must be declared
         // before (= dropped after) the Output that drives the callbacks.
         let render_err = Arc::new(AtomicBool::new(false));
+        let nonzero_callbacks = Arc::new(AtomicU64::new(0));
         let mut ctx = Box::new(Ctx {
             buf: buf.clone(),
             unit: std::ptr::null_mut(),
             scratch: vec![0.0; 8192],
             render_err: render_err.clone(),
+            nonzero_callbacks: nonzero_callbacks.clone(),
             callbacks: 0,
         });
 
@@ -381,6 +402,7 @@ mod vp {
         );
 
         buf.last_callback.store(epoch_ms(), Ordering::Relaxed);
+        let session_started = epoch_ms();
         let result = loop {
             if stop.load(Ordering::Relaxed) {
                 break Ok(());
@@ -389,6 +411,16 @@ mod vp {
 
             if render_err.load(Ordering::Relaxed) {
                 break Err(anyhow!("{STARTED} render error"));
+            }
+            // A real microphone has a non-zero noise floor even when nobody
+            // is speaking. Two seconds of callbacks containing exact zeros is
+            // a broken VPIO route, not silence; return an unstarted-class error
+            // so run_mic immediately falls back to the raw input stream.
+            if vpio_needs_raw_fallback(
+                epoch_ms().saturating_sub(session_started),
+                nonzero_callbacks.load(Ordering::Relaxed),
+            ) {
+                break Err(anyhow!("vp produced only zero-valued mic samples"));
             }
             let stale_ms = epoch_ms().saturating_sub(buf.last_callback.load(Ordering::Relaxed));
             if stale_ms > 10_000 {
@@ -806,6 +838,13 @@ mod tests {
             infer_callback_layout(2_048, 1_000.0, 1_512.0),
             Some((512, 4))
         );
+    }
+
+    #[test]
+    fn exact_zero_vpio_stream_falls_back_after_two_seconds() {
+        assert!(!vpio_needs_raw_fallback(2_000, 0));
+        assert!(vpio_needs_raw_fallback(2_001, 0));
+        assert!(!vpio_needs_raw_fallback(10_000, 1));
     }
 
     /// Live smoke test: builds a real VoiceProcessingIO session, records 3s,

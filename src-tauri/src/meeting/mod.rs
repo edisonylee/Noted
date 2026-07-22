@@ -206,6 +206,61 @@ pub fn cfg_update(dir: &std::path::Path, new_cfg: MeetingsCfg) -> Result<()> {
     Ok(())
 }
 
+/// Make sure macOS has granted microphone access before opening Core Audio.
+/// An existing grant returns immediately; the system request is made only
+/// when the user has never answered the permission prompt. Core Audio can
+/// otherwise start successfully while delivering only zero-valued samples,
+/// which looks like a healthy recording until the transcript is empty.
+#[cfg(target_os = "macos")]
+pub async fn ensure_mic_permission() -> Result<()> {
+    use cidre::av;
+
+    let media_type = av::MediaType::audio();
+    match av::CaptureDevice::authorization_status_for_media_type(media_type)
+        .map_err(|e| anyhow!("could not read microphone permission: {e:?}"))?
+    {
+        av::AuthorizationStatus::Authorized => return Ok(()),
+        av::AuthorizationStatus::Denied | av::AuthorizationStatus::Restricted => {
+            return Err(anyhow!(
+                "microphone access is off — enable noted in System Settings → Privacy & Security → Microphone"
+            ));
+        }
+        av::AuthorizationStatus::NotDetermined => {}
+    }
+
+    // Core Audio itself does not register a TCC request, so use
+    // AVCaptureDevice for the one-time system prompt.
+    let granted_rx = {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut tx = Some(tx);
+        let mut completion = cidre::blocks::SendBlock::new1(move |granted: bool| {
+            if let Some(tx) = tx.take() {
+                let _ = tx.send(granted);
+            }
+        });
+        av::CaptureDevice::request_access_for_media_type_ch(
+            media_type,
+            &mut completion,
+        )
+        .map_err(|e| anyhow!("could not request microphone permission: {e:?}"))?;
+        rx
+    };
+    match granted_rx.await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(anyhow!(
+            "microphone access is off — enable noted in System Settings → Privacy & Security → Microphone"
+        )),
+        Err(_) => Err(anyhow!(
+            "macOS closed the microphone permission request before it completed"
+        )),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub async fn ensure_mic_permission() -> Result<()> {
+    Ok(())
+}
+
 fn epoch_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -417,7 +472,8 @@ pub fn start(
     {
         let (b, s) = (me.clone(), stop.clone());
         let aec = cfg().mic_aec;
-        threads.push(std::thread::spawn(move || capture::run_mic(b, s, aec)));
+        let log = audio_dir.as_ref().map(|d| d.join("capture.log"));
+        threads.push(std::thread::spawn(move || capture::run_mic(b, s, aec, log)));
     }
     // Window video rides along when enabled (its own dir derivation — audio
     // retention off shouldn't disable video). Fire-and-forget: the worker
@@ -513,16 +569,11 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
     // "Did it end?" should never be a mystery: a small transient card confirms.
     detect::show_status_card(&app, &title, "Meeting saved — writing notes…");
 
-    // Auto-enhance (Granola: enhancement fires when the call ends), then mine
-    // the transcript for who "Speaker N" is (stored as confirmable suggestions).
+    // Auto-enhance when the call ends. Speaker identities remain anonymous
+    // until the user labels them for this meeting.
     let h = app.clone();
     tauri::async_runtime::spawn(async move {
         match summarize::run(&h, id, None).await {
-            Ok(_) if crate::release_profile::diarization() => {
-                if let Err(e) = summarize::suggest_speaker_names(&h, id).await {
-                    eprintln!("[noted] speaker-name suggestions failed: {e}");
-                }
-            }
             Ok(_) => {}
             Err(e) => {
                 eprintln!("[noted] meeting summarize failed: {e}");
@@ -564,7 +615,7 @@ fn rediarize_interrupted(app: &tauri::AppHandle, id: i64) {
     let dir = data_dir.join("meetings").join(id.to_string());
     let db = app.state::<Db>();
     let conn = db.0.lock().unwrap();
-    match asr::rediarize_from_wav(&conn, Some(app), &model, &dir, id, false) {
+    match asr::rediarize_from_wav(&conn, &model, &dir, id, false) {
         Ok(n) if n > 0 => {
             println!("[noted] recovered speaker labels for meeting {id} ({n} voices)")
         }
@@ -606,11 +657,6 @@ pub fn reconcile(app: &tauri::AppHandle) {
                 .await;
             }
             match summarize::run(&h, id, None).await {
-                Ok(_) if crate::release_profile::diarization() => {
-                    if let Err(e) = summarize::suggest_speaker_names(&h, id).await {
-                        eprintln!("[noted] speaker-name suggestions failed: {e}");
-                    }
-                }
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("[noted] recovery summarize failed for {id}: {e}");

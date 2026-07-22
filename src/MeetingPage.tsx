@@ -94,6 +94,40 @@ function MdBlock({ md }: { md: string }) {
   return <div className="md">{out}</div>;
 }
 
+function shortSummary(md: string): string | null {
+  const lines = md.split("\n");
+  const summaryHeading = lines.findIndex((line) => /^##\s+summary\s*$/i.test(line.trim()));
+  const candidates = (summaryHeading >= 0 ? lines.slice(summaryHeading + 1) : lines)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#") && !line.startsWith("- ["))
+    .map((line) => line.replace(/^-\s+/, "").replace(/\*\*/g, ""));
+  const text = candidates.join(" ").trim();
+  if (!text) return null;
+  const firstSentence = text.match(/^.*?[.!?](?:\s|$)/)?.[0]?.trim() ?? text;
+  return firstSentence.length <= 180
+    ? firstSentence
+    : `${firstSentence.slice(0, 177).trimEnd()}…`;
+}
+
+function peopleLine(names: string[]): string {
+  const readable = names.map((name) => {
+    const trimmed = name.trim();
+    if (!trimmed.includes("@")) return trimmed;
+    return trimmed
+      .split("@", 1)[0]
+      .replace(/[._-]+/g, " ")
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ");
+  });
+  const unique = [...new Set(readable.filter(Boolean))];
+  if (unique.length === 0) return "You and the other participants";
+  if (unique.length === 1) return `You and ${unique[0]}`;
+  if (unique.length === 2) return `You, ${unique[0]}, and ${unique[1]}`;
+  return `You, ${unique.slice(0, 2).join(", ")}, and ${unique.length - 2} more`;
+}
+
 type Tab = "notes" | "transcript" | "video" | number; // number = summary index
 
 export function MeetingPage({
@@ -120,7 +154,6 @@ export function MeetingPage({
   const [generating, setGenerating] = useState<string | null>(null);
   const [renameFor, setRenameFor] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
-  const [suggesting, setSuggesting] = useState(false);
   const [rediarizing, setRediarizing] = useState(false);
   const [assistQ, setAssistQ] = useState("");
   const [assistA, setAssistA] = useState<string | null>(null);
@@ -325,7 +358,7 @@ export function MeetingPage({
   const storedSpeakers = detail?.speakers ?? [];
   // Old/manual/recovered recordings may have remote transcript lines without
   // a usable voiceprint cluster. Still expose a rename chip: the backend's
-  // "Them" path relabels those rows without persisting a bogus voiceprint.
+  // "Them" path relabels those rows for this meeting.
   const fallbackSpeakerCounts = new Map<string, number>();
   for (const segment of liveSegments) {
     if (segment.channel !== "them") continue;
@@ -337,6 +370,13 @@ export function MeetingPage({
       ? storedSpeakers
       : [...fallbackSpeakerCounts].map(([label, seg_count]) => ({ label, suggested: null, seg_count }));
   const unnamed = (l: string) => l.startsWith("Speaker ") || l === "Them";
+  const aboutPeople = peopleLine([
+    ...attendees.map((a) => a.name || a.email),
+    ...speakers
+      .map((speaker) => speaker.label)
+      .filter((label) => label !== "Me" && !unnamed(label)),
+  ]);
+  const aboutTopic = shortSummary(summaries[0]?.content_md ?? "") || ev?.description?.trim() || title;
 
   const renameSpeaker = async (from: string, to: string) => {
     if (id == null || !to.trim()) return;
@@ -346,19 +386,6 @@ export function MeetingPage({
       await load();
     } catch (e) {
       setError(String(e));
-    }
-  };
-
-  const suggestNames = async () => {
-    if (id == null) return;
-    setSuggesting(true);
-    try {
-      const n = await api.meetingSuggestSpeakers(id);
-      if (n > 0) await load();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSuggesting(false);
     }
   };
 
@@ -710,9 +737,17 @@ export function MeetingPage({
         </p>
       )}
 
+      {id != null && (
+        <section className="meeting-about" aria-label="About this meeting">
+          <span className="meeting-about-label">About</span>
+          <p>{aboutTopic}</p>
+          <small><Users size={12} /> {aboutPeople}</small>
+        </section>
+      )}
+
       <nav className="meeting-tabs">
         <button className={tab === "notes" ? "on" : ""} onClick={() => setTab("notes")}>
-          Notes
+          My Notes
         </button>
         {id != null && (
           <button
@@ -762,13 +797,13 @@ export function MeetingPage({
           <header className="copilot-head">
             <span className="copilot-mark"><Sparkles size={14} /></span>
             <div>
-              <strong>{recording ? "Live copilot" : "Meeting copilot"}</strong>
+              <strong>{recording ? "Live copilot" : "Ask this meeting"}</strong>
               <span>
                 {recording
                   ? autoAssistOn
                     ? "Watching for useful moments"
                     : "Automatic suggestions paused"
-                  : "Ask anything from this meeting"}
+                  : "Answers from the transcript and your notes"}
               </span>
             </div>
             {recording && (
@@ -838,21 +873,28 @@ export function MeetingPage({
       )}
 
       {tab === "notes" ? (
-        <textarea
-          className="meeting-notes"
-          value={notes}
-          onChange={(e) => onNotes(e.target.value)}
-          placeholder={
-            recording
-              ? "Terse trigger bullets are enough — they'll be expanded with the transcript when the meeting ends."
-              : "Notes for this meeting…"
-          }
-        />
+        <div className="meeting-notes-pane">
+          <p className="meeting-notes-help">
+            Optional notes you type yourself. Use them for prep or quick bullets; they autosave,
+            guide the generated summary, and remain verbatim in exports.
+          </p>
+          <textarea
+            className="meeting-notes"
+            value={notes}
+            onChange={(e) => onNotes(e.target.value)}
+            placeholder={
+              recording
+                ? "A few trigger bullets are enough — the summary combines them with the transcript."
+                : "Add your own notes…"
+            }
+          />
+        </div>
       ) : tab === "transcript" ? (
         <>
           {releaseProfile.diarization && speakers.length > 0 && !recording && (
             <div className="speaker-bar">
               <span className="speaker-bar-label">Speakers</span>
+              <span className="speaker-manual-hint">Click a label to rename it for this meeting</span>
               {speakers.map((sp) =>
                 renameFor === sp.label ? (
                   <input
@@ -873,31 +915,16 @@ export function MeetingPage({
                   <span key={sp.label} className="speaker-chip">
                     <button
                       className="chip-name"
-                      title="Rename this speaker — the voice is remembered when this person is invited again"
+                      title="Rename this speaker for this meeting"
                       onClick={() => {
                         setRenameFor(sp.label);
-                        setRenameText(sp.suggested ?? "");
+                        setRenameText(unnamed(sp.label) ? "" : sp.label);
                       }}
                     >
                       {sp.label}
                     </button>
-                    {sp.suggested && (
-                      <button
-                        className="chip-suggest"
-                        title={`Looks like ${sp.suggested} (from the transcript) — click to confirm`}
-                        onClick={() => renameSpeaker(sp.label, sp.suggested!)}
-                      >
-                        {sp.suggested}? <Check size={11} />
-                      </button>
-                    )}
                   </span>
                 )
-              )}
-              {storedSpeakers.some((sp) => unnamed(sp.label) && !sp.suggested) && (
-                <button className="chip-action" onClick={suggestNames} disabled={suggesting}>
-                  {suggesting ? <Loader size={12} className="spin" /> : <Sparkles size={12} />}
-                  Suggest names
-                </button>
               )}
               {detail?.status === "done" && detail.audio_them_path && (
                 <button

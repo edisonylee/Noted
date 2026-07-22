@@ -516,6 +516,7 @@ fn rediarize() {
         Path::new(&model),
         Path::new(&dir),
         id,
+        true,
     )
     .expect("rediarize");
     println!("→ {n} voices");

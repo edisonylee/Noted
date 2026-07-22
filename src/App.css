@@ -135,7 +135,7 @@ input, textarea { font-family: inherit; }
   backdrop-filter: blur(var(--surface-blur));
   z-index: 20;
 }
-.brand { display: inline-flex; align-items: center; gap: 8px; font-size: 19px; font-weight: 620; letter-spacing: -0.025em; }
+.brand { font-size: 19px; font-weight: 620; letter-spacing: -0.025em; }
 .brand .dot { color: var(--accent); }
 
 .nav { display: flex; gap: 22px; }
@@ -2073,6 +2073,9 @@ a.cal-btn { text-decoration: none; }
 }
 .meeting-page .btn:hover { background: var(--hover-soft); }
 .meeting-page .btn.ghost { color: var(--accent); }
+.meeting-page .btn.meeting-delete-forever { color: var(--bad); }
+.meeting-page .btn.meeting-delete-forever:hover { background: var(--error-bg); border-color: var(--error-border); }
+.meeting-trash-btn:hover { color: var(--bad); background: var(--error-bg); }
 .meeting-page .btn.rec { background: var(--ink); border-color: var(--ink); color: var(--on-ink); }
 .meeting-page .btn.rec:hover { background: var(--ink-hover); }
 .meeting-page .btn.stop { border-color: var(--good); color: var(--good); font-variant-numeric: tabular-nums; }

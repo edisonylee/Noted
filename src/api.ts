@@ -392,6 +392,7 @@ export type MeetingListRow = {
   event_json: Partial<RangeEvent> | null;
   segment_count: number;
   summary_count: number;
+  trashed_at: string | null;
 };
 // A diarized voice in a meeting. `suggested` is an unconfirmed LLM-mined name
 // (confirming = renaming); label "Them" is the lone-unrecognized-voice case.
@@ -707,7 +708,11 @@ export const api = {
   meetingStop: () => invoke<number | null>("meeting_stop"),
   meetingState: () => invoke<MeetingLiveState>("meeting_state"),
   meetingList: () => invoke<MeetingListRow[]>("meeting_list"),
+  meetingTrashList: () => invoke<MeetingListRow[]>("meeting_trash_list"),
   meetingGet: (id: number) => invoke<MeetingDetail>("meeting_get", { id }),
+  meetingTrash: (id: number) => invoke<void>("meeting_trash", { id }),
+  meetingRestore: (id: number) => invoke<void>("meeting_restore", { id }),
+  meetingDeleteForever: (id: number) => invoke<void>("meeting_delete_forever", { id }),
   meetingSetNotes: (id: number, notes: string) =>
     invoke<void>("meeting_set_notes", { id, notes }),
   meetingSummarize: (id: number, template?: string) =>
@@ -718,9 +723,8 @@ export const api = {
     invoke<void>("meeting_rename_speaker", { id, from, to }),
   meetingSuggestSpeakers: (id: number) =>
     invoke<number>("meeting_suggest_speakers", { id }),
-  // Rebuild speaker labels from the retained audio — for meetings recorded
-  // before diarization existed or interrupted by a crash. Resolves to the
-  // voice count (0 = nothing to do).
+  // Rebuild speaker labels from retained audio, including repairing existing
+  // labels under the current attendee-scoped naming policy.
   meetingRediarize: (id: number) => invoke<number>("meeting_rediarize", { id }),
   // Delete the window video now instead of waiting out the retention window.
   meetingVideoDelete: (id: number) => invoke<void>("meeting_video_delete", { id }),

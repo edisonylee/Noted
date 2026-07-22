@@ -838,22 +838,27 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
             .map(|(name, emb, _)| (name, emb))
             .collect()
     };
-    // This meeting's own mic embeddings (kept separate so the profile merge
-    // at stop doesn't double-count the seed).
-    let mut me_meeting_sum: Vec<f32> = Vec::new();
-    let mut me_meeting_n: i64 = 0;
-    // 1:1 calendar rule, known at start: with exactly one external attendee,
-    // provisional labels can use the real name immediately.
-    let lone_external: Option<String> = {
+    // Voiceprints remain useful for separating the user's echo from a remote
+    // voice, but a stored real name is eligible for display only when that
+    // person is actually on this meeting's invite.  Cross-meeting nearest-
+    // voice guesses are not identity evidence.
+    let external_attendees = {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
         store::meeting_event_json(&conn, args.meeting_id)
             .ok()
             .flatten()
             .map(|ev| super::summarize::external_attendees(&ev))
-            .filter(|v| v.len() == 1)
-            .map(|v| v[0].clone())
+            .unwrap_or_default()
     };
+    let naming_profiles = profiles_for_attendees(&foreign_prints, &external_attendees);
+    // This meeting's own mic embeddings (kept separate so the profile merge
+    // at stop doesn't double-count the seed).
+    let mut me_meeting_sum: Vec<f32> = Vec::new();
+    let mut me_meeting_n: i64 = 0;
+    // 1:1 calendar rule, known at start: with exactly one external attendee,
+    // provisional labels can use the real name immediately.
+    let lone_external = (external_attendees.len() == 1).then(|| external_attendees[0].clone());
     let mut prints_since_relabel = 0usize;
 
     // "them" first: it's the clean digital copy, so its segments are already
@@ -1128,6 +1133,7 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                 &me_print,
                 me_n,
                 &foreign_prints,
+                &naming_profiles,
                 lone_external.as_deref(),
             );
             if !labels.is_empty() {
@@ -1193,6 +1199,46 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
 /// enough to feel live, rare enough that whisper never waits on it.
 const LIVE_RELABEL_EVERY: usize = 4;
 
+fn person_key(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Limit automatic real-name labels to people listed on this meeting.  A
+/// saved profile may use a first name ("Brian") while Calendar carries a
+/// display name ("Brian Smith"), so exact full-name or exact first-token
+/// matches are accepted; fuzzy/sub-string matches are deliberately not.
+fn profiles_for_attendees(
+    profiles: &[(String, Vec<f32>)],
+    attendees: &[String],
+) -> Vec<(String, Vec<f32>)> {
+    let allowed: Vec<(String, String)> = attendees
+        .iter()
+        .map(|name| {
+            let full = person_key(name);
+            let first = full.split_whitespace().next().unwrap_or("").to_string();
+            (full, first)
+        })
+        .collect();
+    profiles
+        .iter()
+        .filter(|(name, _)| {
+            let profile = person_key(name);
+            let first = profile.split_whitespace().next().unwrap_or("");
+            !profile.is_empty()
+                && allowed.iter().any(|(full, attendee_first)| {
+                    profile == *full || (!first.is_empty() && first == attendee_first)
+                })
+        })
+        .cloned()
+        .collect()
+}
+
 /// Cluster the embeddings collected so far into provisional labels for the
 /// live transcript. Mirrors the naming policy of `finalize_speakers` minus
 /// its side effects: own-voice clusters are left unlabeled (not deleted), no
@@ -1203,6 +1249,7 @@ fn provisional_labels(
     me_print: &[f32],
     me_n: i64,
     foreign_prints: &[(String, Vec<f32>)],
+    naming_profiles: &[(String, Vec<f32>)],
     lone_external: Option<&str>,
 ) -> Vec<(i64, String)> {
     if voice_prints.len() < 2 {
@@ -1222,7 +1269,7 @@ fn provisional_labels(
     } else {
         clusters
     };
-    let mut named = super::diarize::assign_names(keep, foreign_prints);
+    let mut named = super::diarize::assign_names(keep, naming_profiles);
     if let Some(name) = lone_external {
         for s in named.iter_mut() {
             if s.label
@@ -1293,15 +1340,10 @@ pub fn finalize_speakers(
     // that merged away, an echo cluster) — reset the channel and rewrite from
     // the full-context result so no stale label survives.
     let _ = store::clear_them_speakers(conn, meeting_id);
+    let _ = store::clear_meeting_speakers(conn, meeting_id);
     if clusters.is_empty() {
         return 0;
     }
-    let profiles: Vec<(String, Vec<f32>)> = store::speaker_profiles(conn)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(name, emb, _)| (name, emb))
-        .collect();
-    let mut named = super::diarize::assign_names(clusters, &profiles);
     // 1:1 rule: with exactly one external attendee on the calendar
     // event, every voice that didn't match a stored profile IS that
     // person — no model, no guessing.
@@ -1310,6 +1352,8 @@ pub fn finalize_speakers(
         .flatten()
         .map(|ev| super::summarize::external_attendees(&ev))
         .unwrap_or_default();
+    let naming_profiles = profiles_for_attendees(foreign_prints, &external);
+    let mut named = super::diarize::assign_names(clusters, &naming_profiles);
     if external.len() == 1 {
         for s in named.iter_mut() {
             let generic = s
@@ -1401,8 +1445,9 @@ pub fn rediarize_from_wav(
     model: &Path,
     meeting_dir: &Path,
     meeting_id: i64,
+    force: bool,
 ) -> Result<usize> {
-    if !store::list_meeting_speakers(conn, meeting_id)?.is_empty() {
+    if !force && !store::list_meeting_speakers(conn, meeting_id)?.is_empty() {
         return Ok(0); // already diarized (crash happened after the stop path)
     }
     let wav_path = meeting_dir.join("them.wav");
@@ -1492,7 +1537,7 @@ mod tests {
     #[test]
     fn provisional_labels_name_multiple_voices_live() {
         let prints = vec![vp(1, 0, 1), vp(2, 1, 2), vp(3, 0, 3), vp(4, 1, 4)];
-        let labels = provisional_labels(&prints, &[], 0, &[], None);
+        let labels = provisional_labels(&prints, &[], 0, &[], &[], None);
         let by_id: std::collections::HashMap<i64, String> = labels.into_iter().collect();
         assert_eq!(by_id.get(&1).map(String::as_str), Some("Speaker 1"));
         assert_eq!(by_id.get(&2).map(String::as_str), Some("Speaker 2"));
@@ -1503,11 +1548,29 @@ mod tests {
     fn provisional_labels_keep_lone_voice_unlabeled_unless_1to1() {
         let prints = vec![vp(1, 2, 1), vp(2, 2, 2), vp(3, 2, 3)];
         // lone unknown voice: no live label (channel default "Them" reads better)
-        assert!(provisional_labels(&prints, &[], 0, &[], None).is_empty());
+        assert!(provisional_labels(&prints, &[], 0, &[], &[], None).is_empty());
         // …but a 1:1 calendar event names it immediately
-        let labels = provisional_labels(&prints, &[], 0, &[], Some("Brian"));
+        let labels = provisional_labels(&prints, &[], 0, &[], &[], Some("Brian"));
         assert_eq!(labels.len(), 3);
         assert!(labels.iter().all(|(_, l)| l == "Brian"));
+    }
+
+    #[test]
+    fn remembered_names_are_only_eligible_when_invited() {
+        let profiles = vec![
+            ("Brian".to_string(), voice(0, 10)),
+            ("Jasmine Wu".to_string(), voice(1, 11)),
+        ];
+        assert!(profiles_for_attendees(&profiles, &[]).is_empty());
+        assert!(profiles_for_attendees(&profiles, &["Chris".into()]).is_empty());
+
+        let brian = profiles_for_attendees(&profiles, &["Brian Smith".into()]);
+        assert_eq!(brian.len(), 1);
+        assert_eq!(brian[0].0, "Brian");
+
+        let jasmine = profiles_for_attendees(&profiles, &["Jasmine Wu".into()]);
+        assert_eq!(jasmine.len(), 1);
+        assert_eq!(jasmine[0].0, "Jasmine Wu");
     }
 
     #[test]
@@ -1515,7 +1578,7 @@ mod tests {
         // Voice at base 0 is the note-taker's own echo; base 1 is a real peer.
         let me = voice(0, 99);
         let prints = vec![vp(1, 0, 1), vp(2, 1, 2), vp(3, 0, 3), vp(4, 1, 4)];
-        let labels = provisional_labels(&prints, &me, ME_READY_MIN, &[], None);
+        let labels = provisional_labels(&prints, &me, ME_READY_MIN, &[], &[], None);
         let by_id: std::collections::HashMap<i64, String> = labels.into_iter().collect();
         assert!(
             !by_id.contains_key(&1),

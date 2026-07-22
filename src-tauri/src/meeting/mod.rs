@@ -311,24 +311,14 @@ pub fn start(
         .and_then(|e| e["date"].as_str())
         .map(String::from);
 
-    // ASR vocabulary bias: this meeting's attendees + every known voice +
-    // the user's custom terms.
+    // ASR vocabulary bias: this meeting's attendees plus the user's custom
+    // terms. Names remembered from unrelated meetings must not bias Whisper.
     let (asr_hint, vocab) = {
         let c = cfg();
-        let mut names = event_json
+        let names = event_json
             .as_ref()
             .map(summarize::external_attendees)
             .unwrap_or_default();
-        let db = app.state::<Db>();
-        let conn = db.0.lock().unwrap();
-        if crate::release_profile::diarization() {
-            names.extend(
-                store::speaker_profiles(&conn)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(n, _, _)| n),
-            );
-        }
         (asr::vocab_hint(&names, &c.vocabulary), c.vocabulary)
     };
 
@@ -574,7 +564,7 @@ fn rediarize_interrupted(app: &tauri::AppHandle, id: i64) {
     let dir = data_dir.join("meetings").join(id.to_string());
     let db = app.state::<Db>();
     let conn = db.0.lock().unwrap();
-    match asr::rediarize_from_wav(&conn, Some(app), &model, &dir, id) {
+    match asr::rediarize_from_wav(&conn, Some(app), &model, &dir, id, false) {
         Ok(n) if n > 0 => {
             println!("[noted] recovered speaker labels for meeting {id} ({n} voices)")
         }

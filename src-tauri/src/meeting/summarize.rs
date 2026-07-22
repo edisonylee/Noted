@@ -413,7 +413,7 @@ pub async fn suggest_speaker_names(app: &tauri::AppHandle, meeting_id: i64) -> R
             external_attendees(&meeting["event_json"]),
         )
     };
-    if unnamed.is_empty() || segments.is_empty() {
+    if unnamed.is_empty() || segments.is_empty() || attendees.is_empty() {
         return Ok(0);
     }
 
@@ -441,19 +441,16 @@ pub async fn suggest_speaker_names(app: &tauri::AppHandle, meeting_id: i64) -> R
         "UNIDENTIFIED SPEAKERS: {}\n\nCANDIDATE NAMES (calendar attendees): {}\n\n\
          TRANSCRIPT EXCERPTS:\n{evidence}",
         unnamed.join(", "),
-        if attendees.is_empty() {
-            "(none listed — use names stated in the transcript)".into()
-        } else {
-            attendees.join(", ")
-        },
+        attendees.join(", "),
     );
     let out = ollama::chat_json_local_ctx(
         &ollama::text_model(),
         "You map a meeting's unidentified speakers to real names, using only evidence \
          in the transcript: being addressed by name right after speaking, answering when \
          a name is called, self-introductions, or presenting work attributed to a name. \
-         'Me' is the note-taker, never a candidate name. Include a mapping ONLY when the \
-         evidence clearly supports it and give the exact speaker label; omit speakers you \
+         'Me' is the note-taker, never a candidate name. Every proposed name MUST exactly \
+         match one of the calendar candidates. Include a mapping ONLY when the evidence \
+         clearly supports it and give the exact speaker label; omit speakers you \
          are unsure about — a missing mapping is better than a wrong one. Respond ONLY \
          with JSON {\"mappings\":[{\"speaker\",\"name\",\"confidence\":0..1,\"evidence\"}]}.",
         &user,
@@ -472,17 +469,19 @@ pub async fn suggest_speaker_names(app: &tauri::AppHandle, meeting_id: i64) -> R
         for m in mappings {
             let speaker = m["speaker"].as_str().unwrap_or("");
             let name = m["name"].as_str().unwrap_or("").trim();
+            let invited = attendees.iter().find(|a| a.eq_ignore_ascii_case(name));
             let conf = m["confidence"].as_f64().unwrap_or(0.0);
             if conf < SUGGEST_CONFIDENCE
                 || name.is_empty()
                 || name == "Me"
                 || name == "Them"
                 || name.starts_with("Speaker ")
+                || invited.is_none()
                 || !unnamed.iter().any(|l| l == speaker)
             {
                 continue;
             }
-            if store::set_speaker_suggestion(&conn, meeting_id, speaker, name).is_ok() {
+            if store::set_speaker_suggestion(&conn, meeting_id, speaker, invited.unwrap()).is_ok() {
                 applied += 1;
             }
         }
@@ -583,6 +582,14 @@ pub async fn run(
         meeting["note_id"].is_null()
     };
 
+    let mut note_text = format!("# {title}\n\n{md}");
+    if !raw_notes.trim().is_empty() {
+        note_text.push_str(&format!(
+            "\n\n## Your Notes (verbatim)\n\n{}",
+            raw_notes.trim()
+        ));
+    }
+
     // First summary → file a real note under 'meetings' (search/embeddings/KG).
     if first_note {
         let (me_ms, them_ms) = {
@@ -596,13 +603,6 @@ pub async fn run(
             .max()
             .unwrap_or(0)
             / 60_000;
-        let mut note_text = format!("# {title}\n\n{md}");
-        if !raw_notes.trim().is_empty() {
-            note_text.push_str(&format!(
-                "\n\n## Your Notes (verbatim)\n\n{}",
-                raw_notes.trim()
-            ));
-        }
         let entities: Vec<Value> = attendees
             .iter()
             .map(|n| json!({ "name": n, "type": "person" }))
@@ -635,6 +635,22 @@ pub async fn run(
                 Err(e) => eprintln!("[noted] meeting note filing failed: {e}"),
             },
             Err(e) => eprintln!("[noted] meeting note args invalid: {e}"),
+        }
+    } else if template == super::cfg().default_template {
+        // A refreshed primary summary (including a speaker repair) must also
+        // refresh the searchable note; otherwise a bad old name survives in
+        // Notes, semantic search, and the knowledge graph.
+        if let Some(note_id) = meeting["note_id"].as_i64() {
+            {
+                let state = app.state::<Db>();
+                let conn = state.0.lock().unwrap();
+                crate::db::refresh_note_text(&conn, note_id, &note_text)?;
+            }
+            if let Ok(v) = ollama::embed(&note_text).await {
+                let state = app.state::<Db>();
+                let conn = state.0.lock().unwrap();
+                let _ = crate::db::insert_embedding(&conn, note_id, &crate::normalize(v));
+            }
         }
     }
 

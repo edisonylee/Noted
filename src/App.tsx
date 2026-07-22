@@ -549,7 +549,7 @@ export default function App() {
     return (
       <div className="app repair-screen">
         <div className="repair-card">
-          <div className="brand">noted</div>
+          <div className="brand">noted<span className="dot">.</span></div>
           <h2>Reconnect to your Mac</h2>
           <p>
             This phone’s connection expired. Open <strong>noted</strong> on your Mac, click the
@@ -571,7 +571,7 @@ export default function App() {
       <div className="app mobile">
         {reconnectingOverlay}
         <header className="mobile-topbar">
-          <div className="brand">noted</div>
+          <div className="brand">noted<span className="dot">.</span></div>
           <button className="icon-btn" onClick={() => setShowSettings(true)} aria-label="Settings">
             <Settings size={18} />
           </button>
@@ -639,7 +639,7 @@ export default function App() {
           engages when the grabbed element is the one carrying the attribute. */}
       <aside className="sidebar" data-tauri-drag-region="deep">
         <div className="side-head" data-tauri-drag-region>
-          <div className="brand" data-tauri-drag-region>noted</div>
+          <div className="brand" data-tauri-drag-region>noted<span className="dot">.</span></div>
         </div>
         <nav className="side-nav">
           <button

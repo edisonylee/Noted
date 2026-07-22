@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS meetings (
   audio_me_path  TEXT,                    -- retained WAVs (verifiability); NULL if off
   audio_them_path TEXT,
   note_id        INTEGER REFERENCES notes(id),
+  trashed_at     TEXT,                    -- reversible removal; NULL = visible
   created_at     TEXT NOT NULL
 );
 
@@ -237,6 +238,7 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     // (people filed from meeting attendees start out named by raw email).
     ensure_column(&conn, "entities", "suggested_name", "TEXT")?;
     ensure_column(&conn, "meetings", "video_path", "TEXT")?;
+    ensure_column(&conn, "meetings", "trashed_at", "TEXT")?;
     initialize_embedding_fingerprint(&conn, &crate::provider::active_embedding_fingerprint())?;
     // Note: the reserved catch-all "misc" is not pre-seeded — the classifier is
     // told about it by name in the prompt, and it's created on first real use
@@ -360,6 +362,9 @@ pub fn list_notes(conn: &Connection) -> Result<Vec<NoteRow>> {
          LEFT JOIN entries e ON e.note_id = n.id
          LEFT JOIN categories c ON c.id = e.category_id
          WHERE (n.origin = 'capture' OR n.origin IS NULL)
+           AND NOT EXISTS (
+             SELECT 1 FROM meetings m WHERE m.note_id = n.id AND m.trashed_at IS NOT NULL
+           )
          GROUP BY n.id
          ORDER BY event_date DESC, n.id DESC",
     )?;
@@ -375,6 +380,19 @@ pub fn list_notes(conn: &Connection) -> Result<Vec<NoteRow>> {
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Refresh the human-readable body of a generated note. Its semantic index
+/// and knowledge mentions are derived data, so discard both before rebuilding
+/// them from the corrected content.
+pub fn refresh_note_text(conn: &Connection, note_id: i64, raw_text: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE notes SET raw_text = ?2 WHERE id = ?1",
+        rusqlite::params![note_id, raw_text],
+    )?;
+    conn.execute("DELETE FROM embeddings WHERE note_id = ?1", [note_id])?;
+    clear_note_mentions(conn, note_id)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

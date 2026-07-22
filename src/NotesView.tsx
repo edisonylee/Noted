@@ -4,7 +4,7 @@
 // everything else gets a clean read-only detail pane.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, AudioLines, BookOpen, FileText, Inbox, PanelLeftClose, PanelLeftOpen, Search } from "lucide-react";
+import { ArrowLeft, AudioLines, BookOpen, FileText, Inbox, PanelLeftClose, PanelLeftOpen, Search, Trash2 } from "lucide-react";
 import { api, type CategoryInfo, type MeetingListRow, type NoteRow } from "./api";
 import { DataView } from "./DataView";
 import { MeetingPage } from "./MeetingPage";
@@ -42,6 +42,7 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
   const [openNote, setOpenNote] = useState<NoteRow | null>(null);
   const [openMeeting, setOpenMeeting] = useState<number | null>(null);
   const [meetings, setMeetings] = useState<MeetingListRow[]>([]);
+  const [trashedMeetings, setTrashedMeetings] = useState<MeetingListRow[]>([]);
   // The spaces column collapses (and stays collapsed across launches).
   const [spacesOpen, setSpacesOpenState] = useState(
     () => localStorage.getItem("noted-spaces") !== "closed"
@@ -52,7 +53,12 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
   };
 
   const loadMeetings = useCallback(() => {
-    api.meetingList().then(setMeetings).catch(() => {});
+    Promise.all([api.meetingList(), api.meetingTrashList()])
+      .then(([active, trashed]) => {
+        setMeetings(active);
+        setTrashedMeetings(trashed);
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -76,6 +82,7 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
     const fixed = [
       { id: "all", label: "All notes", n: notes.length },
       { id: "meetings", label: "Meetings", n: successfulMeetings.length },
+      { id: "meeting-trash", label: "Trash", n: trashedMeetings.length },
       { id: "journal", label: "Journal", n: count((x) => noteCats(x).includes("journal")) },
     ];
     const rest = cats
@@ -89,7 +96,7 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
       .filter((s) => s.n > 0)
       .sort((a, b) => b.n - a.n);
     return [...fixed, ...rest];
-  }, [notes, cats, successfulMeetings.length]);
+  }, [notes, cats, successfulMeetings.length, trashedMeetings.length]);
 
   const list = useMemo(() => {
     let rows = space === "all" ? notes : notes.filter((n) => noteCats(n).includes(space));
@@ -99,12 +106,15 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
   }, [notes, space, query]);
 
   const meetingRows = useMemo(() => {
+    const rows = space === "meeting-trash" ? trashedMeetings : successfulMeetings;
     const q = query.trim().toLowerCase();
-    if (!q) return successfulMeetings;
-    return successfulMeetings.filter((m) =>
+    if (!q) return rows;
+    return rows.filter((m) =>
       `${m.title} ${m.status}`.toLowerCase().includes(q)
     );
-  }, [successfulMeetings, query]);
+  }, [successfulMeetings, trashedMeetings, space, query]);
+
+  const meetingSpace = space === "meetings" || space === "meeting-trash";
 
   if (openMeeting != null) {
     return (
@@ -187,6 +197,8 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
             >
               {s.id === "meetings" ? (
                 <AudioLines size={14} />
+              ) : s.id === "meeting-trash" ? (
+                <Trash2 size={14} />
               ) : s.id === "journal" ? (
                 <BookOpen size={14} />
               ) : s.id === "all" ? (
@@ -226,15 +238,17 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
             />
           </label>
         </div>
-        {(space === "meetings" ? meetingRows.length : list.length) === 0 ? (
+        {(meetingSpace ? meetingRows.length : list.length) === 0 ? (
           <p className="quiet-empty">
             {query
               ? "Nothing matches."
               : space === "meetings"
                 ? "No meetings recorded yet."
+                : space === "meeting-trash"
+                  ? "Trash is empty."
                 : "Nothing here yet — capture something."}
           </p>
-        ) : space === "meetings" ? (
+        ) : meetingSpace ? (
           meetingRows.map((m) => (
             <button
               key={m.id}
@@ -245,7 +259,9 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
               <span className="note-row-title">{m.title}</span>
               <span className="note-row-chips">
                 <em className="note-chip">
-                  {m.status === "recording"
+                  {space === "meeting-trash"
+                    ? "in trash"
+                    : m.status === "recording"
                     ? "recording"
                     : m.status === "summarizing"
                       ? "enhancing notes"

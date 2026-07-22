@@ -1880,6 +1880,60 @@ async fn meeting_list(app: tauri::AppHandle) -> Result<Value, String> {
 }
 
 #[tauri::command]
+async fn meeting_trash_list(app: tauri::AppHandle) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let rows = meeting::store::list_trashed_meetings(&conn, 200).map_err(|e| e.to_string())?;
+    Ok(json!(rows))
+}
+
+#[tauri::command]
+async fn meeting_trash(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let moved = meeting::store::trash_meeting(&conn, id, &chrono::Utc::now().to_rfc3339())
+        .map_err(|e| e.to_string())?;
+    if moved {
+        Ok(())
+    } else {
+        Err("Only a finished, visible meeting can be moved to Trash".into())
+    }
+}
+
+#[tauri::command]
+async fn meeting_restore(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    if meeting::store::restore_meeting(&conn, id).map_err(|e| e.to_string())? {
+        Ok(())
+    } else {
+        Err("Meeting is not in Trash".into())
+    }
+}
+
+#[tauri::command]
+async fn meeting_delete_forever(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    let meeting_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("meetings")
+        .join(id.to_string());
+    let state = app.state::<Db>();
+    let mut conn = state.0.lock().unwrap();
+    if !meeting::store::delete_meeting_forever(&mut conn, id).map_err(|e| e.to_string())? {
+        return Err("Move the meeting to Trash before deleting it permanently".into());
+    }
+    drop(conn);
+    if meeting_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&meeting_dir) {
+            eprintln!("[noted] permanently deleted meeting {id}, but retained media cleanup failed: {e}");
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn meeting_get(app: tauri::AppHandle, id: i64) -> Result<Value, String> {
     let state = app.state::<Db>();
     let conn = state.0.lock().unwrap();
@@ -2010,14 +2064,14 @@ async fn meeting_video_delete(app: tauri::AppHandle, id: i64) -> Result<(), Stri
 
 /// Rebuild a meeting's speaker labels from its retained audio — heals
 /// meetings recorded before diarization existed or interrupted by a crash.
-/// Returns the voice count (0 = nothing to do / already diarized).
+/// Returns the voice count (0 = nothing could be recovered).
 #[tauri::command]
 async fn meeting_rediarize(app: tauri::AppHandle, id: i64) -> Result<usize, String> {
     if !release_profile::diarization() {
         return Err(release_profile::disabled("speaker diarization"));
     }
     let h = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let count = tauri::async_runtime::spawn_blocking(move || {
         let Some(model) = meeting::diarize::model_path(&h) else {
             return Err("speaker model not downloaded".to_string());
         };
@@ -2029,11 +2083,32 @@ async fn meeting_rediarize(app: tauri::AppHandle, id: i64) -> Result<usize, Stri
             .join(id.to_string());
         let state = h.state::<Db>();
         let conn = state.0.lock().unwrap();
-        meeting::asr::rediarize_from_wav(&conn, Some(&h), &model, &dir, id)
+        meeting::asr::rediarize_from_wav(&conn, Some(&h), &model, &dir, id, true)
             .map_err(|e| e.to_string())
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+
+    // Speaker names are embedded in summaries and the generated note. When a
+    // user explicitly repairs diarization, rebuild every existing tab so the
+    // stale name does not survive outside the transcript.
+    if count > 0 {
+        let templates: Vec<String> = {
+            let state = app.state::<Db>();
+            let conn = state.0.lock().unwrap();
+            meeting::store::list_summaries(&conn, id)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .filter_map(|s| s["template"].as_str().map(str::to_string))
+                .collect()
+        };
+        for template in templates {
+            if let Err(e) = meeting::summarize::run(&app, id, Some(template)).await {
+                eprintln!("[noted] speaker labels repaired, but summary refresh failed: {e}");
+            }
+        }
+    }
+    Ok(count)
 }
 
 /// Where a meeting export lands: ~/Documents/Notes/Meeting/<title>/<date title>.<ext>,
@@ -3721,6 +3796,10 @@ pub fn run() {
             meeting_stop,
             meeting_state,
             meeting_list,
+            meeting_trash_list,
+            meeting_trash,
+            meeting_restore,
+            meeting_delete_forever,
             meeting_get,
             meeting_set_notes,
             meeting_summarize,

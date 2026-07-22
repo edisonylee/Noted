@@ -304,7 +304,17 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "meeting_model_status" => Ok(crate::meeting_model_status(a)),
         "meeting_state" => Ok(crate::meeting_state(a)),
         "meeting_list" => crate::meeting_list(a).await,
+        "meeting_trash_list" => crate::meeting_trash_list(a).await,
         "meeting_get" => crate::meeting_get(a, iarg(b, "id")).await,
+        "meeting_trash" => crate::meeting_trash(a, iarg(b, "id"))
+            .await
+            .map(|_| Value::Null),
+        "meeting_restore" => crate::meeting_restore(a, iarg(b, "id"))
+            .await
+            .map(|_| Value::Null),
+        "meeting_delete_forever" => crate::meeting_delete_forever(a, iarg(b, "id"))
+            .await
+            .map(|_| Value::Null),
         "meeting_set_notes" => crate::meeting_set_notes(a, iarg(b, "id"), sarg(b, "notes"))
             .await
             .map(|_| Value::Null),

@@ -235,3 +235,55 @@ fn failed_calendar_meeting_does_not_block_retry() {
     );
     let _ = std::fs::remove_file(&tmp);
 }
+
+#[test]
+fn meeting_trash_is_reversible_and_required_before_delete() {
+    use tauri_app_lib::meeting::store;
+
+    let tmp = std::env::temp_dir().join(format!("noted_meeting_trash_{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let mut conn = db::init(&tmp).unwrap();
+    let id = store::create_meeting(&conn, "Important call", None, None, "2026-07-21T16:00:00Z").unwrap();
+    store::set_status(&conn, id, "done").unwrap();
+    save(
+        &mut conn,
+        "meetings",
+        "generated meeting note",
+        json!({"meeting_id": id}),
+        "2026-07-21T16:30:00Z",
+    );
+    let note_id: i64 = conn.query_row("SELECT id FROM notes ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+    store::set_note_id(&conn, id, note_id).unwrap();
+    db::insert_embedding(&conn, note_id, &vec![0.1; 768]).unwrap();
+    db::refresh_note_text(&conn, note_id, "# Important call\n\nCorrected notes").unwrap();
+    let refreshed: String = conn.query_row("SELECT raw_text FROM notes WHERE id = ?1", [note_id], |r| r.get(0)).unwrap();
+    assert_eq!(refreshed, "# Important call\n\nCorrected notes");
+    assert_eq!(db::embedding_count(&conn).unwrap(), 0, "stale semantic index is removed");
+    db::insert_embedding(&conn, note_id, &vec![0.2; 768]).unwrap();
+
+    assert_eq!(store::list_meetings(&conn, 20).unwrap().len(), 1);
+    assert!(store::list_trashed_meetings(&conn, 20).unwrap().is_empty());
+    assert!(!store::delete_meeting_forever(&mut conn, id).unwrap(), "visible meetings cannot be permanently deleted");
+
+    assert!(store::trash_meeting(&conn, id, "2026-07-21T17:00:00Z").unwrap());
+    assert!(store::list_meetings(&conn, 20).unwrap().is_empty());
+    assert_eq!(store::list_trashed_meetings(&conn, 20).unwrap().len(), 1);
+
+    assert!(store::restore_meeting(&conn, id).unwrap());
+    assert_eq!(store::list_meetings(&conn, 20).unwrap().len(), 1);
+
+    assert!(store::trash_meeting(&conn, id, "2026-07-21T18:00:00Z").unwrap());
+    assert!(store::delete_meeting_forever(&mut conn, id).unwrap());
+    assert!(store::list_trashed_meetings(&conn, 20).unwrap().is_empty());
+    let exists: bool = conn
+        .query_row("SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ?1)", [id], |r| r.get(0))
+        .unwrap();
+    assert!(!exists);
+    let note_exists: bool = conn
+        .query_row("SELECT EXISTS(SELECT 1 FROM notes WHERE id = ?1)", [note_id], |r| r.get(0))
+        .unwrap();
+    assert!(!note_exists, "the generated note is deleted with its meeting");
+    assert_eq!(db::embedding_count(&conn).unwrap(), 0);
+
+    let _ = std::fs::remove_file(&tmp);
+}

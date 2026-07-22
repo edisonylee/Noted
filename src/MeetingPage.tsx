@@ -16,9 +16,11 @@ import {
   Pause,
   Play,
   Plus,
+  RotateCcw,
   Search,
   Sparkles,
   Square,
+  Trash2,
   Users,
   Video,
 } from "lucide-react";
@@ -130,6 +132,7 @@ export function MeetingPage({
   const [query, setQuery] = useState("");
   const [playingSeg, setPlayingSeg] = useState<number | null>(null);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
+  const [removing, setRemoving] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const notesTimer = useRef<number | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
@@ -464,8 +467,8 @@ export function MeetingPage({
     return () => window.removeEventListener("keydown", focusAssist);
   }, [recording]);
 
-  // Rebuild labels from the retained audio — meetings recorded before
-  // diarization existed (or interrupted by a crash) have none.
+  // Rebuild labels from retained audio. This also repairs stale or incorrect
+  // labels using the current attendee-scoped naming policy.
   const rediarize = async () => {
     if (id == null) return;
     setRediarizing(true);
@@ -522,6 +525,52 @@ export function MeetingPage({
       await load();
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  const moveToTrash = async () => {
+    if (id == null || recording || summarizing) return;
+    setRemoving(true);
+    setError(null);
+    try {
+      await api.meetingTrash(id);
+      onBack();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRemoving(false);
+    }
+  };
+
+  const restoreMeeting = async () => {
+    if (id == null) return;
+    setRemoving(true);
+    setError(null);
+    try {
+      await api.meetingRestore(id);
+      onBack();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRemoving(false);
+    }
+  };
+
+  const deleteForever = async () => {
+    if (id == null) return;
+    const confirmed = window.confirm(
+      `Permanently delete “${title}”? This removes its transcript, summaries, retained audio/video, and generated note. This cannot be undone.`,
+    );
+    if (!confirmed) return;
+    setRemoving(true);
+    setError(null);
+    try {
+      await api.meetingDeleteForever(id);
+      onBack();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRemoving(false);
     }
   };
   const playLine = (s: MeetingSegment) => {
@@ -620,6 +669,27 @@ export function MeetingPage({
             aria-label="Export as Markdown"
           >
             <Download size={16} />
+          </button>
+        )}
+        {id != null && detail?.trashed_at && (
+          <>
+            <button className="btn ghost" onClick={restoreMeeting} disabled={removing}>
+              <RotateCcw size={15} /> Restore
+            </button>
+            <button className="btn ghost meeting-delete-forever" onClick={deleteForever} disabled={removing}>
+              <Trash2 size={15} /> Delete permanently
+            </button>
+          </>
+        )}
+        {id != null && !detail?.trashed_at && !recording && !summarizing && (
+          <button
+            className="icon-btn meeting-trash-btn"
+            onClick={moveToTrash}
+            disabled={removing}
+            title="Move meeting to Trash"
+            aria-label="Move meeting to Trash"
+          >
+            {removing ? <Loader size={15} className="spin" /> : <Trash2 size={16} />}
           </button>
         )}
       </header>
@@ -803,7 +873,7 @@ export function MeetingPage({
                   <span key={sp.label} className="speaker-chip">
                     <button
                       className="chip-name"
-                      title="Rename this speaker — the name is remembered for future meetings"
+                      title="Rename this speaker — the voice is remembered when this person is invited again"
                       onClick={() => {
                         setRenameFor(sp.label);
                         setRenameText(sp.suggested ?? "");
@@ -829,15 +899,15 @@ export function MeetingPage({
                   Suggest names
                 </button>
               )}
-              {storedSpeakers.length === 0 && detail?.status === "done" && (
+              {detail?.status === "done" && detail.audio_them_path && (
                 <button
                   className="chip-action"
                   onClick={rediarize}
                   disabled={rediarizing}
-                  title="Rebuild speaker labels from the recorded audio"
+                  title="Rebuild speaker labels from retained audio and refresh meeting notes"
                 >
                   {rediarizing ? <Loader size={12} className="spin" /> : <AudioLines size={12} />}
-                  Detect speakers
+                  {storedSpeakers.length === 0 ? "Detect speakers" : "Re-detect speakers"}
                 </button>
               )}
               <datalist id="attendee-names">

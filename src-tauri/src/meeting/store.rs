@@ -30,6 +30,76 @@ pub fn delete_meeting(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+pub fn trash_meeting(conn: &Connection, id: i64, now: &str) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE meetings SET trashed_at = ?2
+         WHERE id = ?1 AND trashed_at IS NULL
+           AND status NOT IN ('recording', 'summarizing')",
+        rusqlite::params![id, now],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn restore_meeting(conn: &Connection, id: i64) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE meetings SET trashed_at = NULL WHERE id = ?1 AND trashed_at IS NOT NULL",
+        [id],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Permanently remove a trashed meeting and its generated note. The caller
+/// deletes retained media after this transaction commits.
+pub fn delete_meeting_forever(conn: &mut Connection, id: i64) -> Result<bool> {
+    let tx = conn.transaction()?;
+    let note_id = tx
+        .query_row(
+            "SELECT note_id FROM meetings WHERE id = ?1 AND trashed_at IS NOT NULL",
+            [id],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten();
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ?1 AND trashed_at IS NOT NULL)",
+        [id],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(false);
+    }
+
+    tx.execute("DELETE FROM meeting_summaries WHERE meeting_id = ?1", [id])?;
+    tx.execute("DELETE FROM meeting_segments WHERE meeting_id = ?1", [id])?;
+    tx.execute("DELETE FROM meeting_speakers WHERE meeting_id = ?1", [id])?;
+    tx.execute("DELETE FROM meetings WHERE id = ?1", [id])?;
+
+    if let Some(note_id) = note_id {
+        tx.execute(
+            "UPDATE entities SET home_note_id = NULL WHERE home_note_id = ?1",
+            [note_id],
+        )?;
+        tx.execute("DELETE FROM entity_mentions WHERE note_id = ?1", [note_id])?;
+        tx.execute("DELETE FROM embeddings WHERE note_id = ?1", [note_id])?;
+        tx.execute("DELETE FROM entries WHERE note_id = ?1", [note_id])?;
+        tx.execute("DELETE FROM notes WHERE id = ?1", [note_id])?;
+        tx.execute(
+            "UPDATE categories SET entry_count =
+               (SELECT COUNT(*) FROM entries e WHERE e.category_id = categories.id)",
+            [],
+        )?;
+        tx.execute(
+            "UPDATE entities SET
+               mention_count = (SELECT COUNT(*) FROM entity_mentions m WHERE m.entity_id = entities.id),
+               first_seen = (SELECT MIN(event_date) FROM entity_mentions m WHERE m.entity_id = entities.id),
+               last_seen = (SELECT MAX(event_date) FROM entity_mentions m WHERE m.entity_id = entities.id)",
+            [],
+        )?;
+    }
+    tx.commit()?;
+    Ok(true)
+}
+
 pub fn set_status(conn: &Connection, id: i64, status: &str) -> Result<()> {
     conn.execute(
         "UPDATE meetings SET status = ?2 WHERE id = ?1",
@@ -147,6 +217,16 @@ pub fn clear_them_speakers(conn: &Connection, meeting_id: i64) -> Result<()> {
     conn.execute(
         "UPDATE meeting_segments SET speaker = NULL
          WHERE meeting_id = ?1 AND channel = 'them'",
+        [meeting_id],
+    )?;
+    Ok(())
+}
+
+/// Remove the saved cluster rows before rebuilding diarization. Without this,
+/// a label that disappears on a later pass can remain visible in the UI.
+pub fn clear_meeting_speakers(conn: &Connection, meeting_id: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM meeting_speakers WHERE meeting_id = ?1",
         [meeting_id],
     )?;
     Ok(())
@@ -450,7 +530,7 @@ pub fn find_meeting_by_event(conn: &Connection, event_id: &str) -> Result<Option
     Ok(conn
         .query_row(
             "SELECT id FROM meetings
-             WHERE event_id = ?1 AND status <> 'failed'
+             WHERE event_id = ?1 AND status <> 'failed' AND trashed_at IS NULL
              ORDER BY id DESC LIMIT 1",
             [event_id],
             |r| r.get(0),
@@ -482,14 +562,26 @@ pub fn list_summaries(conn: &Connection, meeting_id: i64) -> Result<Vec<Value>> 
 
 /// Recent meetings, newest first, with enough for a list row.
 pub fn list_meetings(conn: &Connection, limit: i64) -> Result<Vec<Value>> {
+    list_meetings_by_trash(conn, limit, false)
+}
+
+pub fn list_trashed_meetings(conn: &Connection, limit: i64) -> Result<Vec<Value>> {
+    list_meetings_by_trash(conn, limit, true)
+}
+
+fn list_meetings_by_trash(conn: &Connection, limit: i64, trashed: bool) -> Result<Vec<Value>> {
     let mut stmt = conn.prepare(
         "SELECT m.id, m.title, m.started_at, m.ended_at, m.status, m.note_id, m.event_json,
                 (SELECT COUNT(*) FROM meeting_segments s WHERE s.meeting_id = m.id),
-                (SELECT COUNT(DISTINCT y.template) FROM meeting_summaries y WHERE y.meeting_id = m.id)
-         FROM meetings m ORDER BY m.id DESC LIMIT ?1",
+                (SELECT COUNT(DISTINCT y.template) FROM meeting_summaries y WHERE y.meeting_id = m.id),
+                m.trashed_at
+         FROM meetings m
+         WHERE (?2 = 1 AND m.trashed_at IS NOT NULL)
+            OR (?2 = 0 AND m.trashed_at IS NULL)
+         ORDER BY m.id DESC LIMIT ?1",
     )?;
     let rows = stmt
-        .query_map([limit], |r| {
+        .query_map(rusqlite::params![limit, trashed], |r| {
             Ok(json!({
                 "id": r.get::<_, i64>(0)?,
                 "title": r.get::<_, String>(1)?,
@@ -501,6 +593,7 @@ pub fn list_meetings(conn: &Connection, limit: i64) -> Result<Vec<Value>> {
                     .and_then(|s| serde_json::from_str::<Value>(&s).ok()),
                 "segment_count": r.get::<_, i64>(7)?,
                 "summary_count": r.get::<_, i64>(8)?,
+                "trashed_at": r.get::<_, Option<String>>(9)?,
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -511,7 +604,7 @@ pub fn list_meetings(conn: &Connection, limit: i64) -> Result<Vec<Value>> {
 pub fn get_meeting(conn: &Connection, id: i64) -> Result<Value> {
     let meta = conn.query_row(
         "SELECT id, title, event_id, event_json, started_at, ended_at, status, raw_notes,
-                audio_me_path, audio_them_path, note_id, video_path
+                audio_me_path, audio_them_path, note_id, video_path, trashed_at
          FROM meetings WHERE id = ?1",
         [id],
         |r| {
@@ -529,6 +622,7 @@ pub fn get_meeting(conn: &Connection, id: i64) -> Result<Value> {
                 "audio_them_path": r.get::<_, Option<String>>(9)?,
                 "note_id": r.get::<_, Option<i64>>(10)?,
                 "video_path": r.get::<_, Option<String>>(11)?,
+                "trashed_at": r.get::<_, Option<String>>(12)?,
             }))
         },
     )?;

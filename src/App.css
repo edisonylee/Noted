@@ -2081,17 +2081,21 @@ a.cal-btn { text-decoration: none; }
 .meeting-page .btn.stop { border-color: var(--good); color: var(--good); font-variant-numeric: tabular-nums; }
 .meeting-page .btn.stop:hover { background: var(--hover-soft); }
 
-.meeting-about {
-  display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 3px 12px;
-  padding: 10px 12px; border: var(--border-width, 1px) solid var(--line);
-  border-radius: var(--r-lg); background: var(--surface-2);
+.meeting-share { position: relative; }
+.meeting-share-menu {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; width: 230px;
+  padding: 5px; border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-md);
+  background: var(--surface); box-shadow: var(--shadow-2);
 }
-.meeting-about-label {
-  grid-row: 1 / span 2; color: var(--faint); font-size: 10.5px; font-weight: 650;
-  letter-spacing: .075em; text-transform: uppercase; padding-top: 2px;
+.meeting-share-menu button {
+  width: 100%; display: flex; align-items: center; gap: 9px; padding: 8px 9px;
+  border: 0; border-radius: var(--r-sm); background: transparent; color: var(--ink);
+  text-align: left; cursor: pointer;
 }
-.meeting-about p { margin: 0; color: var(--ink); font-size: 13px; line-height: 1.45; }
-.meeting-about small { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11.5px; }
+.meeting-share-menu button:hover { background: var(--hover-soft); }
+.meeting-share-menu button > span { display: flex; flex-direction: column; gap: 1px; }
+.meeting-share-menu strong { font-size: 12.5px; font-weight: 600; }
+.meeting-share-menu small { color: var(--faint); font-size: 10.5px; }
 
 .meeting-tabs { display: flex; align-items: center; gap: 2px; border-bottom: var(--border-width, 1px) solid var(--line); }
 .meeting-tabs button {

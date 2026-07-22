@@ -653,7 +653,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               {conn.state !== "ok" && conn.state !== "checking" && <WifiOff size={13} />}
               <span className="conn-label">
                 {conn.state === "checking"
-                  ? "Checking Noted Hosted…"
+                  ? "Checking hosted connection…"
                   : conn.state === "ok"
                     ? conn.msg
                     : s?.has_hosted_key

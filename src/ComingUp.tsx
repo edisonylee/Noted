@@ -1,7 +1,7 @@
 // "Coming up" (Granola's habit loop): the next few calendar meetings across
 // every connected account, each row a click away from its meeting page, plus
-// the most recent recorded meetings. 5 per page, paging arrows, quiet when
-// there's nothing — the strip should never shout.
+// the three most recent recorded meetings. Upcoming events use five-per-page
+// paging arrows; both sections stay quiet when there's nothing to show.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AudioLines, ChevronLeft, ChevronRight, FileText, Loader, Mic, Users, Video } from "lucide-react";
@@ -94,7 +94,7 @@ export function ComingUp({
         m.summary_count > 0 ||
         m.note_id != null
     )
-    .slice(0, 6);
+    .slice(0, 3);
   const today = easternDay();
 
   if (events === null) return null; // first load: no flash

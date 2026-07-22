@@ -18,6 +18,7 @@ import {
   Plus,
   RotateCcw,
   Search,
+  Share2,
   Sparkles,
   Square,
   Trash2,
@@ -94,40 +95,6 @@ function MdBlock({ md }: { md: string }) {
   return <div className="md">{out}</div>;
 }
 
-function shortSummary(md: string): string | null {
-  const lines = md.split("\n");
-  const summaryHeading = lines.findIndex((line) => /^##\s+summary\s*$/i.test(line.trim()));
-  const candidates = (summaryHeading >= 0 ? lines.slice(summaryHeading + 1) : lines)
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#") && !line.startsWith("- ["))
-    .map((line) => line.replace(/^-\s+/, "").replace(/\*\*/g, ""));
-  const text = candidates.join(" ").trim();
-  if (!text) return null;
-  const firstSentence = text.match(/^.*?[.!?](?:\s|$)/)?.[0]?.trim() ?? text;
-  return firstSentence.length <= 180
-    ? firstSentence
-    : `${firstSentence.slice(0, 177).trimEnd()}…`;
-}
-
-function peopleLine(names: string[]): string {
-  const readable = names.map((name) => {
-    const trimmed = name.trim();
-    if (!trimmed.includes("@")) return trimmed;
-    return trimmed
-      .split("@", 1)[0]
-      .replace(/[._-]+/g, " ")
-      .split(/\s+/)
-      .filter(Boolean)
-      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(" ");
-  });
-  const unique = [...new Set(readable.filter(Boolean))];
-  if (unique.length === 0) return "You and the other participants";
-  if (unique.length === 1) return `You and ${unique[0]}`;
-  if (unique.length === 2) return `You, ${unique[0]}, and ${unique[1]}`;
-  return `You, ${unique.slice(0, 2).join(", ")}, and ${unique.length - 2} more`;
-}
-
 type Tab = "notes" | "transcript" | "video" | number; // number = summary index
 
 export function MeetingPage({
@@ -144,7 +111,7 @@ export function MeetingPage({
   const [detail, setDetail] = useState<MeetingDetail | null>(null);
   const [liveSegments, setLiveSegments] = useState<MeetingSegment[]>([]);
   const [notes, setNotes] = useState("");
-  const [tab, setTab] = useState<Tab>("notes");
+  const [tab, setTab] = useState<Tab>(id == null ? "notes" : "transcript");
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -165,6 +132,7 @@ export function MeetingPage({
   const [query, setQuery] = useState("");
   const [playingSeg, setPlayingSeg] = useState<number | null>(null);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
+  const [shareOpen, setShareOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const notesTimer = useRef<number | null>(null);
@@ -187,8 +155,9 @@ export function MeetingPage({
       setDetail(d);
       setLiveSegments(d.segments);
       setNotes((prev) => (prev === "" ? d.raw_notes : prev));
-      // First summary that appears: switch to it once.
-      setTab((t) => (t === "notes" && d.summaries.length > 0 && d.status === "done" ? 0 : t));
+      // A completed meeting opens on its primary generated summary. Meetings
+      // without one open on the transcript; My Notes is deliberately tertiary.
+      setTab((t) => (t === "transcript" && d.summaries.length > 0 && d.status === "done" ? 0 : t));
     } catch (e) {
       setError(String(e));
     }
@@ -198,6 +167,10 @@ export function MeetingPage({
     load();
     api.meetingTemplates().then(setTemplates).catch(() => {});
   }, [load]);
+
+  useEffect(() => {
+    setTab(id == null ? "notes" : "transcript");
+  }, [id]);
 
   // A meeting switch starts a fresh copilot session. Insights are deliberately
   // ephemeral: they are prompts for the moment, not another source of notes.
@@ -370,14 +343,6 @@ export function MeetingPage({
       ? storedSpeakers
       : [...fallbackSpeakerCounts].map(([label, seg_count]) => ({ label, suggested: null, seg_count }));
   const unnamed = (l: string) => l.startsWith("Speaker ") || l === "Them";
-  const aboutPeople = peopleLine([
-    ...attendees.map((a) => a.name || a.email),
-    ...speakers
-      .map((speaker) => speaker.label)
-      .filter((label) => label !== "Me" && !unnamed(label)),
-  ]);
-  const aboutTopic = shortSummary(summaries[0]?.content_md ?? "") || ev?.description?.trim() || title;
-
   const renameSpeaker = async (from: string, to: string) => {
     if (id == null || !to.trim()) return;
     setRenameFor(null);
@@ -683,20 +648,31 @@ export function MeetingPage({
             <Loader size={14} className="spin" /> enhancing notes…
           </span>
         ) : null}
-        {id != null && !recording && (summaries.length > 0 || notes.trim().length > 0) && (
-          <button className="btn ghost meeting-export-pdf" onClick={exportPdf}>
-            <FileDown size={15} /> Export PDF
-          </button>
-        )}
-        {isDesktop && id != null && !recording && liveSegments.length > 0 && (
-          <button
-            className="icon-btn"
-            onClick={exportMd}
-            title="Export summaries + notes + transcript as Markdown (to Documents/Notes/Meeting)"
-            aria-label="Export as Markdown"
-          >
-            <Download size={16} />
-          </button>
+        {id != null && !recording && (summaries.length > 0 || notes.trim().length > 0 || liveSegments.length > 0) && (
+          <div className="meeting-share">
+            <button
+              className="btn ghost"
+              onClick={() => setShareOpen((open) => !open)}
+              aria-expanded={shareOpen}
+              aria-haspopup="menu"
+            >
+              <Share2 size={15} /> Share
+            </button>
+            {shareOpen && (
+              <div className="meeting-share-menu" role="menu">
+                <button onClick={() => { setShareOpen(false); void exportPdf(); }}>
+                  <FileDown size={15} />
+                  <span><strong>Export PDF</strong><small>Summary, notes, and transcript</small></span>
+                </button>
+                {isDesktop && (
+                  <button onClick={() => { setShareOpen(false); void exportMd(); }}>
+                    <Download size={15} />
+                    <span><strong>Export Markdown</strong><small>Editable plain-text copy</small></span>
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         )}
         {id != null && detail?.trashed_at && (
           <>
@@ -737,18 +713,12 @@ export function MeetingPage({
         </p>
       )}
 
-      {id != null && (
-        <section className="meeting-about" aria-label="About this meeting">
-          <span className="meeting-about-label">About</span>
-          <p>{aboutTopic}</p>
-          <small><Users size={12} /> {aboutPeople}</small>
-        </section>
-      )}
-
       <nav className="meeting-tabs">
-        <button className={tab === "notes" ? "on" : ""} onClick={() => setTab("notes")}>
-          My Notes
-        </button>
+        {summaries.map((s, i) => (
+          <button key={s.id} className={tab === i ? "on" : ""} onClick={() => setTab(i)}>
+            {s.template}
+          </button>
+        ))}
         {id != null && (
           <button
             className={tab === "transcript" ? "on" : ""}
@@ -758,16 +728,14 @@ export function MeetingPage({
             {liveSegments.length > 0 ? ` (${liveSegments.length})` : ""}
           </button>
         )}
+        <button className={tab === "notes" ? "on" : ""} onClick={() => setTab("notes")}>
+          My Notes
+        </button>
         {releaseProfile.videoCapture && videoSrc && (
           <button className={tab === "video" ? "on" : ""} onClick={() => setTab("video")}>
             <Video size={13} /> Video
           </button>
         )}
-        {summaries.map((s, i) => (
-          <button key={s.id} className={tab === i ? "on" : ""} onClick={() => setTab(i)}>
-            {s.template}
-          </button>
-        ))}
         {id != null && !recording && liveSegments.length > 0 && templates.some((t) => !summaries.some((s) => s.template === t.name)) && (
           <div className="tab-add">
             <button
@@ -792,56 +760,48 @@ export function MeetingPage({
         )}
       </nav>
 
-      {id != null && (recording || liveSegments.length > 0) && (
+      {id != null && recording && (
         <section className="meeting-copilot" aria-label="Meeting copilot">
           <header className="copilot-head">
             <span className="copilot-mark"><Sparkles size={14} /></span>
             <div>
-              <strong>{recording ? "Live copilot" : "Ask this meeting"}</strong>
+              <strong>Live copilot</strong>
               <span>
-                {recording
-                  ? autoAssistOn
-                    ? "Watching for useful moments"
-                    : "Automatic suggestions paused"
-                  : "Answers from the transcript and your notes"}
+                {autoAssistOn ? "Watching for useful moments" : "Automatic suggestions paused"}
               </span>
             </div>
-            {recording && (
-              <button
-                className={`copilot-toggle${autoAssistOn ? " on" : ""}`}
-                onClick={() => setAutoAssistOn((on) => !on)}
-                aria-pressed={autoAssistOn}
-                title={autoAssistOn ? "Pause automatic suggestions" : "Resume automatic suggestions"}
-              >
-                <span className="copilot-pulse" />
-                {autoAssistOn ? "Live" : "Paused"}
-              </button>
-            )}
+            <button
+              className={`copilot-toggle${autoAssistOn ? " on" : ""}`}
+              onClick={() => setAutoAssistOn((on) => !on)}
+              aria-pressed={autoAssistOn}
+              title={autoAssistOn ? "Pause automatic suggestions" : "Resume automatic suggestions"}
+            >
+              <span className="copilot-pulse" />
+              {autoAssistOn ? "Live" : "Paused"}
+            </button>
           </header>
 
-          {recording && (
-            <div className={`copilot-insight${liveInsight ? " ready" : ""}`} aria-live="polite">
-              <span className="copilot-insight-label">
-                {autoAssistBusy ? (
-                  <><Loader size={12} className="spin" /> Thinking about the latest discussion</>
-                ) : liveInsight ? (
-                  "Suggested now"
-                ) : autoAssistOn ? (
-                  "Listening for enough context"
-                ) : (
-                  "Live suggestions are paused"
-                )}
-              </span>
-              {liveInsight ? (
-                <p>{liveInsight}</p>
+          <div className={`copilot-insight${liveInsight ? " ready" : ""}`} aria-live="polite">
+            <span className="copilot-insight-label">
+              {autoAssistBusy ? (
+                <><Loader size={12} className="spin" /> Thinking about the latest discussion</>
+              ) : liveInsight ? (
+                "Suggested now"
+              ) : autoAssistOn ? (
+                "Listening for enough context"
               ) : (
-                <p className="copilot-placeholder">
-                  I’ll surface a response, risk, decision, or follow-up when it becomes useful.
-                </p>
+                "Live suggestions are paused"
               )}
-              {autoAssistError && <small>{autoAssistError}</small>}
-            </div>
-          )}
+            </span>
+            {liveInsight ? (
+              <p>{liveInsight}</p>
+            ) : (
+              <p className="copilot-placeholder">
+                I’ll surface a response, risk, decision, or follow-up when it becomes useful.
+              </p>
+            )}
+            {autoAssistError && <small>{autoAssistError}</small>}
+          </div>
 
           {assistA && (
             <div className="assist-answer" aria-live="polite">
@@ -860,11 +820,11 @@ export function MeetingPage({
               onKeyDown={(e) => {
                 if (e.key === "Enter") askAssist();
               }}
-              placeholder={recording ? "Ask about what’s happening right now…" : "Ask about this meeting…"}
+              placeholder="Ask about what’s happening right now…"
               spellCheck={false}
               disabled={assistBusy}
             />
-            {recording && <kbd>⌘⇧A</kbd>}
+            <kbd>⌘⇧A</kbd>
             <button className="chip-action" onClick={askAssist} disabled={assistBusy || !assistQ.trim()}>
               {assistBusy ? <Loader size={12} className="spin" /> : "Ask"}
             </button>

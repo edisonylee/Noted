@@ -9,6 +9,7 @@ pub mod ollama;
 pub mod phone;
 pub mod pipeline;
 pub mod provider;
+pub mod release_profile;
 pub mod themes;
 pub mod voice;
 
@@ -1653,9 +1654,10 @@ fn meeting_model_status(app: tauri::AppHandle) -> Value {
     json!({
         "turbo": dir.join("ggml-large-v3-turbo.bin").exists(),
         "base": dir.join("ggml-base.en.bin").exists(),
-        "speaker": dir.join(meeting::diarize::MODEL_FILE).exists(),
+        "speaker": release_profile::diarization()
+            && dir.join(meeting::diarize::MODEL_FILE).exists(),
         "parakeet": meeting::parakeet_ready(&app),
-        "hosted": hosted::has_key(),
+        "hosted": release_profile::noted_hosted() && hosted::has_key(),
         "tap_supported": meeting::capture::tap_supported(),
     })
 }
@@ -1731,6 +1733,9 @@ const SPEAKER_MODEL_URL: &str =
 
 #[tauri::command]
 async fn download_speaker_model(app: tauri::AppHandle) -> Result<bool, String> {
+    if !release_profile::diarization() {
+        return Err(release_profile::disabled("speaker diarization"));
+    }
     let dir = app
         .path()
         .app_data_dir()
@@ -1809,6 +1814,9 @@ fn meetings_settings_get() -> Value {
 
 #[tauri::command]
 fn hosted_key_set(value: String) -> Result<(), String> {
+    if !release_profile::noted_hosted() {
+        return Err(release_profile::disabled("Noted Hosted"));
+    }
     if value.trim().is_empty() {
         hosted::delete_key();
         return Ok(());
@@ -1894,6 +1902,9 @@ async fn meeting_rename_speaker(
     from: String,
     to: String,
 ) -> Result<(), String> {
+    if !release_profile::diarization() {
+        return Err(release_profile::disabled("speaker diarization"));
+    }
     let state = app.state::<Db>();
     let conn = state.0.lock().unwrap();
     meeting::store::rename_speaker(&conn, id, &from, &to).map_err(|e| e.to_string())
@@ -1902,6 +1913,9 @@ async fn meeting_rename_speaker(
 /// On-demand speaker-name suggestions (stop-time runs this automatically).
 #[tauri::command]
 async fn meeting_suggest_speakers(app: tauri::AppHandle, id: i64) -> Result<usize, String> {
+    if !release_profile::diarization() {
+        return Err(release_profile::disabled("speaker diarization"));
+    }
     meeting::summarize::suggest_speaker_names(&app, id)
         .await
         .map_err(|e| e.to_string())
@@ -1980,6 +1994,9 @@ offer to do more. If the transcript doesn't contain the answer, say so plainly."
 /// this is the "free the space today" button).
 #[tauri::command]
 async fn meeting_video_delete(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    if !release_profile::video_capture() {
+        return Err(release_profile::disabled("meeting video"));
+    }
     let state = app.state::<Db>();
     let conn = state.0.lock().unwrap();
     let path: Option<String> = conn
@@ -1996,6 +2013,9 @@ async fn meeting_video_delete(app: tauri::AppHandle, id: i64) -> Result<(), Stri
 /// Returns the voice count (0 = nothing to do / already diarized).
 #[tauri::command]
 async fn meeting_rediarize(app: tauri::AppHandle, id: i64) -> Result<usize, String> {
+    if !release_profile::diarization() {
+        return Err(release_profile::disabled("speaker diarization"));
+    }
     let h = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let Some(model) = meeting::diarize::model_path(&h) else {
@@ -3004,7 +3024,7 @@ fn get_provider_settings() -> Value {
         "has_gemini_key": has(&c.gemini_api_key),
         "has_openai_key": has(&c.openai_api_key),
         "has_anthropic_key": has(&c.anthropic_api_key),
-        "has_hosted_key": hosted::has_key(),
+        "has_hosted_key": release_profile::noted_hosted() && hosted::has_key(),
         "byok": c.byok,
         "has_groq_key": has(&c.groq_api_key),
         "has_openai_compatible_key": has(&c.openai_compatible_api_key),
@@ -3020,6 +3040,7 @@ fn set_byok_settings(
     confirm_embedding_rebuild: bool,
 ) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    provider::validate_byok_config(&settings).map_err(|e| e.to_string())?;
     let new_fingerprint = provider::embedding_fingerprint(&settings.embeddings);
     let state = app.state::<Db>();
     let conn = state.0.lock().unwrap();
@@ -3070,6 +3091,7 @@ fn set_provider_settings(
     vision_model: Option<String>,
 ) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    provider::validate_mode_ready(&mode).map_err(|e| e.to_string())?;
     let target_fingerprint = provider::profile_embedding_fingerprint(&mode, &provider::get().byok);
     let state = app.state::<Db>();
     let conn = state.0.lock().unwrap();
@@ -3102,9 +3124,15 @@ fn set_provider_settings(
         },
     )
     .map_err(|e| e.to_string())?;
+    let mut meetings = meeting::cfg();
     if provider::get().mode == provider::Mode::Hosted {
-        let mut meetings = meeting::cfg();
         meetings.asr_engine = "hosted".into();
+        meeting::cfg_update(&dir, meetings).map_err(|e| e.to_string())?;
+    } else if meetings.asr_engine == "hosted" {
+        // Leaving Hosted must also leave its credential-bound meeting engine;
+        // otherwise ordinary note capture works locally while the next meeting
+        // still fails on a stale Hosted selection.
+        meetings.asr_engine = "whisper".into();
         meeting::cfg_update(&dir, meetings).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -3508,7 +3536,9 @@ pub fn run() {
             // Recover meetings a previous process left mid-recording.
             meeting::reconcile(&app.handle().clone());
             // Retention sweep: expired meeting window videos free their space.
-            meeting::video::cleanup_old(&app.handle().clone(), meeting::cfg().video_keep_days);
+            if release_profile::video_capture() {
+                meeting::video::cleanup_old(&app.handle().clone(), meeting::cfg().video_keep_days);
+            }
 
             // Model-provider config was loaded before DB initialization so the
             // embedding-space marker can be migrated safely.
@@ -3571,34 +3601,48 @@ pub fn run() {
                 });
             });
 
-            // Phone capture: tiny LAN upload server gated by a random token.
-            let inbox = dir.join("inbox");
-            std::fs::create_dir_all(&inbox)?;
-            // Stable token + stable hostname so a phone's "Add to Home Screen"
-            // icon keeps working across launches (and DHCP IP changes).
-            let token = phone::load_or_make_token(&dir);
-            let ip = local_ip_address::local_ip()
-                .map(|i| i.to_string())
-                .unwrap_or_else(|_| "localhost".to_string());
-            let host = phone::local_hostname().map(|h| format!("{h}.local"));
-            // Cert SANs: the .local name (primary), the LAN IP, and localhost.
-            let mut sans = vec![ip.clone(), "localhost".to_string()];
-            if let Some(h) = &host {
-                sans.insert(0, h.clone());
-            }
-            if let Some((server, port)) = phone::bind_https(&dir, &sans, 8787) {
-                // Prefer the stable .local name; fall back to the raw IP.
-                let host_for_url = host.clone().unwrap_or_else(|| ip.clone());
-                let url = format!("https://{host_for_url}:{port}/?t={token}");
-                let lan_url = format!("https://{ip}:{port}/?t={token}");
-                println!("[noted] phone access ready (full app): {url}");
-                app.manage(phone::PhoneState { url, lan_url, token: token.clone(), port });
-                phone::serve(server, app.handle().clone(), inbox, token);
+            if release_profile::phone_lan() {
+                // Phone capture: tiny LAN upload server gated by a random token.
+                let inbox = dir.join("inbox");
+                std::fs::create_dir_all(&inbox)?;
+                // Stable token + stable hostname so a phone's "Add to Home Screen"
+                // icon keeps working across launches (and DHCP IP changes).
+                let token = phone::load_or_make_token(&dir);
+                let ip = local_ip_address::local_ip()
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|_| "localhost".to_string());
+                let host = phone::local_hostname().map(|h| format!("{h}.local"));
+                // Cert SANs: the .local name (primary), the LAN IP, and localhost.
+                let mut sans = vec![ip.clone(), "localhost".to_string()];
+                if let Some(h) = &host {
+                    sans.insert(0, h.clone());
+                }
+                if let Some((server, port)) = phone::bind_https(&dir, &sans, 8787) {
+                    // Prefer the stable .local name; fall back to the raw IP.
+                    let host_for_url = host.clone().unwrap_or_else(|| ip.clone());
+                    let url = format!("https://{host_for_url}:{port}/?t={token}");
+                    let lan_url = format!("https://{ip}:{port}/?t={token}");
+                    println!("[noted] phone access ready (full app): {url}");
+                    app.manage(phone::PhoneState {
+                        url,
+                        lan_url,
+                        token: token.clone(),
+                        port,
+                    });
+                    phone::serve(server, app.handle().clone(), inbox, token);
+                } else {
+                    app.manage(phone::PhoneState {
+                        url: String::new(),
+                        lan_url: String::new(),
+                        token,
+                        port: 0,
+                    });
+                }
             } else {
                 app.manage(phone::PhoneState {
                     url: String::new(),
                     lan_url: String::new(),
-                    token,
+                    token: String::new(),
                     port: 0,
                 });
             }

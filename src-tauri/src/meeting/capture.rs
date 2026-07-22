@@ -337,7 +337,9 @@ mod vp {
         }
 
         let input_device = ca::System::default_input_device().map_err(e("input device"))?;
-        output.set_input_device(&input_device).map_err(e("bind input"))?;
+        output
+            .set_input_device(&input_device)
+            .map_err(e("bind input"))?;
         let input_uid = input_device.uid().map_err(e("input uid"))?;
         // The echo reference is the default output device (what the call
         // plays through); if it changes (AirPods!) we rebuild to re-anchor.
@@ -407,7 +409,11 @@ mod vp {
         eprintln!(
             "[noted] mic vp session ended: {} callbacks ({})",
             ctx.callbacks,
-            if result.is_ok() { "clean stop" } else { "rebuilding" }
+            if result.is_ok() {
+                "clean stop"
+            } else {
+                "rebuilding"
+            }
         );
         result
     }
@@ -621,9 +627,7 @@ mod macos {
 
         let asbd = tap.asbd().map_err(|e| anyhow!("tap format: {e:?}"))?;
         if asbd.bits_per_channel != 32
-            || !asbd
-                .format_flags
-                .contains(cat::AudioFormatFlags::IS_FLOAT)
+            || !asbd.format_flags.contains(cat::AudioFormatFlags::IS_FLOAT)
             || asbd.channels_per_frame == 0
             || !asbd.sample_rate.is_finite()
             || asbd.sample_rate <= 0.0
@@ -756,7 +760,11 @@ mod macos {
             "[noted] tap session ended: {} callbacks, {} mono frames pushed ({})",
             ctx.callbacks,
             ctx.pushed_frames,
-            if result.is_ok() { "clean stop" } else { "rebuilding" }
+            if result.is_ok() {
+                "clean stop"
+            } else {
+                "rebuilding"
+            }
         );
         capture_log(
             log_path,
@@ -794,7 +802,10 @@ mod tests {
         assert!(!callback_overdelivers(512, 1_000.0, 1_512.0));
         assert!(callback_overdelivers(2_048, 1_000.0, 1_512.0));
         assert_eq!(infer_callback_layout(512, 1_000.0, 1_512.0), Some((512, 1)));
-        assert_eq!(infer_callback_layout(2_048, 1_000.0, 1_512.0), Some((512, 4)));
+        assert_eq!(
+            infer_callback_layout(2_048, 1_000.0, 1_512.0),
+            Some((512, 4))
+        );
     }
 
     /// Live smoke test: builds a real VoiceProcessingIO session, records 3s,

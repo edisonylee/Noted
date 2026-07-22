@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use tauri::Manager;
 
-use crate::db::Db;
 use super::store;
+use crate::db::Db;
 
 /// SCRecordingOutput needs macOS 15.0+. Runtime gate, not compile (the app
 /// itself supports 14.4 for the audio tap).
@@ -72,8 +72,15 @@ pub fn spawn(
             // block_on so everything lives and dies on this one thread
             // (same discipline as the audio capture threads).
             tauri::async_runtime::block_on(async move {
-                match macos::record(&app, meeting_id, &dir, &stop, source_bundle, &ignore_bundles)
-                    .await
+                match macos::record(
+                    &app,
+                    meeting_id,
+                    &dir,
+                    &stop,
+                    source_bundle,
+                    &ignore_bundles,
+                )
+                .await
                 {
                     Ok(Some(path)) => {
                         {
@@ -175,7 +182,9 @@ mod macos {
                 .filter(|b| {
                     let lb = b.to_lowercase();
                     lb != "com.noted.app"
-                        && !super::super::ALWAYS_IGNORED_BUNDLES.iter().any(|t| lb.contains(t))
+                        && !super::super::ALWAYS_IGNORED_BUNDLES
+                            .iter()
+                            .any(|t| lb.contains(t))
                         && !ignore.iter().any(|t| lb.contains(&t.to_lowercase()))
                 })
                 .collect(),
@@ -230,7 +239,9 @@ mod macos {
                 break w;
             }
             if std::time::Instant::now() > deadline {
-                eprintln!("[noted] meeting {meeting_id}: no meeting-app window found; video skipped");
+                eprintln!(
+                    "[noted] meeting {meeting_id}: no meeting-app window found; video skipped"
+                );
                 return Ok(None);
             }
             tokio::time::sleep(Duration::from_millis(POLL_MS * 5)).await;
@@ -246,7 +257,10 @@ mod macos {
         let mut cfg = sc::StreamCfg::new();
         let f = window.frame();
         // Retina-scale the window rect, capped to MAX_EDGE on the long side.
-        let (mut w, mut h) = ((f.size.width * 2.0) as usize, (f.size.height * 2.0) as usize);
+        let (mut w, mut h) = (
+            (f.size.width * 2.0) as usize,
+            (f.size.height * 2.0) as usize,
+        );
         let long = w.max(h);
         if long > MAX_EDGE {
             w = w * MAX_EDGE / long;
@@ -306,9 +320,9 @@ mod macos {
             let out = std::env::var("OUT").unwrap_or_else(|_| "/tmp/noted-video-smoke.mp4".into());
             let _ = std::fs::remove_file(&out);
             tauri::async_runtime::block_on(async {
-                let content = sc::ShareableContent::current().await.expect(
-                    "shareable content — grant Screen Recording to the terminal and retry",
-                );
+                let content = sc::ShareableContent::current()
+                    .await
+                    .expect("shareable content — grant Screen Recording to the terminal and retry");
                 let windows = content.windows();
                 let mut best: Option<(f64, cidre::arc::R<sc::Window>)> = None;
                 for i in 0..windows.len() {

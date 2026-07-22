@@ -27,10 +27,14 @@ fn wrap(text: &str, max: usize) -> Vec<String> {
         if !line.is_empty() && line.chars().count() + word.chars().count() + 1 > max {
             lines.push(std::mem::take(&mut line));
         }
-        if !line.is_empty() { line.push(' '); }
+        if !line.is_empty() {
+            line.push(' ');
+        }
         line.push_str(word);
     }
-    if !line.is_empty() { lines.push(line); }
+    if !line.is_empty() {
+        lines.push(line);
+    }
     lines
 }
 
@@ -49,17 +53,40 @@ impl Writer {
         let (doc, page, layer) = PdfDocument::new(title, Mm(210.0), Mm(PAGE_H), "Meeting notes");
         let regular = doc.add_builtin_font(BuiltinFont::Helvetica)?;
         let bold = doc.add_builtin_font(BuiltinFont::HelveticaBold)?;
-        let mut out = Self { layer: doc.get_page(page).get_layer(layer), doc, regular, bold, y: TOP, page: 1, title: clean(title) };
+        let mut out = Self {
+            layer: doc.get_page(page).get_layer(layer),
+            doc,
+            regular,
+            bold,
+            y: TOP,
+            page: 1,
+            title: clean(title),
+        };
         out.page_header();
         Ok(out)
     }
 
     fn page_header(&mut self) {
-        self.layer.set_fill_color(Color::Rgb(Rgb::new(0.64, 0.35, 0.22, None)));
-        self.layer.use_text("NOTED  /  MEETING NOTES", 8.5, Mm(LEFT), Mm(282.0), &self.bold);
-        self.layer.set_fill_color(Color::Rgb(Rgb::new(0.47, 0.43, 0.38, None)));
-        self.layer.use_text(format!("{}  ·  {}", self.title, self.page), 8.0, Mm(LEFT), Mm(13.0), &self.regular);
-        self.layer.set_fill_color(Color::Rgb(Rgb::new(0.14, 0.12, 0.10, None)));
+        self.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.64, 0.35, 0.22, None)));
+        self.layer.use_text(
+            "NOTED  /  MEETING NOTES",
+            8.5,
+            Mm(LEFT),
+            Mm(282.0),
+            &self.bold,
+        );
+        self.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.47, 0.43, 0.38, None)));
+        self.layer.use_text(
+            format!("{}  ·  {}", self.title, self.page),
+            8.0,
+            Mm(LEFT),
+            Mm(13.0),
+            &self.regular,
+        );
+        self.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.14, 0.12, 0.10, None)));
     }
 
     fn next_page(&mut self) {
@@ -70,21 +97,29 @@ impl Writer {
         self.page_header();
     }
 
-    fn ensure(&mut self, need: f32) { if self.y - need < BOTTOM { self.next_page(); } }
+    fn ensure(&mut self, need: f32) {
+        if self.y - need < BOTTOM {
+            self.next_page();
+        }
+    }
 
     fn text(&mut self, text: &str, size: f32, bold: bool, color: (f32, f32, f32), indent: f32) {
         let chars = ((166.0 - indent) / (size * 0.19)).max(25.0) as usize;
         let leading = size * 0.43;
         let lines = wrap(text, chars);
-        self.layer.set_fill_color(Color::Rgb(Rgb::new(color.0, color.1, color.2, None)));
+        self.layer
+            .set_fill_color(Color::Rgb(Rgb::new(color.0, color.1, color.2, None)));
         for line in lines {
             self.ensure(leading + 1.0);
-            self.layer.set_fill_color(Color::Rgb(Rgb::new(color.0, color.1, color.2, None)));
+            self.layer
+                .set_fill_color(Color::Rgb(Rgb::new(color.0, color.1, color.2, None)));
             let font = if bold { &self.bold } else { &self.regular };
-            self.layer.use_text(line, size, Mm(LEFT + indent), Mm(self.y), font);
+            self.layer
+                .use_text(line, size, Mm(LEFT + indent), Mm(self.y), font);
             self.y -= leading;
         }
-        self.layer.set_fill_color(Color::Rgb(Rgb::new(0.14, 0.12, 0.10, None)));
+        self.layer
+            .set_fill_color(Color::Rgb(Rgb::new(0.14, 0.12, 0.10, None)));
     }
 
     fn section(&mut self, name: &str) {
@@ -97,7 +132,10 @@ impl Writer {
     fn markdown(&mut self, md: &str) {
         for raw in md.lines() {
             let line = raw.trim();
-            if line.is_empty() { self.y -= 2.5; continue; }
+            if line.is_empty() {
+                self.y -= 2.5;
+                continue;
+            }
             if let Some(h) = line.strip_prefix("## ") {
                 self.ensure(11.0);
                 self.y -= 2.0;
@@ -118,7 +156,13 @@ pub fn export(meeting: &Value, path: &Path) -> Result<()> {
     let mut w = Writer::new(title)?;
     w.text(title, 26.0, true, (0.14, 0.12, 0.10), 0.0);
     if let Some(date) = meeting["started_at"].as_str() {
-        w.text(&date.replace('T', " ").chars().take(16).collect::<String>(), 9.5, false, (0.47, 0.43, 0.38), 0.0);
+        w.text(
+            &date.replace('T', " ").chars().take(16).collect::<String>(),
+            9.5,
+            false,
+            (0.47, 0.43, 0.38),
+            0.0,
+        );
     }
     w.y -= 8.0;
 
@@ -128,17 +172,36 @@ pub fn export(meeting: &Value, path: &Path) -> Result<()> {
             w.markdown(summary["content_md"].as_str().unwrap_or(""));
         }
     }
-    if let Some(notes) = meeting["raw_notes"].as_str().filter(|s| !s.trim().is_empty()) {
+    if let Some(notes) = meeting["raw_notes"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+    {
         w.section("Notes");
         w.markdown(notes);
     }
     if let Some(segments) = meeting["segments"].as_array().filter(|s| !s.is_empty()) {
         w.section("Transcript");
         for seg in segments {
-            let who = if seg["channel"] == "me" { "Me" } else { seg["speaker"].as_str().unwrap_or("Them") };
+            let who = if seg["channel"] == "me" {
+                "Me"
+            } else {
+                seg["speaker"].as_str().unwrap_or("Them")
+            };
             let secs = seg["t0_ms"].as_i64().unwrap_or(0) / 1000;
-            w.text(&format!("{who}  {:02}:{:02}", secs / 60, secs % 60), 8.5, true, (0.55, 0.30, 0.18), 0.0);
-            w.text(seg["text"].as_str().unwrap_or(""), 9.5, false, (0.14, 0.12, 0.10), 4.0);
+            w.text(
+                &format!("{who}  {:02}:{:02}", secs / 60, secs % 60),
+                8.5,
+                true,
+                (0.55, 0.30, 0.18),
+                0.0,
+            );
+            w.text(
+                seg["text"].as_str().unwrap_or(""),
+                9.5,
+                false,
+                (0.14, 0.12, 0.10),
+                4.0,
+            );
             w.y -= 2.0;
         }
     }
@@ -169,9 +232,16 @@ mod tests {
     #[ignore]
     fn renders_live_meeting_pdf() {
         let db = std::env::var("NOTED_TEST_DB").unwrap();
-        let id: i64 = std::env::var("NOTED_TEST_MEETING").unwrap().parse().unwrap();
+        let id: i64 = std::env::var("NOTED_TEST_MEETING")
+            .unwrap()
+            .parse()
+            .unwrap();
         let conn = rusqlite::Connection::open(db).unwrap();
         let meeting = crate::meeting::store::get_meeting(&conn, id).unwrap();
-        export(&meeting, &std::env::temp_dir().join("noted-live-meeting-export.pdf")).unwrap();
+        export(
+            &meeting,
+            &std::env::temp_dir().join("noted-live-meeting-export.pdf"),
+        )
+        .unwrap();
     }
 }

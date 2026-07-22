@@ -136,7 +136,6 @@ input, textarea { font-family: inherit; }
   z-index: 20;
 }
 .brand { display: inline-flex; align-items: center; gap: 8px; font-size: 19px; font-weight: 620; letter-spacing: -0.025em; }
-.brand-logo { width: 26px; height: 26px; border-radius: 7px; object-fit: cover; flex: none; }
 .brand .dot { color: var(--accent); }
 
 .nav { display: flex; gap: 22px; }
@@ -1484,7 +1483,6 @@ textarea.json.bad { border-color: var(--bad); }
   flex: none;
 }
 .mobile-topbar .brand { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; }
-.mobile-topbar .brand-logo { width: 28px; height: 28px; border-radius: 8px; }
 .mobile-topbar .dot { color: var(--accent); }
 
 .mobile-content {
@@ -2061,6 +2059,11 @@ a.cal-btn { text-decoration: none; }
 .meeting-hint { margin: 0; color: var(--muted); font-size: 13px; }
 .meeting-export-status { align-self: flex-end; color: var(--good); border: 1px solid color-mix(in srgb, var(--good) 32%, transparent); background: color-mix(in srgb, var(--good) 8%, transparent); border-radius: 8px; padding: 7px 10px; }
 .meeting-status { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
+.meeting-failure {
+  padding: 10px 12px; border-radius: var(--r-md); font-size: 13px;
+  color: var(--error-ink); background: var(--error-bg);
+  border: var(--border-width, 1px) solid var(--error-border);
+}
 
 .meeting-page .btn {
   display: inline-flex; align-items: center; gap: 7px;

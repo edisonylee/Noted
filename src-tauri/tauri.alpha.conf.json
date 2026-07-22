@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Noted Alpha",
+  "identifier": "com.noted.desktop.alpha",
+  "bundle": {
+    "targets": ["app"],
+    "macOS": {
+      "minimumSystemVersion": "14.4"
+    }
+  }
+}

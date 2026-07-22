@@ -43,7 +43,7 @@ pub enum Mode {
 }
 
 impl Mode {
-    fn parse(s: &str) -> Mode {
+    fn parse_unrestricted(s: &str) -> Mode {
         match s.to_ascii_lowercase().as_str() {
             "balanced" => Mode::Balanced,
             "hosted" => Mode::Hosted,
@@ -51,6 +51,49 @@ impl Mode {
             _ => Mode::Local,
         }
     }
+
+    fn allowed(self) -> bool {
+        match self {
+            Mode::Balanced => crate::release_profile::balanced_inference(),
+            Mode::Hosted => crate::release_profile::noted_hosted(),
+            Mode::Local | Mode::Byok => true,
+        }
+    }
+
+    fn parse(s: &str) -> Mode {
+        let mode = Self::parse_unrestricted(s);
+        if mode.allowed() {
+            mode
+        } else {
+            Mode::Local
+        }
+    }
+}
+
+pub fn validate_mode_name(mode: &str) -> Result<()> {
+    let parsed = Mode::parse_unrestricted(mode);
+    if parsed.allowed() {
+        Ok(())
+    } else {
+        Err(anyhow!(crate::release_profile::disabled(mode)))
+    }
+}
+
+fn validate_mode_credential(mode: Mode, has_hosted_key: bool) -> Result<()> {
+    if mode == Mode::Hosted && !has_hosted_key {
+        return Err(anyhow!(
+            "Hosted mode is not activated on this Mac. Restore the Noted activation credential or choose Local."
+        ));
+    }
+    Ok(())
+}
+
+/// Validate both product availability and the credential required to make the
+/// selected profile work. A missing Hosted key must never silently route data
+/// through local models under a Hosted embedding-space fingerprint.
+pub fn validate_mode_ready(mode: &str) -> Result<()> {
+    validate_mode_name(mode)?;
+    validate_mode_credential(Mode::parse_unrestricted(mode), crate::hosted::has_key())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,7 +132,11 @@ pub struct ByokConfig {
 }
 
 fn choice(provider: ProviderId, model: &str, base_url: &str) -> CapabilityChoice {
-    CapabilityChoice { provider, model: model.into(), base_url: base_url.into() }
+    CapabilityChoice {
+        provider,
+        model: model.into(),
+        base_url: base_url.into(),
+    }
 }
 fn d_byok_intelligence() -> CapabilityChoice {
     choice(ProviderId::Openai, "gpt-5-mini", OPENAI_DEFAULT_BASE)
@@ -98,10 +145,18 @@ fn d_byok_vision() -> CapabilityChoice {
     choice(ProviderId::Openai, "gpt-5-mini", OPENAI_DEFAULT_BASE)
 }
 fn d_byok_embeddings() -> CapabilityChoice {
-    choice(ProviderId::Openai, "text-embedding-3-small", OPENAI_DEFAULT_BASE)
+    choice(
+        ProviderId::Openai,
+        "text-embedding-3-small",
+        OPENAI_DEFAULT_BASE,
+    )
 }
 fn d_byok_transcription() -> CapabilityChoice {
-    choice(ProviderId::Openai, "gpt-4o-mini-transcribe", OPENAI_DEFAULT_BASE)
+    choice(
+        ProviderId::Openai,
+        "gpt-4o-mini-transcribe",
+        OPENAI_DEFAULT_BASE,
+    )
 }
 fn d_byok_speech() -> CapabilityChoice {
     choice(ProviderId::System, "macos", "")
@@ -118,6 +173,49 @@ impl Default for ByokConfig {
     }
 }
 
+fn ensure_choice_allowed(choice: &CapabilityChoice) -> Result<()> {
+    if choice.provider == ProviderId::NotedHosted && !crate::release_profile::noted_hosted() {
+        Err(anyhow!(crate::release_profile::disabled("Noted Hosted")))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn validate_byok_config(config: &ByokConfig) -> Result<()> {
+    for choice in [
+        &config.intelligence,
+        &config.vision,
+        &config.embeddings,
+        &config.transcription,
+        &config.speech,
+    ] {
+        ensure_choice_allowed(choice)?;
+    }
+    Ok(())
+}
+
+fn sanitize_byok_config(config: &mut ByokConfig) {
+    if crate::release_profile::noted_hosted() {
+        return;
+    }
+    let defaults = ByokConfig::default();
+    if config.intelligence.provider == ProviderId::NotedHosted {
+        config.intelligence = defaults.intelligence;
+    }
+    if config.vision.provider == ProviderId::NotedHosted {
+        config.vision = defaults.vision;
+    }
+    if config.embeddings.provider == ProviderId::NotedHosted {
+        config.embeddings = defaults.embeddings;
+    }
+    if config.transcription.provider == ProviderId::NotedHosted {
+        config.transcription = defaults.transcription;
+    }
+    if config.speech.provider == ProviderId::NotedHosted {
+        config.speech = defaults.speech;
+    }
+}
+
 pub fn embedding_fingerprint(choice: &CapabilityChoice) -> String {
     let base_class = match choice.provider {
         ProviderId::OpenaiCompatible => choice.base_url.trim_end_matches('/'),
@@ -126,7 +224,10 @@ pub fn embedding_fingerprint(choice: &CapabilityChoice) -> String {
         ProviderId::NotedHosted => "noted_hosted",
         _ => "unsupported",
     };
-    format!("{:?}|{}|{}|768|provider-default", choice.provider, base_class, choice.model)
+    format!(
+        "{:?}|{}|{}|768|provider-default",
+        choice.provider, base_class, choice.model
+    )
 }
 
 pub fn profile_embedding_fingerprint(profile: &str, byok: &ByokConfig) -> String {
@@ -195,7 +296,7 @@ pub struct Config {
     /// Which cloud service Balanced routes extract/OCR to.
     #[serde(default = "d_cloud_provider")]
     pub cloud_provider: CloudProvider,
-    pub gemini_text_model: String,   // extraction hot path — cheapest/fastest
+    pub gemini_text_model: String, // extraction hot path — cheapest/fastest
     pub gemini_vision_model: String, // handwriting OCR — a touch stronger
     /// OpenAI-compatible endpoint (OpenAI, LM Studio, llama.cpp, OpenRouter…).
     #[serde(default = "d_openai_base")]
@@ -226,7 +327,9 @@ pub struct Config {
 fn d_text_model() -> String {
     crate::ollama::TEXT_MODEL.into()
 }
-fn config_version() -> u32 { 2 }
+fn config_version() -> u32 {
+    2
+}
 fn d_vision_model() -> String {
     crate::ollama::VISION_MODEL.into()
 }
@@ -297,11 +400,13 @@ fn active_cloud_key(c: &Config) -> Option<&str> {
 /// True when structured calls (extract + OCR) should be routed to the cloud.
 pub fn use_cloud_for_extract() -> bool {
     let c = get();
-    c.mode == Mode::Balanced && active_cloud_key(&c).is_some()
+    crate::release_profile::balanced_inference()
+        && c.mode == Mode::Balanced
+        && active_cloud_key(&c).is_some()
 }
 
 pub fn use_hosted() -> bool {
-    get().mode == Mode::Hosted && crate::hosted::has_key()
+    crate::release_profile::noted_hosted() && get().mode == Mode::Hosted
 }
 
 pub fn use_byok() -> bool {
@@ -317,14 +422,19 @@ fn provider_key(c: &Config, provider: ProviderId) -> Result<String> {
         ProviderId::OpenaiCompatible => c.openai_compatible_api_key.as_deref(),
         _ => None,
     };
-    key.filter(|k| !k.is_empty()).map(str::to_string)
+    key.filter(|k| !k.is_empty())
+        .map(str::to_string)
         .ok_or_else(|| anyhow!("no credential configured for {:?}", provider))
 }
 
 fn credential_for_choice(c: &Config, choice: &CapabilityChoice) -> Result<String> {
     if choice.provider == ProviderId::OpenaiCompatible
-        && (choice.base_url.starts_with("http://localhost") || choice.base_url.starts_with("http://127.0.0.1"))
-        && c.openai_compatible_api_key.as_deref().unwrap_or("").is_empty()
+        && (choice.base_url.starts_with("http://localhost")
+            || choice.base_url.starts_with("http://127.0.0.1"))
+        && c.openai_compatible_api_key
+            .as_deref()
+            .unwrap_or("")
+            .is_empty()
     {
         return Ok(String::new());
     }
@@ -338,8 +448,13 @@ fn openai_base(choice: &CapabilityChoice) -> Result<&str> {
         ProviderId::Groq => Ok("https://api.groq.com/openai/v1"),
         ProviderId::OpenaiCompatible => {
             let base = choice.base_url.trim_end_matches('/');
-            if !base.starts_with("https://") && !base.starts_with("http://127.0.0.1") && !base.starts_with("http://localhost") {
-                return Err(anyhow!("custom provider base URL must use HTTPS or loopback HTTP"));
+            if !base.starts_with("https://")
+                && !base.starts_with("http://127.0.0.1")
+                && !base.starts_with("http://localhost")
+            {
+                return Err(anyhow!(
+                    "custom provider base URL must use HTTPS or loopback HTTP"
+                ));
             }
             Ok(base)
         }
@@ -365,13 +480,29 @@ async fn byok_chat_json_for(
     format: Option<Value>,
 ) -> Result<Value> {
     let vision = images.as_ref().is_some_and(|v| !v.is_empty());
-    let choice = if vision { &c.byok.vision } else { &c.byok.intelligence };
+    let choice = if vision {
+        &c.byok.vision
+    } else {
+        &c.byok.intelligence
+    };
+    ensure_choice_allowed(choice)?;
     match choice.provider {
         ProviderId::Anthropic => {
-            anthropic_chat_json(&credential_for_choice(c, choice)?, &choice.model, system, user, images, format).await
+            anthropic_chat_json(
+                &credential_for_choice(c, choice)?,
+                &choice.model,
+                system,
+                user,
+                images,
+                format,
+            )
+            .await
         }
         ProviderId::NotedHosted => crate::hosted::chat_json(system, user, images, format).await,
-        ProviderId::Openai | ProviderId::Gemini | ProviderId::Groq | ProviderId::OpenaiCompatible => {
+        ProviderId::Openai
+        | ProviderId::Gemini
+        | ProviderId::Groq
+        | ProviderId::OpenaiCompatible => {
             openai_compat_chat_json(
                 openai_base(choice)?,
                 &credential_for_choice(c, choice)?,
@@ -380,34 +511,57 @@ async fn byok_chat_json_for(
                 user,
                 images,
                 format,
-            ).await
+            )
+            .await
         }
-        _ => Err(anyhow!("selected provider cannot generate structured output")),
+        _ => Err(anyhow!(
+            "selected provider cannot generate structured output"
+        )),
     }
 }
 
 pub async fn byok_chat_text(system: &str, user: &str) -> Result<String> {
     byok_chat_messages(
-        vec![json!({"role":"system","content":system}), json!({"role":"user","content":user})],
+        vec![
+            json!({"role":"system","content":system}),
+            json!({"role":"user","content":user}),
+        ],
         0.2,
-    ).await
+    )
+    .await
 }
 
 pub async fn byok_chat_messages(messages: Vec<Value>, temperature: f32) -> Result<String> {
     let c = get();
     let choice = &c.byok.intelligence;
+    ensure_choice_allowed(choice)?;
     match choice.provider {
         ProviderId::NotedHosted => crate::hosted::chat_messages(messages, temperature).await,
-        ProviderId::Anthropic => anthropic_chat_messages(
-            &credential_for_choice(&c, choice)?, &choice.model, messages, temperature,
-        ).await,
-        ProviderId::Openai | ProviderId::Gemini | ProviderId::Groq | ProviderId::OpenaiCompatible => {
-            openai_compat_chat_messages(
-                openai_base(choice)?, &credential_for_choice(&c, choice)?, &choice.model,
-                messages, temperature,
-            ).await
+        ProviderId::Anthropic => {
+            anthropic_chat_messages(
+                &credential_for_choice(&c, choice)?,
+                &choice.model,
+                messages,
+                temperature,
+            )
+            .await
         }
-        _ => Err(anyhow!("selected intelligence provider cannot generate text")),
+        ProviderId::Openai
+        | ProviderId::Gemini
+        | ProviderId::Groq
+        | ProviderId::OpenaiCompatible => {
+            openai_compat_chat_messages(
+                openai_base(choice)?,
+                &credential_for_choice(&c, choice)?,
+                &choice.model,
+                messages,
+                temperature,
+            )
+            .await
+        }
+        _ => Err(anyhow!(
+            "selected intelligence provider cannot generate text"
+        )),
     }
 }
 
@@ -418,13 +572,24 @@ pub async fn byok_embed(input: &str) -> Result<Vec<f32>> {
 
 async fn byok_embed_for(c: &Config, input: &str) -> Result<Vec<f32>> {
     let choice = &c.byok.embeddings;
+    ensure_choice_allowed(choice)?;
     match choice.provider {
         ProviderId::NotedHosted => crate::hosted::embed(input).await,
-        ProviderId::Gemini => gemini_embed(&credential_for_choice(c, choice)?, &choice.model, input).await,
-        ProviderId::Openai | ProviderId::OpenaiCompatible => openai_compat_embed(
-            openai_base(choice)?, &credential_for_choice(c, choice)?, &choice.model, input,
-        ).await,
-        _ => Err(anyhow!("selected provider does not support compatible embeddings")),
+        ProviderId::Gemini => {
+            gemini_embed(&credential_for_choice(c, choice)?, &choice.model, input).await
+        }
+        ProviderId::Openai | ProviderId::OpenaiCompatible => {
+            openai_compat_embed(
+                openai_base(choice)?,
+                &credential_for_choice(c, choice)?,
+                &choice.model,
+                input,
+            )
+            .await
+        }
+        _ => Err(anyhow!(
+            "selected provider does not support compatible embeddings"
+        )),
     }
 }
 
@@ -437,52 +602,90 @@ pub fn byok_transcribe_blocking(samples: &[f32], vocabulary: &[String]) -> Resul
 
 fn byok_transcribe_for(c: &Config, samples: &[f32], vocabulary: &[String]) -> Result<String> {
     let choice = &c.byok.transcription;
+    ensure_choice_allowed(choice)?;
     if choice.provider == ProviderId::NotedHosted {
         return crate::hosted::Session::open(vocabulary.to_vec())?.transcribe(samples);
     }
     if choice.provider == ProviderId::Gemini {
-        return gemini_transcribe_blocking(&provider_key(c, choice.provider)?, &choice.model, samples, vocabulary);
+        return gemini_transcribe_blocking(
+            &provider_key(c, choice.provider)?,
+            &choice.model,
+            samples,
+            vocabulary,
+        );
     }
-    if !matches!(choice.provider, ProviderId::Openai | ProviderId::Groq | ProviderId::OpenaiCompatible) {
+    if !matches!(
+        choice.provider,
+        ProviderId::Openai | ProviderId::Groq | ProviderId::OpenaiCompatible
+    ) {
         return Err(anyhow!("selected provider does not support transcription"));
     }
     let base = openai_base(choice)?;
     let wav = crate::hosted::wav_bytes(samples);
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(90)).build()?;
+        .timeout(std::time::Duration::from_secs(90))
+        .build()?;
     let key = credential_for_choice(c, choice)?;
     let mut last = None;
     for attempt in 0..3 {
         let file = reqwest::blocking::multipart::Part::bytes(wav.clone())
-            .file_name("speech.wav").mime_str("audio/wav")?;
+            .file_name("speech.wav")
+            .mime_str("audio/wav")?;
         let mut form = reqwest::blocking::multipart::Form::new()
-            .part("file", file).text("model", choice.model.clone()).text("language", "en");
-        if !vocabulary.is_empty() { form = form.text("prompt", vocabulary.join(", ")); }
-        match client.post(format!("{base}/audio/transcriptions"))
-            .bearer_auth(&key).multipart(form).send() {
+            .part("file", file)
+            .text("model", choice.model.clone())
+            .text("language", "en");
+        if !vocabulary.is_empty() {
+            form = form.text("prompt", vocabulary.join(", "));
+        }
+        match client
+            .post(format!("{base}/audio/transcriptions"))
+            .bearer_auth(&key)
+            .multipart(form)
+            .send()
+        {
             Ok(resp) if resp.status().is_success() => {
                 let v: Value = resp.json()?;
-                return v.get("text").and_then(Value::as_str).map(str::to_string)
+                return v
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
                     .ok_or_else(|| anyhow!("no text in transcription response"));
             }
             Ok(resp) => {
                 let status = resp.status();
                 let retryable = retryable_status(status);
                 last = Some(provider_http_error("transcription", status).to_string());
-                if !retryable { break; }
+                if !retryable {
+                    break;
+                }
             }
             Err(e) => last = Some(format!("transcription request failed: {e}")),
         }
-        if attempt < 2 { std::thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1) as u64)); }
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1) as u64));
+        }
     }
-    Err(anyhow!(last.unwrap_or_else(|| "transcription failed".into())))
+    Err(anyhow!(
+        last.unwrap_or_else(|| "transcription failed".into())
+    ))
 }
 
-fn gemini_transcribe_blocking(key: &str, model: &str, samples: &[f32], vocabulary: &[String]) -> Result<String> {
+fn gemini_transcribe_blocking(
+    key: &str,
+    model: &str,
+    samples: &[f32],
+    vocabulary: &[String],
+) -> Result<String> {
     use base64::Engine;
     let audio = base64::engine::general_purpose::STANDARD.encode(crate::hosted::wav_bytes(samples));
-    let vocab = if vocabulary.is_empty() { String::new() } else {
-        format!(" Preserve these spellings where heard: {}.", vocabulary.join(", "))
+    let vocab = if vocabulary.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Preserve these spellings where heard: {}.",
+            vocabulary.join(", ")
+        )
     };
     let body = json!({ "contents": [{ "parts": [
         { "text": format!("Transcribe this English audio verbatim. Return only the transcript.{vocab}") },
@@ -490,35 +693,62 @@ fn gemini_transcribe_blocking(key: &str, model: &str, samples: &[f32], vocabular
     ]}]});
     let model = model.strip_prefix("models/").unwrap_or(model);
     let resp = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(90)).build()?
-        .post(format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"))
-        .header("x-goog-api-key", key).json(&body).send()?;
+        .timeout(std::time::Duration::from_secs(90))
+        .build()?
+        .post(format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        ))
+        .header("x-goog-api-key", key)
+        .json(&body)
+        .send()?;
     if !resp.status().is_success() {
         let status = resp.status();
         return Err(provider_http_error("transcription", status));
     }
     let v: Value = resp.json()?;
-    v.pointer("/candidates/0/content/parts/0/text").and_then(Value::as_str)
-        .map(|s| s.trim().to_string()).ok_or_else(|| anyhow!("no transcript in Gemini response"))
+    v.pointer("/candidates/0/content/parts/0/text")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| anyhow!("no transcript in Gemini response"))
 }
 
 // ── Keychain (via the macOS `security` CLI) ─────────────────────────────────
 fn keychain_read(account: &str) -> Option<String> {
     let out = Command::new("security")
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            account,
+            "-w",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
     let key = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if key.is_empty() { None } else { Some(key) }
+    if key.is_empty() {
+        None
+    } else {
+        Some(key)
+    }
 }
 
 fn keychain_write(account: &str, key: &str) -> Result<()> {
     // -U updates the item if it already exists.
     let status = Command::new("security")
-        .args(["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", account, "-w", key])
+        .args([
+            "add-generic-password",
+            "-U",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            account,
+            "-w",
+            key,
+        ])
         .status()?;
     if status.success() {
         Ok(())
@@ -529,7 +759,13 @@ fn keychain_write(account: &str, key: &str) -> Result<()> {
 
 fn keychain_delete(account: &str) {
     let _ = Command::new("security")
-        .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account])
+        .args([
+            "delete-generic-password",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            account,
+        ])
         .status();
 }
 
@@ -566,6 +802,10 @@ pub fn init(dir: &Path) {
         .ok()
         .and_then(|s| serde_json::from_str::<Config>(&s).ok())
         .unwrap_or_default();
+    if !c.mode.allowed() {
+        c.mode = Mode::Local;
+    }
+    sanitize_byok_config(&mut c.byok);
     c.gemini_api_key = keychain_read(CloudProvider::Gemini.keychain_account());
     c.openai_api_key = keychain_read(CloudProvider::OpenAI.keychain_account());
     c.anthropic_api_key = keychain_read(CloudProvider::Anthropic.keychain_account());
@@ -603,12 +843,14 @@ pub struct SettingsPatch {
 pub fn update(dir: &Path, patch: SettingsPatch) -> Result<()> {
     let mut c = get();
     if let Some(m) = patch.mode {
-        c.mode = Mode::parse(&m);
+        validate_mode_ready(&m)?;
+        c.mode = Mode::parse_unrestricted(&m);
     }
     if let Some(p) = patch.cloud_provider {
         c.cloud_provider = CloudProvider::parse(&p);
     }
     if let Some(byok) = patch.byok {
+        validate_byok_config(&byok)?;
         c.byok = byok;
     }
     let set = |dst: &mut String, src: Option<String>| {
@@ -627,23 +869,21 @@ pub fn update(dir: &Path, patch: SettingsPatch) -> Result<()> {
     set(&mut c.openai_vision_model, patch.openai_vision_model);
     set(&mut c.anthropic_text_model, patch.anthropic_text_model);
     set(&mut c.anthropic_vision_model, patch.anthropic_vision_model);
-    let set_key = |slot: &mut Option<String>,
-                   account: &str,
-                   incoming: Option<String>|
-     -> Result<()> {
-        match classify_key_update(incoming) {
-            KeyUpdate::Store(k) => {
-                keychain_write(account, &k)?;
-                *slot = Some(k);
+    let set_key =
+        |slot: &mut Option<String>, account: &str, incoming: Option<String>| -> Result<()> {
+            match classify_key_update(incoming) {
+                KeyUpdate::Store(k) => {
+                    keychain_write(account, &k)?;
+                    *slot = Some(k);
+                }
+                KeyUpdate::Delete => {
+                    keychain_delete(account);
+                    *slot = None;
+                }
+                KeyUpdate::Keep => {} // unchanged
             }
-            KeyUpdate::Delete => {
-                keychain_delete(account);
-                *slot = None;
-            }
-            KeyUpdate::Keep => {} // unchanged
-        }
-        Ok(())
-    };
+            Ok(())
+        };
     set_key(
         &mut c.gemini_api_key,
         CloudProvider::Gemini.keychain_account(),
@@ -726,13 +966,27 @@ pub async fn cloud_chat_json(
     let c = get();
     match c.cloud_provider {
         CloudProvider::Gemini => {
-            let key = c.gemini_api_key.clone().ok_or_else(|| anyhow!("no gemini api key configured"))?;
-            let model = if vision { &c.gemini_vision_model } else { &c.gemini_text_model };
+            let key = c
+                .gemini_api_key
+                .clone()
+                .ok_or_else(|| anyhow!("no gemini api key configured"))?;
+            let model = if vision {
+                &c.gemini_vision_model
+            } else {
+                &c.gemini_text_model
+            };
             openai_compat_chat_json(GEMINI_BASE, &key, model, system, user, images, format).await
         }
         CloudProvider::OpenAI => {
-            let key = c.openai_api_key.clone().ok_or_else(|| anyhow!("no openai api key configured"))?;
-            let model = if vision { &c.openai_vision_model } else { &c.openai_text_model };
+            let key = c
+                .openai_api_key
+                .clone()
+                .ok_or_else(|| anyhow!("no openai api key configured"))?;
+            let model = if vision {
+                &c.openai_vision_model
+            } else {
+                &c.openai_text_model
+            };
             let base = c.openai_base_url.trim_end_matches('/');
             openai_compat_chat_json(base, &key, model, system, user, images, format).await
         }
@@ -741,7 +995,11 @@ pub async fn cloud_chat_json(
                 .anthropic_api_key
                 .clone()
                 .ok_or_else(|| anyhow!("no anthropic api key configured"))?;
-            let model = if vision { &c.anthropic_vision_model } else { &c.anthropic_text_model };
+            let model = if vision {
+                &c.anthropic_vision_model
+            } else {
+                &c.anthropic_text_model
+            };
             anthropic_chat_json(&key, model, system, user, images, format).await
         }
     }
@@ -863,11 +1121,16 @@ async fn openai_compat_embed(base: &str, key: &str, model: &str, input: &str) ->
 }
 
 fn parse_openai_embedding_response(v: &Value) -> Result<Vec<f32>> {
-    let embedding = v.pointer("/data/0/embedding")
+    let embedding = v
+        .pointer("/data/0/embedding")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("no data[0].embedding in response"))?
         .iter()
-        .map(|n| n.as_f64().map(|x| x as f32).ok_or_else(|| anyhow!("embedding contained a non-number")))
+        .map(|n| {
+            n.as_f64()
+                .map(|x| x as f32)
+                .ok_or_else(|| anyhow!("embedding contained a non-number"))
+        })
         .collect::<Result<Vec<_>>>()?;
     validate_embedding(embedding)
 }
@@ -880,7 +1143,9 @@ async fn gemini_embed(key: &str, model: &str, input: &str) -> Result<Vec<f32>> {
         "outputDimensionality": 768,
     });
     let resp = http_client()?
-        .post(format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent"))
+        .post(format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{model}:embedContent"
+        ))
         .header("x-goog-api-key", key)
         .json(&body)
         .send()
@@ -890,18 +1155,26 @@ async fn gemini_embed(key: &str, model: &str, input: &str) -> Result<Vec<f32>> {
         return Err(provider_http_error("embeddings", status));
     }
     let v: Value = resp.json().await?;
-    let embedding = v.pointer("/embedding/values")
+    let embedding = v
+        .pointer("/embedding/values")
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("no embedding.values in Gemini response"))?
         .iter()
-        .map(|n| n.as_f64().map(|x| x as f32).ok_or_else(|| anyhow!("embedding contained a non-number")))
+        .map(|n| {
+            n.as_f64()
+                .map(|x| x as f32)
+                .ok_or_else(|| anyhow!("embedding contained a non-number"))
+        })
         .collect::<Result<Vec<_>>>()?;
     validate_embedding(embedding)
 }
 
 fn validate_embedding(embedding: Vec<f32>) -> Result<Vec<f32>> {
     if embedding.len() != 768 {
-        return Err(anyhow!("embedding model returned {} dimensions; Noted requires 768", embedding.len()));
+        return Err(anyhow!(
+            "embedding model returned {} dimensions; Noted requires 768",
+            embedding.len()
+        ));
     }
     Ok(embedding)
 }
@@ -925,7 +1198,9 @@ async fn anthropic_chat_json(
             "{system}\n\nRespond ONLY with a single JSON object conforming to this JSON Schema — \
              no prose, no code fences:\n{schema}"
         ),
-        None => format!("{system}\n\nRespond ONLY with a single JSON object — no prose, no code fences."),
+        None => format!(
+            "{system}\n\nRespond ONLY with a single JSON object — no prose, no code fences."
+        ),
     };
 
     let mut content = Vec::new();
@@ -963,7 +1238,9 @@ async fn anthropic_chat_json(
     // A refusal is a 200 with stop_reason "refusal" — surface it as an error
     // so the caller falls back to the local model instead of parsing nothing.
     if v.get("stop_reason").and_then(|s| s.as_str()) == Some("refusal") {
-        return Err(anyhow!("anthropic declined the request (stop_reason: refusal)"));
+        return Err(anyhow!(
+            "anthropic declined the request (stop_reason: refusal)"
+        ));
     }
     let content = v
         .get("content")
@@ -989,10 +1266,15 @@ async fn anthropic_chat_messages(
     let mut system = Vec::new();
     let mut turns = Vec::new();
     for message in messages {
-        let role = message.get("role").and_then(Value::as_str).unwrap_or("user");
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
         let content = message.get("content").cloned().unwrap_or_else(|| json!(""));
         if role == "system" {
-            if let Some(text) = content.as_str() { system.push(text.to_string()); }
+            if let Some(text) = content.as_str() {
+                system.push(text.to_string());
+            }
         } else {
             turns.push(json!({ "role": if role == "assistant" { "assistant" } else { "user" }, "content": content }));
         }
@@ -1016,9 +1298,15 @@ async fn anthropic_chat_messages(
         return Err(provider_http_error("text generation", status));
     }
     let v: Value = resp.json().await?;
-    v.get("content").and_then(Value::as_array)
-        .and_then(|blocks| blocks.iter().find(|b| b.get("type").and_then(Value::as_str) == Some("text")))
-        .and_then(|b| b.get("text")).and_then(Value::as_str)
+    v.get("content")
+        .and_then(Value::as_array)
+        .and_then(|blocks| {
+            blocks
+                .iter()
+                .find(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+        })
+        .and_then(|b| b.get("text"))
+        .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| anyhow!("no text block in anthropic response"))
 }
@@ -1074,7 +1362,9 @@ pub async fn test_byok_candidate(
     let mut c = get();
     c.byok = settings;
     let replace = |slot: &mut Option<String>, value: Option<String>| {
-        if let Some(value) = value.filter(|v| !v.trim().is_empty()) { *slot = Some(value); }
+        if let Some(value) = value.filter(|v| !v.trim().is_empty()) {
+            *slot = Some(value);
+        }
     };
     replace(&mut c.openai_api_key, openai_api_key);
     replace(&mut c.gemini_api_key, gemini_api_key);
@@ -1085,26 +1375,49 @@ pub async fn test_byok_candidate(
 }
 
 async fn test_byok_config(c: Config) -> Value {
-    let intelligence = byok_chat_json_for(&c,
-        "Return only valid JSON.", "Return {\"ok\":true}.", None, None,
-    ).await.map(|_| "passed".to_string()).unwrap_or_else(|e| format!("failed: {e}"));
+    let intelligence = byok_chat_json_for(
+        &c,
+        "Return only valid JSON.",
+        "Return {\"ok\":true}.",
+        None,
+        None,
+    )
+    .await
+    .map(|_| "passed".to_string())
+    .unwrap_or_else(|e| format!("failed: {e}"));
     // One transparent 1x1 PNG: verifies that the selected model accepts image
     // input without uploading personal content.
     let fixture = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
-    let vision = byok_chat_json_for(&c,
-        "Return only valid JSON.", "Return {\"ok\":true}.", Some(vec![fixture.into()]), None,
-    ).await.map(|_| "passed".to_string()).unwrap_or_else(|e| format!("failed: {e}"));
-    let embeddings = byok_embed_for(&c, "Noted capability test").await
+    let vision = byok_chat_json_for(
+        &c,
+        "Return only valid JSON.",
+        "Return {\"ok\":true}.",
+        Some(vec![fixture.into()]),
+        None,
+    )
+    .await
+    .map(|_| "passed".to_string())
+    .unwrap_or_else(|e| format!("failed: {e}"));
+    let embeddings = byok_embed_for(&c, "Noted capability test")
+        .await
         .map(|v| format!("passed ({} dimensions)", v.len()))
         .unwrap_or_else(|e| format!("failed: {e}"));
-    let transcription = tauri::async_runtime::spawn_blocking(move || byok_transcribe_for(&c, &vec![0.0; 8_000], &[]))
-        .await.map_err(|e| anyhow!(e.to_string())).and_then(|r| r)
-        .map(|_| "passed".to_string()).unwrap_or_else(|e| format!("failed: {e}"));
+    let transcription = tauri::async_runtime::spawn_blocking(move || {
+        byok_transcribe_for(&c, &vec![0.0; 8_000], &[])
+    })
+    .await
+    .map_err(|e| anyhow!(e.to_string()))
+    .and_then(|r| r)
+    .map(|_| "passed".to_string())
+    .unwrap_or_else(|e| format!("failed: {e}"));
     json!({ "intelligence": intelligence, "vision": vision, "embeddings": embeddings, "transcription": transcription })
 }
 
 pub async fn list_byok_models(provider: ProviderId, base_url: String) -> Result<Vec<String>> {
     let c = get();
+    if provider == ProviderId::NotedHosted && !crate::release_profile::noted_hosted() {
+        return Err(anyhow!(crate::release_profile::disabled("Noted Hosted")));
+    }
     if provider == ProviderId::NotedHosted {
         let value = crate::hosted::models().await?;
         return Ok(model_ids(&value, "models"));
@@ -1121,8 +1434,16 @@ pub async fn list_byok_models(provider: ProviderId, base_url: String) -> Result<
             provider_key(&c, provider)?,
         ),
         ProviderId::Openai | ProviderId::Groq | ProviderId::OpenaiCompatible => {
-            let choice = CapabilityChoice { provider, model: String::new(), base_url };
-            (format!("{}/models", openai_base(&choice)?), "bearer", provider_key(&c, provider)?)
+            let choice = CapabilityChoice {
+                provider,
+                model: String::new(),
+                base_url,
+            };
+            (
+                format!("{}/models", openai_base(&choice)?),
+                "bearer",
+                provider_key(&c, provider)?,
+            )
         }
         _ => return Err(anyhow!("selected provider does not expose model discovery")),
     };
@@ -1130,7 +1451,9 @@ pub async fn list_byok_models(provider: ProviderId, base_url: String) -> Result<
     let mut request = client.get(url);
     request = match header_kind {
         "gemini" => request.header("x-goog-api-key", key),
-        "anthropic" => request.header("x-api-key", key).header("anthropic-version", ANTHROPIC_VERSION),
+        "anthropic" => request
+            .header("x-api-key", key)
+            .header("anthropic-version", ANTHROPIC_VERSION),
         _ => request.bearer_auth(key),
     };
     let response = request.send().await?;
@@ -1138,13 +1461,25 @@ pub async fn list_byok_models(provider: ProviderId, base_url: String) -> Result<
         return Err(anyhow!("model discovery failed with {}", response.status()));
     }
     let value: Value = response.json().await?;
-    let root = if provider == ProviderId::Gemini { "models" } else { "data" };
+    let root = if provider == ProviderId::Gemini {
+        "models"
+    } else {
+        "data"
+    };
     Ok(model_ids(&value, root))
 }
 
 fn model_ids(value: &Value, root: &str) -> Vec<String> {
-    value.get(root).and_then(Value::as_array).into_iter().flatten()
-        .filter_map(|item| item.get("id").or_else(|| item.get("name")).and_then(Value::as_str))
+    value
+        .get(root)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            item.get("id")
+                .or_else(|| item.get("name"))
+                .and_then(Value::as_str)
+        })
         .map(|id| id.strip_prefix("models/").unwrap_or(id).to_string())
         .collect()
 }
@@ -1178,7 +1513,11 @@ mod byok_tests {
 
     #[test]
     fn compatible_url_requires_https_or_loopback() {
-        let mut c = choice(ProviderId::OpenaiCompatible, "model", "http://example.com/v1");
+        let mut c = choice(
+            ProviderId::OpenaiCompatible,
+            "model",
+            "http://example.com/v1",
+        );
         assert!(openai_base(&c).is_err());
         c.base_url = "http://localhost:1234/v1/".into();
         assert_eq!(openai_base(&c).unwrap(), "http://localhost:1234/v1");
@@ -1203,20 +1542,27 @@ mod byok_tests {
 
     #[test]
     fn openai_chat_contract_parses_message_content() {
-        let text = parse_openai_text_response(&json!({"choices":[{"message":{"content":"hello"}}]})).unwrap();
+        let text =
+            parse_openai_text_response(&json!({"choices":[{"message":{"content":"hello"}}]}))
+                .unwrap();
         assert_eq!(text, "hello");
     }
 
     #[test]
     fn openai_embedding_contract_enforces_768_values() {
-        let vector = parse_openai_embedding_response(&json!({"data":[{"embedding": vec![0.25; 768]}]})).unwrap();
+        let vector =
+            parse_openai_embedding_response(&json!({"data":[{"embedding": vec![0.25; 768]}]}))
+                .unwrap();
         assert_eq!(vector.len(), 768);
     }
 
     #[test]
     fn model_discovery_parses_openai_and_gemini_shapes() {
         assert_eq!(model_ids(&json!({"data":[{"id":"a"}]}), "data"), vec!["a"]);
-        assert_eq!(model_ids(&json!({"models":[{"name":"models/b"}]}), "models"), vec!["b"]);
+        assert_eq!(
+            model_ids(&json!({"models":[{"name":"models/b"}]}), "models"),
+            vec!["b"]
+        );
     }
 
     #[test]
@@ -1229,7 +1575,8 @@ mod byok_tests {
 
     #[test]
     fn errors_name_capability_without_provider_body() {
-        let message = provider_http_error("transcription", reqwest::StatusCode::UNAUTHORIZED).to_string();
+        let message =
+            provider_http_error("transcription", reqwest::StatusCode::UNAUTHORIZED).to_string();
         assert!(message.contains("transcription"));
         assert!(message.contains("credential"));
         assert!(!message.contains("request body"));
@@ -1239,14 +1586,34 @@ mod byok_tests {
     fn key_updates_distinguish_keep_delete_and_store() {
         assert_eq!(classify_key_update(None), KeyUpdate::Keep);
         assert_eq!(classify_key_update(Some("  ".into())), KeyUpdate::Delete);
-        assert_eq!(classify_key_update(Some(" secret ".into())), KeyUpdate::Store("secret".into()));
+        assert_eq!(
+            classify_key_update(Some(" secret ".into())),
+            KeyUpdate::Store("secret".into())
+        );
+    }
+
+    #[test]
+    fn hosted_profile_requires_its_activation_credential() {
+        assert!(validate_mode_credential(Mode::Hosted, false).is_err());
+        assert!(validate_mode_credential(Mode::Hosted, true).is_ok());
+        assert!(validate_mode_credential(Mode::Local, false).is_ok());
+        assert!(validate_mode_credential(Mode::Byok, false).is_ok());
     }
 
     #[test]
     fn profile_fingerprints_prevent_cross_provider_search() {
         let byok = ByokConfig::default();
-        assert_eq!(profile_embedding_fingerprint("local", &byok), profile_embedding_fingerprint("balanced", &byok));
-        assert_ne!(profile_embedding_fingerprint("local", &byok), profile_embedding_fingerprint("hosted", &byok));
-        assert_ne!(profile_embedding_fingerprint("local", &byok), profile_embedding_fingerprint("byok", &byok));
+        assert_eq!(
+            profile_embedding_fingerprint("local", &byok),
+            profile_embedding_fingerprint("balanced", &byok)
+        );
+        assert_ne!(
+            profile_embedding_fingerprint("local", &byok),
+            profile_embedding_fingerprint("hosted", &byok)
+        );
+        assert_ne!(
+            profile_embedding_fingerprint("local", &byok),
+            profile_embedding_fingerprint("byok", &byok)
+        );
     }
 }

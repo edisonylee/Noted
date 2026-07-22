@@ -3,12 +3,12 @@
 // Meeting notes open the full MeetingPage (transcript + summary tabs);
 // everything else gets a clean read-only detail pane.
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowLeft, AudioLines, BookOpen, FileText, Inbox, PanelLeftClose, PanelLeftOpen, Search } from "lucide-react";
-import { type CategoryInfo, type NoteRow } from "./api";
+import { api, type CategoryInfo, type MeetingListRow, type NoteRow } from "./api";
 import { DataView } from "./DataView";
 import { MeetingPage } from "./MeetingPage";
-import { relativeDay } from "./day";
+import { easternDay, relativeDay } from "./day";
 
 function noteCats(n: NoteRow): string[] {
   return n.entries
@@ -41,6 +41,7 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
   const [query, setQuery] = useState("");
   const [openNote, setOpenNote] = useState<NoteRow | null>(null);
   const [openMeeting, setOpenMeeting] = useState<number | null>(null);
+  const [meetings, setMeetings] = useState<MeetingListRow[]>([]);
   // The spaces column collapses (and stays collapsed across launches).
   const [spacesOpen, setSpacesOpenState] = useState(
     () => localStorage.getItem("noted-spaces") !== "closed"
@@ -50,12 +51,31 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
     localStorage.setItem("noted-spaces", o ? "open" : "closed");
   };
 
+  const loadMeetings = useCallback(() => {
+    api.meetingList().then(setMeetings).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    loadMeetings();
+  }, [loadMeetings]);
+
+  const successfulMeetings = useMemo(
+    () => meetings.filter(
+      (m) =>
+        m.status !== "failed" ||
+        m.segment_count > 0 ||
+        m.summary_count > 0 ||
+        m.note_id != null
+    ),
+    [meetings]
+  );
+
   // Spaces: the two first-class ones, then every other category by volume.
   const spaces = useMemo(() => {
     const count = (pred: (n: NoteRow) => boolean) => notes.filter(pred).length;
     const fixed = [
       { id: "all", label: "All notes", n: notes.length },
-      { id: "meetings", label: "Meetings", n: count((x) => noteCats(x).includes("meetings")) },
+      { id: "meetings", label: "Meetings", n: successfulMeetings.length },
       { id: "journal", label: "Journal", n: count((x) => noteCats(x).includes("journal")) },
     ];
     const rest = cats
@@ -69,7 +89,7 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
       .filter((s) => s.n > 0)
       .sort((a, b) => b.n - a.n);
     return [...fixed, ...rest];
-  }, [notes, cats]);
+  }, [notes, cats, successfulMeetings.length]);
 
   const list = useMemo(() => {
     let rows = space === "all" ? notes : notes.filter((n) => noteCats(n).includes(space));
@@ -78,8 +98,24 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
     return rows;
   }, [notes, space, query]);
 
+  const meetingRows = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return successfulMeetings;
+    return successfulMeetings.filter((m) =>
+      `${m.title} ${m.status}`.toLowerCase().includes(q)
+    );
+  }, [successfulMeetings, query]);
+
   if (openMeeting != null) {
-    return <MeetingPage id={openMeeting} onBack={() => setOpenMeeting(null)} />;
+    return (
+      <MeetingPage
+        id={openMeeting}
+        onBack={() => {
+          setOpenMeeting(null);
+          loadMeetings();
+        }}
+      />
+    );
   }
 
   if (openNote) {
@@ -190,10 +226,41 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
             />
           </label>
         </div>
-        {list.length === 0 ? (
+        {(space === "meetings" ? meetingRows.length : list.length) === 0 ? (
           <p className="quiet-empty">
-            {query ? "Nothing matches." : "Nothing here yet — capture something."}
+            {query
+              ? "Nothing matches."
+              : space === "meetings"
+                ? "No meetings recorded yet."
+                : "Nothing here yet — capture something."}
           </p>
+        ) : space === "meetings" ? (
+          meetingRows.map((m) => (
+            <button
+              key={m.id}
+              className="note-row"
+              onClick={() => setOpenMeeting(m.id)}
+            >
+              <AudioLines size={14} className="note-row-icon" />
+              <span className="note-row-title">{m.title}</span>
+              <span className="note-row-chips">
+                <em className="note-chip">
+                  {m.status === "recording"
+                    ? "recording"
+                    : m.status === "summarizing"
+                      ? "enhancing notes"
+                      : m.summary_count > 0
+                        ? "meeting notes"
+                        : m.segment_count > 0
+                          ? "transcript"
+                          : "meeting"}
+                </em>
+              </span>
+              <span className="note-row-date">
+                {m.started_at ? relativeDay(easternDay(new Date(m.started_at))) : ""}
+              </span>
+            </button>
+          ))
         ) : (
           list.map((n) => (
             <button key={n.id} className="note-row" onClick={() => open(n)}>

@@ -202,3 +202,36 @@ fn rename_speaker_onto_existing_label_merges_rows() {
     assert!(labels.contains(&"Vivian".to_string()) && labels.contains(&"Brian".to_string()));
     let _ = std::fs::remove_file(&tmp);
 }
+
+#[test]
+fn failed_calendar_meeting_does_not_block_retry() {
+    use tauri_app_lib::meeting::store;
+
+    let tmp = std::env::temp_dir().join(format!("noted_meeting_retry_{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::init(&tmp).unwrap();
+    let failed = store::create_meeting(
+        &conn,
+        "Standup",
+        Some("calendar-event"),
+        None,
+        "2026-07-21T15:00:00Z",
+    )
+    .unwrap();
+    store::set_status(&conn, failed, "failed").unwrap();
+    assert_eq!(store::find_meeting_by_event(&conn, "calendar-event").unwrap(), None);
+
+    let retry = store::create_meeting(
+        &conn,
+        "Standup",
+        Some("calendar-event"),
+        None,
+        "2026-07-21T15:01:00Z",
+    )
+    .unwrap();
+    assert_eq!(
+        store::find_meeting_by_event(&conn, "calendar-event").unwrap(),
+        Some(retry)
+    );
+    let _ = std::fs::remove_file(&tmp);
+}

@@ -309,11 +309,10 @@ fn run(app: tauri::AppHandle) {
                 let state = app.state::<MeetingState>();
                 let guard = state.0.lock().unwrap();
                 let a = guard.as_ref().unwrap();
-                let sig = a
-                    .me
-                    .last_signal
-                    .load(Ordering::Relaxed)
-                    .max(a.them.last_signal.load(Ordering::Relaxed));
+                let sig =
+                    a.me.last_signal
+                        .load(Ordering::Relaxed)
+                        .max(a.them.last_signal.load(Ordering::Relaxed));
                 (
                     a.stopping,
                     a.source_bundle.clone(),
@@ -355,10 +354,7 @@ fn run(app: tauri::AppHandle) {
                 }
             }
             if let (Some(end), Some(date)) = (sched_end, ev_date.as_deref()) {
-                if date == crate::today_local()
-                    && now_min() > end + 5
-                    && silence_ms > 5 * 60_000
-                {
+                if date == crate::today_local() && now_min() > end + 5 && silence_ms > 5 * 60_000 {
                     stop_reason = Some("scheduled end passed");
                 }
             }
@@ -412,17 +408,21 @@ fn run(app: tauri::AppHandle) {
         // ended), or the calendar start slipped 15+ minutes into the past.
         {
             let pending = app.state::<PendingPrompt>();
-            let stale = pending.0.lock().unwrap().as_ref().is_some_and(|p| {
-                match p["kind"].as_str() {
-                    Some("mic") => p["bundleId"]
-                        .as_str()
-                        .is_some_and(|b| !users.iter().any(|u| u == b)),
-                    Some("calendar") => p["event"]["start_min"]
-                        .as_i64()
-                        .is_some_and(|start| nmin > start + ADJACENCY_MIN),
-                    _ => false,
-                }
-            });
+            let stale =
+                pending
+                    .0
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|p| match p["kind"].as_str() {
+                        Some("mic") => p["bundleId"]
+                            .as_str()
+                            .is_some_and(|b| !users.iter().any(|u| u == b)),
+                        Some("calendar") => p["event"]["start_min"]
+                            .as_i64()
+                            .is_some_and(|start| nmin > start + ADJACENCY_MIN),
+                        _ => false,
+                    });
             if stale {
                 close_prompt(&app);
             }
@@ -441,7 +441,10 @@ fn run(app: tauri::AppHandle) {
             }
             {
                 let cd = cooldown.0.lock().unwrap();
-                if cd.get(bundle).is_some_and(|t| now.saturating_sub(*t) < COOLDOWN_MS) {
+                if cd
+                    .get(bundle)
+                    .is_some_and(|t| now.saturating_sub(*t) < COOLDOWN_MS)
+                {
                     continue;
                 }
             }

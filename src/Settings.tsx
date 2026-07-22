@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { X, Check, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, Download, Mic, Plus, RefreshCw, Trash2, FolderPlus, Laptop, Gauge, Cloud, KeyRound } from "lucide-react";
 import { api, type BrainVaultStatus, type ByokConfig, type CloudProvider, type GcalStatus, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type ProviderId, type ProviderMode, type ProviderSettings } from "./api";
 import { ThemesSettings } from "./ThemesSettings";
+import { releaseProfile } from "./releaseProfile";
 
 // Live connection status, shown as a persistent badge so "is Gemini actually
 // reachable?" is never a mystery — checked on open and after every save/test.
@@ -200,6 +201,12 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
       setLocalTextModel(cfg.text_model ?? "");
       setLocalVisionModel(cfg.vision_model ?? "");
       setByok(cfg.byok);
+      if (cfg.mode === "hosted" && !cfg.has_hosted_key) {
+        setConn({
+          state: "err",
+          msg: "Hosted activation is missing from macOS Keychain. Choose Local and save, or restore activation before using Hosted.",
+        });
+      }
       // If a key is already stored, verify it's actually live on open so the
       // user sees "Connected" without having to remember to click Test.
       const hasActiveKey =
@@ -514,7 +521,9 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           <>
         <h3>Models</h3>
         <p className="settings-sub">
-          Choose Hosted for the simplest setup, use your own API keys, or keep inference private and local.
+          {releaseProfile.notedHosted
+            ? "Choose Hosted for the simplest setup, use your own API keys, or keep inference private and local."
+            : "Keep inference private and local, or route each capability through your own API keys."}
         </p>
 
         <div className="provider-profiles" role="radiogroup" aria-label="Model profile">
@@ -523,23 +532,27 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
             <span className="provider-profile-copy"><strong>Local</strong><small>Private on this Mac</small></span>
             {mode === "local" && <Check className="provider-profile-check" size={15} />}
           </button>
-          <button role="radio" className={"provider-profile" + (mode === "balanced" ? " on" : "")} onClick={() => setMode("balanced")} aria-checked={mode === "balanced"}>
-            <span className="provider-profile-icon"><Gauge size={17} /></span>
-            <span className="provider-profile-copy"><strong>Balanced</strong><small>Local with cloud assist</small></span>
-            {mode === "balanced" && <Check className="provider-profile-check" size={15} />}
-          </button>
-          <button
-            className={"provider-profile recommended" + (mode === "hosted" ? " on" : "")}
-            onClick={() => setMode("hosted")}
-            disabled={!s?.has_hosted_key}
-            title={s?.has_hosted_key ? "Use your Noted hosted account" : "Activate a Noted account first"}
-            role="radio"
-            aria-checked={mode === "hosted"}
-          >
-            <span className="provider-profile-icon"><Cloud size={17} /></span>
-            <span className="provider-profile-copy"><strong>Hosted <em>Recommended</em></strong><small>Everything included</small></span>
-            {mode === "hosted" && <Check className="provider-profile-check" size={15} />}
-          </button>
+          {releaseProfile.balancedInference && (
+            <button role="radio" className={"provider-profile" + (mode === "balanced" ? " on" : "")} onClick={() => setMode("balanced")} aria-checked={mode === "balanced"}>
+              <span className="provider-profile-icon"><Gauge size={17} /></span>
+              <span className="provider-profile-copy"><strong>Balanced</strong><small>Local with cloud assist</small></span>
+              {mode === "balanced" && <Check className="provider-profile-check" size={15} />}
+            </button>
+          )}
+          {releaseProfile.notedHosted && (
+            <button
+              className={"provider-profile recommended" + (mode === "hosted" ? " on" : "")}
+              onClick={() => setMode("hosted")}
+              disabled={!s?.has_hosted_key}
+              title={s?.has_hosted_key ? "Use your Noted hosted account" : "Activate a Noted account first"}
+              role="radio"
+              aria-checked={mode === "hosted"}
+            >
+              <span className="provider-profile-icon"><Cloud size={17} /></span>
+              <span className="provider-profile-copy"><strong>Hosted <em>Recommended</em></strong><small>Everything included</small></span>
+              {mode === "hosted" && <Check className="provider-profile-check" size={15} />}
+            </button>
+          )}
           <button role="radio" className={"provider-profile" + (mode === "byok" ? " on" : "")} onClick={() => setMode("byok")} aria-checked={mode === "byok"}>
             <span className="provider-profile-icon"><KeyRound size={17} /></span>
             <span className="provider-profile-copy"><strong>My API keys</strong><small>Choose every provider</small></span>
@@ -580,7 +593,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           </span>
         </div>}
 
-        {mode === "hosted" && (
+        {releaseProfile.notedHosted && mode === "hosted" && (
           <div className="settings-fields">
             <div className={"conn-status " + conn.state}>
               {conn.state === "checking" && <Loader2 size={13} className="spin" />}
@@ -591,7 +604,9 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
                   ? "Checking Noted Hosted…"
                   : conn.state === "ok"
                     ? conn.msg
-                    : "Ready to connect"}
+                    : s?.has_hosted_key
+                      ? "Ready to connect"
+                      : "Hosted activation missing"}
               </span>
             </div>
             {conn.state === "err" && <div className="conn-detail">{conn.msg}</div>}
@@ -599,13 +614,13 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               Your activation credential is stored in macOS Keychain. No Ollama, Gemma, Parakeet,
               Whisper, or embedding-model download is required.
             </span>
-            <button className="ghost-btn test-btn" onClick={() => checkConnection({ mode: "hosted" })}>
+            <button className="ghost-btn test-btn" onClick={() => checkConnection({ mode: "hosted" })} disabled={!s?.has_hosted_key}>
               Test hosted connection
             </button>
           </div>
         )}
 
-        {mode === "balanced" && (
+        {releaseProfile.balancedInference && mode === "balanced" && (
           <div className="settings-fields">
             <div className={"conn-status " + conn.state}>
               {conn.state === "checking" && <Loader2 size={13} className="spin" />}
@@ -795,11 +810,12 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               ["embeddings", "Semantic search index"],
               ["transcription", "Dictation and meeting audio"],
             ] as const).map(([slot, label]) => {
-              const allowed: ProviderId[] = slot === "embeddings"
+              const allowed: ProviderId[] = (slot === "embeddings"
                 ? ["openai", "gemini", "openai_compatible", "noted_hosted"]
                 : slot === "transcription"
                   ? ["openai", "gemini", "groq", "openai_compatible", "noted_hosted"]
-                  : ["openai", "gemini", "anthropic", "groq", "openai_compatible", "noted_hosted"];
+                  : ["openai", "gemini", "anthropic", "groq", "openai_compatible", "noted_hosted"]
+              ).filter((provider) => releaseProfile.notedHosted || provider !== "noted_hosted") as ProviderId[];
               const choice = byok[slot];
               const update = (patch: Partial<typeof choice>) => setByok({ ...byok, [slot]: { ...choice, ...patch } });
               return <div className="field-row" key={slot}>
@@ -1094,8 +1110,8 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
         <h3>Meetings</h3>
         <p className="settings-sub">
           noted records meetings bot-free using your mic + system audio. Choose private local
-          transcription or hosted Parakeet with no model download. Nothing is captured unless
-          you accept a prompt or hit Record.
+          transcription{releaseProfile.notedHosted ? " or hosted Parakeet with no model download" : " or your own transcription provider"}.
+          Nothing is captured unless you accept a prompt or hit Record.
         </p>
 
         <div className="settings-fields">
@@ -1132,6 +1148,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               </em>
             </span>
           </label>
+          {releaseProfile.videoCapture && (
           <label className="vault-auto">
             <input
               type="checkbox"
@@ -1160,6 +1177,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               </em>
             </span>
           </label>
+          )}
           <label className="vault-auto">
             <input
               type="checkbox"
@@ -1366,7 +1384,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               {probing ? <Loader2 size={14} className="spin" /> : <Mic size={14} />} Test capture
             </button>
           </div>
-          <div className="field-row">
+          {releaseProfile.diarization && <div className="field-row">
             {mModel?.speaker ? (
               <span className="field-hint">
                 <Check size={13} /> Speaker ID ready — transcripts label who's speaking
@@ -1382,7 +1400,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
                 {sDownloading ? "Downloading (29 MB)…" : "Download speaker ID model (29 MB)"}
               </button>
             )}
-          </div>
+          </div>}
           <label className="field">
             <span className="field-label">Transcription engine</span>
             <select
@@ -1397,10 +1415,12 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
                 Parakeet — faster, better with names
                 {mModel?.parakeet ? "" : " (download below)"}
               </option>
-              <option value="hosted" disabled={!mModel?.hosted}>
-                Hosted Parakeet — no local model download
-                {mModel?.hosted ? "" : " (activation required)"}
-              </option>
+              {releaseProfile.notedHosted && (
+                <option value="hosted" disabled={!mModel?.hosted}>
+                  Hosted Parakeet — no local model download
+                  {mModel?.hosted ? "" : " (activation required)"}
+                </option>
+              )}
             </select>
           </label>
           <div className="field-row">

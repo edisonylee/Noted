@@ -33,7 +33,12 @@ fn transcript_text(segments: &[Value]) -> String {
                 "me" => "Me",
                 _ => s["speaker"].as_str().unwrap_or("Them"),
             };
-            format!("[{}] {}: {}", mmss(t0), who, s["text"].as_str().unwrap_or(""))
+            format!(
+                "[{}] {}: {}",
+                mmss(t0),
+                who,
+                s["text"].as_str().unwrap_or("")
+            )
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -86,7 +91,10 @@ pub fn export_markdown(meeting: &Value) -> String {
         }
     }
     if !raw_notes.trim().is_empty() {
-        md.push_str(&format!("\n---\n\n## Your Notes (verbatim)\n\n{}\n", raw_notes.trim()));
+        md.push_str(&format!(
+            "\n---\n\n## Your Notes (verbatim)\n\n{}\n",
+            raw_notes.trim()
+        ));
     }
     if !segments.is_empty() {
         md.push_str("\n---\n\n## Transcript\n\n");
@@ -354,7 +362,10 @@ fn name_evidence(segments: &[Value], unnamed: &[String], attendees: &[String]) -
     }
     for (i, s) in segments.iter().enumerate() {
         let text = s["text"].as_str().unwrap_or("").to_lowercase();
-        if firsts.iter().any(|f| !f.is_empty() && text.contains(f.as_str())) {
+        if firsts
+            .iter()
+            .any(|f| !f.is_empty() && text.contains(f.as_str()))
+        {
             picked.push(i);
         }
     }
@@ -396,7 +407,11 @@ pub async fn suggest_speaker_names(app: &tauri::AppHandle, meeting_id: i64) -> R
             })
             .filter_map(|s| s["label"].as_str().map(String::from))
             .collect();
-        (segments, unnamed, external_attendees(&meeting["event_json"]))
+        (
+            segments,
+            unnamed,
+            external_attendees(&meeting["event_json"]),
+        )
     };
     if unnamed.is_empty() || segments.is_empty() {
         return Ok(0);
@@ -426,7 +441,11 @@ pub async fn suggest_speaker_names(app: &tauri::AppHandle, meeting_id: i64) -> R
         "UNIDENTIFIED SPEAKERS: {}\n\nCANDIDATE NAMES (calendar attendees): {}\n\n\
          TRANSCRIPT EXCERPTS:\n{evidence}",
         unnamed.join(", "),
-        if attendees.is_empty() { "(none listed — use names stated in the transcript)".into() } else { attendees.join(", ") },
+        if attendees.is_empty() {
+            "(none listed — use names stated in the transcript)".into()
+        } else {
+            attendees.join(", ")
+        },
     );
     let out = ollama::chat_json_local_ctx(
         &ollama::text_model(),
@@ -479,7 +498,11 @@ pub async fn suggest_speaker_names(app: &tauri::AppHandle, meeting_id: i64) -> R
 
 /// Generate or refresh one template summary for a meeting. Files the meeting
 /// note on first summarize; later runs replace that template's existing tab.
-pub async fn run(app: &tauri::AppHandle, meeting_id: i64, template_name: Option<String>) -> Result<String> {
+pub async fn run(
+    app: &tauri::AppHandle,
+    meeting_id: i64,
+    template_name: Option<String>,
+) -> Result<String> {
     // Snapshot everything under one short lock.
     let (meeting, segments, template, prompt) = {
         let state = app.state::<Db>();
@@ -521,13 +544,21 @@ pub async fn run(app: &tauri::AppHandle, meeting_id: i64, template_name: Option<
          MEETING: {title}{}{}\n\n\
          MY TYPED NOTES:\n{}\n\n\
          TRANSCRIPT:\n{transcript}",
-        if date.is_empty() { String::new() } else { format!(" ({date})") },
+        if date.is_empty() {
+            String::new()
+        } else {
+            format!(" ({date})")
+        },
         if attendees.is_empty() {
             String::new()
         } else {
             format!("\nATTENDEES: {}", attendees.join(", "))
         },
-        if raw_notes.trim().is_empty() { "(none)" } else { raw_notes.trim() },
+        if raw_notes.trim().is_empty() {
+            "(none)"
+        } else {
+            raw_notes.trim()
+        },
     );
 
     let out = ollama::chat_json_local_ctx(
@@ -567,7 +598,10 @@ pub async fn run(app: &tauri::AppHandle, meeting_id: i64, template_name: Option<
             / 60_000;
         let mut note_text = format!("# {title}\n\n{md}");
         if !raw_notes.trim().is_empty() {
-            note_text.push_str(&format!("\n\n## Your Notes (verbatim)\n\n{}", raw_notes.trim()));
+            note_text.push_str(&format!(
+                "\n\n## Your Notes (verbatim)\n\n{}",
+                raw_notes.trim()
+            ));
         }
         let entities: Vec<Value> = attendees
             .iter()
@@ -651,9 +685,7 @@ pub async fn extract_knowledge(app: &tauri::AppHandle, meeting_id: i64) -> Resul
             .into_iter()
             .flatten()
             .filter_map(|s| s["label"].as_str())
-            .filter(|l| {
-                !l.is_empty() && *l != "Me" && *l != "Them" && !l.starts_with("Speaker ")
-            })
+            .filter(|l| !l.is_empty() && *l != "Me" && *l != "Them" && !l.starts_with("Speaker "))
             .map(|l| l.to_string())
             .collect();
         // Richest tab wins: the longest summary carries the most extractable detail.
@@ -695,7 +727,11 @@ pub async fn extract_knowledge(app: &tauri::AppHandle, meeting_id: i64) -> Resul
     body.truncate(12_000);
     let user = format!(
         "Meeting: {title} ({date})\nAttendees: {}\n\nSummary:\n{body}",
-        if attendees.is_empty() { "(unknown)".to_string() } else { attendees.join(", ") }
+        if attendees.is_empty() {
+            "(unknown)".to_string()
+        } else {
+            attendees.join(", ")
+        }
     );
     // People first — attendees AND named speakers — deduped by normalized name.
     // These file even when the content extraction below has a bad day, and the
@@ -743,7 +779,10 @@ pub async fn extract_knowledge(app: &tauri::AppHandle, meeting_id: i64) -> Resul
                 Some(crate::EntityCandidate {
                     name: name.to_string(),
                     etype,
-                    fact: e["fact"].as_str().map(|f| f.trim().to_string()).filter(|f| !f.is_empty()),
+                    fact: e["fact"]
+                        .as_str()
+                        .map(|f| f.trim().to_string())
+                        .filter(|f| !f.is_empty()),
                     relationship: None,
                 })
             }),
@@ -752,8 +791,7 @@ pub async fn extract_knowledge(app: &tauri::AppHandle, meeting_id: i64) -> Resul
         return Ok(0);
     }
     let now = chrono::Utc::now().to_rfc3339();
-    let added =
-        crate::persist_entities(app, note_id, &date, &title, &now, candidates, true).await;
+    let added = crate::persist_entities(app, note_id, &date, &title, &now, candidates, true).await;
     Ok(added as usize)
 }
 
@@ -795,7 +833,10 @@ mod tests {
         assert!(md.starts_with("# Standup"));
         assert!(md.contains("*2026-07-13 · Mayan, Jasmine · you spoke 25%*"));
         assert!(md.contains("## Meeting"));
-        assert!(md.contains("### Summary"), "summary headings demote under the tab name");
+        assert!(
+            md.contains("### Summary"),
+            "summary headings demote under the tab name"
+        );
         assert!(md.contains("- [00:02] **Mayan**: hello"));
         assert!(md.contains("## Your Notes (verbatim)\n\nremember the demo"));
     }
@@ -814,7 +855,10 @@ mod tests {
         assert!(idx("## Summary") < idx("## Key Takeaways"));
         assert!(idx("## Key Takeaways") < idx("## Chapters"));
         assert!(md.contains("- **[00:12]** Kickoff"));
-        assert!(md.contains("- **[05:30]** Demo"), "brackets normalized: {md}");
+        assert!(
+            md.contains("- **[05:30]** Demo"),
+            "brackets normalized: {md}"
+        );
         assert!(md.contains("- [ ] Me — write the plan by Friday"));
     }
 
@@ -850,6 +894,9 @@ mod tests {
         let t = transcript_text(&segs);
         assert!(t.contains("[00:01] Me: hi"));
         assert!(t.contains("[00:02] Them: hello"));
-        assert!(t.contains("[00:03] Ana: renamed"), "diarized name wins: {t}");
+        assert!(
+            t.contains("[00:03] Ana: renamed"),
+            "diarized name wins: {t}"
+        );
     }
 }

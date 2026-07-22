@@ -149,7 +149,7 @@ impl Default for MeetingsCfg {
             vocabulary: Vec::new(),
             asr_engine: d_engine(),
             mic_aec: true,
-            record_video: true,
+            record_video: crate::release_profile::video_capture(),
             video_keep_days: d_video_days(),
         }
     }
@@ -165,15 +165,39 @@ pub fn cfg() -> MeetingsCfg {
     cfg_cell().read().unwrap().clone()
 }
 
+fn apply_release_profile(mut value: MeetingsCfg) -> MeetingsCfg {
+    if !crate::release_profile::noted_hosted() && value.asr_engine == "hosted" {
+        value.asr_engine = d_engine();
+    }
+    if !crate::release_profile::video_capture() {
+        value.record_video = false;
+    }
+    value
+}
+
+fn validate_asr_engine(engine: &str, hosted_ready: bool) -> Result<()> {
+    if !matches!(engine, "whisper" | "parakeet" | "hosted") {
+        return Err(anyhow!("unknown meeting transcription engine: {engine}"));
+    }
+    if engine == "hosted" && !hosted_ready {
+        return Err(anyhow!(
+            "Hosted transcription is not activated on this Mac. Restore the Noted activation credential or choose Whisper."
+        ));
+    }
+    Ok(())
+}
+
 pub fn cfg_init(dir: &std::path::Path) {
     if let Ok(text) = std::fs::read_to_string(dir.join("meetings.json")) {
         if let Ok(loaded) = serde_json::from_str::<MeetingsCfg>(&text) {
-            *cfg_cell().write().unwrap() = loaded;
+            *cfg_cell().write().unwrap() = apply_release_profile(loaded);
         }
     }
 }
 
 pub fn cfg_update(dir: &std::path::Path, new_cfg: MeetingsCfg) -> Result<()> {
+    let new_cfg = apply_release_profile(new_cfg);
+    validate_asr_engine(&new_cfg.asr_engine, crate::hosted::has_key())?;
     std::fs::write(
         dir.join("meetings.json"),
         serde_json::to_string_pretty(&new_cfg)?,
@@ -240,21 +264,28 @@ pub fn parakeet_ready(app: &tauri::AppHandle) -> bool {
 /// fail over a settings/download mismatch).
 pub fn engine_spec(app: &tauri::AppHandle) -> Result<asr::EngineSpec> {
     if crate::provider::use_byok() {
-        return Ok(asr::EngineSpec::Byok { vocabulary: cfg().vocabulary });
+        return Ok(asr::EngineSpec::Byok {
+            vocabulary: cfg().vocabulary,
+        });
     }
-    if cfg().asr_engine == "hosted" {
-        if crate::hosted::has_key() {
-            return Ok(asr::EngineSpec::Hosted { vocabulary: cfg().vocabulary });
-        }
-        eprintln!("[noted] hosted ASR selected but no API key is configured — using local ASR");
+    let config = cfg();
+    validate_asr_engine(&config.asr_engine, crate::hosted::has_key())?;
+    if crate::release_profile::noted_hosted() && config.asr_engine == "hosted" {
+        return Ok(asr::EngineSpec::Hosted {
+            vocabulary: config.vocabulary,
+        });
     }
-    if cfg().asr_engine == "parakeet" {
+    if config.asr_engine == "parakeet" {
         if parakeet_ready(app) {
-            return Ok(asr::EngineSpec::Parakeet { dir: parakeet_dir(app)? });
+            return Ok(asr::EngineSpec::Parakeet {
+                dir: parakeet_dir(app)?,
+            });
         }
         eprintln!("[noted] parakeet selected but not downloaded — using whisper");
     }
-    Ok(asr::EngineSpec::Whisper { model: model_path(app)? })
+    Ok(asr::EngineSpec::Whisper {
+        model: model_path(app)?,
+    })
 }
 
 /// Begin recording. `event_json` is the calendar-event snapshot when started
@@ -290,12 +321,14 @@ pub fn start(
             .unwrap_or_default();
         let db = app.state::<Db>();
         let conn = db.0.lock().unwrap();
-        names.extend(
-            store::speaker_profiles(&conn)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(n, _, _)| n),
-        );
+        if crate::release_profile::diarization() {
+            names.extend(
+                store::speaker_profiles(&conn)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(n, _, _)| n),
+            );
+        }
         (asr::vocab_hint(&names, &c.vocabulary), c.vocabulary)
     };
 
@@ -330,10 +363,64 @@ pub fn start(
     let started_epoch_ms = epoch_ms();
     let mut threads = Vec::new();
 
+    // ASR and retained-audio writers must be ready before capture starts or the
+    // UI announces a recording. Previously this initialization happened in
+    // the background, so a rejected Hosted session left a convincing but empty
+    // meeting row running until the user pressed Stop.
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let asr_thread = {
+        let args = asr::WorkerArgs {
+            meeting_id: id,
+            me: me.clone(),
+            them: them.clone(),
+            stop: stop.clone(),
+            engine,
+            ready: ready_tx,
+            audio_dir: audio_dir.clone(),
+            started_epoch_ms,
+            speaker_model: if crate::release_profile::diarization() {
+                diarize::model_path(app)
+            } else {
+                None
+            },
+            asr_hint,
+            vocab,
+        };
+        let h = app.clone();
+        std::thread::spawn(move || asr::run_worker(h, args))
+    };
+    match ready_rx.recv() {
+        Ok(Ok(())) => threads.push(asr_thread),
+        Ok(Err(message)) => {
+            let _ = asr_thread.join();
+            let db = app.state::<Db>();
+            let conn = db.0.lock().unwrap();
+            let _ = store::delete_meeting(&conn, id);
+            drop(conn);
+            if let Some(dir) = &audio_dir {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            return Err(anyhow!(message));
+        }
+        Err(_) => {
+            let _ = asr_thread.join();
+            let db = app.state::<Db>();
+            let conn = db.0.lock().unwrap();
+            let _ = store::delete_meeting(&conn, id);
+            drop(conn);
+            if let Some(dir) = &audio_dir {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            return Err(anyhow!("meeting transcription stopped during startup"));
+        }
+    }
+
     if capture::tap_supported() {
         let (b, s) = (them.clone(), stop.clone());
         let log = audio_dir.as_ref().map(|d| d.join("capture.log"));
-        threads.push(std::thread::spawn(move || capture::run_system_tap(b, s, log)));
+        threads.push(std::thread::spawn(move || {
+            capture::run_system_tap(b, s, log)
+        }));
     } else {
         eprintln!("[noted] system-audio tap needs macOS 14.4+; recording mic only");
     }
@@ -342,26 +429,10 @@ pub fn start(
         let aec = cfg().mic_aec;
         threads.push(std::thread::spawn(move || capture::run_mic(b, s, aec)));
     }
-    {
-        let args = asr::WorkerArgs {
-            meeting_id: id,
-            me: me.clone(),
-            them: them.clone(),
-            stop: stop.clone(),
-            engine,
-            audio_dir: audio_dir.clone(),
-            started_epoch_ms,
-            speaker_model: diarize::model_path(app),
-            asr_hint,
-            vocab,
-        };
-        let h = app.clone();
-        threads.push(std::thread::spawn(move || asr::run_worker(h, args)));
-    }
     // Window video rides along when enabled (its own dir derivation — audio
     // retention off shouldn't disable video). Fire-and-forget: the worker
     // stamps video_path itself; stop() doesn't wait on it.
-    if cfg().record_video {
+    if crate::release_profile::video_capture() && cfg().record_video {
         if let Ok(base) = app.path().app_data_dir() {
             video::spawn(
                 app.clone(),
@@ -389,7 +460,10 @@ pub fn start(
         stopping: false,
     });
     detect::close_prompt(app); // an accepted (or now-moot) prompt goes away
-    let _ = app.emit("meeting-started", json!({ "meetingId": id, "title": title }));
+    let _ = app.emit(
+        "meeting-started",
+        json!({ "meetingId": id, "title": title }),
+    );
     Ok(id)
 }
 
@@ -454,16 +528,29 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
     let h = app.clone();
     tauri::async_runtime::spawn(async move {
         match summarize::run(&h, id, None).await {
-            Ok(_) => {
+            Ok(_) if crate::release_profile::diarization() => {
                 if let Err(e) = summarize::suggest_speaker_names(&h, id).await {
                     eprintln!("[noted] speaker-name suggestions failed: {e}");
                 }
             }
+            Ok(_) => {}
             Err(e) => {
                 eprintln!("[noted] meeting summarize failed: {e}");
                 let db = h.state::<Db>();
                 let conn = db.0.lock().unwrap();
-                let _ = store::set_status(&conn, id, "failed");
+                // Capture already succeeded: preserve the meeting as a usable
+                // transcript even when optional note generation fails.
+                let _ = store::set_status(&conn, id, "done");
+                drop(conn);
+                let _ = h.emit(
+                    "meeting-summarized",
+                    json!({ "meetingId": id, "summaryFailed": true }),
+                );
+                detect::show_status_card(
+                    &h,
+                    &title,
+                    "Meeting saved — transcript ready; notes couldn't be generated.",
+                );
             }
         }
     });
@@ -475,6 +562,9 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
 /// retained wall-anchored WAV so a killed app can't leave a multi-speaker
 /// meeting reading "Them" forever.
 fn rediarize_interrupted(app: &tauri::AppHandle, id: i64) {
+    if !crate::release_profile::diarization() {
+        return;
+    }
     let Some(model) = diarize::model_path(app) else {
         return;
     };
@@ -485,7 +575,9 @@ fn rediarize_interrupted(app: &tauri::AppHandle, id: i64) {
     let db = app.state::<Db>();
     let conn = db.0.lock().unwrap();
     match asr::rediarize_from_wav(&conn, Some(app), &model, &dir, id) {
-        Ok(n) if n > 0 => println!("[noted] recovered speaker labels for meeting {id} ({n} voices)"),
+        Ok(n) if n > 0 => {
+            println!("[noted] recovered speaker labels for meeting {id} ({n} voices)")
+        }
         Ok(_) => {}
         Err(e) => eprintln!("[noted] recovery diarization failed for {id}: {e}"),
     }
@@ -516,22 +608,30 @@ pub fn reconcile(app: &tauri::AppHandle) {
         tauri::async_runtime::spawn(async move {
             // Labels first (blocking: onnx over the whole WAV), so the
             // summary and the reloaded transcript see speaker names.
-            let h2 = h.clone();
-            let _ = tauri::async_runtime::spawn_blocking(move || {
-                rediarize_interrupted(&h2, id);
-            })
-            .await;
+            if crate::release_profile::diarization() {
+                let h2 = h.clone();
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    rediarize_interrupted(&h2, id);
+                })
+                .await;
+            }
             match summarize::run(&h, id, None).await {
-                Ok(_) => {
+                Ok(_) if crate::release_profile::diarization() => {
                     if let Err(e) = summarize::suggest_speaker_names(&h, id).await {
                         eprintln!("[noted] speaker-name suggestions failed: {e}");
                     }
                 }
+                Ok(_) => {}
                 Err(e) => {
                     eprintln!("[noted] recovery summarize failed for {id}: {e}");
                     let db = h.state::<Db>();
                     let conn = db.0.lock().unwrap();
-                    let _ = store::set_status(&conn, id, "failed");
+                    let _ = store::set_status(&conn, id, "done");
+                    drop(conn);
+                    let _ = h.emit(
+                        "meeting-summarized",
+                        json!({ "meetingId": id, "summaryFailed": true }),
+                    );
                 }
             }
         });
@@ -545,11 +645,10 @@ pub fn state_json(app: &tauri::AppHandle) -> Value {
     match guard.as_ref() {
         Some(a) => {
             let now = epoch_ms();
-            let sig = a
-                .me
-                .last_signal
-                .load(Ordering::Relaxed)
-                .max(a.them.last_signal.load(Ordering::Relaxed));
+            let sig =
+                a.me.last_signal
+                    .load(Ordering::Relaxed)
+                    .max(a.them.last_signal.load(Ordering::Relaxed));
             let signal_ago = if sig == 0 {
                 Value::Null
             } else {
@@ -565,5 +664,18 @@ pub fn state_json(app: &tauri::AppHandle) -> Value {
             })
         }
         None => json!({ "active": false }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_asr_engine;
+
+    #[test]
+    fn hosted_asr_cannot_start_without_activation() {
+        assert!(validate_asr_engine("hosted", false).is_err());
+        assert!(validate_asr_engine("hosted", true).is_ok());
+        assert!(validate_asr_engine("whisper", false).is_ok());
+        assert!(validate_asr_engine("bogus", true).is_err());
     }
 }

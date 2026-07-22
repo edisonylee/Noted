@@ -34,6 +34,7 @@ import {
   type MeetingTemplate,
   type RangeEvent,
 } from "./api";
+import { releaseProfile } from "./releaseProfile";
 
 function mmss(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -511,7 +512,7 @@ export function MeetingPage({
   // paths land at stop, so playback is a post-meeting affordance).
   const meAudio = localFileUrl(detail?.audio_me_path);
   const themAudio = localFileUrl(detail?.audio_them_path);
-  const videoSrc = localFileUrl(detail?.video_path);
+  const videoSrc = releaseProfile.videoCapture ? localFileUrl(detail?.video_path) : null;
 
   const deleteVideo = async () => {
     if (id == null) return;
@@ -543,7 +544,7 @@ export function MeetingPage({
   }, []);
 
   const copyLine = (s: MeetingSegment) => {
-    const who = s.channel === "me" ? "Me" : s.speaker || "Them";
+    const who = s.channel === "me" ? "Me" : releaseProfile.diarization ? s.speaker || "Them" : "Them";
     navigator.clipboard?.writeText(`[${mmss(s.t0_ms)}] ${who}: ${s.text}`).catch(() => {});
   };
 
@@ -625,6 +626,13 @@ export function MeetingPage({
 
       {exportMsg && <div className="meeting-hint meeting-export-status" role="status">{exportMsg}</div>}
       {error && <div className="error">{error}</div>}
+      {detail?.status === "failed" && (
+        <div className="meeting-failure" role="status">
+          {liveSegments.length === 0
+            ? "Recording failed before any audio or transcript was saved. This attempt remains in your meeting history so it doesn’t disappear."
+            : "Recording stopped before notes were generated. The transcript below is still available."}
+        </div>
+      )}
       {id == null && (
         <p className="meeting-hint">
           Jot prep notes below — recording starts when you hit Record, and your notes get
@@ -645,7 +653,7 @@ export function MeetingPage({
             {liveSegments.length > 0 ? ` (${liveSegments.length})` : ""}
           </button>
         )}
-        {videoSrc && (
+        {releaseProfile.videoCapture && videoSrc && (
           <button className={tab === "video" ? "on" : ""} onClick={() => setTab("video")}>
             <Video size={13} /> Video
           </button>
@@ -772,7 +780,7 @@ export function MeetingPage({
         />
       ) : tab === "transcript" ? (
         <>
-          {speakers.length > 0 && !recording && (
+          {releaseProfile.diarization && speakers.length > 0 && !recording && (
             <div className="speaker-bar">
               <span className="speaker-bar-label">Speakers</span>
               {speakers.map((sp) =>
@@ -875,7 +883,7 @@ export function MeetingPage({
                   }
                 >
                   <span className="who">
-                    {s.channel === "me" ? "Me" : s.speaker || "Them"} · {mmss(s.t0_ms)}
+                    {s.channel === "me" ? "Me" : releaseProfile.diarization ? s.speaker || "Them" : "Them"} · {mmss(s.t0_ms)}
                     <span className="line-ops">
                       {playable && !recording && (
                         <button
@@ -899,7 +907,7 @@ export function MeetingPage({
           </div>
           <audio ref={audioRef} onEnded={() => setPlayingSeg(null)} style={{ display: "none" }} />
         </>
-      ) : tab === "video" ? (
+      ) : releaseProfile.videoCapture && tab === "video" ? (
         <div className="meeting-video">
           {videoSrc ? (
             <>
@@ -953,7 +961,7 @@ export function MeetingPage({
         {notes.trim() && <section><h2>Notes</h2><p className="print-notes">{notes}</p></section>}
         {liveSegments.length > 0 && (
           <section className="print-transcript"><h2>Transcript</h2>
-            {liveSegments.map((s) => <p key={s.id}><b>{s.channel === "me" ? "Me" : s.speaker || "Them"}</b><span>{mmss(s.t0_ms)}</span>{s.text}</p>)}
+            {liveSegments.map((s) => <p key={s.id}><b>{s.channel === "me" ? "Me" : releaseProfile.diarization ? s.speaker || "Them" : "Them"}</b><span>{mmss(s.t0_ms)}</span>{s.text}</p>)}
           </section>
         )}
         <footer>{title} · Generated locally with Noted</footer>

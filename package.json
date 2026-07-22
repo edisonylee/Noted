@@ -6,8 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:alpha": "VITE_NOTED_PROFILE=alpha bun run build",
+    "alpha:check": "bun run build:alpha && node --test tests/alpha-build.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:alpha": "NOTED_RELEASE_PROFILE=alpha VITE_NOTED_PROFILE=alpha tauri build --config src-tauri/tauri.alpha.conf.json",
     "app:update": "bash scripts/install-app.sh"
   },
   "dependencies": {

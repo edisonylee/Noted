@@ -86,12 +86,21 @@ fn async_client(timeout_secs: u64) -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder().timeout(Duration::from_secs(timeout_secs)).build()?)
 }
 
+fn decode_response(status: reqwest::StatusCode, bytes: &[u8], operation: &str) -> Result<Value> {
+    serde_json::from_slice(bytes).map_err(|_| {
+        anyhow!(
+            "{operation} failed ({status}): Hosted returned a non-JSON response; the service may be unavailable"
+        )
+    })
+}
+
 pub async fn models() -> Result<Value> {
     let key = key().ok_or_else(|| anyhow!("hosted API key is not configured"))?;
     let response = async_client(30)?.get(format!("{BASE_URL}/v1/models"))
         .bearer_auth(key).send().await?;
     let status = response.status();
-    let body: Value = response.json().await?;
+    let bytes = response.bytes().await?;
+    let body = decode_response(status, &bytes, "hosted models")?;
     if !status.is_success() {
         return Err(anyhow!("hosted models failed ({status}): {}", error_message(&body)));
     }
@@ -150,7 +159,8 @@ async fn send_chat(body: Value, timeout_secs: u64) -> Result<Value> {
     let response = async_client(timeout_secs)?.post(format!("{BASE_URL}/v1/chat/completions"))
         .bearer_auth(key).json(&body).send().await?;
     let status = response.status();
-    let body: Value = response.json().await?;
+    let bytes = response.bytes().await?;
+    let body = decode_response(status, &bytes, "hosted chat")?;
     if !status.is_success() {
         return Err(anyhow!("hosted chat failed ({status}): {}", error_message(&body)));
     }
@@ -168,7 +178,8 @@ pub async fn embed(input: &str) -> Result<Vec<f32>> {
     let response = async_client(60)?.post(format!("{BASE_URL}/v1/embeddings"))
         .bearer_auth(key).json(&serde_json::json!({"model":EMBED_MODEL,"input":input})).send().await?;
     let status = response.status();
-    let body: Value = response.json().await?;
+    let bytes = response.bytes().await?;
+    let body = decode_response(status, &bytes, "hosted embedding")?;
     if !status.is_success() {
         return Err(anyhow!("hosted embedding failed ({status}): {}", error_message(&body)));
     }
@@ -207,7 +218,8 @@ pub async fn transcribe_batch(samples: &[f32], vocabulary: &[String]) -> Result<
         .send()
         .await?;
     let status = response.status();
-    let body: Value = response.json().await?;
+    let bytes = response.bytes().await?;
+    let body = decode_response(status, &bytes, "hosted transcription")?;
     if !status.is_success() {
         return Err(anyhow!("hosted transcription failed ({status}): {}", error_message(&body)));
     }
@@ -233,7 +245,8 @@ impl Session {
         let response = client.post(format!("{BASE_URL}/v1/noted/transcribe/sessions"))
             .bearer_auth(&key).send()?;
         let status = response.status();
-        let body: Value = response.json()?;
+        let bytes = response.bytes()?;
+        let body = decode_response(status, &bytes, "hosted transcription session")?;
         if !status.is_success() {
             return Err(anyhow!("could not open hosted transcription session ({status}): {}", error_message(&body)));
         }
@@ -259,7 +272,8 @@ impl Session {
                 Ok(response) => {
                     let status = response.status();
                     let retryable = status.as_u16() == 429 || status.as_u16() == 503;
-                    let body: Value = response.json()?;
+                    let bytes = response.bytes()?;
+                    let body = decode_response(status, &bytes, "hosted transcription chunk")?;
                     if status.is_success() {
                         self.next_seq += 1;
                         return Ok(body["text"].as_str().unwrap_or("").to_string());
@@ -281,7 +295,7 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use super::wav_bytes;
+    use super::{decode_response, wav_bytes};
 
     #[test]
     fn writes_pcm16_wav_header() {
@@ -290,5 +304,19 @@ mod tests {
         assert_eq!(&wav[8..12], b"WAVE");
         assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16_000);
         assert_eq!(wav.len(), 50);
+    }
+
+    #[test]
+    fn non_json_service_errors_keep_status_and_context() {
+        let message = decode_response(
+            reqwest::StatusCode::from_u16(530).unwrap(),
+            b"origin unavailable",
+            "hosted models",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(message.contains("hosted models"));
+        assert!(message.contains("530"));
+        assert!(message.contains("non-JSON"));
     }
 }

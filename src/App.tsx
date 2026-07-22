@@ -18,6 +18,7 @@ import { FloatingChat } from "./FloatingChat";
 import { KnowledgeView } from "./Knowledge";
 import { parseBlocks, TodayView } from "./Today";
 import { MeetingPage } from "./MeetingPage";
+import { releaseProfile } from "./releaseProfile";
 import { ComingUp } from "./ComingUp";
 import { NotesView } from "./NotesView";
 import { AskView } from "./AskView";
@@ -95,7 +96,8 @@ export default function App() {
 
   // Mobile-first layout: phone viewports get a bottom-nav + dedicated capture
   // screen instead of the desktop topbar/review flow.
-  const isMobile = useIsMobile();
+  const mobileViewport = useIsMobile();
+  const isMobile = releaseProfile.phoneLan && mobileViewport;
   const [mobileTab, setMobileTab] = useState<MobileTab>("today");
 
   // Keep the native glass in step with the in-app theme: the theme runtime
@@ -547,7 +549,7 @@ export default function App() {
     return (
       <div className="app repair-screen">
         <div className="repair-card">
-          <div className="brand"><img className="brand-logo" src="/noted-logo.png" alt="" />noted</div>
+          <div className="brand">noted</div>
           <h2>Reconnect to your Mac</h2>
           <p>
             This phone’s connection expired. Open <strong>noted</strong> on your Mac, click the
@@ -569,9 +571,7 @@ export default function App() {
       <div className="app mobile">
         {reconnectingOverlay}
         <header className="mobile-topbar">
-          <div className="brand">
-            <img className="brand-logo" src="/noted-logo.png" alt="" />noted
-          </div>
+          <div className="brand">noted</div>
           <button className="icon-btn" onClick={() => setShowSettings(true)} aria-label="Settings">
             <Settings size={18} />
           </button>
@@ -639,9 +639,7 @@ export default function App() {
           engages when the grabbed element is the one carrying the attribute. */}
       <aside className="sidebar" data-tauri-drag-region="deep">
         <div className="side-head" data-tauri-drag-region>
-          <div className="brand" data-tauri-drag-region>
-            <img className="brand-logo" src="/noted-logo.png" alt="" />noted
-          </div>
+          <div className="brand" data-tauri-drag-region>noted</div>
         </div>
         <nav className="side-nav">
           <button
@@ -715,9 +713,11 @@ export default function App() {
           >
             {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
           </button>
-          <button className="icon-btn" onClick={() => setShowPhone(true)} title="Capture from your phone">
-            <Smartphone size={18} />
-          </button>
+          {releaseProfile.phoneLan && (
+            <button className="icon-btn" onClick={() => setShowPhone(true)} title="Capture from your phone">
+              <Smartphone size={18} />
+            </button>
+          )}
           <button
             className={"icon-btn" + (view === "settings" ? " on" : "")}
             onClick={() => setView("settings")}
@@ -1085,7 +1085,7 @@ export default function App() {
       </footer>
       </div>
 
-      {showPhone && <PhonePanel onClose={() => setShowPhone(false)} />}
+      {releaseProfile.phoneLan && showPhone && <PhonePanel onClose={() => setShowPhone(false)} />}
     </div>
   );
 }

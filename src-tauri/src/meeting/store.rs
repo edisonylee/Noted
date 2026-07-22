@@ -22,6 +22,14 @@ pub fn create_meeting(
     Ok(conn.last_insert_rowid())
 }
 
+/// Remove a row that never became a recording. This is only used while
+/// `meeting::start` still owns the unpublished row, before capture threads,
+/// segments, summaries, or UI state can exist.
+pub fn delete_meeting(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM meetings WHERE id = ?1", [id])?;
+    Ok(())
+}
+
 pub fn set_status(conn: &Connection, id: i64, status: &str) -> Result<()> {
     conn.execute(
         "UPDATE meetings SET status = ?2 WHERE id = ?1",
@@ -68,7 +76,12 @@ pub fn set_notes(conn: &Connection, id: i64, notes: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn set_audio_paths(conn: &Connection, id: i64, me: Option<&str>, them: Option<&str>) -> Result<()> {
+pub fn set_audio_paths(
+    conn: &Connection,
+    id: i64,
+    me: Option<&str>,
+    them: Option<&str>,
+) -> Result<()> {
     conn.execute(
         "UPDATE meetings SET audio_me_path = ?2, audio_them_path = ?3 WHERE id = ?1",
         rusqlite::params![id, me, them],
@@ -153,8 +166,7 @@ pub fn them_segment_times(conn: &Connection, meeting_id: i64) -> Result<Vec<(i64
 }
 
 pub fn set_segment_speakers(conn: &Connection, labels: &[(i64, String)]) -> Result<()> {
-    let mut stmt =
-        conn.prepare("UPDATE meeting_segments SET speaker = ?2 WHERE id = ?1")?;
+    let mut stmt = conn.prepare("UPDATE meeting_segments SET speaker = ?2 WHERE id = ?1")?;
     for (id, speaker) in labels {
         stmt.execute(rusqlite::params![id, speaker])?;
     }
@@ -213,11 +225,10 @@ pub fn merge_profile(conn: &Connection, name: &str, centroid: &[f32], n: i64) ->
 
 /// The calendar-event snapshot captured at start, if this meeting had one.
 pub fn meeting_event_json(conn: &Connection, id: i64) -> Result<Option<Value>> {
-    let raw: Option<String> = conn.query_row(
-        "SELECT event_json FROM meetings WHERE id = ?1",
-        [id],
-        |r| r.get(0),
-    )?;
+    let raw: Option<String> =
+        conn.query_row("SELECT event_json FROM meetings WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })?;
     Ok(raw.and_then(|s| serde_json::from_str(&s).ok()))
 }
 
@@ -436,12 +447,15 @@ pub fn insert_summary(
 }
 
 pub fn find_meeting_by_event(conn: &Connection, event_id: &str) -> Result<Option<i64>> {
-    Ok(conn.query_row(
-        "SELECT id FROM meetings WHERE event_id = ?1 ORDER BY id DESC LIMIT 1",
-        [event_id],
-        |r| r.get(0),
-    )
-    .optional()?)
+    Ok(conn
+        .query_row(
+            "SELECT id FROM meetings
+             WHERE event_id = ?1 AND status <> 'failed'
+             ORDER BY id DESC LIMIT 1",
+            [event_id],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 pub fn list_summaries(conn: &Connection, meeting_id: i64) -> Result<Vec<Value>> {

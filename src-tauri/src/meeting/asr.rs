@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc::SyncSender, Arc};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -205,11 +205,19 @@ impl Chunker {
 /// Which engine to load, resolved from config + downloaded files at meeting
 /// start (`meeting::engine_spec`).
 pub enum EngineSpec {
-    Whisper { model: PathBuf },
+    Whisper {
+        model: PathBuf,
+    },
     /// Directory holding encoder/decoder/joiner int8 ONNX + tokens.txt.
-    Parakeet { dir: PathBuf },
-    Hosted { vocabulary: Vec<String> },
-    Byok { vocabulary: Vec<String> },
+    Parakeet {
+        dir: PathBuf,
+    },
+    Hosted {
+        vocabulary: Vec<String>,
+    },
+    Byok {
+        vocabulary: Vec<String>,
+    },
 }
 
 /// Model stays loaded for the whole meeting. Calls are serialized by the
@@ -223,9 +231,15 @@ pub enum Transcriber {
     /// No prompt biasing: the published Parakeet export ships no bpe.vocab,
     /// so sherpa hotwords can't be used — `apply_vocab` still canonicalizes
     /// vocabulary terms after decode.
-    Parakeet { rec: sherpa_rs::transducer::TransducerRecognizer },
-    Hosted { session: crate::hosted::Session },
-    Byok { vocabulary: Vec<String> },
+    Parakeet {
+        rec: sherpa_rs::transducer::TransducerRecognizer,
+    },
+    Hosted {
+        session: crate::hosted::Session,
+    },
+    Byok {
+        vocabulary: Vec<String>,
+    },
 }
 
 impl Transcriber {
@@ -264,7 +278,9 @@ impl Transcriber {
             EngineSpec::Hosted { vocabulary } => Ok(Self::Hosted {
                 session: crate::hosted::Session::open(vocabulary.clone())?,
             }),
-            EngineSpec::Byok { vocabulary } => Ok(Self::Byok { vocabulary: vocabulary.clone() }),
+            EngineSpec::Byok { vocabulary } => Ok(Self::Byok {
+                vocabulary: vocabulary.clone(),
+            }),
         }
     }
 
@@ -274,9 +290,10 @@ impl Transcriber {
                 let mut state = ctx
                     .create_state()
                     .map_err(|e| anyhow!("whisper state: {e:?}"))?;
-                let mut params = whisper_rs::FullParams::new(
-                    whisper_rs::SamplingStrategy::Greedy { best_of: 1 },
-                );
+                let mut params =
+                    whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy {
+                        best_of: 1,
+                    });
                 params.set_language(Some("en"));
                 params.set_print_progress(false);
                 params.set_print_special(false);
@@ -302,7 +319,9 @@ impl Transcriber {
             }
             Self::Parakeet { rec } => Ok(rec.transcribe(SR as u32, samples).trim().to_string()),
             Self::Hosted { session } => session.transcribe(samples),
-            Self::Byok { vocabulary } => crate::provider::byok_transcribe_blocking(samples, vocabulary),
+            Self::Byok { vocabulary } => {
+                crate::provider::byok_transcribe_blocking(samples, vocabulary)
+            }
         }
     }
 
@@ -452,7 +471,11 @@ pub fn transcribe_retained_wav(
     if !pcm.is_empty() {
         decode(chunker.push(&pcm), &mut transcriber, &mut out)?;
     }
-    decode(chunker.flush().into_iter().collect(), &mut transcriber, &mut out)?;
+    decode(
+        chunker.flush().into_iter().collect(),
+        &mut transcriber,
+        &mut out,
+    )?;
     Ok(out)
 }
 
@@ -525,8 +548,12 @@ fn word_spans(text: &str) -> Vec<(usize, usize)> {
 /// start or end inside a word, and multi-word runs must collapse to ≥ 3 chars
 /// so "a i" can't become "AI".
 pub fn apply_vocab(text: &str, vocab: &[String]) -> String {
-    let collapse =
-        |s: &str| -> String { s.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect() };
+    let collapse = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(|c| c.to_lowercase())
+            .collect()
+    };
     let terms: Vec<(&String, String)> = vocab
         .iter()
         .map(|t| (t, collapse(t)))
@@ -672,7 +699,9 @@ fn best_foreign_sim(emb: &[f32], prints: &[(String, Vec<f32>)]) -> Option<f32> {
     prints
         .iter()
         .map(|(_, p)| super::diarize::cosine(emb, p))
-        .fold(None, |acc: Option<f32>, s| Some(acc.map_or(s, |a| a.max(s))))
+        .fold(None, |acc: Option<f32>, s| {
+            Some(acc.map_or(s, |a| a.max(s)))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -687,14 +716,24 @@ struct ChannelPipe {
     last_decode: Option<(String, i64)>,
 }
 
-fn wav_writer(path: &Path) -> Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>> {
+type RetainedWav = hound::WavWriter<std::io::BufWriter<std::fs::File>>;
+
+fn wav_writer(path: &Path) -> Result<RetainedWav> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: SR as u32,
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    hound::WavWriter::create(path, spec).ok()
+    Ok(hound::WavWriter::create(path, spec)?)
+}
+
+fn retained_writers(dir: &Path) -> Result<(RetainedWav, RetainedWav)> {
+    std::fs::create_dir_all(dir)?;
+    Ok((
+        wav_writer(&dir.join("me.wav"))?,
+        wav_writer(&dir.join("them.wav"))?,
+    ))
 }
 
 pub struct WorkerArgs {
@@ -703,6 +742,10 @@ pub struct WorkerArgs {
     pub them: Arc<ChannelBuf>,
     pub stop: Arc<AtomicBool>,
     pub engine: EngineSpec,
+    /// Meeting start waits for this signal before capture threads or UI state
+    /// are committed. An ASR/session failure is therefore a visible start
+    /// error, never a fake recording that produces no transcript.
+    pub ready: SyncSender<std::result::Result<(), String>>,
     /// None = audio retention off. Some(dir) = write me.wav / them.wav there.
     pub audio_dir: Option<PathBuf>,
     /// Wall anchor for both channel timelines (gap insertion keys off it).
@@ -730,21 +773,45 @@ const GAP_SLACK_MS: u64 = 2_500;
 const WAV_GAP_CAP_MS: u64 = 30 * 60 * 1_000;
 
 pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
+    let ready = args.ready;
     let mut transcriber = match Transcriber::new(&args.engine, args.asr_hint.clone()) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("[noted] meeting ASR unavailable: {e}");
-            let state = app.state::<Db>();
-            let conn = state.0.lock().unwrap();
-            let _ = store::set_status(&conn, args.meeting_id, "failed");
+            let message = format!("meeting transcription could not start: {e}");
+            eprintln!("[noted] {message}");
+            let _ = ready.send(Err(message));
             return;
         }
     };
+
+    let (me_wav, them_wav) = match &args.audio_dir {
+        Some(dir) => match retained_writers(dir) {
+            Ok((me, them)) => (Some(me), Some(them)),
+            Err(e) => {
+                let message = format!("meeting audio files could not be created: {e}");
+                eprintln!("[noted] {message}");
+                let _ = ready.send(Err(message));
+                return;
+            }
+        },
+        None => (None, None),
+    };
+
+    // Speaker-model startup can take several seconds on a cold launch.  Do it
+    // before declaring the worker ready; otherwise capture begins and the UI
+    // timer runs while this thread is still unable to drain or transcribe the
+    // mic.  Audio was buffered, but the apparent dead period made a healthy
+    // microphone look broken.
     let mut embedder = args.speaker_model.as_ref().and_then(|p| {
         super::diarize::Embedder::new(p)
             .map_err(|e| eprintln!("[noted] speaker embeddings unavailable: {e}"))
             .ok()
     });
+
+    if ready.send(Ok(())).is_err() {
+        return;
+    }
+
     let mut voice_prints: Vec<super::diarize::SegEmb> = Vec::new();
 
     // The note-taker's own voiceprint, built live from the mic channel (and
@@ -789,16 +856,6 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
     };
     let mut prints_since_relabel = 0usize;
 
-    let (me_wav, them_wav) = match &args.audio_dir {
-        Some(dir) => {
-            let _ = std::fs::create_dir_all(dir);
-            (
-                wav_writer(&dir.join("me.wav")),
-                wav_writer(&dir.join("them.wav")),
-            )
-        }
-        None => (None, None),
-    };
     // "them" first: it's the clean digital copy, so its segments are already
     // recorded by the time the mic's echo rendition of the same speech closes.
     let mut pipes = [
@@ -850,7 +907,11 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                             let _ = w.write_sample(0i16);
                         }
                     }
-                    eprintln!("[noted] {}: {}s delivery gap bridged", pipe.name, gap / 1000);
+                    eprintln!(
+                        "[noted] {}: {}s delivery gap bridged",
+                        pipe.name,
+                        gap / 1000
+                    );
                 }
             }
             if let Some(w) = pipe.wav.as_mut() {
@@ -886,7 +947,10 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                     &text,
                     seg.t0_ms,
                 ) {
-                    eprintln!("[noted] {}: repeated short decode skipped: {text}", pipe.name);
+                    eprintln!(
+                        "[noted] {}: repeated short decode skipped: {text}",
+                        pipe.name
+                    );
                     continue;
                 }
                 // Voice work happens BEFORE insert: a them-segment that is the
@@ -901,8 +965,9 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                             me_sim = Some(super::diarize::cosine(e, &me_print));
                         }
                     }
-                    let foreign =
-                        them_emb.as_ref().and_then(|e| best_foreign_sim(e, &foreign_prints));
+                    let foreign = them_emb
+                        .as_ref()
+                        .and_then(|e| best_foreign_sim(e, &foreign_prints));
                     if is_own_voice(me_sim, foreign) {
                         eprintln!(
                             "[noted] own-voice echo skipped ({:.2}): {}",
@@ -914,8 +979,11 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                 }
                 if pipe.name == "me" {
                     let matched = overlapping(&recent_them, seg.t0_ms, seg.t1_ms);
-                    let sys_text =
-                        matched.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join(" ");
+                    let sys_text = matched
+                        .iter()
+                        .map(|r| r.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     if is_echo(&text, &sys_text) && matched_is_foreign(&matched, me_ready(me_n)) {
                         eprintln!(
                             "[noted] echo suppressed: {}",
@@ -949,7 +1017,13 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                         "text": text,
                     }),
                 );
-                let recent = RecentSeg { id, t0: seg.t0_ms, t1: seg.t1_ms, text, me_sim };
+                let recent = RecentSeg {
+                    id,
+                    t0: seg.t0_ms,
+                    t1: seg.t1_ms,
+                    text,
+                    me_sim,
+                };
                 if pipe.name == "them" {
                     if let Some(emb) = them_emb {
                         voice_prints.push(super::diarize::SegEmb {
@@ -972,9 +1046,14 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                             continue;
                         }
                         let matched = overlapping(&recent_them, m.t0, m.t1);
-                        let sys_text =
-                            matched.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join(" ");
-                        if is_echo(&m.text, &sys_text) && matched_is_foreign(&matched, me_ready(me_n)) {
+                        let sys_text = matched
+                            .iter()
+                            .map(|r| r.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if is_echo(&m.text, &sys_text)
+                            && matched_is_foreign(&matched, me_ready(me_n))
+                        {
                             echoed.push(i);
                         }
                     }
@@ -1005,13 +1084,12 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                     // pulls the centroid a little further toward the remote
                     // voice. No overlapping system audio → the mic is
                     // provably just the user.
-                    let remote_quiet =
-                        overlapping(&recent_them, seg.t0_ms, seg.t1_ms).is_empty();
+                    let remote_quiet = overlapping(&recent_them, seg.t0_ms, seg.t1_ms).is_empty();
                     if remote_quiet && seg.t1_ms - seg.t0_ms >= 2_500 {
                         if let Some(embedder) = embedder.as_mut() {
                             if let Some(emb) = embedder.embed(&seg.samples) {
-                                let consistent = me_n == 0
-                                    || super::diarize::cosine(&emb, &me_print) >= 0.45;
+                                let consistent =
+                                    me_n == 0 || super::diarize::cosine(&emb, &me_print) >= 0.45;
                                 if consistent {
                                     if me_print.is_empty() {
                                         me_print = vec![0.0; emb.len()];
@@ -1147,7 +1225,10 @@ fn provisional_labels(
     let mut named = super::diarize::assign_names(keep, foreign_prints);
     if let Some(name) = lone_external {
         for s in named.iter_mut() {
-            if s.label.as_deref().map_or(true, |l| l.starts_with("Speaker ")) {
+            if s.label
+                .as_deref()
+                .map_or(true, |l| l.starts_with("Speaker "))
+            {
                 s.label = Some(name.to_string());
             }
         }
@@ -1231,7 +1312,10 @@ pub fn finalize_speakers(
         .unwrap_or_default();
     if external.len() == 1 {
         for s in named.iter_mut() {
-            let generic = s.label.as_deref().map_or(true, |l| l.starts_with("Speaker "));
+            let generic = s
+                .label
+                .as_deref()
+                .map_or(true, |l| l.starts_with("Speaker "));
             if generic {
                 s.label = Some(external[0].clone());
             }
@@ -1255,7 +1339,8 @@ pub fn finalize_speakers(
     if external.len() == 1 {
         for s in &named {
             if s.label.as_deref() == Some(external[0].as_str()) {
-                let _ = store::merge_profile(conn, &external[0], &s.centroid, s.seg_ids.len() as i64);
+                let _ =
+                    store::merge_profile(conn, &external[0], &s.centroid, s.seg_ids.len() as i64);
             }
         }
     }
@@ -1340,16 +1425,22 @@ pub fn rediarize_from_wav(
         // WAV_GAP_CAP_MS are truncated in the file — anything past the end of
         // the audio is unrecoverable, skip it.
         let s0 = (t0.max(0) as usize).saturating_mul(SR / 1000);
-        let s1 = (t1.max(0) as usize).saturating_mul(SR / 1000).min(wav.len());
+        let s1 = (t1.max(0) as usize)
+            .saturating_mul(SR / 1000)
+            .min(wav.len());
         if s0 >= s1 {
             continue;
         }
         if let Some(emb) = embedder.embed(&wav[s0..s1]) {
-            voice_prints.push(super::diarize::SegEmb { seg_id, dur_ms: t1 - t0, emb });
+            voice_prints.push(super::diarize::SegEmb {
+                seg_id,
+                dur_ms: t1 - t0,
+                emb,
+            });
         }
     }
-    let (me_print, me_n) = store::get_profile(conn, super::diarize::ME_PROFILE)?
-        .unwrap_or((Vec::new(), 0));
+    let (me_print, me_n) =
+        store::get_profile(conn, super::diarize::ME_PROFILE)?.unwrap_or((Vec::new(), 0));
     let foreign_prints: Vec<(String, Vec<f32>)> = store::speaker_profiles(conn)?
         .into_iter()
         .map(|(name, emb, _)| (name, emb))
@@ -1391,7 +1482,11 @@ mod tests {
     }
 
     fn vp(id: i64, base: usize, jitter: u64) -> super::super::diarize::SegEmb {
-        super::super::diarize::SegEmb { seg_id: id, dur_ms: 5_000, emb: voice(base, jitter) }
+        super::super::diarize::SegEmb {
+            seg_id: id,
+            dur_ms: 5_000,
+            emb: voice(base, jitter),
+        }
     }
 
     #[test]
@@ -1422,7 +1517,10 @@ mod tests {
         let prints = vec![vp(1, 0, 1), vp(2, 1, 2), vp(3, 0, 3), vp(4, 1, 4)];
         let labels = provisional_labels(&prints, &me, ME_READY_MIN, &[], None);
         let by_id: std::collections::HashMap<i64, String> = labels.into_iter().collect();
-        assert!(!by_id.contains_key(&1), "echo cluster must not get a live label");
+        assert!(
+            !by_id.contains_key(&1),
+            "echo cluster must not get a live label"
+        );
         assert!(!by_id.contains_key(&3));
         // The surviving lone real voice stays unlabeled (assign_names lone rule)
         assert!(by_id.is_empty());
@@ -1439,7 +1537,11 @@ mod tests {
         segs.extend(c.flush()); // B closes at end of stream
         assert_eq!(segs.len(), 2, "two utterances split by the gap");
         // A starts around 500ms (minus preroll), well before 1000ms.
-        assert!(segs[0].t0_ms >= 250 && segs[0].t0_ms <= 600, "t0={}", segs[0].t0_ms);
+        assert!(
+            segs[0].t0_ms >= 250 && segs[0].t0_ms <= 600,
+            "t0={}",
+            segs[0].t0_ms
+        );
         assert!(segs[0].t1_ms > segs[0].t0_ms + 1000);
         // B starts after the gap.
         assert!(segs[1].t0_ms >= 2500, "t0={}", segs[1].t0_ms);
@@ -1453,7 +1555,10 @@ mod tests {
         audio.extend(quiet(2000));
         let mut segs = c.push(&audio);
         segs.extend(c.flush());
-        assert!(segs.is_empty(), "silence and sub-90ms blips produce nothing");
+        assert!(
+            segs.is_empty(),
+            "silence and sub-90ms blips produce nothing"
+        );
     }
 
     #[test]
@@ -1485,8 +1590,16 @@ mod tests {
 
     #[test]
     fn repeated_short_decode_keeps_first_and_suppresses_immediate_loop() {
-        assert!(repeated_short_decode(Some(("Thank you.", 1_000)), "- thank you", 2_000));
-        assert!(!repeated_short_decode(Some(("Thank you.", 1_000)), "thank you", 40_000));
+        assert!(repeated_short_decode(
+            Some(("Thank you.", 1_000)),
+            "- thank you",
+            2_000
+        ));
+        assert!(!repeated_short_decode(
+            Some(("Thank you.", 1_000)),
+            "thank you",
+            40_000
+        ));
         assert!(!repeated_short_decode(
             Some(("we should ship the new recorder", 1_000)),
             "we should ship the new recorder",
@@ -1550,16 +1663,31 @@ mod tests {
     fn vocab_canonicalizes_near_miss_spellings() {
         let v = vec!["a16z".into(), "Vanta".into(), "SOC 2".into()];
         // Split renditions collapse to the canonical form.
-        assert_eq!(apply_vocab("we talked to a 16 z yesterday", &v), "we talked to a16z yesterday");
+        assert_eq!(
+            apply_vocab("we talked to a 16 z yesterday", &v),
+            "we talked to a16z yesterday"
+        );
         assert_eq!(apply_vocab("A16-Z passed on it", &v), "a16z passed on it");
         // Case normalization on a single word.
-        assert_eq!(apply_vocab("vanta is doing our soc 2", &v), "Vanta is doing our SOC 2");
+        assert_eq!(
+            apply_vocab("vanta is doing our soc 2", &v),
+            "Vanta is doing our SOC 2"
+        );
         // Whole words only — no rewriting inside longer words.
-        assert_eq!(apply_vocab("advantage stays put", &v), "advantage stays put");
+        assert_eq!(
+            apply_vocab("advantage stays put", &v),
+            "advantage stays put"
+        );
         // Runs never jump sentence boundaries.
-        assert_eq!(apply_vocab("plan A. 16 z is not a term here", &v), "plan A. 16 z is not a term here");
+        assert_eq!(
+            apply_vocab("plan A. 16 z is not a term here", &v),
+            "plan A. 16 z is not a term here"
+        );
         // Untouched text round-trips byte-for-byte.
-        assert_eq!(apply_vocab("nothing to see here.", &v), "nothing to see here.");
+        assert_eq!(
+            apply_vocab("nothing to see here.", &v),
+            "nothing to see here."
+        );
         assert_eq!(apply_vocab("", &v), "");
     }
 
@@ -1569,7 +1697,10 @@ mod tests {
         // Single word "ai" is canonicalized...
         assert_eq!(apply_vocab("the ai stuff", &v), "the AI stuff");
         // ...but "a i" (two words collapsing to 2 chars) is not.
-        assert_eq!(apply_vocab("give it a i mean look", &v), "give it a i mean look");
+        assert_eq!(
+            apply_vocab("give it a i mean look", &v),
+            "give it a i mean look"
+        );
     }
 
     #[test]
@@ -1583,7 +1714,10 @@ mod tests {
         };
         // Matched system audio is another voice → local echo, suppressible.
         let foreign = [them(Some(0.30))];
-        assert!(matched_is_foreign(&foreign.iter().collect::<Vec<_>>(), true));
+        assert!(matched_is_foreign(
+            &foreign.iter().collect::<Vec<_>>(),
+            true
+        ));
         // Matched audio resembles the note-taker → their own remote echo; the
         // mic line is the original and must survive.
         let mine = [them(Some(0.62))];
@@ -1592,8 +1726,14 @@ mod tests {
         assert!(!matched_is_foreign(&mixed.iter().collect::<Vec<_>>(), true));
         // Unknown voice (too short to embed) or no voiceprint yet → keep mic.
         let unknown = [them(None)];
-        assert!(!matched_is_foreign(&unknown.iter().collect::<Vec<_>>(), true));
-        assert!(!matched_is_foreign(&foreign.iter().collect::<Vec<_>>(), false));
+        assert!(!matched_is_foreign(
+            &unknown.iter().collect::<Vec<_>>(),
+            true
+        ));
+        assert!(!matched_is_foreign(
+            &foreign.iter().collect::<Vec<_>>(),
+            false
+        ));
     }
 
     #[test]
@@ -1609,7 +1749,10 @@ mod tests {
         // Too short to embed / no voiceprint yet → never an own-voice call.
         assert!(!is_own_voice(None, Some(0.10)));
 
-        let prints = vec![("Brian".into(), vec![1.0f32, 0.0]), ("Ana".into(), vec![0.0f32, 1.0])];
+        let prints = vec![
+            ("Brian".into(), vec![1.0f32, 0.0]),
+            ("Ana".into(), vec![0.0f32, 1.0]),
+        ];
         let best = best_foreign_sim(&[0.6, 0.8], &prints).unwrap();
         assert!((best - 0.8).abs() < 1e-6);
         assert!(best_foreign_sim(&[1.0, 0.0], &[]).is_none());
@@ -1650,7 +1793,11 @@ mod tests {
         let mut segs = c.push(&tone(1200, 0.2));
         segs.extend(c.flush());
         assert_eq!(segs.len(), 1);
-        assert!(segs[0].t0_ms >= 72_800, "t0={} should sit at ~73s", segs[0].t0_ms);
+        assert!(
+            segs[0].t0_ms >= 72_800,
+            "t0={} should sit at ~73s",
+            segs[0].t0_ms
+        );
     }
 
     #[test]

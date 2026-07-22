@@ -86,9 +86,15 @@ export function ComingUp({
 
   const pages = Math.max(1, Math.ceil(upcoming.length / PAGE));
   const view = upcoming.slice(page * PAGE, page * PAGE + PAGE);
-  // Recent recordings: failed/empty attempts have nothing to open — hide them.
-  // (Still recording / summarizing / done all carry something to show.)
-  const recent = meetings.filter((m) => m.status !== "failed").slice(0, 4);
+  const recent = meetings
+    .filter(
+      (m) =>
+        m.status !== "failed" ||
+        m.segment_count > 0 ||
+        m.summary_count > 0 ||
+        m.note_id != null
+    )
+    .slice(0, 6);
   const today = easternDay();
 
   if (events === null) return null; // first load: no flash
@@ -180,7 +186,11 @@ export function ComingUp({
             <h3>Recent recordings</h3>
           </div>
           {recent.map((m) => (
-            <button key={m.id} className="recent-row" onClick={() => onOpenMeeting(m.id)}>
+            <button
+              key={m.id}
+              className="recent-row"
+              onClick={() => onOpenMeeting(m.id)}
+            >
               {m.status === "recording" || m.id === activeMeetingId ? (
                 <span className="bars small" aria-hidden>
                   <i />
@@ -196,7 +206,7 @@ export function ComingUp({
               )}
               <span className="cu-title">{m.title}</span>
               <span className="cu-when">
-                {m.started_at ? relativeDay(m.started_at.slice(0, 10)) : ""}
+                {m.started_at ? relativeDay(easternDay(new Date(m.started_at))) : ""}
               </span>
             </button>
           ))}

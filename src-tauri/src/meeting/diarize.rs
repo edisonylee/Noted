@@ -189,8 +189,7 @@ pub fn cluster_at(segs: &[SegEmb], cutoff: f32) -> Vec<SpeakerCluster> {
             sim[b * n + a] = s;
         }
     }
-    let mut members: Vec<Option<Vec<usize>>> =
-        seed_idx.iter().map(|&i| Some(vec![i])).collect();
+    let mut members: Vec<Option<Vec<usize>>> = seed_idx.iter().map(|&i| Some(vec![i])).collect();
     loop {
         let mut best = (usize::MAX, usize::MAX, cutoff);
         for a in 0..n {
@@ -295,7 +294,11 @@ pub fn assign_names(
                 None if lone => None,
                 None => Some(format!("Speaker {}", i + 1)),
             };
-            NamedSpeaker { label, seg_ids: c.seg_ids, centroid: c.centroid }
+            NamedSpeaker {
+                label,
+                seg_ids: c.seg_ids,
+                centroid: c.centroid,
+            }
         })
         .collect()
 }
@@ -317,7 +320,11 @@ mod tests {
     }
 
     fn seg(id: i64, dur: i64, base: usize, jitter: u64) -> SegEmb {
-        SegEmb { seg_id: id, dur_ms: dur, emb: voice(base, jitter) }
+        SegEmb {
+            seg_id: id,
+            dur_ms: dur,
+            emb: voice(base, jitter),
+        }
     }
 
     fn label_of(named: &[NamedSpeaker], id: i64) -> Option<String> {
@@ -349,7 +356,10 @@ mod tests {
         let segs: Vec<SegEmb> = (0..6).map(|i| seg(i, 5000, 2, i as u64)).collect();
         let named = assign_names(cluster(&segs), &[]);
         assert_eq!(named.len(), 1);
-        assert!(named[0].label.is_none(), "1:1 calls keep the channel default");
+        assert!(
+            named[0].label.is_none(),
+            "1:1 calls keep the channel default"
+        );
     }
 
     #[test]
@@ -452,7 +462,11 @@ mod tests {
             let s0 = (t0 as usize * 16).min(wav.len());
             let s1 = (t1 as usize * 16).min(wav.len());
             if let Some(emb) = embedder.embed(&wav[s0..s1]) {
-                segs.push(SegEmb { seg_id: id, dur_ms: t1 - t0, emb });
+                segs.push(SegEmb {
+                    seg_id: id,
+                    dur_ms: t1 - t0,
+                    emb,
+                });
             }
         }
         // Where does this recording's voice structure separate? Sweep the

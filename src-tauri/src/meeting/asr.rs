@@ -637,6 +637,28 @@ pub fn is_echo(mic_text: &str, system_text: &str) -> bool {
     hits as f32 / mic.len() as f32 >= 0.70
 }
 
+/// How far apart matching segments may sit across channels. The microphone
+/// hears speaker output at the same wall time, but its quieter copy can open
+/// and close on different VAD boundaries.
+const ECHO_SLACK_MS: i64 = 2_500;
+
+struct RecentSeg {
+    id: i64,
+    t0: i64,
+    t1: i64,
+    text: String,
+}
+
+/// Concatenated text of recent segments overlapping [t0, t1] +/- slack.
+fn overlapping_text(recents: &[RecentSeg], t0: i64, t1: i64) -> String {
+    recents
+        .iter()
+        .filter(|r| r.t1 >= t0 - ECHO_SLACK_MS && r.t0 <= t1 + ECHO_SLACK_MS)
+        .map(|r| r.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 // ---------------------------------------------------------------------------
 // Worker: the per-meeting loop tying capture → chunker → whisper → DB/UI.
 // ---------------------------------------------------------------------------
@@ -767,6 +789,9 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
             last_decode: None,
         },
     ];
+    let mut recent_them: Vec<RecentSeg> = Vec::new();
+    let mut recent_me: Vec<RecentSeg> = Vec::new();
+
     loop {
         let stopping = args.stop.load(Ordering::Relaxed);
         for pipe in pipes.iter_mut() {
@@ -843,6 +868,19 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                     );
                     continue;
                 }
+                if pipe.name == "me"
+                    && is_echo(
+                        &text,
+                        &overlapping_text(&recent_them, seg.t0_ms, seg.t1_ms),
+                    )
+                {
+                    eprintln!(
+                        "[noted] echo suppressed: {}",
+                        text.chars().take(60).collect::<String>()
+                    );
+                    pipe.last_decode = Some((text, seg.t1_ms));
+                    continue;
+                }
                 let mut them_emb: Option<Vec<f32>> = None;
                 if pipe.name == "them" {
                     if let Some(embedder) = embedder.as_mut() {
@@ -874,6 +912,12 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                         "text": text,
                     }),
                 );
+                let recent = RecentSeg {
+                    id,
+                    t0: seg.t0_ms,
+                    t1: seg.t1_ms,
+                    text,
+                };
                 if pipe.name == "them" {
                     if let Some(emb) = them_emb {
                         voice_prints.push(super::diarize::SegEmb {
@@ -883,6 +927,45 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                         });
                         prints_since_relabel += 1;
                     }
+                    recent_them.retain(|r| r.t1 >= seg.t1_ms - 90_000);
+                    recent_them.push(recent);
+
+                    // The quieter mic copy may close first. Re-check recently
+                    // inserted mic rows whenever the matching system segment
+                    // arrives, then remove the duplicate from both DB and UI.
+                    let mut echoed = Vec::new();
+                    for (i, mic) in recent_me.iter().enumerate() {
+                        if mic.t1 >= seg.t0_ms - ECHO_SLACK_MS
+                            && mic.t0 <= seg.t1_ms + ECHO_SLACK_MS
+                            && is_echo(
+                                &mic.text,
+                                &overlapping_text(&recent_them, mic.t0, mic.t1),
+                            )
+                        {
+                            echoed.push(i);
+                        }
+                    }
+                    for &i in echoed.iter().rev() {
+                        let mic = recent_me.remove(i);
+                        eprintln!(
+                            "[noted] echo suppressed (late): {}",
+                            mic.text.chars().take(60).collect::<String>()
+                        );
+                        let removed = {
+                            let state = app.state::<Db>();
+                            let conn = state.0.lock().unwrap();
+                            store::delete_segment(&conn, mic.id)
+                        };
+                        if removed.is_ok() {
+                            let _ = app.emit(
+                                "meeting-segment-removed",
+                                json!({ "meetingId": args.meeting_id, "id": mic.id }),
+                            );
+                        }
+                    }
+                } else {
+                    recent_me.retain(|r| r.t1 >= seg.t1_ms - 90_000);
+                    recent_me.push(recent);
                 }
             }
         }
@@ -1312,6 +1395,12 @@ mod tests {
 
     #[test]
     fn echo_detects_duplicated_remote_speech() {
+        // Regression from meeting 24: the exact same remote sentence was
+        // stored at 38:24 as both "Speaker 3" and "Me".
+        assert!(is_echo(
+            "I don't think so. Um what did the protein company say?",
+            "I don't think so. Um what did the protein company say?"
+        ));
         // Word-for-word duplicate (mic heard the speakers clearly).
         assert!(is_echo(
             "Sounds good. I might build it over the weekend too.",
@@ -1333,6 +1422,36 @@ mod tests {
         assert!(!is_echo("Yeah.", "Yeah, that's good."));
         // Nothing on the system channel at that time → keep.
         assert!(!is_echo("I created my own note taker this weekend", ""));
+    }
+
+    #[test]
+    fn echo_matching_uses_time_overlap_and_combines_remote_chunks() {
+        let remote = vec![
+            RecentSeg {
+                id: 1,
+                t0: 37_000,
+                t1: 38_500,
+                text: "I don't think so.".into(),
+            },
+            RecentSeg {
+                id: 2,
+                t0: 38_500,
+                t1: 41_000,
+                text: "Um what did the protein company say?".into(),
+            },
+            RecentSeg {
+                id: 3,
+                t0: 80_000,
+                t1: 82_000,
+                text: "Unrelated later sentence".into(),
+            },
+        ];
+        let matched = overlapping_text(&remote, 38_000, 40_500);
+        assert!(is_echo(
+            "I don't think so. Um what did the protein company say?",
+            &matched
+        ));
+        assert!(!matched.contains("Unrelated later sentence"));
     }
 
     #[test]

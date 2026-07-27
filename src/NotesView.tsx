@@ -76,13 +76,13 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
     [meetings]
   );
 
-  // Spaces: the two first-class ones, then every other category by volume.
+  // Spaces: the first-class ones, then every other category by volume. Trash
+  // is rendered separately after this list so it can never move among them.
   const spaces = useMemo(() => {
     const count = (pred: (n: NoteRow) => boolean) => notes.filter(pred).length;
     const fixed = [
       { id: "all", label: "All notes", n: notes.length },
       { id: "meetings", label: "Meetings", n: successfulMeetings.length },
-      { id: "meeting-trash", label: "Trash", n: trashedMeetings.length },
       { id: "journal", label: "Journal", n: count((x) => noteCats(x).includes("journal")) },
     ];
     const rest = cats
@@ -96,7 +96,7 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
       .filter((s) => s.n > 0)
       .sort((a, b) => b.n - a.n);
     return [...fixed, ...rest];
-  }, [notes, cats, successfulMeetings.length, trashedMeetings.length]);
+  }, [notes, cats, successfulMeetings.length]);
 
   const list = useMemo(() => {
     let rows = space === "all" ? notes : notes.filter((n) => noteCats(n).includes(space));
@@ -172,7 +172,9 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
     else setOpenNote(n);
   };
 
-  const currentSpace = spaces.find((s) => s.id === space);
+  const currentSpace = space === "meeting-trash"
+    ? { id: "meeting-trash", label: "Trash", n: trashedMeetings.length }
+    : spaces.find((s) => s.id === space);
 
   return (
     <div className="notes-view" data-tauri-drag-region>
@@ -197,8 +199,6 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
             >
               {s.id === "meetings" ? (
                 <AudioLines size={14} />
-              ) : s.id === "meeting-trash" ? (
-                <Trash2 size={14} />
               ) : s.id === "journal" ? (
                 <BookOpen size={14} />
               ) : s.id === "all" ? (
@@ -210,6 +210,17 @@ export function NotesView({ notes, cats }: { notes: NoteRow[]; cats: CategoryInf
               <span className="space-n">{s.n}</span>
             </button>
           ))}
+          <div className="spaces-trash-wrap">
+            <button
+              className={`spaces-trash${space === "meeting-trash" ? " on" : ""}`}
+              onClick={() => setSpace("meeting-trash")}
+              title="Open trash"
+            >
+              <Trash2 size={14} />
+              <span className="space-label">Open trash</span>
+              <span className="space-n">{trashedMeetings.length}</span>
+            </button>
+          </div>
         </aside>
       )}
 

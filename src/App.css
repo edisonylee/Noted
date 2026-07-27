@@ -2404,6 +2404,13 @@ a.cal-btn { text-decoration: none; }
 }
 .spaces button:hover { color: var(--ink); background: var(--hover-soft); }
 .spaces button.on { background: var(--hover-soft); color: var(--ink); font-weight: 570; }
+.spaces-trash-wrap {
+  margin-top: 12px; padding-top: 10px;
+  border-top: var(--border-width, 1px) solid var(--line);
+}
+.spaces .spaces-trash { width: 100%; color: var(--faint); }
+.spaces .spaces-trash:hover,
+.spaces .spaces-trash.on { color: var(--muted); }
 .space-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .space-n { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
 

@@ -11,6 +11,12 @@ type Block = {
   duration_min?: number;
 };
 
+type Todo = {
+  id: string;
+  text: string;
+  completed: boolean;
+};
+
 // Minutes since midnight for an "HH:MM" string, or null if absent/unparseable.
 function toMinutes(hhmm?: string): number | null {
   if (!hhmm) return null;
@@ -142,6 +148,39 @@ export function parseBlocks(data: Record<string, unknown> | null | undefined): B
     // parse) also cleans schedules saved before date-stripping existed, so a
     // stored "June 4, 2026" stops showing up under "Anytime".
     .filter((b) => b.task && !isDateOnly(b.task));
+}
+
+// Checklist items live beside schedule blocks in the same entry. Be generous
+// when reading older/hand-edited data, but always write the canonical shape.
+export function parseTodos(data: Record<string, unknown> | null | undefined): Todo[] {
+  const raw = data?.todos;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item, index): Todo | null => {
+      if (typeof item === "string") {
+        const text = item.trim();
+        return text ? { id: `legacy-${index}-${text}`, text, completed: false } : null;
+      }
+      if (!item || typeof item !== "object") return null;
+      const value = item as Record<string, unknown>;
+      const text =
+        typeof value.text === "string"
+          ? value.text.trim()
+          : typeof value.task === "string"
+            ? value.task.trim()
+            : "";
+      if (!text) return null;
+      return {
+        id: typeof value.id === "string" && value.id ? value.id : `legacy-${index}-${text}`,
+        text,
+        completed: value.completed === true || value.done === true,
+      };
+    })
+    .filter((item): item is Todo => item != null);
+}
+
+function todoId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `todo-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 const isSchedule = (cat: string | null) => cat?.toLowerCase() === "schedule";
@@ -580,6 +619,13 @@ export function TodayView({
   const [adding, setAdding] = useState(false);
   const [rowBusy, setRowBusy] = useState(false);
 
+  // The checklist is intentionally separate from untimed schedule blocks:
+  // "Anytime" is still part of the agenda, while these are finishable tasks.
+  const [todoDraft, setTodoDraft] = useState("");
+  const [todoEditId, setTodoEditId] = useState<string | null>(null);
+  const [todoEditText, setTodoEditText] = useState("");
+  const [todoBusy, setTodoBusy] = useState(false);
+
   // Google Calendar sync: whether we're connected, and the last sync's outcome.
   const [gcalConnected, setGcalConnected] = useState<boolean | null>(null);
   // Today's events pulled back from Google Calendar — shown in the empty state
@@ -613,6 +659,7 @@ export function TodayView({
   );
   const entry = note?.entries.find((e) => isSchedule(e.category));
   const blocks = parseBlocks(entry?.data);
+  const todos = parseTodos(entry?.data);
   // Only timed blocks can become calendar events; "Anytime" tasks are skipped.
   const hasTimed = blocks.some((b) => toMinutes(b.start) != null);
 
@@ -919,7 +966,7 @@ export function TodayView({
         source,
         image_path,
         event_date: today, // always today's schedule
-        entries: [{ category: "schedule", description: "today's schedule", data: { blocks } }],
+        entries: [{ category: "schedule", description: "today's schedule", data: { blocks, todos } }],
         entities,
       });
 
@@ -951,7 +998,7 @@ export function TodayView({
           raw_text: blocksToText(cleaned),
           source: note?.source ?? "text",
           event_date: today,
-          entries: [{ category: "schedule", description: "today's schedule", data: { blocks: cleaned } }],
+          entries: [{ category: "schedule", description: "today's schedule", data: { blocks: cleaned, todos } }],
         });
       }
       setEditIdx(null);
@@ -971,6 +1018,176 @@ export function TodayView({
     setAdding(false);
     setEditError(null);
     setEditIdx(idx);
+  };
+
+  async function persistTodos(next: Todo[]): Promise<boolean> {
+    if (todoBusy) return false;
+    setTodoBusy(true);
+    setEditError(null);
+    try {
+      const cleaned = next
+        .map((todo) => ({ ...todo, text: todo.text.trim() }))
+        .filter((todo) => todo.text);
+      if (entry?.id != null) {
+        await api.updateEntry(entry.id, { todos: cleaned });
+      } else {
+        await api.save({
+          raw_text: cleaned
+            .map((todo) => `${todo.completed ? "[x]" : "[ ]"} ${todo.text}`)
+            .join("\n"),
+          source: "text",
+          event_date: today,
+          entries: [
+            {
+              category: "schedule",
+              description: "today's schedule and tasks",
+              data: { blocks, todos: cleaned },
+            },
+          ],
+        });
+      }
+      await onSaved();
+      return true;
+    } catch (e) {
+      setEditError(String(e));
+      return false;
+    } finally {
+      setTodoBusy(false);
+    }
+  }
+
+  async function addTodo() {
+    const text = todoDraft.trim();
+    if (!text) return;
+    if (await persistTodos([...todos, { id: todoId(), text, completed: false }])) {
+      setTodoDraft("");
+    }
+  }
+
+  async function commitTodoEdit(id: string) {
+    const text = todoEditText.trim();
+    if (!text) return;
+    if (await persistTodos(todos.map((todo) => (todo.id === id ? { ...todo, text } : todo)))) {
+      setTodoEditId(null);
+      setTodoEditText("");
+    }
+  }
+
+  const renderTodoSection = () => {
+    const remaining = todos.filter((todo) => !todo.completed).length;
+    return (
+      <section className="today-todos" aria-labelledby="today-todos-title">
+        <div className="today-todos-head">
+          <h2 id="today-todos-title">To do</h2>
+          {todos.length > 0 && (
+            <span>{remaining ? `${remaining} left` : "All done"}</span>
+          )}
+        </div>
+
+        {todos.length > 0 ? (
+          <ul className="today-todo-list">
+            {todos.map((todo) => (
+              <li className={"today-todo" + (todo.completed ? " completed" : "")} key={todo.id}>
+                <button
+                  type="button"
+                  className="today-todo-check"
+                  aria-label={todo.completed ? `Mark ${todo.text} incomplete` : `Complete ${todo.text}`}
+                  aria-pressed={todo.completed}
+                  disabled={todoBusy}
+                  onClick={() =>
+                    void persistTodos(
+                      todos.map((item) =>
+                        item.id === todo.id ? { ...item, completed: !item.completed } : item
+                      )
+                    )
+                  }
+                >
+                  {todo.completed && <Check size={13} strokeWidth={2.4} />}
+                </button>
+
+                {todoEditId === todo.id ? (
+                  <input
+                    className="today-todo-edit"
+                    value={todoEditText}
+                    autoFocus
+                    disabled={todoBusy}
+                    aria-label={`Edit ${todo.text}`}
+                    onChange={(e) => setTodoEditText(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void commitTodoEdit(todo.id);
+                      if (e.key === "Escape") setTodoEditId(null);
+                    }}
+                    onBlur={() => void commitTodoEdit(todo.id)}
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    className="today-todo-text"
+                    disabled={todoBusy}
+                    onDoubleClick={() => {
+                      setTodoEditId(todo.id);
+                      setTodoEditText(todo.text);
+                    }}
+                  >
+                    {todo.text}
+                  </button>
+                )}
+
+                {todoEditId !== todo.id && (
+                  <div className="today-todo-actions">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTodoEditId(todo.id);
+                        setTodoEditText(todo.text);
+                      }}
+                      disabled={todoBusy}
+                      aria-label={`Edit ${todo.text}`}
+                      title="Edit task"
+                    >
+                      <Pencil size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void persistTodos(todos.filter((item) => item.id !== todo.id))}
+                      disabled={todoBusy}
+                      aria-label={`Delete ${todo.text}`}
+                      title="Delete task"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="today-todos-empty">Keep the small things here, outside your timeline.</p>
+        )}
+
+        <div className="today-todo-add">
+          <span className="today-todo-check" aria-hidden="true" />
+          <input
+            value={todoDraft}
+            disabled={todoBusy}
+            placeholder="Add a task…"
+            aria-label="New to-do"
+            onChange={(e) => setTodoDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void addTodo();
+            }}
+          />
+          <button
+            type="button"
+            disabled={todoBusy || !todoDraft.trim()}
+            onClick={() => void addTodo()}
+            aria-label="Add task"
+          >
+            {todoBusy ? <Loader size={14} className="spin" /> : <Plus size={15} />}
+          </button>
+        </div>
+      </section>
+    );
   };
 
   // A quiet pill at the foot of the schedule — photo capture is an entry
@@ -1245,6 +1462,7 @@ export function TodayView({
             </button>
           </div>
         )}
+        {renderTodoSection()}
         <div className="today-footrow">
           <PhotoEntry />
         </div>
@@ -1386,6 +1604,8 @@ export function TodayView({
           </div>
         )}
       </div>
+
+      {renderTodoSection()}
 
       {editError && !editing && <div className="error today-rowerror">{editError}</div>}
     </div>

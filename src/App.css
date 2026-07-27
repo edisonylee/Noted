@@ -795,6 +795,79 @@ textarea.json.bad { border-color: var(--bad); }
   color: var(--faint); margin: 0 0 4px 12px;
 }
 
+/* A finishable checklist, deliberately separate from the schedule timeline. */
+.today-todos {
+  margin-top: 28px; padding-top: 20px;
+  border-top: var(--border-width, 1px) solid var(--line);
+}
+.today-todos-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  margin-bottom: 7px;
+}
+.today-todos-head h2 {
+  margin: 0; color: var(--ink); font-size: 15px; font-weight: 620; letter-spacing: -0.01em;
+}
+.today-todos-head > span { color: var(--faint); font-size: 11.5px; font-weight: 520; }
+.today-todos-empty {
+  margin: 0; padding: 6px 0 9px; color: var(--muted); font-size: 13px; line-height: 1.45;
+}
+.today-todo-list { list-style: none; margin: 0; padding: 0; }
+.today-todo {
+  display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 10px;
+  min-height: 42px; border-bottom: var(--border-width, 1px) solid var(--line);
+}
+.today-todo:first-child { border-top: var(--border-width, 1px) solid var(--line); }
+.today-todo-check {
+  display: inline-grid; place-items: center; width: 18px; height: 18px; padding: 0;
+  color: var(--on-ink); background: transparent;
+  border: var(--border-width, 1px) solid var(--line-strong); border-radius: 5px;
+  transition: color var(--duration-fast) var(--ease), background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease), transform var(--duration-fast) var(--ease);
+}
+button.today-todo-check:hover:not(:disabled) { border-color: var(--ink-soft); transform: scale(1.04); }
+.today-todo.completed .today-todo-check { background: var(--ink); border-color: var(--ink); }
+.today-todo-text {
+  min-width: 0; padding: 10px 0; overflow-wrap: anywhere; text-align: left;
+  color: var(--ink); background: none; border: 0; font: inherit; font-size: 14.5px; line-height: 1.45;
+}
+.today-todo.completed .today-todo-text {
+  color: var(--muted); text-decoration: line-through; text-decoration-thickness: 1px;
+}
+.today-todo-edit {
+  min-width: 0; width: 100%; padding: 7px 8px;
+  color: var(--ink); background: var(--surface);
+  border: var(--border-width, 1px) solid var(--accent); border-radius: var(--r-sm);
+  font: inherit; font-size: 14.5px; outline: none;
+  box-shadow: 0 0 0 3px var(--accent-tint);
+}
+.today-todo-actions {
+  display: inline-flex; gap: 2px; opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease);
+}
+.today-todo:hover .today-todo-actions,
+.today-todo:focus-within .today-todo-actions { opacity: 1; }
+.today-todo-actions button,
+.today-todo-add button {
+  display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0;
+  color: var(--muted); background: transparent; border: 0; border-radius: var(--r-sm);
+  transition: color var(--duration-fast) var(--ease), background var(--duration-fast) var(--ease);
+}
+.today-todo-actions button:hover:not(:disabled),
+.today-todo-add button:hover:not(:disabled) { color: var(--ink); background: var(--surface-2); }
+.today-todo-actions button:last-child:hover:not(:disabled) { color: var(--bad); }
+.today-todo-add {
+  display: grid; grid-template-columns: 22px minmax(0, 1fr) 28px; align-items: center; gap: 10px;
+  min-height: 42px;
+}
+.today-todo-add input {
+  min-width: 0; width: 100%; padding: 10px 0;
+  color: var(--ink); background: transparent; border: 0; outline: none;
+  font: inherit; font-size: 14px;
+}
+.today-todo-add input::placeholder { color: var(--faint); }
+.today-todo-add > .today-todo-check { opacity: 0.62; }
+.today-todo-add button:disabled,
+.today-todo button:disabled { opacity: 0.42; cursor: default; }
+
 /* Inline row editing on the agenda */
 .today-block.editable:hover { background: var(--surface-2); }
 .today-block.editable .today-task { cursor: text; }
@@ -1007,6 +1080,7 @@ textarea.json.bad { border-color: var(--bad); }
 
 @media (hover: none) {
   .today-row-edit-trigger { opacity: 0.72; }
+  .today-todo-actions { opacity: 0.72; }
 }
 
 .raw { margin-top: 12px; }

@@ -1,6 +1,6 @@
 # noted
 
-A local-first personal notes app that turns messy capture into structured, searchable knowledge — privately, on your own machine.
+A local-first personal knowledge app that turns messy capture into structured, searchable knowledge — privately, on your own machine.
 
 You jot, speak, or photograph a note; a local model categorizes it, extracts the structured bits, and files it. Over time noted builds a personal knowledge base you can search semantically, a daily schedule, recaps and trends, and a lightweight knowledge graph of the people and things in your life.
 

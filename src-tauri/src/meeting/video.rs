@@ -13,9 +13,10 @@
 // cleanup_old() at launch deletes expired files and clears their DB paths;
 // the transcript and summaries are forever, the pixels are a rolling window.
 //
-// Permission: the first SCShareableContent query triggers the system's
-// Screen Recording prompt. A denial yields an error/empty content — logged,
-// video skipped, meeting unaffected.
+// Permission is never requested from the automatic meeting-start path. The
+// Settings UI owns the one explicit request; ordinary recordings only start
+// video after preflight says the grant already exists. This prevents macOS
+// from presenting the same screen-recording notice on every meeting.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,6 +51,29 @@ pub fn video_supported() -> bool {
     false
 }
 
+/// Read the current Screen Recording grant without prompting.
+#[cfg(target_os = "macos")]
+pub fn permission_granted() -> bool {
+    cidre::cg::screen_capture_access::preflight()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn permission_granted() -> bool {
+    false
+}
+
+/// Explicit, user-initiated permission request from Settings. Never call this
+/// during meeting start: requesting there is what caused a prompt every time.
+#[cfg(target_os = "macos")]
+pub fn request_permission() -> bool {
+    cidre::cg::screen_capture_access::request()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_permission() -> bool {
+    false
+}
+
 /// Start the window-video worker for a meeting. Returns immediately; the
 /// worker looks for the meeting app's window (retrying while the call ramps
 /// up), records it until `stop`, then stamps `video_path` and emits
@@ -62,7 +86,7 @@ pub fn spawn(
     source_bundle: Option<String>,
     ignore_bundles: Vec<String>,
 ) {
-    if !video_supported() {
+    if !video_supported() || !permission_granted() {
         return;
     }
     std::thread::spawn(move || {

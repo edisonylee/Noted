@@ -368,13 +368,17 @@ pub fn start(
 
     // ASR vocabulary bias: this meeting's attendees plus the user's custom
     // terms. Names remembered from unrelated meetings must not bias Whisper.
-    let (asr_hint, vocab) = {
+    let (asr_hint, vocab, attendees) = {
         let c = cfg();
         let names = event_json
             .as_ref()
             .map(summarize::external_attendees)
             .unwrap_or_default();
-        (asr::vocab_hint(&names, &c.vocabulary), c.vocabulary)
+        (
+            asr::vocab_hint(&names, &c.vocabulary),
+            c.vocabulary,
+            names,
+        )
     };
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -430,6 +434,7 @@ pub fn start(
             },
             asr_hint,
             vocab,
+            attendees,
         };
         let h = app.clone();
         std::thread::spawn(move || asr::run_worker(h, args))
@@ -479,14 +484,20 @@ pub fn start(
     // retention off shouldn't disable video). Fire-and-forget: the worker
     // stamps video_path itself; stop() doesn't wait on it.
     if crate::release_profile::video_capture() && cfg().record_video {
-        if let Ok(base) = app.path().app_data_dir() {
-            video::spawn(
-                app.clone(),
-                id,
-                base.join("meetings").join(id.to_string()),
-                stop.clone(),
-                source_bundle.clone(),
-                cfg().ignore_bundles,
+        if video::permission_granted() {
+            if let Ok(base) = app.path().app_data_dir() {
+                video::spawn(
+                    app.clone(),
+                    id,
+                    base.join("meetings").join(id.to_string()),
+                    stop.clone(),
+                    source_bundle.clone(),
+                    cfg().ignore_bundles,
+                );
+            }
+        } else {
+            eprintln!(
+                "[noted] meeting {id}: window video skipped; Screen Recording permission is not granted"
             );
         }
     }
@@ -598,6 +609,17 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
     Ok(Some(id))
 }
 
+fn rediarize_retained(app: &tauri::AppHandle, id: i64, force: bool) -> Result<usize> {
+    let Some(model) = diarize::model_path(app) else {
+        return Ok(0);
+    };
+    let data_dir = app.path().app_data_dir().map_err(|e| anyhow!("{e}"))?;
+    let dir = data_dir.join("meetings").join(id.to_string());
+    let db = app.state::<Db>();
+    let conn = db.0.lock().unwrap();
+    asr::rediarize_from_wav(&conn, &model, &dir, id, force)
+}
+
 /// Recovery diarization for one interrupted meeting (labels are written only
 /// by the live stop path, which a crash never reaches): rebuild them from the
 /// retained wall-anchored WAV so a killed app can't leave a multi-speaker
@@ -606,16 +628,7 @@ fn rediarize_interrupted(app: &tauri::AppHandle, id: i64) {
     if !crate::release_profile::diarization() {
         return;
     }
-    let Some(model) = diarize::model_path(app) else {
-        return;
-    };
-    let Ok(data_dir) = app.path().app_data_dir() else {
-        return;
-    };
-    let dir = data_dir.join("meetings").join(id.to_string());
-    let db = app.state::<Db>();
-    let conn = db.0.lock().unwrap();
-    match asr::rediarize_from_wav(&conn, &model, &dir, id, false) {
+    match rediarize_retained(app, id, false) {
         Ok(n) if n > 0 => {
             println!("[noted] recovered speaker labels for meeting {id} ({n} voices)")
         }

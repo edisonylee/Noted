@@ -427,6 +427,8 @@ export type MeetingModelStatus = {
   parakeet: boolean; // Parakeet-TDT ASR engine files present
   hosted: boolean; // scoped Noted API key exists in macOS Keychain
   tap_supported: boolean;
+  video_supported: boolean;
+  video_authorized: boolean;
 };
 // What the record-prompt popup shows: calendar T-60s / mic-in-use detection,
 // or a transient buttonless "status" card (e.g. "Meeting saved").
@@ -722,6 +724,8 @@ export const api = {
     invoke<void>("meeting_rename_speaker", { id, from, to }),
   // Rebuild anonymous speaker labels from retained audio.
   meetingRediarize: (id: number) => invoke<number>("meeting_rediarize", { id }),
+  // Explicit one-time macOS Screen Recording request. Meeting start never asks.
+  meetingVideoRequestPermission: () => invoke<boolean>("meeting_video_request_permission"),
   // Delete the window video now instead of waiting out the retention window.
   meetingVideoDelete: (id: number) => invoke<void>("meeting_video_delete", { id }),
   // Live Assist: answer a question against this meeting's transcript-so-far.

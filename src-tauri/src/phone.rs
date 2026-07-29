@@ -344,7 +344,7 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "meeting_summarize" => {
             crate::meeting_summarize(a, iarg(b, "id"), oarg(b, "template")).await.map(|v| json!(v))
         }
-        "meeting_start" | "meeting_template_save"
+        "meeting_start" | "meeting_template_save" | "meeting_video_request_permission"
         | "meeting_template_delete" | "meeting_capture_probe" | "download_meeting_model"
         | "download_speaker_model" | "download_parakeet_model" | "meeting_prompt_payload"
         | "meeting_dismiss_prompt" | "meetings_settings_set" | "hosted_key_set" | "meeting_export_md" | "meeting_export_pdf"

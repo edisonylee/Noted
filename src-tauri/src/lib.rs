@@ -1667,7 +1667,19 @@ fn meeting_model_status(app: tauri::AppHandle) -> Value {
         "parakeet": meeting::parakeet_ready(&app),
         "hosted": release_profile::noted_hosted() && hosted::has_key(),
         "tap_supported": meeting::capture::tap_supported(),
+        "video_supported": release_profile::video_capture() && meeting::video::video_supported(),
+        "video_authorized": release_profile::video_capture() && meeting::video::permission_granted(),
     })
+}
+
+/// The only place Noted asks macOS for Screen Recording permission. Meeting
+/// start itself only preflights, so a declined or missing grant stays quiet.
+#[tauri::command]
+fn meeting_video_request_permission() -> Result<bool, String> {
+    if !release_profile::video_capture() || !meeting::video::video_supported() {
+        return Err("meeting window video needs macOS 15 or newer".into());
+    }
+    Ok(meeting::video::request_permission())
 }
 
 /// Download the meeting model (large-v3-turbo, ~1.6GB) — streamed to disk.
@@ -1734,10 +1746,10 @@ async fn download_parakeet_model(app: tauri::AppHandle) -> Result<bool, String> 
     Ok(true)
 }
 
-/// WeSpeaker CAM++ voice-embedding model (~29MB) — powers per-speaker labels
+/// English ERes2Net voice-embedding model (~27MB) — powers per-speaker labels
 /// on the system-audio channel. Same explicit-download pattern as whisper.
 const SPEAKER_MODEL_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_CAM%2B%2B_LM.onnx";
+    "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_eres2net_sv_en_voxceleb_16k.onnx";
 
 #[tauri::command]
 async fn download_speaker_model(app: tauri::AppHandle) -> Result<bool, String> {
@@ -1762,7 +1774,9 @@ async fn download_speaker_model(app: tauri::AppHandle) -> Result<bool, String> {
         .bytes()
         .await
         .map_err(|e| e.to_string())?;
-    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    let tmp = dir.join(format!("{}.part", meeting::diarize::MODEL_FILE));
+    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -3785,6 +3799,7 @@ pub fn run() {
             meeting_rename_speaker,
             meeting_rediarize,
             meeting_video_delete,
+            meeting_video_request_permission,
             meeting_assist,
             meeting_export_md,
             meeting_export_pdf,

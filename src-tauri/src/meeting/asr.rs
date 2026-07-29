@@ -42,7 +42,10 @@ impl Default for ChunkerCfg {
             close_rms: 0.006,
             open_frames: 3,
             hang_ms: 720,
-            max_segment_ms: 25_000,
+            // Shorter transcript rows materially improve attribution: a
+            // 25-second energy-gated chunk often spans two standup turns, but
+            // the transcript schema can carry only one speaker per row.
+            max_segment_ms: 12_000,
             min_segment_ms: 400,
         }
     }
@@ -711,6 +714,9 @@ pub struct WorkerArgs {
     pub asr_hint: Option<String>,
     /// Canonical user-vocabulary terms for post-decode normalization.
     pub vocab: Vec<String>,
+    /// Calendar attendees are diagnostic context only. They never become
+    /// speaker labels without identity evidence.
+    pub attendees: Vec<String>,
 }
 
 fn epoch_ms() -> u64 {
@@ -1008,7 +1014,13 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
     {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
-        finalize_speakers(&conn, args.meeting_id, &voice_prints);
+        finalize_speakers(
+            &conn,
+            args.meeting_id,
+            &voice_prints,
+            &args.attendees,
+            args.audio_dir.as_deref(),
+        );
     }
 
     for pipe in pipes {
@@ -1046,16 +1058,18 @@ pub fn finalize_speakers(
     conn: &rusqlite::Connection,
     meeting_id: i64,
     voice_prints: &[super::diarize::SegEmb],
+    attendees: &[String],
+    diagnostic_dir: Option<&Path>,
 ) -> usize {
-    if voice_prints.is_empty() {
-        return 0;
-    }
-    let clusters = super::diarize::cluster(voice_prints);
+    let clusters = super::diarize::cluster_with_expected(voice_prints, Some(attendees.len()));
     // Provisional live labels may disagree with the final clustering (a voice
     // that merged away, an echo cluster) — reset the channel and rewrite from
     // the full-context result so no stale label survives.
     let _ = store::clear_them_speakers(conn, meeting_id);
     let _ = store::clear_meeting_speakers(conn, meeting_id);
+    if let Some(dir) = diagnostic_dir {
+        write_diarization_diagnostic(dir, meeting_id, attendees, voice_prints, &clusters);
+    }
     if clusters.is_empty() {
         return 0;
     }
@@ -1082,6 +1096,68 @@ pub fn finalize_speakers(
         Err(e) => eprintln!("[noted] diarization write failed: {e}"),
     }
     named.len()
+}
+
+/// Keep enough local evidence to tune diarization against a real failure
+/// without retaining model tensors or sending meeting content anywhere.
+fn write_diarization_diagnostic(
+    dir: &Path,
+    meeting_id: i64,
+    attendees: &[String],
+    voice_prints: &[super::diarize::SegEmb],
+    clusters: &[super::diarize::SpeakerCluster],
+) {
+    let duration = |ids: &[i64]| -> i64 {
+        ids.iter()
+            .filter_map(|id| voice_prints.iter().find(|s| s.seg_id == *id))
+            .map(|s| s.dur_ms)
+            .sum()
+    };
+    let lone = clusters.len() == 1;
+    let rows = clusters
+        .iter()
+        .enumerate()
+        .map(|(index, cluster)| {
+            json!({
+                "label": if lone { "Them".to_string() } else { format!("Speaker {}", index + 1) },
+                "segment_count": cluster.seg_ids.len(),
+                "duration_ms": duration(&cluster.seg_ids),
+                "segment_ids": cluster.seg_ids,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut similarities = Vec::new();
+    for a in 0..clusters.len() {
+        for b in (a + 1)..clusters.len() {
+            similarities.push(json!({
+                "a": if lone { "Them".to_string() } else { format!("Speaker {}", a + 1) },
+                "b": if lone { "Them".to_string() } else { format!("Speaker {}", b + 1) },
+                "cosine": super::diarize::cosine(&clusters[a].centroid, &clusters[b].centroid),
+            }));
+        }
+    }
+    let report = json!({
+        "version": 1,
+        "meeting_id": meeting_id,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "policy": super::diarize::policy_json(),
+        "invited_remote_attendees": attendees,
+        "expected_remote_speakers": attendees.len(),
+        "clustering": if (2..=12).contains(&attendees.len()) {
+            "calendar_count_spherical_kmeans"
+        } else {
+            "similarity_threshold_average_linkage"
+        },
+        "embedded_segment_count": voice_prints.len(),
+        "clusters": rows,
+        "cluster_similarities": similarities,
+    });
+    if let Ok(bytes) = serde_json::to_vec_pretty(&report) {
+        let _ = std::fs::create_dir_all(dir);
+        if let Err(e) = std::fs::write(dir.join("diarization.json"), bytes) {
+            eprintln!("[noted] meeting {meeting_id}: could not write diarization diagnostics: {e}");
+        }
+    }
 }
 
 /// Read a 16 kHz mono 16-bit WAV written by `wav_writer`, tolerating a file
@@ -1143,7 +1219,7 @@ pub fn rediarize_from_wav(
     }
     let mut embedder = super::diarize::Embedder::new(model)?;
     let mut voice_prints: Vec<super::diarize::SegEmb> = Vec::new();
-    for (seg_id, t0, t1) in segs {
+    for &(seg_id, t0, t1) in &segs {
         // The WAV is wall-anchored (delivery gaps are written as zeros), so
         // segment times map straight to sample offsets. Gaps beyond
         // WAV_GAP_CAP_MS are truncated in the file — anything past the end of
@@ -1163,7 +1239,17 @@ pub fn rediarize_from_wav(
             });
         }
     }
-    Ok(finalize_speakers(conn, meeting_id, &voice_prints))
+    let attendees = store::get_meeting(conn, meeting_id)
+        .ok()
+        .map(|meeting| super::summarize::external_attendees(&meeting["event_json"]))
+        .unwrap_or_default();
+    Ok(finalize_speakers(
+        conn,
+        meeting_id,
+        &voice_prints,
+        &attendees,
+        Some(meeting_dir),
+    ))
 }
 
 #[cfg(test)]

@@ -1247,6 +1247,10 @@ button.today-todo-check:hover:not(:disabled) { border-color: var(--ink-soft); tr
 .conn-status.err { color: var(--error-ink); background: var(--error-bg); }
 .conn-status.checking,
 .conn-status.idle { color: var(--faint); background: var(--surface-2); }
+.meeting-video-permission {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+  margin: -2px 0 4px 30px;
+}
 .conn-detail { font-size: 12px; line-height: 1.45; color: var(--error-ink); background: var(--error-bg); padding: 8px 11px; border-radius: var(--r-sm); word-break: break-word; }
 .settings-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
 .spin { animation: spin 0.8s linear infinite; }

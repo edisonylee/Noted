@@ -1,7 +1,7 @@
 // Speaker diarization for the "them" (system-audio) stream.
 //
 // The ASR worker computes one voice embedding per transcribed them-segment as
-// it lands (WeSpeaker CAM++ via sherpa-onnx, 512-dim, ~30ms per segment). At
+// it lands (English ERes2Net via sherpa-onnx). At
 // stop, `cluster` groups ALL segments at once — full-context agglomerative
 // clustering beats online assignment, needs no retained audio, and finishes
 // before the meeting-stopped event, so the UI reload and the summary both see
@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 
-pub const MODEL_FILE: &str = "speaker-embed.onnx";
+pub const MODEL_FILE: &str = "speaker-embed-eres2net.onnx";
 
 /// Segments shorter than this embed too noisily to use at all.
 const MIN_EMBED_MS: i64 = 1_000;
@@ -35,6 +35,22 @@ const SNAP_MIN: f32 = 0.30;
 const EMBED_CAP_MS: i64 = 12_000;
 /// Matrix-size guard: cluster at most this many seeds (longest kept).
 const MAX_SEEDS: usize = 1_200;
+/// Calendar rosters larger than this are more likely to contain mailing lists,
+/// rooms, or optional invitees than a useful diarization count.
+const MAX_EXPECTED_SPEAKERS: usize = 12;
+
+pub(crate) fn policy_json() -> serde_json::Value {
+    serde_json::json!({
+        "min_embed_ms": MIN_EMBED_MS,
+        "seed_ms": SEED_MS,
+        "cluster_cutoff": CUTOFF,
+        "short_segment_snap_min": SNAP_MIN,
+        "embed_cap_ms": EMBED_CAP_MS,
+        "max_seeds": MAX_SEEDS,
+        "max_expected_speakers": MAX_EXPECTED_SPEAKERS,
+        "identity_policy": "manual",
+    })
+}
 
 pub fn model_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     use tauri::Manager;
@@ -143,7 +159,188 @@ pub(crate) fn cosine(a: &[f32], b: &[f32]) -> f32 {
 /// (`segs` must be in timeline order). May return a single cluster — the
 /// naming stage decides what that means.
 pub fn cluster(segs: &[SegEmb]) -> Vec<SpeakerCluster> {
-    cluster_at(segs, CUTOFF)
+    cluster_with_expected(segs, None)
+}
+
+/// Cluster with an optional calendar-roster count. The roster never assigns
+/// identities; it selects an exact anonymous partition when the expected
+/// remote-speaker count is small and credible.
+pub fn cluster_with_expected(
+    segs: &[SegEmb],
+    expected_speakers: Option<usize>,
+) -> Vec<SpeakerCluster> {
+    let expected = expected_speakers.filter(|&n| (2..=MAX_EXPECTED_SPEAKERS).contains(&n));
+    match expected {
+        Some(count) => cluster_exact_count(segs, count),
+        None => cluster_at(segs, CUTOFF),
+    }
+}
+
+/// Deterministic spherical k-means for calendar meetings where the number of
+/// remote participants is known. Hierarchical thresholding can leave one huge
+/// cluster plus several token outliers; an exact partition lets dense voice
+/// subgroups inside that large bucket separate.
+fn cluster_exact_count(segs: &[SegEmb], count: usize) -> Vec<SpeakerCluster> {
+    let segs: Vec<&SegEmb> = segs.iter().filter(|seg| !seg.emb.is_empty()).collect();
+    let mut seeds: Vec<usize> = (0..segs.len())
+        .filter(|&index| segs[index].dur_ms >= SEED_MS)
+        .collect();
+    if seeds.len() > MAX_SEEDS {
+        seeds.sort_by_key(|&index| -segs[index].dur_ms);
+        seeds.truncate(MAX_SEEDS);
+        seeds.sort_unstable();
+    }
+    let count = count.min(seeds.len());
+    if count < 2 {
+        return cluster_at(
+            &segs
+                .iter()
+                .map(|seg| SegEmb {
+                    seg_id: seg.seg_id,
+                    dur_ms: seg.dur_ms,
+                    emb: seg.emb.clone(),
+                })
+                .collect::<Vec<_>>(),
+            CUTOFF,
+        );
+    }
+
+    // Start in the densest part of the embedding space, then add the point
+    // farthest from its nearest chosen center. This is deterministic and much
+    // less likely than "first point" to spend a center on a noisy blip.
+    let first = seeds
+        .iter()
+        .copied()
+        .max_by(|&a, &b| {
+            let density = |index: usize| {
+                seeds
+                    .iter()
+                    .map(|&other| cosine(&segs[index].emb, &segs[other].emb))
+                    .sum::<f32>()
+            };
+            density(a)
+                .partial_cmp(&density(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.cmp(&a))
+        })
+        .unwrap();
+    let mut centers = vec![segs[first].emb.clone()];
+    while centers.len() < count {
+        let next = seeds
+            .iter()
+            .copied()
+            .min_by(|&a, &b| {
+                let nearest = |index: usize| {
+                    centers
+                        .iter()
+                        .map(|center| cosine(&segs[index].emb, center))
+                        .fold(f32::NEG_INFINITY, f32::max)
+                };
+                nearest(a)
+                    .partial_cmp(&nearest(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.cmp(&b))
+            })
+            .unwrap();
+        centers.push(segs[next].emb.clone());
+    }
+
+    let mut assignments = vec![usize::MAX; seeds.len()];
+    for _ in 0..30 {
+        let next_assignments = seeds
+            .iter()
+            .map(|&index| {
+                centers
+                    .iter()
+                    .enumerate()
+                    .max_by(|(ai, a), (bi, b)| {
+                        cosine(&segs[index].emb, a)
+                            .partial_cmp(&cosine(&segs[index].emb, b))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| bi.cmp(ai))
+                    })
+                    .map(|(center, _)| center)
+                    .unwrap_or(0)
+            })
+            .collect::<Vec<_>>();
+        if next_assignments == assignments {
+            break;
+        }
+        assignments = next_assignments;
+        for (center_index, center) in centers.iter_mut().enumerate() {
+            let members = seeds
+                .iter()
+                .zip(assignments.iter())
+                .filter(|(_, assigned)| **assigned == center_index)
+                .map(|(&seed, _)| seed)
+                .collect::<Vec<_>>();
+            if members.is_empty() {
+                continue;
+            }
+            center.fill(0.0);
+            for member in &members {
+                for (mean, value) in center.iter_mut().zip(segs[*member].emb.iter()) {
+                    *mean += value;
+                }
+            }
+            center
+                .iter_mut()
+                .for_each(|value| *value /= members.len() as f32);
+        }
+    }
+
+    let mut groups = (0..count)
+        .map(|center| {
+            seeds
+                .iter()
+                .zip(assignments.iter())
+                .filter(|(_, assigned)| **assigned == center)
+                .map(|(&seed, _)| seed)
+                .collect::<Vec<_>>()
+        })
+        .filter(|group| !group.is_empty())
+        .collect::<Vec<_>>();
+    groups.sort_by_key(|group| *group.iter().min().unwrap());
+    let mut out = groups
+        .into_iter()
+        .map(|group| {
+            let mut centroid = vec![0.0f32; segs[group[0]].emb.len()];
+            for &index in &group {
+                for (mean, value) in centroid.iter_mut().zip(segs[index].emb.iter()) {
+                    *mean += value;
+                }
+            }
+            centroid
+                .iter_mut()
+                .for_each(|value| *value /= group.len() as f32);
+            SpeakerCluster {
+                seg_ids: group.iter().map(|&index| segs[index].seg_id).collect(),
+                centroid,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let seeded: std::collections::HashSet<usize> = seeds.iter().copied().collect();
+    for (index, seg) in segs.iter().enumerate() {
+        if seeded.contains(&index) {
+            continue;
+        }
+        let nearest = out
+            .iter()
+            .enumerate()
+            .map(|(cluster, candidate)| (cluster, cosine(&seg.emb, &candidate.centroid)))
+            .max_by(|(ai, a), (bi, b)| {
+                a.partial_cmp(b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| bi.cmp(ai))
+            });
+        if let Some((cluster, similarity)) = nearest {
+            if similarity >= SNAP_MIN {
+                out[cluster].seg_ids.push(seg.seg_id);
+            }
+        }
+    }
+    out
 }
 
 /// `cluster` with an explicit merge floor — the tuning harness sweeps this to
@@ -332,6 +529,54 @@ mod tests {
     }
 
     #[test]
+    fn calendar_count_prevents_distinct_attendees_from_merging_away() {
+        // At a deliberately permissive similarity floor, the default pass can
+        // merge these four close voices. A four-person roster keeps four
+        // anonymous clusters without assigning any attendee names.
+        let segs = vec![
+            seg(1, 5000, 0, 1),
+            seg(2, 5000, 1, 2),
+            seg(3, 5000, 2, 3),
+            seg(4, 5000, 3, 4),
+        ];
+        let hinted = cluster_with_expected(&segs, Some(4));
+        assert_eq!(hinted.len(), 4);
+        let named = assign_names(hinted);
+        assert_eq!(named.len(), 4);
+        assert!(named.iter().all(|s| {
+            s.label
+                .as_deref()
+                .is_some_and(|label| label.starts_with("Speaker "))
+        }));
+    }
+
+    #[test]
+    fn calendar_count_separates_low_talkers_from_a_dense_majority() {
+        let mut segs = Vec::new();
+        let mut id = 0i64;
+        for (voice_index, count) in [(0, 30), (1, 12), (2, 5), (3, 1)] {
+            for sample in 0..count {
+                id += 1;
+                segs.push(seg(id, 5_000, voice_index, (id * 100 + sample) as u64));
+            }
+        }
+        let clusters = cluster_with_expected(&segs, Some(4));
+        assert_eq!(clusters.len(), 4);
+        let mut sizes = clusters
+            .iter()
+            .map(|cluster| cluster.seg_ids.len())
+            .collect::<Vec<_>>();
+        sizes.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(sizes, vec![30, 12, 5, 1]);
+    }
+
+    #[test]
+    fn implausibly_large_roster_does_not_force_noise_clusters() {
+        let segs: Vec<SegEmb> = (0..6).map(|i| seg(i, 5000, 2, i as u64)).collect();
+        assert_eq!(cluster_with_expected(&segs, Some(99)).len(), 1);
+    }
+
+    #[test]
     fn short_segment_snaps_to_nearest_speaker() {
         let segs = vec![
             seg(1, 5000, 0, 1),
@@ -377,7 +622,7 @@ mod tests {
 
     /// Tuning harness against a real recording — needs the model plus a
     /// meeting's them.wav and a `id\tt0\tt1\ttext` TSV of its them-segments:
-    ///   SPEAKER_MODEL=…/speaker-embed.onnx THEM_WAV=…/them.wav SEGS_TSV=…/them.tsv \
+    ///   SPEAKER_MODEL=…/speaker-embed-eres2net.onnx THEM_WAV=…/them.wav SEGS_TSV=…/them.tsv \
     ///   cargo test diarize_real_meeting -- --ignored --nocapture
     #[test]
     #[ignore]
@@ -443,6 +688,12 @@ mod tests {
             let mut sizes: Vec<usize> = c.iter().map(|x| x.seg_ids.len()).collect();
             sizes.sort_unstable_by(|a, b| b.cmp(a));
             println!("cutoff {cutoff:.2} → {} clusters {:?}", c.len(), sizes);
+        }
+        if let Ok(expected) = std::env::var("EXPECTED_SPEAKERS") {
+            let c = cluster_with_expected(&segs, expected.parse().ok());
+            let mut sizes: Vec<usize> = c.iter().map(|x| x.seg_ids.len()).collect();
+            sizes.sort_unstable_by(|a, b| b.cmp(a));
+            println!("expected {expected} → {} clusters {:?}", c.len(), sizes);
         }
 
         let named = assign_names(cluster(&segs));

@@ -79,6 +79,8 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   const [pDownloading, setPDownloading] = useState(false);
   const [probeMsg, setProbeMsg] = useState<string | null>(null);
   const [probing, setProbing] = useState(false);
+  const [videoPermissionBusy, setVideoPermissionBusy] = useState(false);
+  const [videoPermissionMsg, setVideoPermissionMsg] = useState<string | null>(null);
 
   async function runCaptureProbe() {
     setProbing(true);
@@ -107,6 +109,25 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
       setProbeMsg(String(e));
     } finally {
       setProbing(false);
+    }
+  }
+
+  async function requestVideoPermission() {
+    setVideoPermissionBusy(true);
+    setVideoPermissionMsg(null);
+    try {
+      const granted = await api.meetingVideoRequestPermission();
+      const status = await api.meetingModelStatus();
+      setMModel(status);
+      setVideoPermissionMsg(
+        granted || status.video_authorized
+          ? "Video permission is ready."
+          : "macOS did not grant access. Enable noted in Privacy & Security → Screen & System Audio Recording, then reopen the app."
+      );
+    } catch (e) {
+      setVideoPermissionMsg(String(e));
+    } finally {
+      setVideoPermissionBusy(false);
     }
   }
 
@@ -1209,34 +1230,71 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
             </span>
           </label>
           {releaseProfile.videoCapture && (
-          <label className="vault-auto">
-            <input
-              type="checkbox"
-              checked={mcfg?.record_video ?? true}
-              onChange={(e) => mcfg && saveMcfg({ ...mcfg, record_video: e.target.checked })}
-            />
-            <span>
-              Record the meeting window as video
-              <em>
-                Captures the call app's window itself (macOS 15+, one-time Screen Recording
-                permission) — covering it with other apps or switching Spaces doesn't interrupt
-                it. Videos auto-delete after{" "}
+            <>
+              <label className="vault-auto">
                 <input
-                  className="inline-days"
-                  type="number"
-                  min={0}
-                  max={365}
-                  value={mcfg?.video_keep_days ?? 14}
-                  onClick={(e) => e.preventDefault()}
-                  onChange={(e) =>
-                    mcfg &&
-                    saveMcfg({ ...mcfg, video_keep_days: Math.max(0, Number(e.target.value) || 0) })
-                  }
-                />{" "}
-                days to save space (0 = keep forever); transcripts and summaries are kept.
-              </em>
-            </span>
-          </label>
+                  type="checkbox"
+                  checked={mcfg?.record_video ?? true}
+                  onChange={(e) => mcfg && saveMcfg({ ...mcfg, record_video: e.target.checked })}
+                />
+                <span>
+                  Record the meeting window as video
+                  <em>
+                    Captures the call app's window itself (macOS 15+, one-time Screen Recording
+                    permission) — covering it with other apps or switching Spaces doesn't
+                    interrupt it. Videos auto-delete after{" "}
+                    <input
+                      className="inline-days"
+                      type="number"
+                      min={0}
+                      max={365}
+                      value={mcfg?.video_keep_days ?? 14}
+                      onClick={(e) => e.preventDefault()}
+                      onChange={(e) =>
+                        mcfg &&
+                        saveMcfg({
+                          ...mcfg,
+                          video_keep_days: Math.max(0, Number(e.target.value) || 0),
+                        })
+                      }
+                    />{" "}
+                    days to save space (0 = keep forever); transcripts and summaries are kept.
+                  </em>
+                </span>
+              </label>
+              {mcfg?.record_video && mModel?.video_supported && (
+                <div className="meeting-video-permission">
+                  <div className={"conn-status " + (mModel.video_authorized ? "ok" : "idle")}>
+                    {mModel.video_authorized ? <Check size={13} /> : <Laptop size={13} />}
+                    {mModel.video_authorized
+                      ? "Window recording permission ready"
+                      : "Window recording is paused until permission is granted"}
+                  </div>
+                  {!mModel.video_authorized && (
+                    <button
+                      type="button"
+                      className="ghost-btn test-btn"
+                      onClick={requestVideoPermission}
+                      disabled={videoPermissionBusy}
+                    >
+                      {videoPermissionBusy ? (
+                        <Loader2 size={14} className="spin" />
+                      ) : (
+                        <Laptop size={14} />
+                      )}
+                      Allow video recording once
+                    </button>
+                  )}
+                  <span className="field-hint">
+                    Noted will not ask during a meeting. If access is off, audio and transcription
+                    continue and video is skipped.
+                  </span>
+                  {videoPermissionMsg && (
+                    <span className="field-hint">{videoPermissionMsg}</span>
+                  )}
+                </div>
+              )}
+            </>
           )}
           <label className="vault-auto">
             <input
@@ -1457,7 +1515,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
                 title="Separates voices into neutral speaker labels; it does not recognize people across meetings"
               >
                 {sDownloading ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
-                {sDownloading ? "Downloading (29 MB)…" : "Download speaker separation model (29 MB)"}
+                {sDownloading ? "Downloading (27 MB)…" : "Download speaker separation model (27 MB)"}
               </button>
             )}
           </div>}

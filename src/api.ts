@@ -225,6 +225,15 @@ export type CategoryInfo = {
   entry_count: number;
 };
 
+export type NoteFolderInfo = {
+  id: number;
+  parent_id: number | null;
+  name: string;
+  kind: "space" | "folder";
+  auto_rule: "" | "daily_standup";
+  note_ids: number[];
+};
+
 export type Health = { models: string[]; vec_version: string };
 
 // Model-provider settings. "local" = 100% Ollama; "balanced" routes the
@@ -557,6 +566,15 @@ export const api = {
     invoke<{ meetings: number; mentions: number; name_suggestions: number }>("kg_reindex_meetings"),
   listNotes: () => invoke<NoteRow[]>("list_notes"),
   listCategories: () => invoke<CategoryInfo[]>("list_categories"),
+  listNoteFolders: () => invoke<NoteFolderInfo[]>("list_note_folders"),
+  createNoteFolder: (parentId: number | null, name: string, kind: "space" | "folder") =>
+    invoke<number>("create_note_folder", { parentId, name, kind }),
+  renameNoteFolder: (folderId: number, name: string) =>
+    invoke<void>("rename_note_folder", { folderId, name }),
+  deleteNoteFolder: (folderId: number) =>
+    invoke<void>("delete_note_folder", { folderId }),
+  fileNote: (noteId: number, folderId: number | null) =>
+    invoke<void>("file_note", { noteId, folderId }),
   // `scope` (a brain vault name) restricts retrieval to that vault; `entityId`
   // pins the answer to one item (its brain note + every capture mentioning it).
   chat: (

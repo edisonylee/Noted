@@ -51,6 +51,29 @@ CREATE TABLE IF NOT EXISTS entries (
   created_at  TEXT NOT NULL
 );
 
+-- User-owned organization is deliberately separate from model-generated
+-- categories. A space is a root node; folders can nest beneath spaces or other
+-- folders. Memberships are only organizational and never alter note content.
+CREATE TABLE IF NOT EXISTS note_folders (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_id   INTEGER REFERENCES note_folders(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL,
+  kind        TEXT NOT NULL CHECK(kind IN ('space', 'folder')),
+  auto_rule   TEXT NOT NULL DEFAULT '',
+  position    INTEGER NOT NULL DEFAULT 0,
+  created_at  TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_note_folders_parent_name
+  ON note_folders(COALESCE(parent_id, 0), name COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS note_folder_items (
+  folder_id  INTEGER NOT NULL REFERENCES note_folders(id) ON DELETE CASCADE,
+  note_id    INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (folder_id, note_id)
+);
+CREATE INDEX IF NOT EXISTS idx_note_folder_items_note ON note_folder_items(note_id);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0(
   note_id   INTEGER PRIMARY KEY,
   embedding FLOAT[768]
@@ -239,11 +262,58 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     ensure_column(&conn, "entities", "suggested_name", "TEXT")?;
     ensure_column(&conn, "meetings", "video_path", "TEXT")?;
     ensure_column(&conn, "meetings", "trashed_at", "TEXT")?;
+    seed_note_folders(&conn)?;
     initialize_embedding_fingerprint(&conn, &crate::provider::active_embedding_fingerprint())?;
     // Note: the reserved catch-all "misc" is not pre-seeded — the classifier is
     // told about it by name in the prompt, and it's created on first real use
     // (so an unused misc never clutters the catalog/UI).
     Ok(conn)
+}
+
+/// Give the notes library a useful first filing tree once. The metadata
+/// marker means deleting or renaming any of these later is respected.
+fn seed_note_folders(conn: &Connection) -> Result<()> {
+    let seeded: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_metadata WHERE key = 'note_folders_v1_seeded'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    if seeded.is_some() {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO note_folders (parent_id, name, kind, auto_rule, position, created_at)
+         VALUES (NULL, 'Work', 'space', '', 0, ?1)",
+        [&now],
+    )?;
+    let work_id = tx.last_insert_rowid();
+    tx.execute(
+        "INSERT INTO note_folders (parent_id, name, kind, auto_rule, position, created_at)
+         VALUES (NULL, 'Personal', 'space', '', 1, ?1)",
+        [&now],
+    )?;
+    tx.execute(
+        "INSERT INTO note_folders (parent_id, name, kind, auto_rule, position, created_at)
+         VALUES (?1, 'Baro', 'folder', '', 0, ?2)",
+        rusqlite::params![work_id, now],
+    )?;
+    let baro_id = tx.last_insert_rowid();
+    tx.execute(
+        "INSERT INTO note_folders (parent_id, name, kind, auto_rule, position, created_at)
+         VALUES (?1, 'Daily Standup Meeting Notes', 'folder', 'daily_standup', 0, ?2)",
+        rusqlite::params![baro_id, now],
+    )?;
+    tx.execute(
+        "INSERT INTO app_metadata (key, value) VALUES ('note_folders_v1_seeded', '1')",
+        [],
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// Add a column if a pre-existing table is missing it. No-op on fresh DBs where
@@ -380,6 +450,204 @@ pub fn list_notes(conn: &Connection) -> Result<Vec<NoteRow>> {
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+// ---------------------------------------------------------------------------
+// Spaces and folders. These are user-owned organization, independent from the
+// extraction categories above. Auto rules are deterministic saved views, so a
+// newly captured stand-up appears beside older ones without a migration job.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Debug)]
+pub struct NoteFolderInfo {
+    pub id: i64,
+    pub parent_id: Option<i64>,
+    pub name: String,
+    pub kind: String,
+    pub auto_rule: String,
+    pub note_ids: Vec<i64>,
+}
+
+pub fn is_daily_standup(note: &NoteRow) -> bool {
+    fn matches(value: &str) -> bool {
+        let lower = value.to_lowercase();
+        let spaced = lower.replace(['-', '_'], " ");
+        lower.contains("standup")
+            || lower.contains("stand-up")
+            || spaced.contains("daily stand up")
+            || spaced.contains("stand up meeting")
+            || spaced.contains("daily scrum")
+    }
+
+    matches(&note.raw_text)
+        || note
+            .entries
+            .iter()
+            .filter_map(|entry| entry.category.as_deref())
+            .any(matches)
+}
+
+pub fn list_note_folders(conn: &Connection) -> Result<Vec<NoteFolderInfo>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, parent_id, name, kind, auto_rule
+         FROM note_folders
+         ORDER BY parent_id IS NOT NULL, parent_id, position, name COLLATE NOCASE",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(NoteFolderInfo {
+            id: r.get(0)?,
+            parent_id: r.get(1)?,
+            name: r.get(2)?,
+            kind: r.get(3)?,
+            auto_rule: r.get(4)?,
+            note_ids: Vec::new(),
+        })
+    })?;
+    let mut folders = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    let auto_notes = if folders.iter().any(|folder| !folder.auto_rule.is_empty()) {
+        list_notes(conn)?
+    } else {
+        Vec::new()
+    };
+
+    for folder in &mut folders {
+        let mut item_stmt = conn.prepare(
+            "SELECT note_id FROM note_folder_items WHERE folder_id = ?1 ORDER BY note_id DESC",
+        )?;
+        let ids = item_stmt.query_map([folder.id], |r| r.get::<_, i64>(0))?;
+        let mut note_ids = ids.collect::<rusqlite::Result<Vec<_>>>()?;
+
+        if folder.auto_rule == "daily_standup" {
+            note_ids.extend(
+                auto_notes
+                    .iter()
+                    .filter(|note| is_daily_standup(note))
+                    .map(|note| note.id),
+            );
+        }
+        note_ids.sort_unstable();
+        note_ids.dedup();
+        folder.note_ids = note_ids;
+    }
+    Ok(folders)
+}
+
+pub fn create_note_folder(
+    conn: &Connection,
+    parent_id: Option<i64>,
+    name: &str,
+    kind: &str,
+    auto_rule: &str,
+    now: &str,
+) -> Result<i64> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow::anyhow!("folder name cannot be empty"));
+    }
+    if !matches!(auto_rule, "" | "daily_standup") {
+        return Err(anyhow::anyhow!("unknown folder rule"));
+    }
+    match parent_id {
+        None if kind != "space" => {
+            return Err(anyhow::anyhow!("a root item must be a space"));
+        }
+        Some(parent) => {
+            let exists = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM note_folders WHERE id = ?1)",
+                [parent],
+                |r| r.get::<_, bool>(0),
+            )?;
+            if !exists {
+                return Err(anyhow::anyhow!("parent folder not found"));
+            }
+            if kind != "folder" {
+                return Err(anyhow::anyhow!("only folders can be nested"));
+            }
+        }
+        None => {}
+    }
+
+    let position: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1
+         FROM note_folders
+         WHERE parent_id IS ?1",
+        [parent_id],
+        |r| r.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO note_folders (parent_id, name, kind, auto_rule, position, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![parent_id, name, kind, auto_rule, position, now],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn rename_note_folder(conn: &Connection, folder_id: i64, name: &str) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow::anyhow!("folder name cannot be empty"));
+    }
+    let changed = conn.execute(
+        "UPDATE note_folders SET name = ?1 WHERE id = ?2",
+        rusqlite::params![name, folder_id],
+    )?;
+    if changed == 0 {
+        return Err(anyhow::anyhow!("folder not found"));
+    }
+    Ok(())
+}
+
+pub fn delete_note_folder(conn: &Connection, folder_id: i64) -> Result<()> {
+    let changed = conn.execute("DELETE FROM note_folders WHERE id = ?1", [folder_id])?;
+    if changed == 0 {
+        return Err(anyhow::anyhow!("folder not found"));
+    }
+    Ok(())
+}
+
+/// Move a note's explicit filing to one space or folder. Filing directly to a
+/// space is its inbox state; filing to a child gives it a more specific home.
+/// Auto-filed appearances remain computed from their rule, so the same note can
+/// still belong to a smart view.
+pub fn file_note(
+    conn: &Connection,
+    note_id: i64,
+    folder_id: Option<i64>,
+    now: &str,
+) -> Result<()> {
+    let note_exists = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM notes WHERE id = ?1 AND (origin = 'capture' OR origin IS NULL)
+         )",
+        [note_id],
+        |r| r.get::<_, bool>(0),
+    )?;
+    if !note_exists {
+        return Err(anyhow::anyhow!("note not found"));
+    }
+    if let Some(folder_id) = folder_id {
+        let is_target = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM note_folders WHERE id = ?1)",
+            [folder_id],
+            |r| r.get::<_, bool>(0),
+        )?;
+        if !is_target {
+            return Err(anyhow::anyhow!("filing target not found"));
+        }
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM note_folder_items WHERE note_id = ?1", [note_id])?;
+    if let Some(folder_id) = folder_id {
+        tx.execute(
+            "INSERT INTO note_folder_items (folder_id, note_id, created_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![folder_id, note_id, now],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// Refresh the human-readable body of a generated note. Its semantic index

@@ -9,7 +9,7 @@ import { useConnection } from "./useConnection";
 import { MobileCapture } from "./MobileCapture";
 import { BottomNav, type MobileTab } from "./BottomNav";
 import { useTheme } from "./useTheme";
-import { api, TokenError, OfflineError, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow, type RangeEvent, type RelatedBrain } from "./api";
+import { api, TokenError, OfflineError, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteFolderInfo, type NoteRow, type RangeEvent, type RelatedBrain } from "./api";
 import { DataView } from "./DataView";
 import { CalendarView } from "./Calendar";
 import { JournalView } from "./Journal";
@@ -85,6 +85,8 @@ export default function App() {
 
   const [notes, setNotes] = useState<NoteRow[]>([]);
   const [cats, setCats] = useState<CategoryInfo[]>([]);
+  const [noteSpaces, setNoteSpaces] = useState<NoteFolderInfo[]>([]);
+  const [captureSpaceId, setCaptureSpaceId] = useState<number | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
 
   // Phone capture + backup
@@ -240,9 +242,31 @@ export default function App() {
   const recorderRef = useRef<Recorder | null>(null);
 
   const refresh = async () => {
-    const [n, c] = await Promise.all([api.listNotes(), api.listCategories()]);
+    const [n, c, folders] = await Promise.all([
+      api.listNotes(),
+      api.listCategories(),
+      api.listNoteFolders(),
+    ]);
     setNotes(n);
     setCats(c);
+    const roots = folders
+      .filter((folder) => folder.kind === "space")
+      .sort((a, b) => {
+        const rank = (name: string) =>
+          name.toLowerCase() === "personal" ? 0 : name.toLowerCase() === "work" ? 1 : 2;
+        return rank(a.name) - rank(b.name);
+      });
+    setNoteSpaces(roots);
+    setCaptureSpaceId((current) => {
+      if (current != null && roots.some((space) => space.id === current)) return current;
+      const saved = Number(localStorage.getItem("noted-capture-space"));
+      return (
+        roots.find((space) => space.id === saved)?.id ??
+        roots.find((space) => space.name.toLowerCase() === "personal")?.id ??
+        roots[0]?.id ??
+        null
+      );
+    });
   };
 
   // Phone web client only: watch the connection to the Mac and auto-recover when
@@ -490,7 +514,7 @@ export default function App() {
           relationship: e.relationship?.trim() || undefined,
         }))
         .filter((e) => e.name && e.type);
-      await api.save({
+      const noteId = await api.save({
         raw_text: source === "photo" ? ocrText : text.trim(),
         source,
         image_path,
@@ -498,6 +522,7 @@ export default function App() {
         entries,
         entities,
       });
+      if (captureSpaceId != null) await api.fileNote(noteId, captureSpaceId);
       const savedCats = Array.from(new Set(entries.map((e) => e.category))).join(", ");
       resetAll();
       await refresh();
@@ -807,6 +832,26 @@ export default function App() {
             pickFile(e.dataTransfer.files?.[0]);
           }}
         >
+          {noteSpaces.length > 0 && (
+            <label className="capture-space-field">
+              <span>File in</span>
+              <select
+                value={captureSpaceId ?? ""}
+                onChange={(event) => {
+                  const id = Number(event.target.value);
+                  setCaptureSpaceId(id);
+                  localStorage.setItem("noted-capture-space", String(id));
+                }}
+                disabled={busy}
+              >
+                {noteSpaces.map((space) => (
+                  <option key={space.id} value={space.id}>
+                    {space.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {img ? (
             <div className="img-attached">
               <img src={img.dataUrl} alt="note" />

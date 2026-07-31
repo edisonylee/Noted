@@ -266,6 +266,29 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         .map(|id| json!(id)),
         "list_notes" => crate::list_notes(a).await,
         "list_categories" => crate::list_categories(a).await,
+        "list_note_folders" => crate::list_note_folders(a).await,
+        "create_note_folder" => {
+            let parent_id = b.get("parentId").and_then(|v| v.as_i64());
+            crate::create_note_folder(a, parent_id, sarg(b, "name"), sarg(b, "kind"))
+                .await
+                .map(|id| json!(id))
+        }
+        "rename_note_folder" => crate::rename_note_folder(
+            a,
+            iarg(b, "folderId"),
+            sarg(b, "name"),
+        )
+        .await
+        .map(|_| Value::Null),
+        "delete_note_folder" => crate::delete_note_folder(a, iarg(b, "folderId"))
+            .await
+            .map(|_| Value::Null),
+        "file_note" => {
+            let folder_id = b.get("folderId").and_then(|v| v.as_i64());
+            crate::file_note(a, iarg(b, "noteId"), folder_id)
+                .await
+                .map(|_| Value::Null)
+        }
         "chat" => {
             let history: Vec<crate::ChatMsg> =
                 serde_json::from_value(varg(b, "history")).unwrap_or_default();

@@ -644,6 +644,58 @@ async fn list_categories(app: tauri::AppHandle) -> Result<Value, String> {
     serde_json::to_value(cats).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn list_note_folders(app: tauri::AppHandle) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let folders = db::list_note_folders(&conn).map_err(|e| e.to_string())?;
+    serde_json::to_value(folders).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_note_folder(
+    app: tauri::AppHandle,
+    parent_id: Option<i64>,
+    name: String,
+    kind: String,
+) -> Result<i64, String> {
+    let state = app.state::<Db>();
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = state.0.lock().unwrap();
+    db::create_note_folder(&conn, parent_id, &name, &kind, "", &now)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn rename_note_folder(
+    app: tauri::AppHandle,
+    folder_id: i64,
+    name: String,
+) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    db::rename_note_folder(&conn, folder_id, &name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_note_folder(app: tauri::AppHandle, folder_id: i64) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    db::delete_note_folder(&conn, folder_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn file_note(
+    app: tauri::AppHandle,
+    note_id: i64,
+    folder_id: Option<i64>,
+) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = state.0.lock().unwrap();
+    db::file_note(&conn, note_id, folder_id, &now).map_err(|e| e.to_string())
+}
+
 /// Generate (and store) a recap for "day" (today) or "week" (trailing 7 days),
 /// grounded in the entries within that range.
 #[tauri::command]
@@ -3775,6 +3827,11 @@ pub fn run() {
             quick_capture,
             list_notes,
             list_categories,
+            list_note_folders,
+            create_note_folder,
+            rename_note_folder,
+            delete_note_folder,
+            file_note,
             chat,
             create_category,
             update_entry,

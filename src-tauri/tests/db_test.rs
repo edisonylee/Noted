@@ -256,6 +256,313 @@ fn transcript_search_is_indexed_live_and_returns_each_matching_line() {
 }
 
 #[test]
+fn transcript_vocabulary_corrects_existing_and_future_lines_with_safe_undo() {
+    use tauri_app_lib::meeting::store;
+
+    let tmp = std::env::temp_dir().join(format!(
+        "noted_transcript_vocabulary_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let mut conn = db::init(&tmp).unwrap();
+    let meeting_id =
+        store::create_meeting(&conn, "Company review", None, None, "2026-08-03T14:00:00Z")
+            .unwrap();
+    store::set_status(&conn, meeting_id, "done").unwrap();
+    let segment_id = store::insert_segment(
+        &conn,
+        meeting_id,
+        "them",
+        1_000,
+        4_000,
+        "Borrow said BORROW, but we never borrowed the deck.",
+    )
+    .unwrap();
+
+    let preview = store::preview_transcript_vocabulary(&conn, "borrow").unwrap();
+    assert_eq!(preview.matching_segments, 1);
+    assert_eq!(preview.occurrences, 2, "whole-word matching excludes borrowed");
+
+    let applied = store::apply_transcript_vocabulary(
+        &mut conn,
+        "borrow",
+        "BARO",
+        "2026-08-03T14:05:00Z",
+    )
+    .unwrap();
+    assert_eq!(applied.changed_segments, 1);
+    assert_eq!(applied.changed_occurrences, 2);
+    let corrected: String = conn
+        .query_row(
+            "SELECT text FROM meeting_segments WHERE id = ?1",
+            [segment_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(corrected, "BARO said BARO, but we never borrowed the deck.");
+    assert_eq!(store::search_transcripts(&conn, "baro", 200).unwrap().len(), 1);
+
+    let undone = store::undo_transcript_vocabulary(
+        &mut conn,
+        applied.batch_id.unwrap(),
+        "2026-08-03T14:06:00Z",
+    )
+    .unwrap();
+    assert_eq!(undone.restored_segments, 1);
+    assert_eq!(undone.skipped_segments, 0);
+    assert!(store::list_transcript_vocabulary(&conn).unwrap().is_empty());
+    let restored: String = conn
+        .query_row(
+            "SELECT text FROM meeting_segments WHERE id = ?1",
+            [segment_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(restored, "Borrow said BORROW, but we never borrowed the deck.");
+
+    store::apply_transcript_vocabulary(
+        &mut conn,
+        "borrow",
+        "BARO",
+        "2026-08-03T14:07:00Z",
+    )
+    .unwrap();
+    let future = store::insert_segment(
+        &conn,
+        meeting_id,
+        "me",
+        5_000,
+        8_000,
+        "BORROW is presenting next.",
+    )
+    .unwrap();
+    let future_text: String = conn
+        .query_row(
+            "SELECT text FROM meeting_segments WHERE id = ?1",
+            [future],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(future_text, "BARO is presenting next.");
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn transcript_filters_are_dynamic_and_one_on_ones_use_the_attendee_name() {
+    use tauri_app_lib::meeting::{diarize, store};
+
+    let tmp = std::env::temp_dir().join(format!(
+        "noted_transcript_facets_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let mut conn = db::init(&tmp).unwrap();
+    let one_on_one_event = json!({
+        "attendees": [
+            {"email":"edison@heybaro.com","self":true},
+            {"email":"brian@heybaro.com","self":false}
+        ]
+    })
+    .to_string();
+    let one_on_one = store::create_meeting(
+        &conn,
+        "Brian/Edison",
+        None,
+        Some(&one_on_one_event),
+        "2026-08-03T15:00:00Z",
+    )
+    .unwrap();
+    store::set_status(&conn, one_on_one, "done").unwrap();
+    let brian_a = store::insert_segment(
+        &conn,
+        one_on_one,
+        "them",
+        1_000,
+        3_000,
+        "The investor update is ready.",
+    )
+    .unwrap();
+    let brian_b = store::insert_segment(
+        &conn,
+        one_on_one,
+        "them",
+        4_000,
+        6_000,
+        "The investor asked about timing.",
+    )
+    .unwrap();
+    store::set_segment_speakers(
+        &conn,
+        &[(brian_a, "Speaker 1".into()), (brian_b, "Speaker 2".into())],
+    )
+    .unwrap();
+    store::save_meeting_speakers(
+        &conn,
+        one_on_one,
+        &[
+            ("Speaker 1".into(), vec![1.0, 0.0], 8),
+            ("Speaker 2".into(), vec![0.0, 1.0], 2),
+        ],
+    )
+    .unwrap();
+
+    let standup_event = json!({
+        "attendees": [
+            {"email":"edison@heybaro.com","self":true},
+            {"email":"brian@heybaro.com","self":false},
+            {"email":"max@heybaro.com","self":false}
+        ]
+    })
+    .to_string();
+    let standup = store::create_meeting(
+        &conn,
+        "Daily Stand Up",
+        None,
+        Some(&standup_event),
+        "2026-08-03T16:00:00Z",
+    )
+    .unwrap();
+    store::set_status(&conn, standup, "done").unwrap();
+    store::insert_segment(
+        &conn,
+        standup,
+        "them",
+        1_000,
+        3_000,
+        "The investor pipeline moved forward.",
+    )
+    .unwrap();
+    save(
+        &mut conn,
+        "meetings",
+        "generated meeting note",
+        json!({"meeting_id": standup, "title": "Daily Stand Up"}),
+        "2026-08-03T16:05:00Z",
+    );
+    let standup_note: i64 = conn
+        .query_row("SELECT id FROM notes ORDER BY id DESC LIMIT 1", [], |row| row.get(0))
+        .unwrap();
+    conn.execute(
+        "UPDATE notes SET raw_text = 'Daily standup meeting notes' WHERE id = ?1",
+        [standup_note],
+    )
+    .unwrap();
+    store::set_note_id(&conn, standup, standup_note).unwrap();
+
+    conn.execute(
+        "DELETE FROM app_metadata WHERE key = 'meeting_one_on_one_speakers_v1'",
+        [],
+    )
+    .unwrap();
+    store::initialize_one_on_one_speakers(&conn).unwrap();
+    let labels: Vec<String> = conn
+        .prepare(
+            "SELECT DISTINCT speaker FROM meeting_segments
+             WHERE meeting_id = ?1 AND channel = 'them' ORDER BY speaker",
+        )
+        .unwrap()
+        .query_map([one_on_one], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(labels, vec!["Brian"]);
+    let merged: (i64, Vec<f32>) = conn
+        .query_row(
+            "SELECT seg_count, centroid FROM meeting_speakers
+             WHERE meeting_id = ?1 AND label = 'Brian'",
+            [one_on_one],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    diarize::blob_to_emb(&row.get::<_, Vec<u8>>(1)?),
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(merged.0, 10);
+    assert!((merged.1[0] - 0.8).abs() < 1e-6);
+
+    let facets = store::transcript_search_facets(&conn).unwrap();
+    assert!(facets.people.iter().any(|value| value.label == "Brian" && value.count == 2));
+    assert!(facets.people.iter().any(|value| value.label == "Max" && value.count == 1));
+    assert!(facets.meeting_types.iter().any(|value| value.value == "one_on_one"));
+    assert!(facets.meeting_types.iter().any(|value| value.value == "daily_standup"));
+    let baro = facets
+        .folders
+        .iter()
+        .find(|value| value.label == "Baro")
+        .expect("parent company folder includes its stand-up child");
+
+    let brian_hits = store::search_transcripts_filtered(
+        &conn,
+        "investor",
+        200,
+        &store::TranscriptSearchFilters {
+            people: vec!["Brian".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(brian_hits.len(), 3);
+    let max_hits = store::search_transcripts_filtered(
+        &conn,
+        "investor",
+        200,
+        &store::TranscriptSearchFilters {
+            people: vec!["Max".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(max_hits.len(), 1);
+    assert_eq!(max_hits[0].meeting_id, standup);
+    let folder_hits = store::search_transcripts_filtered(
+        &conn,
+        "investor",
+        200,
+        &store::TranscriptSearchFilters {
+            folder_ids: vec![baro.value.parse().unwrap()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(folder_hits.len(), 1);
+    assert_eq!(folder_hits[0].meeting_id, standup);
+
+    let oldest_hits = store::search_transcripts_filtered_sorted(
+        &conn,
+        "investor",
+        200,
+        &store::TranscriptSearchFilters::default(),
+        "date_asc",
+    )
+    .unwrap();
+    assert_eq!(oldest_hits.first().unwrap().meeting_id, one_on_one);
+
+    let title_hits = store::search_transcripts_filtered_sorted(
+        &conn,
+        "investor",
+        200,
+        &store::TranscriptSearchFilters::default(),
+        "title_asc",
+    )
+    .unwrap();
+    assert_eq!(title_hits.first().unwrap().meeting_id, one_on_one);
+    assert_eq!(title_hits.last().unwrap().meeting_id, standup);
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
 fn embedding_space_replacement_is_atomic_and_fingerprinted() {
     let tmp = std::env::temp_dir().join(format!("noted_embedding_swap_{}.db", std::process::id()));
     let _ = std::fs::remove_file(&tmp);

@@ -332,7 +332,42 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "meeting_state" => Ok(crate::meeting_state(a)),
         "meeting_list" => crate::meeting_list(a).await,
         "meeting_search_transcripts" => {
-            crate::meeting_search_transcripts(a, sarg(b, "query"), iarg(b, "limit")).await
+            let filters = b
+                .get("filters")
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok());
+            let sort = b.get("sort").and_then(Value::as_str).map(str::to_owned);
+            crate::meeting_search_transcripts(
+                a,
+                sarg(b, "query"),
+                iarg(b, "limit"),
+                filters,
+                sort,
+            )
+            .await
+        }
+        "meeting_search_facets" => crate::meeting_search_facets(a).await,
+        "meeting_transcript_vocabulary_list" => {
+            crate::meeting_transcript_vocabulary_list(a).await
+        }
+        "meeting_transcript_vocabulary_preview" => {
+            crate::meeting_transcript_vocabulary_preview(a, sarg(b, "heard")).await
+        }
+        "meeting_transcript_vocabulary_apply" => {
+            crate::meeting_transcript_vocabulary_apply(
+                a,
+                sarg(b, "heard"),
+                sarg(b, "preferred"),
+            )
+            .await
+        }
+        "meeting_transcript_vocabulary_remove" => {
+            crate::meeting_transcript_vocabulary_remove(a, iarg(b, "id"))
+                .await
+                .map(|_| Value::Null)
+        }
+        "meeting_transcript_vocabulary_undo" => {
+            crate::meeting_transcript_vocabulary_undo(a, iarg(b, "batchId")).await
         }
         "meeting_trash_list" => crate::meeting_trash_list(a).await,
         "meeting_get" => crate::meeting_get(a, iarg(b, "id")).await,

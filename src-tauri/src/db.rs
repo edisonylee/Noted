@@ -217,6 +217,39 @@ CREATE TRIGGER IF NOT EXISTS meeting_segments_fts_update AFTER UPDATE OF text ON
   INSERT INTO meeting_segments_fts(rowid, text) VALUES (new.id, new.text);
 END;
 
+-- User-owned transcript vocabulary. Rules are applied deterministically after
+-- ASR so a preferred spelling survives every transcription engine. Bulk edits
+-- keep the prior text per segment, making the latest correction reversible.
+CREATE TABLE IF NOT EXISTS transcript_vocabulary (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  heard      TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  preferred  TEXT NOT NULL,
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS transcript_correction_batches (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  vocabulary_id       INTEGER REFERENCES transcript_vocabulary(id) ON DELETE SET NULL,
+  heard               TEXT NOT NULL,
+  preferred           TEXT NOT NULL,
+  changed_segments    INTEGER NOT NULL,
+  changed_occurrences INTEGER NOT NULL,
+  created_at          TEXT NOT NULL,
+  undone_at           TEXT
+);
+
+CREATE TABLE IF NOT EXISTS transcript_correction_items (
+  batch_id    INTEGER NOT NULL REFERENCES transcript_correction_batches(id) ON DELETE CASCADE,
+  segment_id  INTEGER NOT NULL REFERENCES meeting_segments(id) ON DELETE CASCADE,
+  before_text TEXT NOT NULL,
+  after_text  TEXT NOT NULL,
+  PRIMARY KEY (batch_id, segment_id)
+);
+CREATE INDEX IF NOT EXISTS idx_transcript_correction_segment
+  ON transcript_correction_items(segment_id);
+
 -- One row per generated summary tab (PLAUD-style multidimensional summaries:
 -- regenerating with another template adds a tab, never overwrites).
 CREATE TABLE IF NOT EXISTS meeting_summaries (
@@ -288,6 +321,7 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     ensure_column(&conn, "meetings", "trashed_at", "TEXT")?;
     initialize_meeting_transcript_index(&conn)?;
     seed_note_folders(&conn)?;
+    crate::meeting::store::initialize_one_on_one_speakers(&conn)?;
     initialize_embedding_fingerprint(&conn, &crate::provider::active_embedding_fingerprint())?;
     // Note: the reserved catch-all "misc" is not pre-seeded — the classifier is
     // told about it by name in the prompt, and it's created on first real use

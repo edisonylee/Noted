@@ -413,6 +413,46 @@ export type TranscriptSearchHit = {
   speaker: string;
   text: string;
 };
+export type TranscriptFacetValue = {
+  value: string;
+  label: string;
+  count: number;
+};
+export type TranscriptSearchFacets = {
+  people: TranscriptFacetValue[];
+  folders: TranscriptFacetValue[];
+  meeting_types: TranscriptFacetValue[];
+};
+export type TranscriptSearchFilters = {
+  people: string[];
+  folderIds: number[];
+  meetingTypes: string[];
+};
+export type NoteSortOrder = "date_desc" | "date_asc" | "title_asc" | "title_desc";
+export type TranscriptVocabularyRule = {
+  id: number;
+  heard: string;
+  preferred: string;
+  created_at: string;
+  updated_at: string;
+  last_batch_id: number | null;
+  last_changed_segments: number | null;
+  last_applied_at: string | null;
+};
+export type TranscriptVocabularyPreview = {
+  matching_segments: number;
+  occurrences: number;
+};
+export type TranscriptVocabularyApplyResult = {
+  rule: TranscriptVocabularyRule;
+  batch_id: number | null;
+  changed_segments: number;
+  changed_occurrences: number;
+};
+export type TranscriptVocabularyUndoResult = {
+  restored_segments: number;
+  skipped_segments: number;
+};
 // A diarized voice in a meeting. `suggested` is an unconfirmed LLM-mined name
 // (confirming = renaming); label "Them" is the lone-unrecognized-voice case.
 export type MeetingSpeaker = {
@@ -740,8 +780,32 @@ export const api = {
   meetingStop: () => invoke<number | null>("meeting_stop"),
   meetingState: () => invoke<MeetingLiveState>("meeting_state"),
   meetingList: () => invoke<MeetingListRow[]>("meeting_list"),
-  meetingSearchTranscripts: (query: string, limit = 200) =>
-    invoke<TranscriptSearchHit[]>("meeting_search_transcripts", { query, limit }),
+  meetingSearchTranscripts: (
+    query: string,
+    filters?: TranscriptSearchFilters,
+    sort: NoteSortOrder = "date_desc",
+    limit = 200
+  ) => invoke<TranscriptSearchHit[]>("meeting_search_transcripts", {
+    query,
+    filters,
+    sort,
+    limit,
+  }),
+  meetingSearchFacets: () =>
+    invoke<TranscriptSearchFacets>("meeting_search_facets"),
+  meetingTranscriptVocabularyList: () =>
+    invoke<TranscriptVocabularyRule[]>("meeting_transcript_vocabulary_list"),
+  meetingTranscriptVocabularyPreview: (heard: string) =>
+    invoke<TranscriptVocabularyPreview>("meeting_transcript_vocabulary_preview", { heard }),
+  meetingTranscriptVocabularyApply: (heard: string, preferred: string) =>
+    invoke<TranscriptVocabularyApplyResult>("meeting_transcript_vocabulary_apply", {
+      heard,
+      preferred,
+    }),
+  meetingTranscriptVocabularyRemove: (id: number) =>
+    invoke<void>("meeting_transcript_vocabulary_remove", { id }),
+  meetingTranscriptVocabularyUndo: (batchId: number) =>
+    invoke<TranscriptVocabularyUndoResult>("meeting_transcript_vocabulary_undo", { batchId }),
   meetingTrashList: () => invoke<MeetingListRow[]>("meeting_trash_list"),
   meetingGet: (id: number) => invoke<MeetingDetail>("meeting_get", { id }),
   meetingTrash: (id: number) => invoke<void>("meeting_trash", { id }),

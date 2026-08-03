@@ -13,6 +13,7 @@ import {
 } from "react";
 import {
   ArrowLeft,
+  ArrowUpDown,
   AudioLines,
   BookOpen,
   CalendarDays,
@@ -22,6 +23,7 @@ import {
   Folder,
   FolderOpen,
   Inbox,
+  ListFilter,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
@@ -29,13 +31,17 @@ import {
   Plus,
   Search,
   Trash2,
+  X,
 } from "lucide-react";
 import {
   api,
   type CategoryInfo,
   type MeetingListRow,
+  type NoteSortOrder,
   type NoteFolderInfo,
   type NoteRow,
+  type TranscriptSearchFacets,
+  type TranscriptSearchFilters,
   type TranscriptSearchHit,
 } from "./api";
 import { DataView } from "./DataView";
@@ -56,6 +62,38 @@ type WeekGroup = {
 type MeetingTarget = {
   id: number;
   segmentId?: number;
+};
+
+type SearchInstrument = "filters" | null;
+
+const SORT_ORDERS: NoteSortOrder[] = [
+  "date_desc",
+  "date_asc",
+  "title_asc",
+  "title_desc",
+];
+
+const SORT_LABELS: Record<NoteSortOrder, string> = {
+  date_desc: "Newest first",
+  date_asc: "Oldest first",
+  title_asc: "Title A–Z",
+  title_desc: "Title Z–A",
+};
+
+function isNoteSortOrder(value: string | null): value is NoteSortOrder {
+  return value != null && SORT_ORDERS.includes(value as NoteSortOrder);
+}
+
+const EMPTY_TRANSCRIPT_FILTERS: TranscriptSearchFilters = {
+  people: [],
+  folderIds: [],
+  meetingTypes: [],
+};
+
+const EMPTY_TRANSCRIPT_FACETS: TranscriptSearchFacets = {
+  people: [],
+  folders: [],
+  meeting_types: [],
 };
 
 function transcriptTimestamp(ms: number): string {
@@ -174,6 +212,71 @@ function scheduleNoteTitle(note: NoteRow): string {
   return `${month} ${ordinalDay(day)}${yearLabel} — Schedule`;
 }
 
+function displayedNoteTitle(note: NoteRow, standupNoteIds: Set<number>): string {
+  if (isScheduleNote(note)) return scheduleNoteTitle(note);
+  if (standupNoteIds.has(note.id)) return datedNoteTitle(note);
+  return noteTitle(note);
+}
+
+function compareDates(
+  left: string | null,
+  right: string | null,
+  oldestFirst: boolean
+): number {
+  const leftTime = left == null ? Number.NaN : Date.parse(left);
+  const rightTime = right == null ? Number.NaN : Date.parse(right);
+  const leftKnown = Number.isFinite(leftTime);
+  const rightKnown = Number.isFinite(rightTime);
+  if (!leftKnown && !rightKnown) return 0;
+  if (!leftKnown) return 1;
+  if (!rightKnown) return -1;
+  return oldestFirst ? leftTime - rightTime : rightTime - leftTime;
+}
+
+function compareNoteRows(
+  left: NoteRow,
+  right: NoteRow,
+  sortOrder: NoteSortOrder,
+  standupNoteIds: Set<number>
+): number {
+  if (sortOrder === "title_asc" || sortOrder === "title_desc") {
+    const titleOrder = displayedNoteTitle(left, standupNoteIds).localeCompare(
+      displayedNoteTitle(right, standupNoteIds),
+      undefined,
+      { numeric: true, sensitivity: "base" }
+    );
+    if (titleOrder !== 0) return sortOrder === "title_asc" ? titleOrder : -titleOrder;
+  }
+  const dateOrder = compareDates(
+    `${left.event_date}T12:00:00Z`,
+    `${right.event_date}T12:00:00Z`,
+    sortOrder === "date_asc"
+  );
+  if (dateOrder !== 0) return dateOrder;
+  return sortOrder === "date_asc" ? left.id - right.id : right.id - left.id;
+}
+
+function compareMeetingRows(
+  left: MeetingListRow,
+  right: MeetingListRow,
+  sortOrder: NoteSortOrder
+): number {
+  if (sortOrder === "title_asc" || sortOrder === "title_desc") {
+    const titleOrder = left.title.localeCompare(right.title, undefined, {
+      numeric: true,
+      sensitivity: "base",
+    });
+    if (titleOrder !== 0) return sortOrder === "title_asc" ? titleOrder : -titleOrder;
+  }
+  const dateOrder = compareDates(
+    left.started_at,
+    right.started_at,
+    sortOrder === "date_asc"
+  );
+  if (dateOrder !== 0) return dateOrder;
+  return sortOrder === "date_asc" ? left.id - right.id : right.id - left.id;
+}
+
 function meetingIdOf(note: NoteRow): number | null {
   for (const entry of note.entries) {
     if ((entry.category ?? "").toLowerCase() === "meetings") {
@@ -209,7 +312,7 @@ function weekFor(date: string): { start: string; end: string } {
   return { start: ymd(start), end: ymd(end) };
 }
 
-function calendarWeeks(notes: NoteRow[]): WeekGroup[] {
+function calendarWeeks(notes: NoteRow[], sortOrder: NoteSortOrder): WeekGroup[] {
   const groups = new Map<string, WeekGroup>();
   for (const note of notes) {
     const { start, end } = weekFor(note.event_date);
@@ -230,7 +333,10 @@ function calendarWeeks(notes: NoteRow[]): WeekGroup[] {
     }
     group.notes.push(note);
   }
-  return Array.from(groups.values()).sort((a, b) => b.key.localeCompare(a.key));
+  const oldestFirst = sortOrder === "date_asc";
+  return Array.from(groups.values()).sort((a, b) =>
+    oldestFirst ? a.key.localeCompare(b.key) : b.key.localeCompare(a.key)
+  );
 }
 
 function folderPath(folderId: number, folders: NoteFolderInfo[]): string {
@@ -265,6 +371,17 @@ export function NotesView({
   const [transcriptSearchPending, setTranscriptSearchPending] = useState(false);
   const [transcriptSearchError, setTranscriptSearchError] = useState<string | null>(null);
   const transcriptSearchRequest = useRef(0);
+  const [searchInstrument, setSearchInstrument] = useState<SearchInstrument>(null);
+  const [transcriptFacets, setTranscriptFacets] = useState<TranscriptSearchFacets>(
+    EMPTY_TRANSCRIPT_FACETS
+  );
+  const [transcriptFilters, setTranscriptFilters] = useState<TranscriptSearchFilters>(
+    EMPTY_TRANSCRIPT_FILTERS
+  );
+  const [sortOrder, setSortOrderState] = useState<NoteSortOrder>(() => {
+    const saved = localStorage.getItem("noted-note-sort");
+    return isNoteSortOrder(saved) ? saved : "date_desc";
+  });
   const [folders, setFolders] = useState<NoteFolderInfo[]>([]);
   const [folderError, setFolderError] = useState<string | null>(null);
   const [creating, setCreating] = useState<CreateTarget | null>(null);
@@ -301,6 +418,11 @@ export function NotesView({
     localStorage.setItem("noted-folder-expanded", JSON.stringify(Array.from(next)));
   };
 
+  const setSortOrder = (next: NoteSortOrder) => {
+    setSortOrderState(next);
+    localStorage.setItem("noted-note-sort", next);
+  };
+
   const loadMeetings = useCallback(() => {
     Promise.all([api.meetingList(), api.meetingTrashList()])
       .then(([active, trashed]) => {
@@ -323,10 +445,20 @@ export function NotesView({
     }
   }, []);
 
+  const loadTranscriptFacets = useCallback(async () => {
+    try {
+      setTranscriptFacets(await api.meetingSearchFacets());
+    } catch {
+      // Search itself remains available if an older phone build has not yet
+      // learned the management endpoints.
+    }
+  }, []);
+
   useEffect(() => {
     loadMeetings();
     loadFolders();
-  }, [loadFolders, loadMeetings]);
+    loadTranscriptFacets();
+  }, [loadFolders, loadMeetings, loadTranscriptFacets]);
 
   useEffect(() => {
     const search = query.trim();
@@ -344,7 +476,7 @@ export function NotesView({
     setTranscriptHits([]);
     const timer = window.setTimeout(() => {
       api
-        .meetingSearchTranscripts(search)
+        .meetingSearchTranscripts(search, transcriptFilters, sortOrder)
         .then((hits) => {
           if (requestId === transcriptSearchRequest.current) setTranscriptHits(hits);
         })
@@ -361,7 +493,7 @@ export function NotesView({
         });
     }, 40);
     return () => window.clearTimeout(timer);
-  }, [query, selection]);
+  }, [query, selection, sortOrder, transcriptFilters]);
 
   const successfulMeetings = useMemo(
     () =>
@@ -518,21 +650,25 @@ export function NotesView({
           noteCats(note).some((category) => category.includes(normalizedQuery))
       );
     }
-    return rows;
-  }, [libraryNotes, query, scheduleNotes, selectedFolder, selection]);
+    return [...rows].sort((left, right) =>
+      compareNoteRows(left, right, sortOrder, standupNoteIds)
+    );
+  }, [libraryNotes, query, scheduleNotes, selectedFolder, selection, sortOrder, standupNoteIds]);
 
   const meetingRows = useMemo(() => {
     const rows = selection === "meeting-trash" ? trashedMeetings : successfulMeetings;
     const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) return rows;
-    return rows.filter((meeting) =>
-      `${meeting.title} ${meeting.status}`.toLowerCase().includes(normalizedQuery)
-    );
-  }, [query, selection, successfulMeetings, trashedMeetings]);
+    const filtered = normalizedQuery
+      ? rows.filter((meeting) =>
+          `${meeting.title} ${meeting.status}`.toLowerCase().includes(normalizedQuery)
+        )
+      : rows;
+    return [...filtered].sort((left, right) => compareMeetingRows(left, right, sortOrder));
+  }, [query, selection, sortOrder, successfulMeetings, trashedMeetings]);
 
   const weekGroups = useMemo(
-    () => (selectedFolder ? calendarWeeks(list) : []),
-    [list, selectedFolder]
+    () => (selectedFolder ? calendarWeeks(list, sortOrder) : []),
+    [list, selectedFolder, sortOrder]
   );
   const meetingView = selection === "meetings" || selection === "meeting-trash";
 
@@ -614,6 +750,30 @@ export function NotesView({
     } finally {
       setFiling(false);
     }
+  }
+
+  function toggleStringTranscriptFilter(
+    key: "people" | "meetingTypes",
+    value: string
+  ) {
+    setTranscriptFilters((current) => {
+      const values = current[key];
+      return {
+        ...current,
+        [key]: values.includes(value)
+          ? values.filter((item) => item !== value)
+          : [...values, value],
+      };
+    });
+  }
+
+  function toggleFolderTranscriptFilter(folderId: number) {
+    setTranscriptFilters((current) => ({
+      ...current,
+      folderIds: current.folderIds.includes(folderId)
+        ? current.folderIds.filter((id) => id !== folderId)
+        : [...current.folderIds, folderId],
+    }));
   }
 
   if (openMeeting != null) {
@@ -801,13 +961,7 @@ export function NotesView({
       ) : (
         <FileText size={14} className="note-row-icon" />
       )}
-      <span className="note-row-title">
-        {isScheduleNote(note)
-          ? scheduleNoteTitle(note)
-          : standupNoteIds.has(note.id)
-          ? datedNoteTitle(note)
-          : noteTitle(note)}
-      </span>
+      <span className="note-row-title">{displayedNoteTitle(note, standupNoteIds)}</span>
       {!isScheduleNote(note) && (
         <span className="note-row-categories">{noteCats(note).slice(0, 2).join(" · ")}</span>
       )}
@@ -817,6 +971,91 @@ export function NotesView({
 
   const transcriptSearchActive =
     (selection === "all" || selection === "meetings") && query.trim().length >= 2;
+  const activeTranscriptFilterCount =
+    transcriptFilters.people.length +
+    transcriptFilters.folderIds.length +
+    transcriptFilters.meetingTypes.length;
+  const transcriptFiltersActive = activeTranscriptFilterCount > 0;
+
+  const renderFacetGroup = (
+    label: string,
+    values: TranscriptSearchFacets["people"],
+    selected: (value: string) => boolean,
+    toggle: (value: string) => void
+  ) => (
+    <fieldset className="search-filter-group">
+      <legend>{label}</legend>
+      <div className="search-filter-values">
+        {values.length === 0 ? (
+          <span className="search-filter-empty">No values yet</span>
+        ) : (
+          values.map((facet) => (
+            <label key={facet.value} className="search-filter-value">
+              <input
+                type="checkbox"
+                checked={selected(facet.value)}
+                onChange={() => toggle(facet.value)}
+              />
+              <span>{facet.label}</span>
+              <small>{facet.count}</small>
+            </label>
+          ))
+        )}
+      </div>
+    </fieldset>
+  );
+
+  const renderSearchInstrument = () => {
+    if (searchInstrument === "filters") {
+      return (
+        <section className="search-instrument" aria-label="Transcript filters">
+          <header className="search-instrument-head">
+            <div>
+              <h2>Filter transcript matches</h2>
+              <p>Choose within a group for either/or; groups combine together.</p>
+            </div>
+            <div className="search-instrument-actions">
+              {transcriptFiltersActive && (
+                <button
+                  onClick={() => setTranscriptFilters(EMPTY_TRANSCRIPT_FILTERS)}
+                >
+                  Clear all
+                </button>
+              )}
+              <button
+                className="search-instrument-close"
+                onClick={() => setSearchInstrument(null)}
+                aria-label="Close transcript filters"
+              >
+                <X size={15} />
+              </button>
+            </div>
+          </header>
+          <div className="search-filter-grid">
+            {renderFacetGroup(
+              "People",
+              transcriptFacets.people,
+              (value) => transcriptFilters.people.includes(value),
+              (value) => toggleStringTranscriptFilter("people", value)
+            )}
+            {renderFacetGroup(
+              "Folders and companies",
+              transcriptFacets.folders,
+              (value) => transcriptFilters.folderIds.includes(Number(value)),
+              (value) => toggleFolderTranscriptFilter(Number(value))
+            )}
+            {renderFacetGroup(
+              "Meeting type",
+              transcriptFacets.meeting_types,
+              (value) => transcriptFilters.meetingTypes.includes(value),
+              (value) => toggleStringTranscriptFilter("meetingTypes", value)
+            )}
+          </div>
+        </section>
+      );
+    }
+    return null;
+  };
 
   const renderTranscriptResults = () => {
     if (!transcriptSearchActive) return null;
@@ -998,11 +1237,13 @@ export function NotesView({
     );
   };
 
-  const listedCount = meetingView
-    ? meetingRows.length
-    : selectedFolder
-      ? visibleFolderChildren.length + list.length
-      : list.length;
+  const listedCount = transcriptSearchActive && transcriptFiltersActive
+    ? 0
+    : meetingView
+      ? meetingRows.length
+      : selectedFolder
+        ? visibleFolderChildren.length + list.length
+        : list.length;
   const visibleCount = listedCount + (transcriptSearchActive ? transcriptHits.length : 0);
   const countLabel = transcriptSearchActive
     ? `${visibleCount}${transcriptHits.length === 200 ? "+" : ""} ${
@@ -1020,6 +1261,8 @@ export function NotesView({
     : `${visibleCount} ${visibleCount === 1 ? "note" : "notes"}`;
   const emptyMessage = transcriptSearchPending
     ? "Searching transcripts…"
+    : transcriptSearchActive && transcriptFiltersActive
+      ? "No transcript lines match this search and filter combination."
     : query
     ? "Nothing matches."
     : selection === "meetings"
@@ -1036,18 +1279,21 @@ export function NotesView({
 
   return (
     <div className="notes-view" data-tauri-drag-region>
-      {libraryOpen && (
-        <aside className="spaces" aria-label="Notes library">
+      <div className="notes-library-shell">
+        <button
+          className="notes-library-toggle icon-btn"
+          onClick={() => setLibraryOpen(!libraryOpen)}
+          title={`${libraryOpen ? "Collapse" : "Show"} library`}
+          aria-label={`${libraryOpen ? "Collapse" : "Show"} library`}
+          aria-expanded={libraryOpen}
+        >
+          {libraryOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}
+        </button>
+
+        {libraryOpen && (
+          <aside className="spaces" aria-label="Notes library">
           <div className="spaces-head">
             <span>Library</span>
-            <button
-              className="icon-btn"
-              onClick={() => setLibraryOpen(false)}
-              title="Collapse library"
-              aria-label="Collapse library"
-            >
-              <PanelLeftClose size={14} />
-            </button>
           </div>
           <nav className="library-main" aria-label="Saved views">
             <button
@@ -1175,8 +1421,9 @@ export function NotesView({
               <span className="space-n">{trashedMeetings.length}</span>
             </button>
           </div>
-        </aside>
-      )}
+          </aside>
+        )}
+      </div>
 
       <main className="notes-list">
         <div className="notes-context">
@@ -1192,16 +1439,6 @@ export function NotesView({
           <span className="notes-context-count">{countLabel}</span>
         </div>
         <div className="notes-list-head">
-          {!libraryOpen && (
-            <button
-              className="icon-btn"
-              onClick={() => setLibraryOpen(true)}
-              title={`Show library (viewing: ${currentLabel})`}
-              aria-label="Show library"
-            >
-              <PanelLeftOpen size={15} />
-            </button>
-          )}
           <label className="notes-search">
             <Search size={14} />
             <input
@@ -1216,13 +1453,50 @@ export function NotesView({
               onChange={(event) => setQuery(event.target.value)}
             />
           </label>
+          <div className="search-tool-buttons">
+            {(selection === "all" || selection === "meetings") && (
+              <button
+                className={
+                  searchInstrument === "filters" || transcriptFiltersActive ? "on" : ""
+                }
+                onClick={() =>
+                  setSearchInstrument((current) =>
+                    current === "filters" ? null : "filters"
+                  )
+                }
+                aria-expanded={searchInstrument === "filters"}
+              >
+                <ListFilter size={14} />
+                <span>Filter</span>
+                {activeTranscriptFilterCount > 0 && (
+                  <small>{activeTranscriptFilterCount}</small>
+                )}
+              </button>
+            )}
+            <label className="notes-sort">
+              <ArrowUpDown size={14} aria-hidden="true" />
+              <span className="notes-sort-label">Sort by</span>
+              <select
+                aria-label="Sort notes by"
+                value={sortOrder}
+                onChange={(event) => setSortOrder(event.target.value as NoteSortOrder)}
+              >
+                {SORT_ORDERS.map((order) => (
+                  <option value={order} key={order}>
+                    {SORT_LABELS[order]}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
         </div>
 
+        {(selection === "all" || selection === "meetings") && renderSearchInstrument()}
         {renderTranscriptResults()}
 
         {visibleCount === 0 ? (
           <p className="quiet-empty">{emptyMessage}</p>
-        ) : meetingView ? (
+        ) : transcriptSearchActive && transcriptFiltersActive ? null : meetingView ? (
           meetingRows.map((meeting) => (
             <button
               key={meeting.id}

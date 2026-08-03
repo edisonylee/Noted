@@ -1983,12 +1983,101 @@ async fn meeting_search_transcripts(
     app: tauri::AppHandle,
     query: String,
     limit: i64,
+    filters: Option<meeting::store::TranscriptSearchFilters>,
+    sort: Option<String>,
 ) -> Result<Value, String> {
     let state = app.state::<Db>();
     let conn = state.0.lock().unwrap();
-    let rows = meeting::store::search_transcripts(&conn, &query, limit)
-        .map_err(|error| error.to_string())?;
+    let rows = meeting::store::search_transcripts_filtered_sorted(
+        &conn,
+        &query,
+        limit,
+        &filters.unwrap_or_default(),
+        sort.as_deref().unwrap_or("date_desc"),
+    )
+    .map_err(|error| error.to_string())?;
     Ok(json!(rows))
+}
+
+#[tauri::command]
+async fn meeting_search_facets(app: tauri::AppHandle) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    meeting::store::transcript_search_facets(&conn)
+        .map(|facets| json!(facets))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn meeting_transcript_vocabulary_list(
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    meeting::store::list_transcript_vocabulary(&conn)
+        .map(|rules| json!(rules))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn meeting_transcript_vocabulary_preview(
+    app: tauri::AppHandle,
+    heard: String,
+) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    meeting::store::preview_transcript_vocabulary(&conn, &heard)
+        .map(|preview| json!(preview))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn meeting_transcript_vocabulary_apply(
+    app: tauri::AppHandle,
+    heard: String,
+    preferred: String,
+) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let mut conn = state.0.lock().unwrap();
+    meeting::store::apply_transcript_vocabulary(
+        &mut conn,
+        &heard,
+        &preferred,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .map(|result| json!(result))
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn meeting_transcript_vocabulary_remove(
+    app: tauri::AppHandle,
+    id: i64,
+) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    meeting::store::remove_transcript_vocabulary(
+        &conn,
+        id,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn meeting_transcript_vocabulary_undo(
+    app: tauri::AppHandle,
+    batch_id: i64,
+) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let mut conn = state.0.lock().unwrap();
+    meeting::store::undo_transcript_vocabulary(
+        &mut conn,
+        batch_id,
+        &chrono::Utc::now().to_rfc3339(),
+    )
+    .map(|result| json!(result))
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -3956,6 +4045,12 @@ pub fn run() {
             meeting_state,
             meeting_list,
             meeting_search_transcripts,
+            meeting_search_facets,
+            meeting_transcript_vocabulary_list,
+            meeting_transcript_vocabulary_preview,
+            meeting_transcript_vocabulary_apply,
+            meeting_transcript_vocabulary_remove,
+            meeting_transcript_vocabulary_undo,
             meeting_trash_list,
             meeting_trash,
             meeting_restore,

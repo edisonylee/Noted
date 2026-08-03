@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { X, Check, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, Download, Mic, Plus, RefreshCw, Trash2, FolderPlus, Laptop, Gauge, Cloud, KeyRound } from "lucide-react";
 import { api, type BrainVaultStatus, type ByokConfig, type CloudProvider, type GcalStatus, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type ProviderId, type ProviderMode, type ProviderSettings } from "./api";
 import { ThemesSettings } from "./ThemesSettings";
+import { TranscriptVocabularySettings } from "./TranscriptVocabularySettings";
 import { releaseProfile } from "./releaseProfile";
 
 // Live connection status, shown as a persistent badge so "is Gemini actually
@@ -661,7 +662,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           </div>
           {releaseProfile.diarization && (
             <span className="field-hint">
-              {mModel?.speaker ? <Check size={13} /> : null} Speaker separation {mModel?.speaker ? "installed" : "not installed"} — separates voices; names are assigned manually per meeting.
+              {mModel?.speaker ? <Check size={13} /> : null} Speaker separation {mModel?.speaker ? "installed" : "not installed"} — separates voices; one-on-ones use calendar attendees when available.
             </span>
           )}
         </div>}
@@ -1433,7 +1434,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           </div>
           <label className="field">
             <span className="field-label">
-              Custom vocabulary — names and jargon the transcriber mishears (comma-separated)
+              Preferred terms for new transcripts (comma-separated)
             </span>
             <input
               value={vocabText}
@@ -1452,7 +1453,11 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               spellCheck={false}
               autoComplete="off"
             />
+            <span className="field-hint">
+              Helps the speech model recognize names and jargon before correction rules are applied.
+            </span>
           </label>
+          <TranscriptVocabularySettings />
           <label className="field">
             <span className="field-label">
               Never prompt for these apps (comma-separated bundle-id fragments)

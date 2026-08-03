@@ -1070,6 +1070,48 @@ pub fn finalize_speakers(
     if let Some(dir) = diagnostic_dir {
         write_diarization_diagnostic(dir, meeting_id, attendees, voice_prints, &clusters);
     }
+    if attendees.len() == 1 {
+        let attendee = attendees[0].trim();
+        if attendee.is_empty() {
+            return 0;
+        }
+        // In a true two-person meeting the system-audio channel has exactly
+        // one possible human speaker. A noisy embedding can split that person
+        // into several clusters; calendar identity is stronger evidence here.
+        if !clusters.is_empty() {
+            let mut merged = clusters[0].centroid.clone();
+            let mut samples = clusters[0].seg_ids.len() as i64;
+            for cluster in clusters.iter().skip(1) {
+                let next_samples = cluster.seg_ids.len() as i64;
+                merged = super::diarize::merge_centroid(
+                    &merged,
+                    samples,
+                    &cluster.centroid,
+                    next_samples,
+                );
+                samples += next_samples;
+            }
+            let _ = store::save_meeting_speakers(
+                conn,
+                meeting_id,
+                &[(attendee.to_string(), merged, samples)],
+            );
+        }
+        match store::set_one_on_one_speaker(conn, meeting_id, attendee) {
+            Ok(()) => eprintln!(
+                "[noted] diarization: one-on-one remote speaker labeled {attendee}"
+            ),
+            Err(error) => eprintln!("[noted] one-on-one speaker write failed: {error}"),
+        }
+        return if store::them_segment_times(conn, meeting_id)
+            .map(|segments| !segments.is_empty())
+            .unwrap_or(false)
+        {
+            1
+        } else {
+            0
+        };
+    }
     if clusters.is_empty() {
         return 0;
     }
@@ -1300,6 +1342,57 @@ mod tests {
         let prints = vec![vp(1, 2, 1), vp(2, 2, 2), vp(3, 2, 3)];
         // lone unknown voice: no live label (channel default "Them" reads better)
         assert!(provisional_labels(&prints).is_empty());
+    }
+
+    #[test]
+    fn one_on_one_finalization_uses_the_sole_attendee_for_every_remote_line() {
+        let tmp = std::env::temp_dir().join(format!(
+            "noted_one_on_one_finalize_{}_{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&tmp);
+        let conn = crate::db::init(&tmp).unwrap();
+        let meeting_id = store::create_meeting(
+            &conn,
+            "Brian/Edison",
+            None,
+            None,
+            "2026-08-03T15:00:00Z",
+        )
+        .unwrap();
+        let first = store::insert_segment(&conn, meeting_id, "them", 0, 5_000, "first")
+            .unwrap();
+        let second = store::insert_segment(&conn, meeting_id, "them", 6_000, 11_000, "second")
+            .unwrap();
+        let third = store::insert_segment(&conn, meeting_id, "them", 12_000, 17_000, "third")
+            .unwrap();
+        let prints = vec![vp(first, 0, 1), vp(second, 1, 2), vp(third, 0, 3)];
+
+        assert_eq!(
+            finalize_speakers(&conn, meeting_id, &prints, &["Brian".into()], None),
+            1
+        );
+        let labels: Vec<String> = conn
+            .prepare(
+                "SELECT DISTINCT speaker FROM meeting_segments
+                 WHERE meeting_id = ?1 AND channel = 'them'",
+            )
+            .unwrap()
+            .query_map([meeting_id], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(labels, vec!["Brian"]);
+        let speakers = store::list_meeting_speakers(&conn, meeting_id).unwrap();
+        assert_eq!(speakers.len(), 1);
+        assert_eq!(speakers[0]["label"], "Brian");
+        assert_eq!(speakers[0]["seg_count"], 3);
+
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]

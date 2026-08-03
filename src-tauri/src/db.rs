@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::Result;
-use rusqlite::{ffi::sqlite3_auto_extension, Connection};
+use rusqlite::{ffi::sqlite3_auto_extension, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sqlite_vec::sqlite3_vec_init;
@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS categories (
 
 CREATE TABLE IF NOT EXISTS notes (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  title        TEXT NOT NULL DEFAULT '',
   raw_text     TEXT NOT NULL,
   source       TEXT NOT NULL DEFAULT 'text',
   image_path   TEXT,
@@ -194,6 +195,28 @@ CREATE TABLE IF NOT EXISTS meeting_segments (
 );
 CREATE INDEX IF NOT EXISTS idx_segment_meeting ON meeting_segments(meeting_id, t0_ms);
 
+-- A content-linked FTS index keeps transcript lookup off the recording table.
+-- The triggers make each completed ASR segment searchable immediately while
+-- avoiding a full transcript scan for every character typed in the UI.
+CREATE VIRTUAL TABLE IF NOT EXISTS meeting_segments_fts USING fts5(
+  text,
+  content='meeting_segments',
+  content_rowid='id',
+  tokenize='unicode61 remove_diacritics 2'
+);
+CREATE TRIGGER IF NOT EXISTS meeting_segments_fts_insert AFTER INSERT ON meeting_segments BEGIN
+  INSERT INTO meeting_segments_fts(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS meeting_segments_fts_delete AFTER DELETE ON meeting_segments BEGIN
+  INSERT INTO meeting_segments_fts(meeting_segments_fts, rowid, text)
+  VALUES ('delete', old.id, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS meeting_segments_fts_update AFTER UPDATE OF text ON meeting_segments BEGIN
+  INSERT INTO meeting_segments_fts(meeting_segments_fts, rowid, text)
+  VALUES ('delete', old.id, old.text);
+  INSERT INTO meeting_segments_fts(rowid, text) VALUES (new.id, new.text);
+END;
+
 -- One row per generated summary tab (PLAUD-style multidimensional summaries:
 -- regenerating with another template adds a tab, never overwrites).
 CREATE TABLE IF NOT EXISTS meeting_summaries (
@@ -242,7 +265,7 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     // SAFETY: standard sqlite-vec registration. Must run before Connection::open.
     unsafe {
         sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite3_vec_init as *const (),
+            sqlite3_vec_init as *const ()
         )));
     }
     let conn = Connection::open(db_path)?;
@@ -251,6 +274,7 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     // Migrations for DBs created before a column existed (additive only).
     ensure_column(&conn, "entries", "event_date", "TEXT")?;
     ensure_column(&conn, "entities", "relationship", "TEXT")?;
+    ensure_column(&conn, "notes", "title", "TEXT")?;
     // Brain-sync columns (additive; legacy rows read as capture-origin via COALESCE).
     ensure_column(&conn, "notes", "origin", "TEXT")?;
     ensure_column(&conn, "notes", "source_path", "TEXT")?;
@@ -262,12 +286,40 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     ensure_column(&conn, "entities", "suggested_name", "TEXT")?;
     ensure_column(&conn, "meetings", "video_path", "TEXT")?;
     ensure_column(&conn, "meetings", "trashed_at", "TEXT")?;
+    initialize_meeting_transcript_index(&conn)?;
     seed_note_folders(&conn)?;
     initialize_embedding_fingerprint(&conn, &crate::provider::active_embedding_fingerprint())?;
     // Note: the reserved catch-all "misc" is not pre-seeded — the classifier is
     // told about it by name in the prompt, and it's created on first real use
     // (so an unused misc never clutters the catalog/UI).
     Ok(conn)
+}
+
+/// Existing databases predate the transcript FTS table. Rebuild it once from
+/// saved segments; afterward the schema triggers keep it current in real time.
+fn initialize_meeting_transcript_index(conn: &Connection) -> Result<()> {
+    let indexed: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_metadata WHERE key = 'meeting_transcripts_fts_v1'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if indexed.is_some() {
+        return Ok(());
+    }
+
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO meeting_segments_fts(meeting_segments_fts) VALUES ('rebuild')",
+        [],
+    )?;
+    tx.execute(
+        "INSERT INTO app_metadata (key, value) VALUES ('meeting_transcripts_fts_v1', '1')",
+        [],
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// Give the notes library a useful first filing tree once. The metadata
@@ -393,6 +445,7 @@ pub struct NoteEntry {
 #[derive(Serialize)]
 pub struct NoteRow {
     pub id: i64,
+    pub title: String,
     pub raw_text: String,
     pub source: String,
     pub entries: Vec<NoteEntry>,
@@ -424,7 +477,7 @@ pub fn list_notes(conn: &Connection) -> Result<Vec<NoteRow>> {
     // array. Ordered by the day the thing happened (latest entry event_date),
     // falling back to the save day for any legacy rows without one.
     let mut stmt = conn.prepare(
-        "SELECT n.id, n.raw_text, n.source,
+        "SELECT n.id, COALESCE(n.title, ''), n.raw_text, n.source,
                 COALESCE(MAX(e.event_date), date(n.created_at)) AS event_date,
                 json_group_array(json_object('id', e.id, 'category', c.name, 'data', json(e.data_json))) AS entries,
                 n.created_at
@@ -439,14 +492,15 @@ pub fn list_notes(conn: &Connection) -> Result<Vec<NoteRow>> {
          ORDER BY event_date DESC, n.id DESC",
     )?;
     let rows = stmt.query_map([], |r| {
-        let entries_str: String = r.get(4)?;
+        let entries_str: String = r.get(5)?;
         Ok(NoteRow {
             id: r.get(0)?,
-            raw_text: r.get(1)?,
-            source: r.get(2)?,
-            event_date: r.get(3)?,
+            title: r.get(1)?,
+            raw_text: r.get(2)?,
+            source: r.get(3)?,
+            event_date: r.get(4)?,
             entries: parse_note_entries(&entries_str),
-            created_at: r.get(5)?,
+            created_at: r.get(6)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -479,11 +533,20 @@ pub fn is_daily_standup(note: &NoteRow) -> bool {
             || spaced.contains("daily scrum")
     }
 
+    let categories: Vec<&str> = note
+        .entries
+        .iter()
+        .filter_map(|entry| entry.category.as_deref())
+        .collect();
+    if categories
+        .iter()
+        .any(|category| category.trim().eq_ignore_ascii_case("schedule"))
+    {
+        return false;
+    }
+
     matches(&note.raw_text)
-        || note
-            .entries
-            .iter()
-            .filter_map(|entry| entry.category.as_deref())
+        || categories.into_iter()
             .any(matches)
 }
 
@@ -615,7 +678,7 @@ pub fn file_note(
     conn: &Connection,
     note_id: i64,
     folder_id: Option<i64>,
-    now: &str,
+    now: &str
 ) -> Result<()> {
     let note_exists = conn.query_row(
         "SELECT EXISTS(
@@ -639,7 +702,7 @@ pub fn file_note(
     }
 
     let tx = conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM note_folder_items WHERE note_id = ?1", [note_id])?;
+    tx.execute("DELETE FROM note_folder_items WHERE note_id = ?1", [note_id],)?;
     if let Some(folder_id) = folder_id {
         tx.execute(
             "INSERT INTO note_folder_items (folder_id, note_id, created_at) VALUES (?1, ?2, ?3)",
@@ -660,6 +723,32 @@ pub fn refresh_note_text(conn: &Connection, note_id: i64, raw_text: &str) -> Res
     )?;
     conn.execute("DELETE FROM embeddings WHERE note_id = ?1", [note_id])?;
     clear_note_mentions(conn, note_id)?;
+    Ok(())
+}
+
+/// Save user-owned note fields without rewriting captured text to manufacture a
+/// display title. Body edits invalidate derived search and knowledge data;
+/// title-only edits only invalidate the semantic index.
+pub fn update_note(conn: &Connection, note_id: i64, title: &str, raw_text: &str) -> Result<()> {
+    let previous = conn
+        .query_row(
+            "SELECT raw_text FROM notes
+             WHERE id = ?1 AND (origin = 'capture' OR origin IS NULL)",
+            [note_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(previous) = previous else {
+        return Err(anyhow::anyhow!("note not found"));
+    };
+    conn.execute(
+        "UPDATE notes SET title = ?2, raw_text = ?3 WHERE id = ?1",
+        rusqlite::params![note_id, title.trim(), raw_text],
+    )?;
+    conn.execute("DELETE FROM embeddings WHERE note_id = ?1", [note_id])?;
+    if previous != raw_text {
+        clear_note_mentions(conn, note_id)?;
+    }
     Ok(())
 }
 
@@ -738,7 +827,8 @@ pub fn replace_embedding_space(
 pub fn all_note_embedding_inputs(conn: &Connection) -> Result<Vec<(i64, String)>> {
     let mut stmt = conn.prepare(
         "SELECT n.id,
-                COALESCE(group_concat(DISTINCT c.name), '') || char(10) || n.raw_text || char(10)
+                COALESCE(n.title, '') || char(10)
+                  || COALESCE(group_concat(DISTINCT c.name), '') || char(10) || n.raw_text || char(10)
                   || COALESCE(group_concat(e.data_json, char(10)), '')
          FROM notes n
          LEFT JOIN entries e ON e.note_id = n.id
@@ -762,7 +852,8 @@ pub fn all_entity_embedding_inputs(conn: &Connection) -> Result<Vec<(i64, String
 pub fn notes_missing_embeddings(conn: &Connection) -> Result<Vec<(i64, String)>> {
     let mut stmt = conn.prepare(
         "SELECT n.id,
-                COALESCE(group_concat(DISTINCT c.name), '') || char(10) || n.raw_text || char(10)
+                COALESCE(n.title, '') || char(10)
+                  || COALESCE(group_concat(DISTINCT c.name), '') || char(10) || n.raw_text || char(10)
                   || COALESCE(group_concat(e.data_json, char(10)), '')
          FROM notes n
          LEFT JOIN entries e ON e.note_id = n.id
@@ -779,7 +870,8 @@ pub fn notes_missing_embeddings(conn: &Connection) -> Result<Vec<(i64, String)>>
 /// the chat agent edits one of its entries.
 pub fn note_embed_text(conn: &Connection, note_id: i64) -> Result<String> {
     let text: String = conn.query_row(
-        "SELECT COALESCE(group_concat(DISTINCT c.name), '') || char(10) || n.raw_text || char(10)
+        "SELECT COALESCE(n.title, '') || char(10)
+                || COALESCE(group_concat(DISTINCT c.name), '') || char(10) || n.raw_text || char(10)
                 || COALESCE(group_concat(e.data_json, char(10)), '')
          FROM notes n
          LEFT JOIN entries e ON e.note_id = n.id
@@ -822,7 +914,7 @@ pub fn all_entry_data(conn: &Connection) -> Result<Vec<(i64, String, String, Val
         let date: String = r.get(1)?;
         let raw: String = r.get(2)?;
         let data_str: String = r.get(3)?;
-        Ok((note_id, date, raw, serde_json::from_str(&data_str).unwrap_or(Value::Null)))
+        Ok((note_id, date, raw, serde_json::from_str(&data_str).unwrap_or(Value::Null),))
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -953,7 +1045,7 @@ pub fn notes_on_date(conn: &Connection, day: &str, limit: i64) -> Result<Vec<Sea
 /// Semantic search restricted to a single origin (e.g. 'brain:baro') — backs
 /// vault-scoped chat. Pulls a wide KNN candidate pool, then filters to the
 /// origin and ranks. (Fine at personal-KB scale; widen the pool if it grows.)
-pub fn search_notes_scoped(conn: &Connection, qvec: &[f32], k: i64, origin: &str) -> Result<Vec<SearchHit>> {
+pub fn search_notes_scoped(conn: &Connection, qvec: &[f32], k: i64, origin: &str,) -> Result<Vec<SearchHit>> {
     ensure_embedding_space_ready(conn)?;
     let json = serde_json::to_string(qvec)?;
     let mut stmt = conn.prepare(
@@ -1102,7 +1194,7 @@ pub fn search_notes(conn: &Connection, qvec: &[f32], k: i64) -> Result<Vec<Searc
 // ---------------------------------------------------------------------------
 
 /// (event_date, category, data) for entries whose day is within [start, end].
-pub fn entries_between(conn: &Connection, start: &str, end: &str) -> Result<Vec<(String, String, Value)>> {
+pub fn entries_between(conn: &Connection, start: &str, end: &str,) -> Result<Vec<(String, String, Value)>> {
     let mut stmt = conn.prepare(
         "SELECT COALESCE(e.event_date, date(e.created_at)) AS d, COALESCE(c.name,''), e.data_json
          FROM entries e LEFT JOIN categories c ON c.id = e.category_id
@@ -1113,7 +1205,7 @@ pub fn entries_between(conn: &Connection, start: &str, end: &str) -> Result<Vec<
         let date: String = r.get(0)?;
         let cat: String = r.get(1)?;
         let data_str: String = r.get(2)?;
-        Ok((date, cat, serde_json::from_str(&data_str).unwrap_or(Value::Null)))
+        Ok((date, cat, serde_json::from_str(&data_str).unwrap_or(Value::Null),))
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -1358,7 +1450,8 @@ pub fn create_category(conn: &Connection, name: &str, description: &str, now: &s
     if let Ok(id) = conn.query_row(
         "SELECT id FROM categories WHERE name = ?1",
         [name],
-        |r| r.get::<_, i64>(0),
+        |r| { r.get::<_, i64>(0)
+    }
     ) {
         return Ok(id);
     }
@@ -1574,7 +1667,7 @@ pub fn entity_neighbors(
 /// Every entity with its aliases: (id, name, type, aliases). The catalog is
 /// small (a personal KB), so chat-question matching happens in memory.
 pub fn entities_for_matching(
-    conn: &Connection,
+    conn: &Connection
 ) -> Result<Vec<(i64, String, String, Vec<String>)>> {
     let mut stmt = conn.prepare("SELECT id, name, type, aliases FROM entities")?;
     let rows = stmt.query_map([], |r| {
@@ -1597,7 +1690,7 @@ pub struct EntityMentionRow {
 }
 
 /// Notes that mention an entity, newest first — for the graph's detail panel.
-pub fn entity_detail(conn: &Connection, entity_id: i64, limit: i64) -> Result<Vec<EntityMentionRow>> {
+pub fn entity_detail(conn: &Connection, entity_id: i64, limit: i64,) -> Result<Vec<EntityMentionRow>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT m.note_id, m.event_date, n.raw_text
          FROM entity_mentions m JOIN notes n ON n.id = m.note_id
@@ -1839,9 +1932,10 @@ pub fn merge_entities(conn: &mut Connection, keep_id: i64, drop_id: i64) -> Resu
         rusqlite::params![keep_id, drop_id],
     )?;
     // fold the dropped name + aliases into keep's alias list
-    let dropped_name: String = tx.query_row("SELECT name FROM entities WHERE id = ?1", [drop_id], |r| r.get(0))?;
-    let keep_aliases: String = tx.query_row("SELECT aliases FROM entities WHERE id = ?1", [keep_id], |r| r.get(0))?;
-    let dropped_aliases: String = tx.query_row("SELECT aliases FROM entities WHERE id = ?1", [drop_id], |r| r.get(0))?;
+    let dropped_name: String = tx.query_row("SELECT name FROM entities WHERE id = ?1", [drop_id], |r| { r.get(0)
+        })?;
+    let keep_aliases: String = tx.query_row("SELECT aliases FROM entities WHERE id = ?1", [keep_id], |r| r.get(0),)?;
+    let dropped_aliases: String = tx.query_row("SELECT aliases FROM entities WHERE id = ?1", [drop_id], |r| r.get(0),)?;
     let mut set: Vec<String> = serde_json::from_str(&keep_aliases).unwrap_or_default();
     set.push(dropped_name);
     if let Ok(extra) = serde_json::from_str::<Vec<String>>(&dropped_aliases) {
@@ -1855,7 +1949,7 @@ pub fn merge_entities(conn: &mut Connection, keep_id: i64, drop_id: i64) -> Resu
          WHERE id = ?2",
         rusqlite::params![serde_json::to_string(&set)?, keep_id],
     )?;
-    tx.execute("DELETE FROM entity_embeddings WHERE entity_id = ?1", [drop_id])?;
+    tx.execute("DELETE FROM entity_embeddings WHERE entity_id = ?1", [drop_id],)?;
     tx.execute("DELETE FROM entities WHERE id = ?1", [drop_id])?;
     tx.commit()?;
     Ok(())
@@ -1993,7 +2087,9 @@ pub fn entity_profile(conn: &Connection, entity_id: i64) -> Result<EntityProfile
         "SELECT name, type, relationship, mention_count, first_seen, last_seen, aliases
          FROM entities WHERE id = ?1",
         [entity_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        |r| { Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
+            ))
+        },
     )?;
 
     let mut stmt = conn.prepare(
@@ -2006,7 +2102,7 @@ pub fn entity_profile(conn: &Connection, entity_id: i64) -> Result<EntityProfile
     )?;
     let mentions = stmt
         .query_map([entity_id], |r| {
-            Ok(PersonMention { date: r.get(0)?, text: r.get(1)?, note_id: r.get(2)? })
+            Ok(PersonMention { date: r.get(0)?, text: r.get(1)?, note_id: r.get(2)?, })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
@@ -2105,7 +2201,7 @@ pub fn list_brain_vaults(conn: &Connection) -> Result<Vec<BrainVaultStatus>> {
     for (vault, root_path, direction, last_git_sha, last_synced_at, enabled) in rows {
         let origin = format!("brain:{vault}");
         let note_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM notes WHERE origin = ?1", [&origin], |r| r.get(0))?;
+            conn.query_row("SELECT COUNT(*) FROM notes WHERE origin = ?1", [&origin], |r| r.get(0),)?;
         let entity_count: i64 = conn.query_row(
             "SELECT COUNT(DISTINCT m.entity_id) FROM entity_mentions m
              JOIN notes n ON n.id = m.note_id WHERE n.origin = ?1",
@@ -2127,7 +2223,7 @@ pub fn list_brain_vaults(conn: &Connection) -> Result<Vec<BrainVaultStatus>> {
 }
 
 /// Register a vault (or update its root/direction). Idempotent on `vault`.
-pub fn upsert_brain_vault(conn: &Connection, vault: &str, root_path: &str, direction: &str) -> Result<()> {
+pub fn upsert_brain_vault(conn: &Connection, vault: &str, root_path: &str, direction: &str,) -> Result<()> {
     conn.execute(
         "INSERT INTO brain_vaults (vault, root_path, direction) VALUES (?1, ?2, ?3)
          ON CONFLICT(vault) DO UPDATE SET root_path = ?2, direction = ?3",
@@ -2142,7 +2238,7 @@ pub fn remove_brain_vault(conn: &Connection, vault: &str) -> Result<()> {
 }
 
 /// Record a completed sync (advances the git checkpoint for next-time diffing).
-pub fn set_vault_synced(conn: &Connection, vault: &str, git_sha: Option<&str>, now: &str) -> Result<()> {
+pub fn set_vault_synced(conn: &Connection, vault: &str, git_sha: Option<&str>, now: &str,) -> Result<()> {
     conn.execute(
         "UPDATE brain_vaults SET last_git_sha = ?2, last_synced_at = ?3 WHERE vault = ?1",
         rusqlite::params![vault, git_sha, now],
@@ -2152,7 +2248,7 @@ pub fn set_vault_synced(conn: &Connection, vault: &str, git_sha: Option<&str>, n
 
 /// The stored content hash for a brain note, if we've mirrored this file before.
 /// Lets a sync skip files whose content is unchanged.
-pub fn brain_note_hash(conn: &Connection, origin: &str, source_path: &str) -> Result<Option<String>> {
+pub fn brain_note_hash(conn: &Connection, origin: &str, source_path: &str,) -> Result<Option<String>> {
     let h: Option<Option<String>> = conn
         .query_row(
             "SELECT content_hash FROM notes WHERE origin = ?1 AND source_path = ?2",
@@ -2292,11 +2388,12 @@ pub fn write_targets(conn: &Connection, vault: Option<&str>) -> Result<Vec<Write
                  ORDER BY m.event_date DESC, m.id DESC",
             )?;
             let v = stmt
-                .query_map([entity_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .query_map([entity_id], |r| { Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             v
         };
-        out.push(WriteTarget { entity_id, entity_name, home_note_id, source_path, origin, captures });
+        out.push(WriteTarget { entity_id, entity_name, home_note_id, source_path, origin, captures, });
     }
     Ok(out)
 }
@@ -2321,7 +2418,7 @@ pub fn people_for_export(conn: &Connection, min_mentions: i64) -> Result<Vec<Per
         )?;
         let v = stmt
             .query_map([min_mentions], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?))
+                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?,))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         v
@@ -2329,14 +2426,14 @@ pub fn people_for_export(conn: &Connection, min_mentions: i64) -> Result<Vec<Per
     let mut out = Vec::with_capacity(ids.len());
     for (id, name, relationship) in ids {
         let mentions = mentions_for(conn, id)?.into_iter().map(|m| (m.date, m.text)).collect();
-        out.push(PersonExport { id, name, relationship, mentions });
+        out.push(PersonExport { id, name, relationship, mentions, });
     }
     Ok(out)
 }
 
 /// After a write-back rewrites a brain file, sync the mirror row to the new
 /// content + hash so the next import sees it unchanged (echo suppression).
-pub fn update_brain_note_content(conn: &Connection, note_id: i64, raw_text: &str, hash: &str, now: &str) -> Result<()> {
+pub fn update_brain_note_content(conn: &Connection, note_id: i64, raw_text: &str, hash: &str, now: &str,) -> Result<()> {
     conn.execute(
         "UPDATE notes SET raw_text = ?1, content_hash = ?2, synced_at = ?3 WHERE id = ?4",
         rusqlite::params![raw_text, hash, now, note_id],
@@ -2348,7 +2445,7 @@ pub fn update_brain_note_content(conn: &Connection, note_id: i64, raw_text: &str
 /// touches (optionally one vault) plus the co-mention edges among them that come
 /// from brain notes. Capture-only entities are excluded; people who appear in
 /// both a brain and daily captures are included (they carry a brain mention).
-pub fn work_graph(conn: &Connection, vault: Option<&str>) -> Result<(Vec<WorkNode>, Vec<GraphEdge>)> {
+pub fn work_graph(conn: &Connection, vault: Option<&str>,) -> Result<(Vec<WorkNode>, Vec<GraphEdge>)> {
     let nodes = {
         let mut stmt = conn.prepare(
             "SELECT DISTINCT e.id, e.name, e.type, e.mention_count,
@@ -2385,7 +2482,7 @@ pub fn work_graph(conn: &Connection, vault: Option<&str>) -> Result<(Vec<WorkNod
         )?;
         let v = stmt
             .query_map(rusqlite::params![vault], |r| {
-                Ok(GraphEdge { source: r.get(0)?, target: r.get(1)?, weight: r.get(2)? })
+                Ok(GraphEdge { source: r.get(0)?, target: r.get(1)?, weight: r.get(2)?, })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         v

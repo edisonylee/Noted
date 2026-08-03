@@ -14,6 +14,7 @@ import {
   Loader,
   Mic,
   Pause,
+  PenLine,
   Play,
   Plus,
   RotateCcw,
@@ -51,6 +52,34 @@ function fmtClock(min: number | null): string {
   const ampm = h >= 12 ? "pm" : "am";
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return m === 0 ? `${h12}${ampm}` : `${h12}:${String(m).padStart(2, "0")}${ampm}`;
+}
+
+function copyWithSelection(text: string): boolean {
+  const field = document.createElement("textarea");
+  const focused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  field.value = text;
+  field.setAttribute("readonly", "");
+  field.style.position = "fixed";
+  field.style.opacity = "0";
+  document.body.appendChild(field);
+  field.select();
+  const copied = document.execCommand("copy");
+  field.remove();
+  focused?.focus();
+  return copied;
+}
+
+async function copyText(text: string): Promise<void> {
+  // WKWebView does not consistently grant the async Clipboard API, while a
+  // selection-based copy remains available inside a direct user gesture.
+  if (isDesktop && copyWithSelection(text)) return;
+
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (error) {
+    if (copyWithSelection(text)) return;
+    throw error;
+  }
 }
 
 // Minimal markdown for our own deterministic summary output (## headings,
@@ -102,11 +131,13 @@ export function MeetingPage({
   event,
   onBack,
   onStarted,
+  focusSegmentId,
 }: {
   id: number | null; // null = pre-meeting page for a calendar event
   event?: Partial<RangeEvent> | null;
   onBack: () => void;
   onStarted?: (id: number) => void;
+  focusSegmentId?: number;
 }) {
   const [detail, setDetail] = useState<MeetingDetail | null>(null);
   const [liveSegments, setLiveSegments] = useState<MeetingSegment[]>([]);
@@ -134,8 +165,16 @@ export function MeetingPage({
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleSaving, setTitleSaving] = useState(false);
+  const [editingSummary, setEditingSummary] = useState<number | null>(null);
+  const [summaryDraft, setSummaryDraft] = useState("");
+  const [summarySaving, setSummarySaving] = useState(false);
+  const [copiedSummary, setCopiedSummary] = useState<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const notesTimer = useRef<number | null>(null);
+  const copyTimer = useRef<number | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const assistInputRef = useRef<HTMLInputElement>(null);
   const autoAssistTimer = useRef<number | null>(null);
@@ -157,11 +196,15 @@ export function MeetingPage({
       setNotes((prev) => (prev === "" ? d.raw_notes : prev));
       // A completed meeting opens on its primary generated summary. Meetings
       // without one open on the transcript; My Notes is deliberately tertiary.
-      setTab((t) => (t === "transcript" && d.summaries.length > 0 && d.status === "done" ? 0 : t));
+      setTab((t) =>
+        focusSegmentId == null && t === "transcript" && d.summaries.length > 0 && d.status === "done"
+          ? 0
+          : t
+      );
     } catch (e) {
       setError(String(e));
     }
-  }, [id]);
+  }, [focusSegmentId, id]);
 
   useEffect(() => {
     load();
@@ -170,7 +213,13 @@ export function MeetingPage({
 
   useEffect(() => {
     setTab(id == null ? "notes" : "transcript");
-  }, [id]);
+  }, [focusSegmentId, id]);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimer.current) window.clearTimeout(copyTimer.current);
+    };
+  }, []);
 
   // A meeting switch starts a fresh copilot session. Insights are deliberately
   // ephemeral: they are prompts for the moment, not another source of notes.
@@ -257,6 +306,23 @@ export function MeetingPage({
     if (nearBottom) el.scrollTop = el.scrollHeight;
   }, [liveSegments.length]);
 
+  useEffect(() => {
+    if (focusSegmentId == null || tab !== "transcript") return;
+    const frame = window.requestAnimationFrame(() => {
+      const transcript = transcriptRef.current;
+      const line = transcript?.querySelector<HTMLElement>(
+        `[data-segment-id="${focusSegmentId}"]`
+      );
+      if (!transcript || !line) return;
+      const top =
+        line.offsetTop -
+        transcript.offsetTop -
+        Math.max(0, (transcript.clientHeight - line.clientHeight) / 2);
+      transcript.scrollTop = Math.max(0, top);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusSegmentId, liveSegments.length, tab]);
+
   const ev = detail?.event_json ?? event ?? null;
   const title = detail?.title ?? ev?.title ?? "Meeting";
   const attendees = (ev?.attendees ?? []).filter((a) => !a.self);
@@ -328,6 +394,60 @@ export function MeetingPage({
   }, [detail?.talk_ms]);
 
   const summaries = detail?.summaries ?? [];
+
+  const saveTitle = async () => {
+    const next = titleDraft.trim();
+    if (id == null || !next || titleSaving) return;
+    setTitleSaving(true);
+    setError(null);
+    try {
+      await api.meetingSetTitle(id, next);
+      setDetail((current) => (current ? { ...current, title: next } : current));
+      setEditingTitle(false);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setTitleSaving(false);
+    }
+  };
+
+  const saveSummary = async () => {
+    if (id == null || editingSummary == null || summarySaving) return;
+    setSummarySaving(true);
+    setError(null);
+    try {
+      await api.meetingSetSummary(id, editingSummary, summaryDraft);
+      setDetail((current) =>
+        current
+          ? {
+              ...current,
+              summaries: current.summaries.map((summary) =>
+                summary.id === editingSummary
+                  ? { ...summary, content_md: summaryDraft }
+                  : summary
+              ),
+            }
+          : current
+      );
+      setEditingSummary(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSummarySaving(false);
+    }
+  };
+
+  const copySummary = async (summaryId: number, content: string) => {
+    try {
+      await copyText(content);
+      setCopiedSummary(summaryId);
+      if (copyTimer.current) window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => setCopiedSummary(null), 1800);
+    } catch (e) {
+      setError(`Could not copy notes: ${String(e)}`);
+    }
+  };
+
   const storedSpeakers = detail?.speakers ?? [];
   // Old/manual/recovered recordings may have remote transcript lines without
   // a usable voiceprint cluster. Still expose a rename chip: the backend's
@@ -586,7 +706,7 @@ export function MeetingPage({
 
   const copyLine = (s: MeetingSegment) => {
     const who = s.channel === "me" ? "Me" : releaseProfile.diarization ? s.speaker || "Them" : "Them";
-    navigator.clipboard?.writeText(`[${mmss(s.t0_ms)}] ${who}: ${s.text}`).catch(() => {});
+    void copyText(`[${mmss(s.t0_ms)}] ${who}: ${s.text}`).catch(() => {});
   };
 
   const q = query.trim().toLowerCase();
@@ -607,7 +727,49 @@ export function MeetingPage({
           <ArrowLeft size={18} />
         </button>
         <div className="meeting-title">
-          <h2>{title}</h2>
+          <div className="meeting-title-line">
+            {editingTitle ? (
+              <input
+                className="meeting-title-input"
+                value={titleDraft}
+                onChange={(event) => setTitleDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void saveTitle();
+                  if (event.key === "Escape") setEditingTitle(false);
+                }}
+                aria-label="Meeting title"
+                autoFocus
+              />
+            ) : (
+              <h2>{title}</h2>
+            )}
+            {id != null && !recording && !summarizing &&
+              (editingTitle ? (
+                <span className="meeting-inline-actions">
+                  <button onClick={() => setEditingTitle(false)} disabled={titleSaving}>
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => void saveTitle()}
+                    disabled={titleSaving || !titleDraft.trim()}
+                  >
+                    {titleSaving ? "Saving…" : "Save"}
+                  </button>
+                </span>
+              ) : (
+                <button
+                  className="meeting-title-edit"
+                  onClick={() => {
+                    setTitleDraft(title);
+                    setEditingTitle(true);
+                  }}
+                  aria-label="Edit meeting title"
+                  title="Edit meeting title"
+                >
+                  <PenLine size={13} /> Edit
+                </button>
+              ))}
+          </div>
           <div className="meeting-meta">
             {ev?.start_min != null && (
               <span>
@@ -935,8 +1097,12 @@ export function MeetingPage({
               return (
                 <div
                   key={s.id}
+                  data-segment-id={s.id}
                   className={
-                    "bubble " + s.channel + (playingSeg === s.id ? " playing" : "")
+                    "bubble " +
+                    s.channel +
+                    (playingSeg === s.id ? " playing" : "") +
+                    (focusSegmentId === s.id ? " search-focus" : "")
                   }
                 >
                   <span className="who">
@@ -991,15 +1157,69 @@ export function MeetingPage({
         <div className="meeting-summary">
           {summaries[tab as number] ? (
             <>
-              <button
-                className="summary-refresh"
-                onClick={() => generate(summaries[tab as number].template)}
-                disabled={generating != null}
-              >
-                {generating ? <Loader size={13} className="spin" /> : <Sparkles size={13} />}
-                Refresh
-              </button>
-              <MdBlock md={summaries[tab as number].content_md} />
+              <div className="summary-tools">
+                {editingSummary === summaries[tab as number].id ? (
+                  <span className="meeting-inline-actions">
+                    <button onClick={() => setEditingSummary(null)} disabled={summarySaving}>
+                      Cancel
+                    </button>
+                    <button onClick={() => void saveSummary()} disabled={summarySaving}>
+                      {summarySaving ? "Saving…" : "Save"}
+                    </button>
+                  </span>
+                ) : (
+                  <>
+                    <button
+                      className="summary-action"
+                      onClick={() => {
+                        const summary = summaries[tab as number];
+                        void copySummary(summary.id, summary.content_md);
+                      }}
+                      aria-label="Copy all summary notes"
+                    >
+                      {copiedSummary === summaries[tab as number].id ? (
+                        <>
+                          <Check size={13} /> Copied
+                        </>
+                      ) : (
+                        <>
+                          <Copy size={13} /> Copy notes
+                        </>
+                      )}
+                    </button>
+                    <button
+                      className="summary-action"
+                      onClick={() => {
+                        const summary = summaries[tab as number];
+                        setEditingSummary(summary.id);
+                        setSummaryDraft(summary.content_md);
+                      }}
+                    >
+                      <PenLine size={13} /> Edit notes
+                    </button>
+                    <button
+                      className="summary-action"
+                      onClick={() => generate(summaries[tab as number].template)}
+                      disabled={generating != null}
+                    >
+                      {generating ? <Loader size={13} className="spin" /> : <Sparkles size={13} />}
+                      Refresh
+                    </button>
+                  </>
+                )}
+              </div>
+              {editingSummary === summaries[tab as number].id ? (
+                <textarea
+                  className="meeting-summary-editor"
+                  value={summaryDraft}
+                  onChange={(event) => setSummaryDraft(event.target.value)}
+                  aria-label="Generated meeting notes"
+                  spellCheck
+                  autoFocus
+                />
+              ) : (
+                <MdBlock md={summaries[tab as number].content_md} />
+              )}
             </>
           ) : null}
         </div>

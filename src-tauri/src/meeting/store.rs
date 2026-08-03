@@ -3,8 +3,9 @@
 // recording. The AI summary is additionally filed as a regular note (see
 // summarize.rs) so search/embeddings/KG stay unchanged.
 
-use anyhow::Result;
+use anyhow::{anyhow,Result};
 use rusqlite::{Connection, OptionalExtension};
+use serde::Serialize;
 use serde_json::{json, Value};
 
 pub fn create_meeting(
@@ -144,6 +145,38 @@ pub fn set_notes(conn: &Connection, id: i64, notes: &str) -> Result<()> {
         rusqlite::params![id, notes],
     )?;
     Ok(())
+}
+
+/// Rename the meeting and its linked library note. The generated body remains
+/// untouched: a custom title is user-owned metadata, not a rewrite of history.
+pub fn set_title(conn: &Connection, id: i64, title: &str) -> Result<Option<i64>> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(anyhow!("meeting title cannot be empty"));
+    }
+    let changed = conn.execute(
+        "UPDATE meetings SET title = ?2 WHERE id = ?1",
+        rusqlite::params![id, title],
+    )?;
+    if changed == 0 {
+        return Err(anyhow!("meeting not found"));
+    }
+    let note_id = conn.query_row("SELECT note_id FROM meetings WHERE id = ?1", [id], |r| {
+        r.get::<_, Option<i64>>(0)
+    })?;
+    if let Some(note_id) = note_id {
+        conn.execute(
+            "UPDATE notes SET title = ?2 WHERE id = ?1",
+            rusqlite::params![note_id, title],
+        )?;
+        conn.execute(
+            "UPDATE entries SET data_json = json_set(data_json, '$.title', ?2)
+             WHERE note_id = ?1 AND json_valid(data_json)",
+            rusqlite::params![note_id, title],
+        )?;
+        conn.execute("DELETE FROM embeddings WHERE note_id = ?1", [note_id])?;
+    }
+    Ok(note_id)
 }
 
 pub fn set_audio_paths(
@@ -388,6 +421,70 @@ pub fn list_segments(conn: &Connection, meeting_id: i64) -> Result<Vec<Value>> {
     Ok(rows)
 }
 
+#[derive(Debug, Serialize)]
+pub struct TranscriptSearchHit {
+    pub segment_id: i64,
+    pub meeting_id: i64,
+    pub meeting_title: String,
+    pub started_at: Option<String>,
+    pub t0_ms: i64,
+    pub speaker: String,
+    pub text: String,
+}
+
+fn transcript_fts_query(query: &str) -> String {
+    query
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("\"{term}\"*"))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+/// Prefix-search every visible meeting transcript using the content-linked
+/// FTS index. One hit represents one spoken segment, so repeated mentions in
+/// separate transcript lines remain separate results.
+pub fn search_transcripts(
+    conn: &Connection,
+    query: &str,
+    limit: i64,
+) -> Result<Vec<TranscriptSearchHit>> {
+    let fts_query = transcript_fts_query(query.trim());
+    if fts_query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = limit.clamp(1, 200);
+    let mut stmt = conn.prepare(
+        "SELECT s.id, m.id, m.title, m.started_at, s.t0_ms,
+                CASE
+                  WHEN s.channel = 'me' THEN 'Me'
+                  ELSE COALESCE(NULLIF(s.speaker, ''), 'Them')
+                END AS speaker,
+                s.text
+         FROM meeting_segments_fts
+         JOIN meeting_segments s ON s.id = meeting_segments_fts.rowid
+         JOIN meetings m ON m.id = s.meeting_id
+         WHERE meeting_segments_fts MATCH ?1
+           AND m.trashed_at IS NULL
+         ORDER BY COALESCE(m.started_at, m.created_at) DESC, s.t0_ms ASC, s.id ASC
+         LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![fts_query, limit], |row| {
+            Ok(TranscriptSearchHit {
+                segment_id: row.get(0)?,
+                meeting_id: row.get(1)?,
+                meeting_title: row.get(2)?,
+                started_at: row.get(3)?,
+                t0_ms: row.get(4)?,
+                speaker: row.get(5)?,
+                text: row.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// Per-channel speaking time in ms — deterministic, no LLM (Read AI's one good
 /// metric worth keeping).
 pub fn talk_time(conn: &Connection, meeting_id: i64) -> Result<(i64, i64)> {
@@ -439,6 +536,57 @@ pub fn insert_summary(
         rusqlite::params![meeting_id, template, content_md, now],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Save an edited generated summary. Editing the primary summary also refreshes
+/// the linked searchable note while preserving the user's verbatim meeting notes.
+pub fn set_summary_content(
+    conn: &Connection,
+    meeting_id: i64,
+    summary_id: i64,
+    content_md: &str,
+    primary_template: &str,
+) -> Result<Option<(i64, String)>> {
+    let summary = conn
+        .query_row(
+            "SELECT s.template, m.title, m.raw_notes, m.note_id
+             FROM meeting_summaries s
+             JOIN meetings m ON m.id = s.meeting_id
+             WHERE s.id = ?1 AND s.meeting_id = ?2",
+            rusqlite::params![summary_id, meeting_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((template, title, raw_notes, note_id)) = summary else {
+        return Err(anyhow!("meeting summary not found"));
+    };
+    conn.execute(
+        "UPDATE meeting_summaries SET content_md = ?2 WHERE id = ?1",
+        rusqlite::params![summary_id, content_md],
+    )?;
+
+    if template != primary_template {
+        return Ok(None);
+    }
+    let Some(note_id) = note_id else {
+        return Ok(None);
+    };
+    let mut note_text = format!("# {title}\n\n{content_md}");
+    if !raw_notes.trim().is_empty() {
+        note_text.push_str(&format!(
+            "\n\n## Your Notes (verbatim)\n\n{}",
+            raw_notes.trim()
+        ));
+    }
+    crate::db::refresh_note_text(conn, note_id, &note_text)?;
+    Ok(Some((note_id, note_text)))
 }
 
 pub fn find_meeting_by_event(conn: &Connection, event_id: &str) -> Result<Option<i64>> {

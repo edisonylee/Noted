@@ -210,6 +210,7 @@ export type NoteEntry = { id?: number; category: string | null; data: Record<str
 
 export type NoteRow = {
   id: number;
+  title: string;
   raw_text: string;
   source: string;
   entries: NoteEntry[];
@@ -403,6 +404,15 @@ export type MeetingListRow = {
   summary_count: number;
   trashed_at: string | null;
 };
+export type TranscriptSearchHit = {
+  segment_id: number;
+  meeting_id: number;
+  meeting_title: string;
+  started_at: string | null;
+  t0_ms: number;
+  speaker: string;
+  text: string;
+};
 // A diarized voice in a meeting. `suggested` is an unconfirmed LLM-mined name
 // (confirming = renaming); label "Them" is the lone-unrecognized-voice case.
 export type MeetingSpeaker = {
@@ -565,6 +575,8 @@ export const api = {
   kgReindexMeetings: () =>
     invoke<{ meetings: number; mentions: number; name_suggestions: number }>("kg_reindex_meetings"),
   listNotes: () => invoke<NoteRow[]>("list_notes"),
+  updateNote: (noteId: number, title: string, rawText: string) =>
+    invoke<void>("update_note", { noteId, title, rawText }),
   listCategories: () => invoke<CategoryInfo[]>("list_categories"),
   listNoteFolders: () => invoke<NoteFolderInfo[]>("list_note_folders"),
   createNoteFolder: (parentId: number | null, name: string, kind: "space" | "folder") =>
@@ -728,6 +740,8 @@ export const api = {
   meetingStop: () => invoke<number | null>("meeting_stop"),
   meetingState: () => invoke<MeetingLiveState>("meeting_state"),
   meetingList: () => invoke<MeetingListRow[]>("meeting_list"),
+  meetingSearchTranscripts: (query: string, limit = 200) =>
+    invoke<TranscriptSearchHit[]>("meeting_search_transcripts", { query, limit }),
   meetingTrashList: () => invoke<MeetingListRow[]>("meeting_trash_list"),
   meetingGet: (id: number) => invoke<MeetingDetail>("meeting_get", { id }),
   meetingTrash: (id: number) => invoke<void>("meeting_trash", { id }),
@@ -735,6 +749,10 @@ export const api = {
   meetingDeleteForever: (id: number) => invoke<void>("meeting_delete_forever", { id }),
   meetingSetNotes: (id: number, notes: string) =>
     invoke<void>("meeting_set_notes", { id, notes }),
+  meetingSetTitle: (id: number, title: string) =>
+    invoke<void>("meeting_set_title", { id, title }),
+  meetingSetSummary: (id: number, summaryId: number, contentMd: string) =>
+    invoke<void>("meeting_set_summary", { id, summaryId, contentMd }),
   meetingSummarize: (id: number, template?: string) =>
     invoke<string>("meeting_summarize", { id, template }),
   // Rename propagates only within this meeting. Future meetings stay anonymous.

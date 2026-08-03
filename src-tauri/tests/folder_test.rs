@@ -5,7 +5,7 @@ fn save(
     conn: &mut rusqlite::Connection,
     text: &str,
     category: &str,
-    date: &str,
+    date: &str
 ) -> i64 {
     db::save_note(
         conn,
@@ -66,6 +66,12 @@ fn seeded_baro_tree_auto_files_standups_and_accepts_manual_filing() {
         "meetings",
         "2026-07-28",
     );
+    let schedule_match = save(
+        &mut conn,
+        "11:00 AM-11:15 AM Daily Stand Up",
+        "schedule",
+        "2026-07-28",
+    );
     let unrelated = save(
         &mut conn,
         "Remember to stand up and stretch every hour, then dinner with Maya.",
@@ -77,6 +83,7 @@ fn seeded_baro_tree_auto_files_standups_and_accepts_manual_filing() {
     let standups = by_name(&folders, "Daily Standup Meeting Notes");
     assert!(standups.note_ids.contains(&category_match));
     assert!(standups.note_ids.contains(&text_match));
+    assert!(!standups.note_ids.contains(&schedule_match));
     assert!(!standups.note_ids.contains(&unrelated));
 
     let personal = by_name(&folders, "Personal");
@@ -84,7 +91,7 @@ fn seeded_baro_tree_auto_files_standups_and_accepts_manual_filing() {
         &conn,
         unrelated,
         Some(personal.id),
-        "2026-07-31T12:00:00Z",
+        "2026-07-31T12:00:00Z"
     )
     .unwrap();
     let filed_space_id: i64 = conn
@@ -109,7 +116,7 @@ fn seeded_baro_tree_auto_files_standups_and_accepts_manual_filing() {
         &conn,
         unrelated,
         Some(receipts),
-        "2026-07-31T12:01:00Z",
+        "2026-07-31T12:01:00Z"
     )
     .unwrap();
     let folders = db::list_note_folders(&conn).unwrap();

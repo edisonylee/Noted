@@ -12,7 +12,7 @@ fn save(conn: &mut rusqlite::Connection, cat: &str, desc: &str, data: serde_json
             source: "text".into(),
             image_path: None,
             event_date: ts[..10].to_string(), // YYYY-MM-DD from the timestamp
-            entries: vec![db::EntryInput { category: cat.into(), description: desc.into(), data }],
+            entries: vec![db::EntryInput { category: cat.into(), description: desc.into(), data, }],
         },
         ts,
     )
@@ -83,11 +83,184 @@ fn vec_loads_and_schema_evolves() {
 }
 
 #[test]
+fn note_titles_and_bodies_are_user_editable() {
+    let tmp = std::env::temp_dir().join(format!(
+        "noted_note_edit_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let mut conn = db::init(&tmp).unwrap();
+    save(
+        &mut conn,
+        "journal",
+        "",
+        json!({"mood":"good"}),
+        "2026-07-31T12:00:00Z",
+    );
+    let note_id: i64 = conn
+        .query_row("SELECT id FROM notes LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    db::insert_embedding(&conn, note_id, &vec![0.1; 768]).unwrap();
+
+    db::update_note(&conn, note_id, "A title I chose", "A body I rewrote.").unwrap();
+
+    let notes = db::list_notes(&conn).unwrap();
+    assert_eq!(notes[0].title, "A title I chose");
+    assert_eq!(notes[0].raw_text, "A body I rewrote.");
+    assert_eq!(db::embedding_count(&conn).unwrap(), 0);
+    let embed_text = db::note_embed_text(&conn, note_id).unwrap();
+    assert!(embed_text.contains("A title I chose"));
+    assert!(embed_text.contains("A body I rewrote."));
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn meeting_title_and_generated_notes_are_editable() {
+    use tauri_app_lib::meeting::store;
+
+    let tmp = std::env::temp_dir().join(format!(
+        "noted_meeting_edit_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let mut conn = db::init(&tmp).unwrap();
+    let meeting_id =
+        store::create_meeting(&conn, "Original title", None, None, "2026-07-31T12:00:00Z").unwrap();
+    store::set_notes(&conn, meeting_id, "My verbatim note").unwrap();
+    save(
+        &mut conn,
+        "meetings",
+        "generated meeting note",
+        json!({"meeting_id": meeting_id, "title": "Original title"}),
+        "2026-07-31T12:30:00Z",
+    );
+    let note_id: i64 = conn
+        .query_row("SELECT id FROM notes ORDER BY id DESC LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    store::set_note_id(&conn, meeting_id, note_id).unwrap();
+    let summary_id = store::insert_summary(
+        &conn,
+        meeting_id,
+        store::DEFAULT_TEMPLATE,
+        "## Summary\n\nOriginal summary.",
+        "2026-07-31T12:31:00Z",
+    )
+    .unwrap();
+
+    assert_eq!(
+        store::set_title(&conn, meeting_id, "Weekly product review").unwrap(),
+        Some(note_id)
+    );
+    let refreshed = store::set_summary_content(
+        &conn,
+        meeting_id,
+        summary_id,
+        "## Summary\n\nEdited by me.",
+        store::DEFAULT_TEMPLATE,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(refreshed.0, note_id);
+    assert!(refreshed.1.contains("Edited by me."));
+    assert!(refreshed.1.contains("My verbatim note"));
+
+    let detail = store::get_meeting(&conn, meeting_id).unwrap();
+    assert_eq!(detail["title"], "Weekly product review");
+    assert_eq!(
+        detail["summaries"][0]["content_md"],
+        "## Summary\n\nEdited by me."
+    );
+    let note = db::list_notes(&conn).unwrap().pop().unwrap();
+    assert_eq!(note.title, "Weekly product review");
+    assert!(note.raw_text.contains("Edited by me."));
+    assert!(note.raw_text.contains("My verbatim note"));
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn transcript_search_is_indexed_live_and_returns_each_matching_line() {
+    use tauri_app_lib::meeting::store;
+
+    let tmp = std::env::temp_dir().join(format!(
+        "noted_transcript_search_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let conn = db::init(&tmp).unwrap();
+    let meeting_id =
+        store::create_meeting(&conn, "Fundraising review", None, None, "2026-07-31T14:00:00Z")
+            .unwrap();
+    store::set_status(&conn, meeting_id, "done").unwrap();
+    let first = store::insert_segment(
+        &conn,
+        meeting_id,
+        "me",
+        2_000,
+        5_000,
+        "The investor asked about retention.",
+    )
+    .unwrap();
+    store::insert_segment(
+        &conn,
+        meeting_id,
+        "them",
+        8_000,
+        12_000,
+        "Our investors want the updated model next week.",
+    )
+    .unwrap();
+    store::insert_segment(
+        &conn,
+        meeting_id,
+        "them",
+        13_000,
+        15_000,
+        "The product demo is ready.",
+    )
+    .unwrap();
+
+    let hits = store::search_transcripts(&conn, "invest", 200).unwrap();
+    assert_eq!(hits.len(), 2, "prefix search returns every matching transcript line");
+    assert_eq!(hits[0].meeting_title, "Fundraising review");
+    assert_eq!(hits[0].started_at.as_deref(), Some("2026-07-31T14:00:00Z"));
+    assert_eq!(hits[0].speaker, "Me");
+    assert_eq!(hits[1].speaker, "Them");
+
+    store::delete_segment(&conn, first).unwrap();
+    let after_delete = store::search_transcripts(&conn, "investor", 200).unwrap();
+    assert_eq!(after_delete.len(), 1, "the delete trigger removes stale FTS rows");
+
+    store::trash_meeting(&conn, meeting_id, "2026-07-31T15:00:00Z").unwrap();
+    assert!(
+        store::search_transcripts(&conn, "investor", 200).unwrap().is_empty(),
+        "trashed meetings stay out of global transcript search"
+    );
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
 fn embedding_space_replacement_is_atomic_and_fingerprinted() {
     let tmp = std::env::temp_dir().join(format!("noted_embedding_swap_{}.db", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let mut conn = db::init(&tmp).unwrap();
-    save(&mut conn, "work", "", json!({"topic":"routing"}), "2026-06-02T00:00:00Z");
+    save(&mut conn, "work", "", json!({"topic":"routing"}), "2026-06-02T00:00:00Z",);
     let note_id: i64 = conn.query_row("SELECT id FROM notes LIMIT 1", [], |r| r.get(0)).unwrap();
 
     db::replace_embedding_space(&mut conn, "openai|a|768", &[(note_id, vec![0.1; 768])], &[]).unwrap();
@@ -131,7 +304,7 @@ fn suggest_merges_finds_near_duplicates_and_respects_dismissals() {
 
     let sugg = db::suggest_merges(&conn, 0.82, 20).unwrap();
     assert_eq!(sugg.len(), 1, "only the near-identical same-type pair should surface");
-    let pair = (sugg[0].a_id.min(sugg[0].b_id), sugg[0].a_id.max(sugg[0].b_id));
+    let pair = (sugg[0].a_id.min(sugg[0].b_id), sugg[0].a_id.max(sugg[0].b_id),);
     assert_eq!(pair, (a.min(b), a.max(b)));
     assert!(sugg[0].similarity > 0.9, "cosine should be ~0.98, got {}", sugg[0].similarity);
     assert_eq!(sugg[0].etype, "person");
@@ -252,11 +425,13 @@ fn meeting_trash_is_reversible_and_required_before_delete() {
         json!({"meeting_id": id}),
         "2026-07-21T16:30:00Z",
     );
-    let note_id: i64 = conn.query_row("SELECT id FROM notes ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+    let note_id: i64 = conn.query_row("SELECT id FROM notes ORDER BY id DESC LIMIT 1", [], |r| { r.get(0)
+        }).unwrap();
     store::set_note_id(&conn, id, note_id).unwrap();
     db::insert_embedding(&conn, note_id, &vec![0.1; 768]).unwrap();
     db::refresh_note_text(&conn, note_id, "# Important call\n\nCorrected notes").unwrap();
-    let refreshed: String = conn.query_row("SELECT raw_text FROM notes WHERE id = ?1", [note_id], |r| r.get(0)).unwrap();
+    let refreshed: String = conn.query_row("SELECT raw_text FROM notes WHERE id = ?1", [note_id], |r| { r.get(0)
+        }).unwrap();
     assert_eq!(refreshed, "# Important call\n\nCorrected notes");
     assert_eq!(db::embedding_count(&conn).unwrap(), 0, "stale semantic index is removed");
     db::insert_embedding(&conn, note_id, &vec![0.2; 768]).unwrap();
@@ -276,11 +451,11 @@ fn meeting_trash_is_reversible_and_required_before_delete() {
     assert!(store::delete_meeting_forever(&mut conn, id).unwrap());
     assert!(store::list_trashed_meetings(&conn, 20).unwrap().is_empty());
     let exists: bool = conn
-        .query_row("SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ?1)", [id], |r| r.get(0))
+        .query_row("SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ?1)", [id], |r| r.get(0),)
         .unwrap();
     assert!(!exists);
     let note_exists: bool = conn
-        .query_row("SELECT EXISTS(SELECT 1 FROM notes WHERE id = ?1)", [note_id], |r| r.get(0))
+        .query_row("SELECT EXISTS(SELECT 1 FROM notes WHERE id = ?1)", [note_id], |r| r.get(0),)
         .unwrap();
     assert!(!note_exists, "the generated note is deleted with its meeting");
     assert_eq!(db::embedding_count(&conn).unwrap(), 0);

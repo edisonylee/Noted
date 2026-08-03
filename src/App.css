@@ -520,16 +520,6 @@ button.link:hover { color: var(--ink); }
 }
 .capture textarea::placeholder { color: var(--faint); }
 
-.capture-space-field {
-  display: flex; align-items: center; gap: 5px; width: fit-content; margin: -2px 0 9px;
-  color: var(--faint); font-size: 11.5px;
-}
-.capture-space-field select {
-  min-width: 78px; border: none; padding: 2px 17px 2px 3px; background: transparent;
-  color: var(--ink-soft); font: inherit; font-size: 12px; font-weight: 590; outline: none;
-}
-.capture-space-field select:focus-visible { color: var(--ink); }
-
 .img-attached { display: flex; gap: 14px; align-items: flex-start; }
 .img-attached img { max-height: 150px; max-width: 58%; border-radius: var(--r-md); border: var(--border-width, 1px) solid var(--line); }
 .img-meta { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 13px; }
@@ -2145,7 +2135,28 @@ a.cal-btn { text-decoration: none; }
 /* Meeting page */
 .meeting-page { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
 .meeting-head { display: flex; align-items: center; gap: 12px; }
+.meeting-title { min-width: 0; }
+.meeting-title-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .meeting-title h2 { margin: 0; font-size: 19px; font-weight: 620; letter-spacing: -0.01em; }
+.meeting-title-edit,
+.summary-action,
+.meeting-inline-actions button {
+  display: inline-flex; align-items: center; gap: 5px; border: none; background: none;
+  color: var(--muted); padding: 4px 5px; border-radius: var(--r-sm); font: inherit;
+  font-size: 12px; cursor: pointer;
+}
+.meeting-title-edit:hover,
+.summary-action:hover,
+.meeting-inline-actions button:hover { color: var(--ink); background: var(--hover-soft); }
+.meeting-inline-actions { display: inline-flex; align-items: center; gap: 2px; }
+.meeting-inline-actions button:last-child { color: var(--accent); font-weight: 620; }
+.meeting-inline-actions button:disabled { opacity: .55; cursor: default; }
+.meeting-title-input {
+  width: min(440px, 44vw); border: none; border-radius: var(--r-sm); outline: none;
+  background: var(--surface-2); color: var(--ink); padding: 5px 8px;
+  font: inherit; font-size: 19px; font-weight: 620; letter-spacing: -0.01em;
+}
+.meeting-title-input:focus { box-shadow: inset 0 0 0 var(--border-width, 1px) var(--line-strong); }
 .meeting-meta { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12.5px; margin-top: 2px; }
 .meeting-meta span { display: inline-flex; align-items: center; gap: 4px; }
 .meeting-hint { margin: 0; color: var(--muted); font-size: 13px; }
@@ -2361,6 +2372,7 @@ a.cal-btn { text-decoration: none; }
 .bubble.me { align-self: flex-end; background: var(--accent-tint); }
 .bubble.them { align-self: flex-start; background: var(--surface-2); border: var(--border-width, 1px) solid var(--line); }
 .bubble.playing { outline: 2px solid var(--accent); outline-offset: -1px; }
+.bubble.search-focus { outline: 2px solid var(--accent); outline-offset: 2px; }
 .bubble .who { display: flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--faint); margin-bottom: 2px; }
 .bubble .line-ops { display: inline-flex; gap: 2px; opacity: 0; transition: opacity 0.12s; }
 .bubble:hover .line-ops { opacity: 1; }
@@ -2372,9 +2384,14 @@ a.cal-btn { text-decoration: none; }
 .bubble p { margin: 0; font-size: 13.5px; line-height: 1.5; }
 .quiet-empty { color: var(--faint); font-size: 13px; text-align: center; margin-top: 40px; }
 
-.meeting-summary { padding: 4px 2px 24px; max-width: 720px; }
-.summary-refresh { float: right; display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); padding: 6px 10px; font: inherit; font-size: 12px; cursor: pointer; }
-.summary-refresh:hover { color: var(--ink); background: var(--hover-soft); }
+.meeting-summary { padding: 4px 2px 24px; max-width: 720px; width: 100%; }
+.summary-tools { display: flex; justify-content: flex-end; gap: 3px; min-height: 30px; }
+.meeting-summary-editor {
+  display: block; width: 100%; min-height: 440px; resize: vertical; box-sizing: border-box;
+  border: none; border-radius: var(--r-md); outline: none; background: var(--surface-2);
+  color: var(--ink); padding: 16px 17px; font: inherit; font-size: 14px; line-height: 1.62;
+}
+.meeting-summary-editor:focus { box-shadow: inset 0 0 0 var(--border-width, 1px) var(--line-strong); }
 .meeting-print { display: none; }
 
 @media print {
@@ -2499,17 +2516,7 @@ a.cal-btn { text-decoration: none; }
 .spaces-head span { flex: 1; }
 .spaces-head .icon-btn { width: 26px; height: 26px; }
 .library-main, .library-categories { display: flex; flex-direction: column; gap: 1px; }
-.library-main { margin-top: 12px; }
-.library-spaces { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; padding: 0 3px; }
-.library-spaces > button {
-  display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 34px;
-  padding: 7px 8px; border: none; border-radius: var(--r-sm); background: none;
-  color: var(--muted); text-align: left; font: inherit; font-size: 12.5px;
-}
-.library-spaces > button:hover { color: var(--ink); background: var(--hover-soft); }
-.library-spaces > button.on {
-  color: var(--ink); background: var(--surface-2); font-weight: 620;
-}
+.library-main { margin-top: 4px; }
 .library-main > button,
 .library-categories > button,
 .spaces .spaces-trash {
@@ -2527,7 +2534,6 @@ a.cal-btn { text-decoration: none; }
   display: flex; align-items: center; min-height: 28px; margin-top: 17px;
   padding: 0 3px 2px 10px; color: var(--ink-soft); font-size: 12px; font-weight: 620;
 }
-.library-section-head.library-spaces-head { margin-top: 0; }
 .library-section-head > span { flex: 1; }
 .library-section-head.categories-head { margin-top: 18px; }
 .library-add {
@@ -2623,6 +2629,7 @@ a.cal-btn { text-decoration: none; }
   color: var(--muted); font-size: 11.5px;
 }
 .note-row-date { flex: none; width: 76px; color: var(--faint); font-size: 11.5px; text-align: right; }
+.folder-content-row .folder-row-arrow { flex: none; width: 16px; color: var(--faint); }
 .note-week { margin-bottom: 21px; }
 .note-week-head {
   display: flex; align-items: center; gap: 10px; min-height: 28px; margin: 0 5px 3px;
@@ -2632,10 +2639,47 @@ a.cal-btn { text-decoration: none; }
 .note-week-head span { color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
 .note-week-list { display: flex; flex-direction: column; gap: 1px; }
 
+.transcript-results { margin: 0 0 21px; }
+.transcript-results-head {
+  display: flex; align-items: center; gap: 10px; min-height: 28px; margin: 0 5px 3px;
+  color: var(--muted);
+}
+.transcript-results-head h2 { flex: 1; margin: 0; font-size: 12px; font-weight: 620; }
+.transcript-results-head span { color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.transcript-result-list { display: flex; flex-direction: column; gap: 1px; }
+.transcript-result {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(125px, 180px);
+  grid-template-rows: auto auto; align-items: start; column-gap: 16px; row-gap: 3px;
+  width: 100%; min-height: 48px; padding: 9px;
+  border: none; border-radius: var(--r-sm); background: none; color: var(--ink);
+  font: inherit; text-align: left; cursor: pointer;
+}
+.transcript-result:hover { background: var(--surface-2); }
+.transcript-result-speaker,
+.transcript-result-meeting { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.transcript-result-speaker { flex-direction: row; align-items: baseline; gap: 6px; }
+.transcript-result-speaker strong { overflow: hidden; color: var(--muted); font-size: 11.5px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+.transcript-result-speaker span { color: var(--faint); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.transcript-result-text { grid-column: 1; min-width: 0; color: var(--ink); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.transcript-match-mark {
+  border-radius: 2px; padding: 0 1px; background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: inherit; font-weight: 650;
+}
+.transcript-result-meeting { grid-column: 2; grid-row: 1 / 3; align-items: flex-end; text-align: right; }
+.transcript-result-meeting strong { max-width: 100%; color: var(--ink-soft); font-size: 11.5px; font-weight: 580; line-height: 1.3; overflow-wrap: anywhere; }
+.transcript-result-meeting time { color: var(--faint); font-size: 10.5px; }
+.transcript-results-error { margin: 8px 9px; color: var(--error-ink); font-size: 12px; }
+
 .note-detail { width: 100%; max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
 .note-detail-head { display: flex; align-items: flex-start; gap: 12px; }
 .note-detail-heading { flex: 1; min-width: 0; }
 .note-detail-head h2 { margin: 2px 0 0; font-size: 19px; font-weight: 630; letter-spacing: -0.015em; }
+.note-title-editor {
+  width: 100%; box-sizing: border-box; border: none; border-radius: var(--r-sm); outline: none;
+  background: var(--surface-2); color: var(--ink); padding: 5px 8px;
+  font: inherit; font-size: 19px; font-weight: 630; letter-spacing: -0.015em;
+}
+.note-title-editor:focus { box-shadow: inset 0 0 0 var(--border-width, 1px) var(--line-strong); }
 .note-detail-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 0; margin-top: 5px; color: var(--muted); font-size: 12px; }
 .note-detail-meta span + span::before { content: "·"; margin: 0 7px; color: var(--faint); }
 .note-filed-paths { margin-top: 4px; color: var(--faint); font-size: 11.5px; }
@@ -2644,7 +2688,29 @@ a.cal-btn { text-decoration: none; }
   padding: 6px 27px 6px 9px; background: var(--surface-2); color: var(--muted); font: inherit; font-size: 12px;
 }
 .note-filing-message { align-self: flex-end; margin-top: -12px; color: var(--muted); font-size: 11.5px; }
+.note-detail-controls { display: flex; align-items: center; gap: 6px; }
+.note-edit-trigger {
+  display: inline-flex; align-items: center; gap: 5px; border: none; border-radius: var(--r-sm);
+  background: none; color: var(--muted); padding: 6px 7px; font: inherit; font-size: 12px; cursor: pointer;
+}
+.note-edit-trigger:hover { color: var(--ink); background: var(--hover-soft); }
 .note-detail-body { white-space: pre-wrap; font-size: 14px; line-height: 1.68; color: var(--ink); }
+.note-edit-pane { display: flex; flex-direction: column; gap: 8px; }
+.note-body-editor {
+  width: 100%; min-height: 390px; resize: vertical; box-sizing: border-box; border: none;
+  border-radius: var(--r-md); outline: none; background: var(--surface-2); color: var(--ink);
+  padding: 16px 17px; font: inherit; font-size: 14px; line-height: 1.68;
+}
+.note-body-editor:focus { box-shadow: inset 0 0 0 var(--border-width, 1px) var(--line-strong); }
+.note-edit-actions { display: flex; justify-content: flex-end; align-items: center; gap: 3px; }
+.note-edit-actions button {
+  border: none; border-radius: var(--r-sm); background: none; padding: 6px 8px;
+  color: var(--muted); font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.note-edit-actions button:hover { color: var(--ink); background: var(--hover-soft); }
+.note-edit-actions .note-edit-save { color: var(--accent); font-weight: 620; }
+.note-edit-actions button:disabled { opacity: .55; cursor: default; }
+.note-edit-error { color: var(--error-ink); font-size: 12px; }
 .note-detail-entries { display: flex; flex-direction: column; gap: 10px; }
 .note-entry-card {
   display: flex; flex-direction: column; gap: 9px; align-items: flex-start;
@@ -2672,6 +2738,11 @@ a.cal-btn { text-decoration: none; }
   .note-row-date { width: 62px; }
   .note-detail-head { flex-wrap: wrap; }
   .note-file-select { margin-left: 44px; }
+  .transcript-result { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  .transcript-result-meeting {
+    grid-column: 1; grid-row: auto; flex-direction: row; align-items: baseline; justify-content: space-between;
+    gap: 10px; text-align: left;
+  }
 }
 
 /* ── Ask page (chat home, Granola-style) ──────────────────────────────────── */

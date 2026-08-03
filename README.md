@@ -10,8 +10,12 @@ Noted supports three complete inference profiles: **Noted Hosted** requires no m
 
 - **Capture anything** — typed text, voice (offline speech-to-text via whisper.cpp), or photos (vision OCR, including Apple HEIC/HEIF).
 - **Automatic structuring** — a note is split into sections; `Header:`-tagged sections route deterministically while untagged prose is classified by the model. One note can fill several categories at once.
+- **Spaces** — notes are organized into personal and work spaces, so the two halves of your life stay separate.
 - **Semantic search** — local `nomic-embed-text` embeddings in a `sqlite-vec` vector store.
+- **Meetings** — a local meeting recorder: system audio + mic captured as separate streams, live offline transcription, per-speaker diarization with voiceprints that learn who's who, optional window video of the call, template-driven summaries (always local), and Live Assist Q&A over the rolling transcript. Meetings are detected automatically from mic use and your calendar.
 - **Today** — a daily schedule parsed deterministically (no LLM, never hard-fails), with connected time ranges, inline editing, and optional one-way push to Google Calendar.
+- **Calendar** — a day / 3-day / week view aggregating every connected Google account, with event create/edit/move/delete.
+- **Journal** — a reflection chat whose entries are saved as notes and feed the personal knowledge graph.
 - **Knowledge graph** — entity resolution for people and things, with embedding-based merge suggestions you confirm. The "Knowledge" view surfaces People and a Self graph.
 - **Recaps & trends** — auto-generated day/week recaps and per-category trends.
 - **Chat** — ask questions over your own knowledge base with a local model.
@@ -33,8 +37,8 @@ Secrets (the Gemini API key, Google Calendar OAuth tokens) are stored in the mac
 
 ## Prerequisites
 
-- **macOS** (the primary supported platform — uses the Keychain and builds whisper.cpp locally; minimum macOS 10.15)
-- **Node.js** 18+ and npm
+- **macOS** (the primary supported platform — uses the Keychain and builds whisper.cpp locally; minimum macOS 10.15, with meeting recording gated to newer releases at runtime)
+- **[Bun](https://bun.sh)** (the committed lockfile is `bun.lock`; npm also works)
 - **Rust** (stable) + the [Tauri prerequisites](https://tauri.app/start/prerequisites/)
 - **[Ollama](https://ollama.com)** running locally, with the models pulled:
 
@@ -47,17 +51,17 @@ Secrets (the Gemini API key, Google Calendar OAuth tokens) are stored in the mac
 ## Getting started
 
 ```sh
-npm install
-npm run tauri dev      # run the desktop app in development
+bun install
+bun run tauri dev      # run the desktop app in development
 ```
 
 To produce a distributable build:
 
 ```sh
-npm run tauri build
+bun run tauri build
 ```
 
-Frontend-only scripts (`vite`) are also available via `npm run dev` / `npm run build`, but the app needs the Tauri backend to do anything useful.
+Frontend-only scripts (`vite`) are also available via `bun run dev` / `bun run build`, but the app needs the Tauri backend to do anything useful.
 
 ## Optional setup
 
@@ -89,7 +93,9 @@ src-tauri/      Rust backend
     provider.rs   provider selection (local vs Gemini Balanced)
     themes.rs     theme validation, persistence, and local DESIGN.md compilation
     voice.rs      whisper.cpp speech-to-text
-    gcal.rs       Google Calendar sync
+    meeting/      meeting recorder (capture, transcription, diarization, video, summaries)
+    analytics.rs  recaps + trends aggregation
+    gcal.rs       Google Calendar sync (multi-account)
     phone.rs      LAN HTTPS server + RPC bridge
 ```
 

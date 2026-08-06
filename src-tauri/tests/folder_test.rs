@@ -1,12 +1,7 @@
 use serde_json::json;
 use tauri_app_lib::db::{self, EntryInput, SaveInput};
 
-fn save(
-    conn: &mut rusqlite::Connection,
-    text: &str,
-    category: &str,
-    date: &str
-) -> i64 {
+fn save(conn: &mut rusqlite::Connection, text: &str, category: &str, date: &str) -> i64 {
     db::save_note(
         conn,
         SaveInput {
@@ -26,10 +21,7 @@ fn save(
 }
 
 fn by_name<'a>(folders: &'a [db::NoteFolderInfo], name: &str) -> &'a db::NoteFolderInfo {
-    folders
-        .iter()
-        .find(|folder| folder.name == name)
-        .unwrap()
+    folders.iter().find(|folder| folder.name == name).unwrap()
 }
 
 #[test]
@@ -87,13 +79,7 @@ fn seeded_baro_tree_auto_files_standups_and_accepts_manual_filing() {
     assert!(!standups.note_ids.contains(&unrelated));
 
     let personal = by_name(&folders, "Personal");
-    db::file_note(
-        &conn,
-        unrelated,
-        Some(personal.id),
-        "2026-07-31T12:00:00Z"
-    )
-    .unwrap();
+    db::file_note(&conn, unrelated, Some(personal.id), "2026-07-31T12:00:00Z").unwrap();
     let filed_space_id: i64 = conn
         .query_row(
             "SELECT folder_id FROM note_folder_items WHERE note_id = ?1",
@@ -112,13 +98,7 @@ fn seeded_baro_tree_auto_files_standups_and_accepts_manual_filing() {
         "2026-07-31T12:00:00Z",
     )
     .unwrap();
-    db::file_note(
-        &conn,
-        unrelated,
-        Some(receipts),
-        "2026-07-31T12:01:00Z"
-    )
-    .unwrap();
+    db::file_note(&conn, unrelated, Some(receipts), "2026-07-31T12:01:00Z").unwrap();
     let folders = db::list_note_folders(&conn).unwrap();
     assert_eq!(by_name(&folders, "Receipts").note_ids, vec![unrelated]);
     let filed_folder_id: i64 = conn
@@ -129,6 +109,76 @@ fn seeded_baro_tree_auto_files_standups_and_accepts_manual_filing() {
         )
         .unwrap();
     assert_eq!(filed_folder_id, receipts);
+
+    drop(conn);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn folders_can_be_reordered_and_nested_without_creating_cycles() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "noted_folder_move_test_{}_{}.db",
+        std::process::id(),
+        nonce
+    ));
+    let conn = db::init(&path).unwrap();
+    let seeded = db::list_note_folders(&conn).unwrap();
+    let baro = by_name(&seeded, "Baro").id;
+    let standups = by_name(&seeded, "Daily Standup Meeting Notes").id;
+    let partner = db::create_note_folder(
+        &conn,
+        Some(baro),
+        "Partner Meetings",
+        "folder",
+        "",
+        "2026-08-06T12:00:00Z",
+    )
+    .unwrap();
+    let planning = db::create_note_folder(
+        &conn,
+        Some(baro),
+        "Planning",
+        "folder",
+        "",
+        "2026-08-06T12:01:00Z",
+    )
+    .unwrap();
+
+    db::move_note_folder(&conn, planning, Some(baro), Some(standups)).unwrap();
+    let folders = db::list_note_folders(&conn).unwrap();
+    let baro_children: Vec<&str> = folders
+        .iter()
+        .filter(|folder| folder.parent_id == Some(baro))
+        .map(|folder| folder.name.as_str())
+        .collect();
+    assert_eq!(
+        baro_children,
+        vec![
+            "Planning",
+            "Daily Standup Meeting Notes",
+            "Partner Meetings"
+        ]
+    );
+
+    db::move_note_folder(&conn, partner, Some(planning), None).unwrap();
+    let folders = db::list_note_folders(&conn).unwrap();
+    assert_eq!(
+        by_name(&folders, "Partner Meetings").parent_id,
+        Some(planning)
+    );
+
+    let error = db::move_note_folder(&conn, planning, Some(partner), None).unwrap_err();
+    assert!(error.to_string().contains("cannot be moved inside itself"));
+    let folders = db::list_note_folders(&conn).unwrap();
+    assert_eq!(by_name(&folders, "Planning").parent_id, Some(baro));
+    assert_eq!(
+        by_name(&folders, "Partner Meetings").parent_id,
+        Some(planning)
+    );
 
     drop(conn);
     let _ = std::fs::remove_file(path);

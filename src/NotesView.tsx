@@ -1,6 +1,6 @@
-// The Notes workspace separates model-generated categories from user-owned
-// organization. Folders are the visible hierarchy; legacy space roots remain
-// as hidden storage anchors so existing filing data stays intact.
+// The Notes workspace separates model-generated topics from user-owned
+// organization. Root spaces scope the whole library; folders remain the
+// visible hierarchy inside the selected space.
 
 import {
   useCallback,
@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import {
@@ -53,15 +54,33 @@ type CreateTarget = {
   label: string;
 };
 
-type WeekGroup = {
-  key: string;
-  label: string;
-  notes: NoteRow[];
-};
-
 type MeetingTarget = {
   id: number;
   segmentId?: number;
+};
+
+type LibraryDragItem =
+  | { kind: "note"; noteId: number; label: string }
+  | { kind: "folder"; folderId: number; label: string };
+
+type FolderDropPlacement = "inside" | "before" | "after";
+
+type FolderDropTarget = {
+  folder: NoteFolderInfo;
+  placement: FolderDropPlacement;
+};
+
+type FolderMoveNotice = {
+  kind: "success" | "error";
+  message: string;
+};
+
+type ActiveFolderPointer = {
+  item: LibraryDragItem;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  moved: boolean;
 };
 
 type SearchInstrument = "filters" | null;
@@ -287,58 +306,6 @@ function meetingIdOf(note: NoteRow): number | null {
   return null;
 }
 
-function dateAtNoon(date: string): Date {
-  return new Date(`${date}T12:00:00Z`);
-}
-
-function ymd(date: Date): string {
-  return date.toISOString().slice(0, 10);
-}
-
-function isoWeek(date: string): number {
-  const value = dateAtNoon(date);
-  const day = value.getUTCDay() || 7;
-  value.setUTCDate(value.getUTCDate() + 4 - day);
-  const yearStart = new Date(Date.UTC(value.getUTCFullYear(), 0, 1, 12));
-  return Math.ceil(((value.getTime() - yearStart.getTime()) / 86_400_000 + 1) / 7);
-}
-
-function weekFor(date: string): { start: string; end: string } {
-  const start = dateAtNoon(date);
-  const offset = (start.getUTCDay() + 6) % 7;
-  start.setUTCDate(start.getUTCDate() - offset);
-  const end = new Date(start);
-  end.setUTCDate(end.getUTCDate() + 6);
-  return { start: ymd(start), end: ymd(end) };
-}
-
-function calendarWeeks(notes: NoteRow[], sortOrder: NoteSortOrder): WeekGroup[] {
-  const groups = new Map<string, WeekGroup>();
-  for (const note of notes) {
-    const { start, end } = weekFor(note.event_date);
-    let group = groups.get(start);
-    if (!group) {
-      const startLabel = formatDay(start, { month: "short", day: "numeric" });
-      const endLabel = formatDay(end, {
-        month: start.slice(0, 7) === end.slice(0, 7) ? undefined : "short",
-        day: "numeric",
-        year: start.slice(0, 4) === end.slice(0, 4) ? undefined : "numeric",
-      });
-      group = {
-        key: start,
-        label: `Week ${isoWeek(start)} · ${startLabel} – ${endLabel}`,
-        notes: [],
-      };
-      groups.set(start, group);
-    }
-    group.notes.push(note);
-  }
-  const oldestFirst = sortOrder === "date_asc";
-  return Array.from(groups.values()).sort((a, b) =>
-    oldestFirst ? a.key.localeCompare(b.key) : b.key.localeCompare(a.key)
-  );
-}
-
 function folderPath(folderId: number, folders: NoteFolderInfo[]): string {
   const byId = new Map(folders.map((folder) => [folder.id, folder]));
   const names: string[] = [];
@@ -391,6 +358,27 @@ export function NotesView({
   const [renameValue, setRenameValue] = useState("");
   const [filing, setFiling] = useState(false);
   const [filingMsg, setFilingMsg] = useState<string | null>(null);
+  const [draggingItem, setDraggingItem] = useState<LibraryDragItem | null>(null);
+  const [folderDropTarget, setFolderDropTargetState] = useState<{
+    folderId: number;
+    placement: FolderDropPlacement;
+  } | null>(null);
+  const [folderDragPoint, setFolderDragPoint] = useState<{ x: number; y: number } | null>(null);
+  const [folderMoveNotice, setFolderMoveNotice] = useState<FolderMoveNotice | null>(null);
+  const [activeSpaceId, setActiveSpaceIdState] = useState<number | null>(() => {
+    const saved = Number(localStorage.getItem("noted-active-space"));
+    return Number.isFinite(saved) && saved > 0 ? saved : null;
+  });
+  const [spaceMenuOpen, setSpaceMenuOpen] = useState(false);
+  const [topicsOpen, setTopicsOpenState] = useState(
+    () => localStorage.getItem("noted-topics") === "open"
+  );
+  const activeFolderPointer = useRef<ActiveFolderPointer | null>(null);
+  const folderDropTargetRef = useRef<FolderDropTarget | null>(null);
+  const spaceSwitcherRef = useRef<HTMLDivElement | null>(null);
+  const suppressRowOpen = useRef(false);
+  const folderExpandTimer = useRef<number | null>(null);
+  const folderNoticeTimer = useRef<number | null>(null);
   const [editingNote, setEditingNote] = useState(false);
   const [editTitle, setEditTitle] = useState("");
   const [editBody, setEditBody] = useState("");
@@ -422,6 +410,37 @@ export function NotesView({
     setSortOrderState(next);
     localStorage.setItem("noted-note-sort", next);
   };
+
+  const setTopicsOpen = (open: boolean) => {
+    setTopicsOpenState(open);
+    localStorage.setItem("noted-topics", open ? "open" : "closed");
+  };
+
+  useEffect(() => {
+    if (!spaceMenuOpen) return;
+    const dismiss = (event: MouseEvent) => {
+      if (!spaceSwitcherRef.current?.contains(event.target as Node)) {
+        setSpaceMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSpaceMenuOpen(false);
+    };
+    document.addEventListener("mousedown", dismiss);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", dismiss);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [spaceMenuOpen]);
+
+  useEffect(
+    () => () => {
+      if (folderExpandTimer.current != null) window.clearTimeout(folderExpandTimer.current);
+      if (folderNoticeTimer.current != null) window.clearTimeout(folderNoticeTimer.current);
+    },
+    []
+  );
 
   const loadMeetings = useCallback(() => {
     Promise.all([api.meetingList(), api.meetingTrashList()])
@@ -495,18 +514,6 @@ export function NotesView({
     return () => window.clearTimeout(timer);
   }, [query, selection, sortOrder, transcriptFilters]);
 
-  const successfulMeetings = useMemo(
-    () =>
-      meetings.filter(
-        (meeting) =>
-          meeting.status !== "failed" ||
-          meeting.segment_count > 0 ||
-          meeting.summary_count > 0 ||
-          meeting.note_id != null
-      ),
-    [meetings]
-  );
-
   const folderChildren = useMemo(() => {
     const result = new Map<number | null, NoteFolderInfo[]>();
     for (const folder of folders) {
@@ -542,33 +549,95 @@ export function NotesView({
         .filter((folder) => folder.kind === "space")
         .sort((a, b) => {
           const rank = (name: string) =>
-            name.toLowerCase() === "personal" ? 0 : name.toLowerCase() === "work" ? 1 : 2;
+            name.toLowerCase() === "work" ? 0 : name.toLowerCase() === "personal" ? 1 : 2;
           return rank(a.name) - rank(b.name);
         }),
     [folderChildren]
   );
-  const personalSpace = rootSpaces.find((folder) => folder.name.toLowerCase() === "personal");
-  const defaultFolderParent = personalSpace ?? rootSpaces[0];
+
+  const workspaceSpace = rootSpaces.find((folder) => folder.name.toLowerCase() === "work");
+  const activeSpace =
+    rootSpaces.find((folder) => folder.id === activeSpaceId) ?? workspaceSpace ?? rootSpaces[0];
+  const activeSpaceLabel =
+    activeSpace?.name.toLowerCase() === "work"
+      ? "My Workspace"
+      : activeSpace?.name.toLowerCase() === "personal"
+        ? "My Personal Space"
+        : activeSpace
+          ? `My ${activeSpace.name} Space`
+          : "My Workspace";
+  const activeSpaceDescription =
+    activeSpace?.name.toLowerCase() === "personal" ? "Personal notes" : "Work notes";
+  const defaultFolderParent = activeSpace;
+
+  useEffect(() => {
+    if (!activeSpace || activeSpace.id === activeSpaceId) return;
+    setActiveSpaceIdState(activeSpace.id);
+    localStorage.setItem("noted-active-space", String(activeSpace.id));
+  }, [activeSpace, activeSpaceId]);
+
   const topLevelFolders = useMemo(
-    () => [
-      ...(folderChildren.get(null) ?? []).filter((folder) => folder.kind === "folder"),
-      ...rootSpaces.flatMap((space) =>
-        (folderChildren.get(space.id) ?? []).filter((folder) => folder.kind === "folder")
-      ),
-    ],
-    [folderChildren, rootSpaces]
+    () =>
+      activeSpace == null
+        ? []
+        : (folderChildren.get(activeSpace.id) ?? []).filter(
+            (folder) => folder.kind === "folder"
+          ),
+    [activeSpace, folderChildren]
   );
+
+  const allSpaceNoteIds = useMemo(() => {
+    const ids = new Set<number>();
+    for (const space of rootSpaces) {
+      for (const noteId of folderNoteIds.get(space.id) ?? []) ids.add(noteId);
+    }
+    return ids;
+  }, [folderNoteIds, rootSpaces]);
+
+  const activeSpaceNoteIds = useMemo(() => {
+    const explicit = new Set(activeSpace ? folderNoteIds.get(activeSpace.id) ?? [] : []);
+    // Before spaces were visible, most captures were intentionally left
+    // unfiled. Preserve them in the existing Work library until the user or a
+    // future routing rule gives them a more specific home.
+    if (activeSpace?.name.toLowerCase() === "work") {
+      for (const note of notes) {
+        if (!allSpaceNoteIds.has(note.id)) explicit.add(note.id);
+      }
+    }
+    return explicit;
+  }, [activeSpace, allSpaceNoteIds, folderNoteIds, notes]);
+
+  const scopedNotes = useMemo(
+    () => (activeSpace ? notes.filter((note) => activeSpaceNoteIds.has(note.id)) : notes),
+    [activeSpace, activeSpaceNoteIds, notes]
+  );
+
+  const successfulMeetings = useMemo(
+    () =>
+      meetings.filter(
+        (meeting) =>
+          (meeting.status !== "failed" ||
+            meeting.segment_count > 0 ||
+            meeting.summary_count > 0 ||
+            meeting.note_id != null) &&
+          (meeting.note_id != null
+            ? activeSpaceNoteIds.has(meeting.note_id)
+            : activeSpace?.name.toLowerCase() === "work")
+      ),
+    [activeSpace, activeSpaceNoteIds, meetings]
+  );
+
   const scheduleNotes = useMemo(() => {
     const seenDays = new Set<string>();
-    return notes.filter((note) => {
+    return scopedNotes.filter((note) => {
       if (!isScheduleNote(note) || seenDays.has(note.event_date)) return false;
       seenDays.add(note.event_date);
       return true;
     });
-  }, [notes]);
+  }, [scopedNotes]);
   const libraryNotes = useMemo(
-    () => notes.filter((note) => !isScheduleNote(note)),
-    [notes]
+    () => scopedNotes.filter((note) => !isScheduleNote(note)),
+    [scopedNotes]
   );
   const libraryNoteIds = useMemo(
     () => new Set(libraryNotes.map((note) => note.id)),
@@ -626,6 +695,10 @@ export function NotesView({
   const selectedFolderParent = selectedFolder
     ? folderParentPath(selectedFolder, folders)
     : "";
+  const selectedFolderParentWithinSpace = selectedFolderParent
+    .split(" / ")
+    .filter((name) => name && name.toLowerCase() !== activeSpace?.name.toLowerCase())
+    .join(" / ");
 
   const list = useMemo(() => {
     let rows: NoteRow[];
@@ -666,10 +739,15 @@ export function NotesView({
     return [...filtered].sort((left, right) => compareMeetingRows(left, right, sortOrder));
   }, [query, selection, sortOrder, successfulMeetings, trashedMeetings]);
 
-  const weekGroups = useMemo(
-    () => (selectedFolder ? calendarWeeks(list, sortOrder) : []),
-    [list, selectedFolder, sortOrder]
+  const activeMeetingIds = useMemo(
+    () => new Set(successfulMeetings.map((meeting) => meeting.id)),
+    [successfulMeetings]
   );
+  const visibleTranscriptHits = useMemo(
+    () => transcriptHits.filter((hit) => activeMeetingIds.has(hit.meeting_id)),
+    [activeMeetingIds, transcriptHits]
+  );
+
   const meetingView = selection === "meetings" || selection === "meeting-trash";
 
   const currentLabel = useMemo(() => {
@@ -681,6 +759,19 @@ export function NotesView({
     if (selectedFolder) return selectedFolder.name;
     return categories.find((category) => category.id === selection)?.label ?? "Notes";
   }, [categories, selectedFolder, selection]);
+
+  function selectSpace(space: NoteFolderInfo) {
+    setActiveSpaceIdState(space.id);
+    localStorage.setItem("noted-active-space", String(space.id));
+    setSelection("all");
+    setQuery("");
+    setSearchInstrument(null);
+    setCreating(null);
+    setNewFolderName("");
+    setMenuFolder(null);
+    setFolderError(null);
+    setSpaceMenuOpen(false);
+  }
 
   async function createFolder() {
     if (!creating || !newFolderName.trim()) return;
@@ -701,6 +792,11 @@ export function NotesView({
     } catch (error) {
       setFolderError(String(error));
     }
+  }
+
+  function cancelFolderCreation() {
+    setCreating(null);
+    setNewFolderName("");
   }
 
   async function renameFolder(folder: NoteFolderInfo) {
@@ -752,6 +848,197 @@ export function NotesView({
     }
   }
 
+  function showFolderMoveNotice(notice: FolderMoveNotice) {
+    setFolderMoveNotice(notice);
+    if (folderNoticeTimer.current != null) window.clearTimeout(folderNoticeTimer.current);
+    folderNoticeTimer.current = window.setTimeout(() => {
+      setFolderMoveNotice(null);
+      folderNoticeTimer.current = null;
+    }, notice.kind === "success" ? 3200 : 5600);
+  }
+
+  function clearFolderDrag() {
+    if (folderExpandTimer.current != null) {
+      window.clearTimeout(folderExpandTimer.current);
+      folderExpandTimer.current = null;
+    }
+    activeFolderPointer.current = null;
+    folderDropTargetRef.current = null;
+    setDraggingItem(null);
+    setFolderDropTargetState(null);
+    setFolderDragPoint(null);
+  }
+
+  function setFolderDropTarget(target: FolderDropTarget | null) {
+    const previous = folderDropTargetRef.current;
+    if (
+      previous?.folder.id === target?.folder.id &&
+      previous?.placement === target?.placement
+    ) {
+      return;
+    }
+    folderDropTargetRef.current = target;
+    setFolderDropTargetState(
+      target ? { folderId: target.folder.id, placement: target.placement } : null
+    );
+    if (folderExpandTimer.current != null) {
+      window.clearTimeout(folderExpandTimer.current);
+      folderExpandTimer.current = null;
+    }
+    if (!target || target.placement !== "inside") return;
+    const children = folderChildren.get(target.folder.id) ?? [];
+    if (children.length > 0 && !expanded.has(target.folder.id)) {
+      folderExpandTimer.current = window.setTimeout(() => {
+        setExpanded(new Set(expanded).add(target.folder.id));
+        folderExpandTimer.current = null;
+      }, 650);
+    }
+  }
+
+  function beginFolderPointer(
+    event: ReactPointerEvent<HTMLElement>,
+    item: LibraryDragItem
+  ) {
+    if (event.button !== 0) return;
+    activeFolderPointer.current = {
+      item,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function folderIsInside(folderId: number, possibleAncestorId: number): boolean {
+    const seen = new Set<number>();
+    let current = folders.find((folder) => folder.id === folderId);
+    while (current && !seen.has(current.id)) {
+      if (current.id === possibleAncestorId) return true;
+      seen.add(current.id);
+      current = current.parent_id == null
+        ? undefined
+        : folders.find((folder) => folder.id === current?.parent_id);
+    }
+    return false;
+  }
+
+  function folderAtPoint(x: number, y: number): FolderDropTarget | null {
+    const element = document
+      .elementFromPoint(x, y)
+      ?.closest<HTMLElement>("[data-folder-drop-id]");
+    const id = element == null ? Number.NaN : Number(element.dataset.folderDropId);
+    const folder = Number.isFinite(id)
+      ? folders.find((item) => item.id === id)
+      : undefined;
+    const dragged = activeFolderPointer.current?.item;
+    if (!element || !folder || !dragged) return null;
+
+    if (dragged.kind === "note") return { folder, placement: "inside" };
+
+    const rect = element.getBoundingClientRect();
+    const relativeY = rect.height > 0 ? (y - rect.top) / rect.height : 0.5;
+    const placement: FolderDropPlacement =
+      relativeY < 0.3 ? "before" : relativeY > 0.7 ? "after" : "inside";
+    if (folder.id === dragged.folderId) return null;
+
+    const destinationParent = placement === "inside" ? folder.id : folder.parent_id;
+    if (
+      destinationParent != null &&
+      folderIsInside(destinationParent, dragged.folderId)
+    ) {
+      return null;
+    }
+    return { folder, placement };
+  }
+
+  function moveFolderPointer(event: ReactPointerEvent<HTMLElement>) {
+    const active = activeFolderPointer.current;
+    if (!active || active.pointerId !== event.pointerId) return;
+    const distance = Math.hypot(event.clientX - active.startX, event.clientY - active.startY);
+    if (!active.moved && distance < 6) return;
+    if (!active.moved) {
+      active.moved = true;
+      suppressRowOpen.current = true;
+      setDraggingItem(active.item);
+      setFolderMoveNotice(null);
+      window.getSelection()?.removeAllRanges();
+    }
+    event.preventDefault();
+    setFolderDragPoint({ x: event.clientX, y: event.clientY });
+    setFolderDropTarget(folderAtPoint(event.clientX, event.clientY));
+  }
+
+  function endFolderPointer(event: ReactPointerEvent<HTMLElement>) {
+    const active = activeFolderPointer.current;
+    if (!active || active.pointerId !== event.pointerId) return;
+    const moved = active.moved;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    const target =
+      folderAtPoint(event.clientX, event.clientY) ?? folderDropTargetRef.current;
+    clearFolderDrag();
+    if (!moved) return;
+    event.preventDefault();
+    window.setTimeout(() => {
+      suppressRowOpen.current = false;
+    }, 0);
+    if (target) void performFolderDrop(active.item, target);
+  }
+
+  function cancelFolderPointer(event: ReactPointerEvent<HTMLElement>) {
+    const active = activeFolderPointer.current;
+    if (!active || active.pointerId !== event.pointerId) return;
+    clearFolderDrag();
+    suppressRowOpen.current = false;
+  }
+
+  function openUnlessDragged(openItem: () => void) {
+    if (suppressRowOpen.current) return;
+    openItem();
+  }
+
+  async function performFolderDrop(item: LibraryDragItem, target: FolderDropTarget) {
+    try {
+      if (item.kind === "note") {
+        await api.fileNote(item.noteId, target.folder.id);
+      } else {
+        const destinationParentId =
+          target.placement === "inside" ? target.folder.id : target.folder.parent_id;
+        let beforeId: number | null = null;
+        if (target.placement === "before") {
+          beforeId = target.folder.id;
+        } else if (target.placement === "after") {
+          const siblings = (folderChildren.get(destinationParentId) ?? []).filter(
+            (folder) => folder.kind === "folder" && folder.id !== item.folderId
+          );
+          const targetIndex = siblings.findIndex((folder) => folder.id === target.folder.id);
+          beforeId = targetIndex >= 0 ? siblings[targetIndex + 1]?.id ?? null : null;
+        }
+        await api.moveNoteFolder(item.folderId, destinationParentId, beforeId);
+        if (target.placement === "inside") {
+          setExpanded(new Set(expanded).add(target.folder.id));
+        }
+      }
+      await Promise.all([loadFolders(), loadTranscriptFacets()]);
+      showFolderMoveNotice({
+        kind: "success",
+        message:
+          item.kind === "note"
+            ? `Moved “${item.label}” to ${folderPath(target.folder.id, folders)}.`
+            : target.placement === "inside"
+              ? `Moved “${item.label}” into “${target.folder.name}”.`
+              : `Moved “${item.label}” ${target.placement} “${target.folder.name}”.`,
+      });
+    } catch (error) {
+      showFolderMoveNotice({
+        kind: "error",
+        message: `Could not move “${item.label}”: ${String(error)}`,
+      });
+    }
+  }
+
   function toggleStringTranscriptFilter(
     key: "people" | "meetingTypes",
     value: string
@@ -793,8 +1080,16 @@ export function NotesView({
 
   if (openNote) {
     const scheduleNote = isScheduleNote(openNote);
-    const visibleFolders = folders.filter((folder) => folder.kind === "folder");
-    const filedIn = visibleFolders.filter((folder) => folder.note_ids.includes(openNote.id));
+    const filingTargets = folders.filter(
+      (folder) => folder.kind === "space" || folder.kind === "folder"
+    );
+    const filedIn = filingTargets.filter((folder) => folder.note_ids.includes(openNote.id));
+    const filingTargetLabel = (folder: NoteFolderInfo) => {
+      if (folder.kind !== "space") return folderPath(folder.id, folders);
+      if (folder.name.toLowerCase() === "work") return "My Workspace · Inbox";
+      if (folder.name.toLowerCase() === "personal") return "My Personal Space · Inbox";
+      return `${folder.name} · Inbox`;
+    };
     return (
       <div className="note-detail">
         <header className="note-detail-head">
@@ -829,7 +1124,7 @@ export function NotesView({
             </div>
             {!scheduleNote && filedIn.length > 0 && (
               <div className="note-filed-paths">
-                {filedIn.map((folder) => folderPath(folder.id, folders)).join(" · ")}
+                {filedIn.map(filingTargetLabel).join(" · ")}
               </div>
             )}
           </div>
@@ -863,9 +1158,9 @@ export function NotesView({
                   }}
                 >
                   <option value="">File in…</option>
-                  {visibleFolders.map((folder) => (
+                  {filingTargets.map((folder) => (
                     <option key={folder.id} value={folder.id}>
-                      {folderPath(folder.id, folders)}
+                      {filingTargetLabel(folder)}
                     </option>
                   ))}
                   <option value="remove">Remove manual filing</option>
@@ -952,8 +1247,22 @@ export function NotesView({
     else setOpenNote(note);
   };
 
-  const renderNoteRow = (note: NoteRow) => (
-    <button key={note.id} className="note-row" onClick={() => open(note)}>
+  const renderNoteRow = (note: NoteRow) => {
+    const canMove = !isScheduleNote(note);
+    const label = displayedNoteTitle(note, standupNoteIds);
+    return (
+    <button
+      key={note.id}
+      className={`note-row${canMove ? " can-drag" : ""}${
+        draggingItem?.kind === "note" && draggingItem.noteId === note.id ? " dragging" : ""
+      }`}
+      onClick={() => openUnlessDragged(() => open(note))}
+      onPointerDown={canMove ? (event) => beginFolderPointer(event, { kind: "note", noteId: note.id, label }) : undefined}
+      onPointerMove={canMove ? moveFolderPointer : undefined}
+      onPointerUp={canMove ? endFolderPointer : undefined}
+      onPointerCancel={canMove ? cancelFolderPointer : undefined}
+      title={canMove ? "Drag to a folder" : undefined}
+    >
       {isScheduleNote(note) ? (
         <CalendarDays size={14} className="note-row-icon" />
       ) : meetingIdOf(note) != null ? (
@@ -961,13 +1270,14 @@ export function NotesView({
       ) : (
         <FileText size={14} className="note-row-icon" />
       )}
-      <span className="note-row-title">{displayedNoteTitle(note, standupNoteIds)}</span>
+      <span className="note-row-title">{label}</span>
       {!isScheduleNote(note) && (
         <span className="note-row-categories">{noteCats(note).slice(0, 2).join(" · ")}</span>
       )}
       <span className="note-row-date">{relativeDay(note.event_date)}</span>
     </button>
-  );
+    );
+  };
 
   const transcriptSearchActive =
     (selection === "all" || selection === "meetings") && query.trim().length >= 2;
@@ -1068,8 +1378,8 @@ export function NotesView({
               ? "Searching…"
               : transcriptSearchError
                 ? "Unavailable"
-                : `${transcriptHits.length === 200 ? "200+" : transcriptHits.length} ${
-                    transcriptHits.length === 1 ? "line" : "lines"
+                : `${visibleTranscriptHits.length === 200 ? "200+" : visibleTranscriptHits.length} ${
+                    visibleTranscriptHits.length === 1 ? "line" : "lines"
                   }`}
           </span>
         </header>
@@ -1077,7 +1387,7 @@ export function NotesView({
           <p className="transcript-results-error">Transcript search is temporarily unavailable.</p>
         ) : (
           <div className="transcript-result-list">
-            {transcriptHits.map((hit) => (
+            {visibleTranscriptHits.map((hit) => (
               <button
                 key={hit.segment_id}
                 className="transcript-result"
@@ -1111,8 +1421,30 @@ export function NotesView({
     return (
       <button
         key={folder.id}
-        className="note-row folder-content-row"
-        onClick={() => setSelection(`folder:${folder.id}`)}
+        className={`note-row folder-content-row can-drag${
+          draggingItem ? " drop-available" : ""
+        }${
+          draggingItem?.kind === "folder" && draggingItem.folderId === folder.id
+            ? " dragging"
+            : ""
+        }${
+          folderDropTarget?.folderId === folder.id
+            ? ` drop-${folderDropTarget.placement}`
+            : ""
+        }`}
+        onClick={() => openUnlessDragged(() => setSelection(`folder:${folder.id}`))}
+        onPointerDown={(event) =>
+          beginFolderPointer(event, {
+            kind: "folder",
+            folderId: folder.id,
+            label: folder.name,
+          })
+        }
+        onPointerMove={moveFolderPointer}
+        onPointerUp={endFolderPointer}
+        onPointerCancel={cancelFolderPointer}
+        title="Drag to reorder or move into another folder"
+        data-folder-drop-id={folder.id}
       >
         <Folder size={14} className="note-row-icon" />
         <span className="note-row-title">{folder.name}</span>
@@ -1134,8 +1466,19 @@ export function NotesView({
     return (
       <div className="folder-tree-item" key={folder.id}>
         <div
-          className={`folder-tree-row${isSelected ? " on" : ""}`}
+          className={`folder-tree-row${isSelected ? " on" : ""}${
+            draggingItem ? " drop-available" : ""
+          }${
+            draggingItem?.kind === "folder" && draggingItem.folderId === folder.id
+              ? " dragging"
+              : ""
+          }${
+            folderDropTarget?.folderId === folder.id
+              ? ` drop-${folderDropTarget.placement}`
+              : ""
+          }`}
           style={{ "--folder-depth": depth } as CSSProperties}
+          data-folder-drop-id={folder.id}
         >
           {children.length > 0 ? (
             <button
@@ -1188,12 +1531,24 @@ export function NotesView({
           ) : (
             <>
               <button
-                className="folder-main"
-                title={folder.name}
+                className="folder-main can-drag"
+                title={`Drag to reorder ${folder.name} or move it into another folder`}
                 onClick={() => {
-                  setSelection(`folder:${folder.id}`);
-                  setMenuFolder(null);
+                  openUnlessDragged(() => {
+                    setSelection(`folder:${folder.id}`);
+                    setMenuFolder(null);
+                  });
                 }}
+                onPointerDown={(event) =>
+                  beginFolderPointer(event, {
+                    kind: "folder",
+                    folderId: folder.id,
+                    label: folder.name,
+                  })
+                }
+                onPointerMove={moveFolderPointer}
+                onPointerUp={endFolderPointer}
+                onPointerCancel={cancelFolderPointer}
               >
                 {isSelected || (isExpanded && children.length > 0) ? (
                   <FolderOpen size={14} />
@@ -1221,6 +1576,18 @@ export function NotesView({
             <button
               onClick={() => {
                 setMenuFolder(null);
+                setCreating({
+                  parentId: folder.id,
+                  label: `Folder in ${folder.name}`,
+                });
+                setNewFolderName("");
+              }}
+            >
+              New subfolder
+            </button>
+            <button
+              onClick={() => {
+                setMenuFolder(null);
                 setRenaming(folder.id);
                 setRenameValue(folder.name);
               }}
@@ -1231,6 +1598,36 @@ export function NotesView({
               Remove
             </button>
           </div>
+        )}
+        {creating?.parentId === folder.id && (
+          <form
+            className="folder-create nested"
+            style={{ "--folder-depth": depth } as CSSProperties}
+            onSubmit={(event) => {
+              event.preventDefault();
+              createFolder();
+            }}
+          >
+            <input
+              autoFocus
+              value={newFolderName}
+              onChange={(event) => setNewFolderName(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") cancelFolderCreation();
+              }}
+              placeholder={creating.label}
+              aria-label={creating.label}
+            />
+            <button
+              type="button"
+              className="folder-create-cancel"
+              onClick={cancelFolderCreation}
+              aria-label="Cancel new subfolder"
+              title="Cancel"
+            >
+              <X size={13} />
+            </button>
+          </form>
         )}
         {isExpanded && children.map((child) => renderFolder(child, depth + 1))}
       </div>
@@ -1244,9 +1641,9 @@ export function NotesView({
       : selectedFolder
         ? visibleFolderChildren.length + list.length
         : list.length;
-  const visibleCount = listedCount + (transcriptSearchActive ? transcriptHits.length : 0);
+  const visibleCount = listedCount + (transcriptSearchActive ? visibleTranscriptHits.length : 0);
   const countLabel = transcriptSearchActive
-    ? `${visibleCount}${transcriptHits.length === 200 ? "+" : ""} ${
+    ? `${visibleCount}${visibleTranscriptHits.length === 200 ? "+" : ""} ${
         visibleCount === 1 ? "result" : "results"
       }`
     : selectedFolder
@@ -1279,6 +1676,16 @@ export function NotesView({
 
   return (
     <div className="notes-view" data-tauri-drag-region>
+      {draggingItem && folderDragPoint && (
+        <div
+          className="folder-drag-preview"
+          style={{ left: folderDragPoint.x + 14, top: folderDragPoint.y + 12 }}
+          aria-hidden="true"
+        >
+          {draggingItem.kind === "folder" ? <FolderOpen size={13} /> : <FileText size={13} />}
+          <strong>{draggingItem.label}</strong>
+        </div>
+      )}
       <div className="notes-library-shell">
         <button
           className="notes-library-toggle icon-btn"
@@ -1292,9 +1699,48 @@ export function NotesView({
 
         {libraryOpen && (
           <aside className="spaces" aria-label="Notes library">
-          <div className="spaces-head">
-            <span>Library</span>
+          <div className="space-switcher" ref={spaceSwitcherRef}>
+            <button
+              className="space-switcher-trigger"
+              onClick={() => setSpaceMenuOpen((open) => !open)}
+              aria-haspopup="menu"
+              aria-expanded={spaceMenuOpen}
+            >
+              <span className="space-switcher-copy">
+                <strong>{activeSpaceLabel}</strong>
+                <small>{activeSpaceDescription}</small>
+              </span>
+              <ChevronDown size={15} aria-hidden="true" />
+            </button>
+            {spaceMenuOpen && (
+              <div className="space-switcher-menu" role="menu" aria-label="Switch space">
+                {rootSpaces.map((space) => {
+                  const isWork = space.name.toLowerCase() === "work";
+                  const isPersonal = space.name.toLowerCase() === "personal";
+                  const label = isWork
+                    ? "My Workspace"
+                    : isPersonal
+                      ? "My Personal Space"
+                      : `My ${space.name} Space`;
+                  return (
+                    <button
+                      key={space.id}
+                      role="menuitemradio"
+                      aria-checked={space.id === activeSpace?.id}
+                      className={space.id === activeSpace?.id ? "on" : ""}
+                      onClick={() => selectSpace(space)}
+                    >
+                      <span>
+                        <strong>{label}</strong>
+                        <small>{isPersonal ? "Personal notes" : "Work notes"}</small>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
+          <div className="library-saved-label">Saved views</div>
           <nav className="library-main" aria-label="Saved views">
             <button
               className={selection === "all" ? "on" : ""}
@@ -1334,42 +1780,38 @@ export function NotesView({
 
           <div className="library-section-head">
             <span>Folders</span>
-            <button
-              className="library-add"
-              disabled={!defaultFolderParent}
-              onClick={() => {
-                if (!defaultFolderParent) return;
-                setCreating({
-                  parentId: defaultFolderParent.id,
-                  label: "Folder name",
-                });
-                setNewFolderName("");
-              }}
-              aria-label="New folder"
-              title="New folder"
-            >
-              <Plus size={14} />
-            </button>
+            {!creating && (
+              <button
+                className="library-add"
+                disabled={!defaultFolderParent}
+                onClick={() => {
+                  if (!defaultFolderParent) return;
+                  setCreating({
+                    parentId: defaultFolderParent.id,
+                    label: `Folder in ${activeSpaceLabel}`,
+                  });
+                  setNewFolderName("");
+                }}
+                aria-label={`New folder in ${activeSpaceLabel}`}
+                title="New folder"
+              >
+                <Plus size={14} />
+              </button>
+            )}
           </div>
           <div className="folder-tree">
             {topLevelFolders.map((folder) => renderFolder(folder, 0))}
           </div>
-          {selectedFolder && (
-            <button
-              className="new-subfolder"
-              aria-label={`New folder in ${selectedFolder.name}`}
-              onClick={() => {
-                setCreating({
-                  parentId: selectedFolder.id,
-                  label: `Folder in ${selectedFolder.name}`,
-                });
-                setNewFolderName("");
-              }}
+          {folderMoveNotice && (
+            <div
+              className={`folder-move-notice ${folderMoveNotice.kind}`}
+              role={folderMoveNotice.kind === "error" ? "alert" : "status"}
+              aria-live="polite"
             >
-              <Plus size={13} /> New subfolder
-            </button>
+              {folderMoveNotice.message}
+            </div>
           )}
-          {creating && (
+          {creating && creating.parentId === activeSpace?.id && (
             <form
               className="folder-create nested"
               onSubmit={(event) => {
@@ -1382,32 +1824,52 @@ export function NotesView({
                 value={newFolderName}
                 onChange={(event) => setNewFolderName(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key === "Escape") setCreating(null);
+                  if (event.key === "Escape") cancelFolderCreation();
                 }}
                 placeholder={creating.label}
                 aria-label={creating.label}
               />
+              <button
+                type="button"
+                className="folder-create-cancel"
+                onClick={cancelFolderCreation}
+                aria-label="Cancel new folder"
+                title="Cancel"
+              >
+                <X size={13} />
+              </button>
             </form>
           )}
-
-          {categories.length > 0 && (
-            <>
-              <div className="library-section-head categories-head">Categories</div>
-              <nav className="library-categories" aria-label="Categories">
-                {categories.map((category) => (
-                  <button
-                    key={category.id}
-                    className={selection === category.id ? "on" : ""}
-                    onClick={() => setSelection(category.id)}
-                  >
-                    <FileText size={13} />
-                    <span className="space-label">{category.label}</span>
-                    <span className="space-n">{category.count}</span>
-                  </button>
-                ))}
+          <div className="library-topics">
+            <button
+              className="library-topics-toggle"
+              onClick={() => setTopicsOpen(!topicsOpen)}
+              aria-expanded={topicsOpen}
+            >
+              {topicsOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+              <span>Topics</span>
+              <small>Automatic</small>
+            </button>
+            {topicsOpen && (
+              <nav className="library-categories" aria-label="Topics">
+                {categories.length > 0 ? (
+                  categories.map((category) => (
+                    <button
+                      key={category.id}
+                      className={selection === category.id ? "on" : ""}
+                      onClick={() => setSelection(category.id)}
+                    >
+                      <FileText size={13} />
+                      <span className="space-label">{category.label}</span>
+                      <span className="space-n">{category.count}</span>
+                    </button>
+                  ))
+                ) : (
+                  <span className="library-topics-empty">No topics in this space yet.</span>
+                )}
               </nav>
-            </>
-          )}
+            )}
+          </div>
 
           {folderError && <div className="folder-error">{folderError}</div>}
           <div className="spaces-trash-wrap">
@@ -1428,12 +1890,15 @@ export function NotesView({
       <main className="notes-list">
         <div className="notes-context">
           <div>
-            {selectedFolderParent && (
-              <div className="notes-breadcrumb">{selectedFolderParent}</div>
-            )}
+            <div className="notes-breadcrumb">
+              {activeSpaceLabel}
+              {selectedFolderParentWithinSpace
+                ? ` / ${selectedFolderParentWithinSpace}`
+                : ""}
+            </div>
             <h1>{currentLabel}</h1>
             {selectedFolder?.auto_rule === "daily_standup" && (
-              <p>Stand-up notes are filed here automatically and grouped by calendar week.</p>
+              <p>Stand-up notes are filed here automatically.</p>
             )}
           </div>
           <span className="notes-context-count">{countLabel}</span>
@@ -1500,8 +1965,44 @@ export function NotesView({
           meetingRows.map((meeting) => (
             <button
               key={meeting.id}
-              className="note-row"
-              onClick={() => setOpenMeeting({ id: meeting.id })}
+              className={`note-row${
+                meeting.note_id != null &&
+                draggingItem?.kind === "note" &&
+                draggingItem.noteId === meeting.note_id
+                  ? " dragging"
+                  : ""
+              }${selection !== "meeting-trash" && meeting.note_id != null ? " can-drag" : ""}`}
+              onClick={() => openUnlessDragged(() => setOpenMeeting({ id: meeting.id }))}
+              onPointerDown={
+                selection !== "meeting-trash" && meeting.note_id != null
+                  ? (event) =>
+                      beginFolderPointer(event, {
+                        kind: "note",
+                        noteId: meeting.note_id as number,
+                        label: meeting.title,
+                      })
+                  : undefined
+              }
+              onPointerMove={
+                selection !== "meeting-trash" && meeting.note_id != null
+                  ? moveFolderPointer
+                  : undefined
+              }
+              onPointerUp={
+                selection !== "meeting-trash" && meeting.note_id != null
+                  ? endFolderPointer
+                  : undefined
+              }
+              onPointerCancel={
+                selection !== "meeting-trash" && meeting.note_id != null
+                  ? cancelFolderPointer
+                  : undefined
+              }
+              title={
+                selection !== "meeting-trash" && meeting.note_id != null
+                  ? "Drag to a folder"
+                  : undefined
+              }
             >
               <AudioLines size={14} className="note-row-icon" />
               <span className="note-row-title">
@@ -1544,25 +2045,17 @@ export function NotesView({
         ) : selectedFolder ? (
           <>
             {visibleFolderChildren.length > 0 && (
-              <section className="note-week folder-index">
-                <header className="note-week-head">
+              <section className="folder-index">
+                <header className="folder-index-head">
                   <h2>Folders</h2>
                   <span>{visibleFolderChildren.length}</span>
                 </header>
-                <div className="note-week-list">
+                <div className="folder-index-list">
                   {visibleFolderChildren.map(renderMainFolderRow)}
                 </div>
               </section>
             )}
-            {weekGroups.map((group) => (
-              <section className="note-week" key={group.key}>
-                <header className="note-week-head">
-                  <h2>{group.label}</h2>
-                  <span>{group.notes.length}</span>
-                </header>
-                <div className="note-week-list">{group.notes.map(renderNoteRow)}</div>
-              </section>
-            ))}
+            {list.map(renderNoteRow)}
           </>
         ) : (
           list.map(renderNoteRow)

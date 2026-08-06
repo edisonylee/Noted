@@ -17,10 +17,43 @@ pub fn create_meeting(
     event_json: Option<&str>,
     now: &str,
 ) -> Result<i64> {
+    create_meeting_row(conn, title, event_id, event_json, None, None, now)
+}
+
+pub fn create_meeting_with_asr(
+    conn: &Connection,
+    title: &str,
+    event_id: Option<&str>,
+    event_json: Option<&str>,
+    asr_engine: &str,
+    asr_model: &str,
+    now: &str,
+) -> Result<i64> {
+    create_meeting_row(
+        conn,
+        title,
+        event_id,
+        event_json,
+        Some(asr_engine),
+        Some(asr_model),
+        now,
+    )
+}
+
+fn create_meeting_row(
+    conn: &Connection,
+    title: &str,
+    event_id: Option<&str>,
+    event_json: Option<&str>,
+    asr_engine: Option<&str>,
+    asr_model: Option<&str>,
+    now: &str,
+) -> Result<i64> {
     conn.execute(
-        "INSERT INTO meetings (title, event_id, event_json, started_at, status, created_at)
-         VALUES (?1, ?2, ?3, ?4, 'recording', ?4)",
-        rusqlite::params![title, event_id, event_json, now],
+        "INSERT INTO meetings
+            (title, event_id, event_json, started_at, status, asr_engine, asr_model, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'recording', ?5, ?6, ?4)",
+        rusqlite::params![title, event_id, event_json, now, asr_engine, asr_model],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -466,10 +499,11 @@ pub fn initialize_one_on_one_speakers(conn: &Connection) -> Result<()> {
 
     let meetings = {
         let mut stmt = conn.prepare("SELECT id, event_json FROM meetings ORDER BY id")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
 
@@ -492,9 +526,8 @@ pub fn initialize_one_on_one_speakers(conn: &Connection) -> Result<()> {
             );
         }
         {
-            let mut stmt = conn.prepare(
-                "SELECT label FROM meeting_speakers WHERE meeting_id = ?1",
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT label FROM meeting_speakers WHERE meeting_id = ?1")?;
             labels.extend(
                 stmt.query_map([meeting_id], |row| row.get::<_, String>(0))?
                     .collect::<rusqlite::Result<Vec<_>>>()?,
@@ -678,9 +711,7 @@ fn collect_folder_notes(
     notes
 }
 
-fn folder_search_data(
-    conn: &Connection,
-) -> Result<(Vec<FolderSearchData>, HashSet<i64>)> {
+fn folder_search_data(conn: &Connection) -> Result<(Vec<FolderSearchData>, HashSet<i64>)> {
     let folders = crate::db::list_note_folders(conn)?;
     let nodes: HashMap<i64, FolderSearchNode> = folders
         .into_iter()
@@ -719,13 +750,7 @@ fn folder_search_data(
         if node.kind != "folder" {
             continue;
         }
-        let note_ids = collect_folder_notes(
-            id,
-            &nodes,
-            &children,
-            &mut memo,
-            &mut HashSet::new(),
-        );
+        let note_ids = collect_folder_notes(id, &nodes, &children, &mut memo, &mut HashSet::new());
         let mut names = Vec::new();
         let mut current = Some(id);
         let mut seen = HashSet::new();
@@ -765,7 +790,9 @@ fn meeting_type<'a>(
     standup_notes: &HashSet<i64>,
 ) -> (&'a str, &'a str) {
     if title_is_standup(&meeting.title)
-        || meeting.note_id.is_some_and(|id| standup_notes.contains(&id))
+        || meeting
+            .note_id
+            .is_some_and(|id| standup_notes.contains(&id))
     {
         ("daily_standup", "Daily stand-up")
     } else if meeting.external_attendee_count == 1 {
@@ -832,11 +859,13 @@ pub fn transcript_search_facets(conn: &Connection) -> Result<TranscriptSearchFac
     let meeting_types = type_order
         .into_iter()
         .filter_map(|value| {
-            type_counts.get(value).map(|(label, count)| TranscriptFacetValue {
-                value: value.to_string(),
-                label: (*label).to_string(),
-                count: *count,
-            })
+            type_counts
+                .get(value)
+                .map(|(label, count)| TranscriptFacetValue {
+                    value: value.to_string(),
+                    label: (*label).to_string(),
+                    count: *count,
+                })
         })
         .collect();
 
@@ -965,9 +994,7 @@ pub fn search_transcripts_filtered_sorted(
         params.extend(ids.into_iter().map(SqlValue::Integer));
     }
     sql.push_str(match sort {
-        "date_asc" => {
-            " ORDER BY COALESCE(m.started_at, m.created_at) ASC, s.t0_ms ASC, s.id ASC"
-        }
+        "date_asc" => " ORDER BY COALESCE(m.started_at, m.created_at) ASC, s.t0_ms ASC, s.id ASC",
         "title_asc" => {
             " ORDER BY m.title COLLATE NOCASE ASC, COALESCE(m.started_at, m.created_at) DESC,
                        s.t0_ms ASC, s.id ASC"
@@ -976,9 +1003,7 @@ pub fn search_transcripts_filtered_sorted(
             " ORDER BY m.title COLLATE NOCASE DESC, COALESCE(m.started_at, m.created_at) DESC,
                        s.t0_ms ASC, s.id ASC"
         }
-        _ => {
-            " ORDER BY COALESCE(m.started_at, m.created_at) DESC, s.t0_ms ASC, s.id ASC"
-        }
+        _ => " ORDER BY COALESCE(m.started_at, m.created_at) DESC, s.t0_ms ASC, s.id ASC",
     });
     sql.push_str(" LIMIT ?");
     params.push(SqlValue::Integer(limit));
@@ -1087,7 +1112,9 @@ fn validate_vocabulary_terms(heard: &str, preferred: &str) -> Result<(String, St
         return Err(anyhow!("the preferred spelling is already identical"));
     }
     if heard.chars().count() > 120 || preferred.chars().count() > 120 {
-        return Err(anyhow!("transcript vocabulary entries must be 120 characters or fewer"));
+        return Err(anyhow!(
+            "transcript vocabulary entries must be 120 characters or fewer"
+        ));
     }
     Ok((heard.to_string(), preferred.to_string()))
 }
@@ -1098,10 +1125,11 @@ pub fn normalize_transcript_text(conn: &Connection, text: &str) -> Result<String
             "SELECT heard, preferred FROM transcript_vocabulary
              WHERE enabled = 1 ORDER BY id",
         )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
     let mut normalized = text.to_string();
@@ -1192,10 +1220,11 @@ pub fn apply_transcript_vocabulary(
     )?;
     let segments = {
         let mut stmt = tx.prepare("SELECT id, text FROM meeting_segments ORDER BY id")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
     let mut changes = Vec::new();
@@ -1296,14 +1325,15 @@ pub fn undo_transcript_vocabulary(
             "SELECT segment_id, before_text, after_text
              FROM transcript_correction_items WHERE batch_id = ?1 ORDER BY segment_id",
         )?;
-        let rows = stmt.query_map([batch_id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+        let rows = stmt
+            .query_map([batch_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
     let mut restored_segments = 0;
@@ -1525,7 +1555,8 @@ fn list_meetings_by_trash(conn: &Connection, limit: i64, trashed: bool) -> Resul
 pub fn get_meeting(conn: &Connection, id: i64) -> Result<Value> {
     let meta = conn.query_row(
         "SELECT id, title, event_id, event_json, started_at, ended_at, status, raw_notes,
-                audio_me_path, audio_them_path, note_id, video_path, trashed_at
+                audio_me_path, audio_them_path, note_id, video_path, trashed_at,
+                asr_engine, asr_model
          FROM meetings WHERE id = ?1",
         [id],
         |r| {
@@ -1544,6 +1575,8 @@ pub fn get_meeting(conn: &Connection, id: i64) -> Result<Value> {
                 "note_id": r.get::<_, Option<i64>>(10)?,
                 "video_path": r.get::<_, Option<String>>(11)?,
                 "trashed_at": r.get::<_, Option<String>>(12)?,
+                "asr_engine": r.get::<_, Option<String>>(13)?,
+                "asr_model": r.get::<_, Option<String>>(14)?,
             }))
         },
     )?;

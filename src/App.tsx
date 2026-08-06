@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "./events";
-import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, ListTodo, Loader, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Square, StickyNote, Sun } from "lucide-react";
+import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, ListTodo, Loader, MessageCircle, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Square, StickyNote, Sun } from "lucide-react";
 import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg, type Img } from "./image";
@@ -9,7 +9,7 @@ import { useConnection } from "./useConnection";
 import { MobileCapture } from "./MobileCapture";
 import { BottomNav, type MobileTab } from "./BottomNav";
 import { useTheme } from "./useTheme";
-import { api, TokenError, OfflineError, type CategoryInfo, type EntityCandidate, type Envelope, type Health, type NoteRow, type RangeEvent, type RelatedBrain } from "./api";
+import { api, TokenError, OfflineError, type CategoryInfo, type EntityCandidate, type Envelope, type NoteRow, type RangeEvent, type RelatedBrain } from "./api";
 import { DataView } from "./DataView";
 import { CalendarView } from "./Calendar";
 import { JournalView } from "./Journal";
@@ -85,7 +85,7 @@ export default function App() {
 
   const [notes, setNotes] = useState<NoteRow[]>([]);
   const [cats, setCats] = useState<CategoryInfo[]>([]);
-  const [health, setHealth] = useState<Health | null>(null);
+  const [assistantOpen, setAssistantOpen] = useState(false);
 
   // Phone capture + backup
   const [showPhone, setShowPhone] = useState(false);
@@ -122,6 +122,7 @@ export default function App() {
     const subs = [
       listen("note-filed", () => refreshRef.current()),
       listen("capture-needs-attention", () => refreshRef.current()),
+      listen("assistant-shortcut", () => setAssistantOpen(true)),
     ];
     return () => {
       subs.forEach((p) => p.then((un) => un()));
@@ -138,6 +139,11 @@ export default function App() {
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === "Space") {
+        e.preventDefault();
+        setAssistantOpen(true);
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b") {
         e.preventDefault();
         setSideOpenState((o) => {
@@ -252,7 +258,7 @@ export default function App() {
   // it comes back (e.g. after a dev rebuild) — refetch health + data, no reload.
   const { online, markOffline } = useConnection({
     onReconnect: () => {
-      api.health().then(setHealth).catch(() => {});
+      api.health().catch(() => {});
       refresh().catch(handleErr);
     },
   });
@@ -270,7 +276,7 @@ export default function App() {
   }, [text, phase, img]);
 
   useEffect(() => {
-    api.health().then(setHealth).catch(handleErr);
+    api.health().catch(handleErr);
     refresh().catch(handleErr);
     api.reindex().catch(() => {}); // backfill any notes missing embeddings
     api.voiceStatus().then((s) => setVoiceReady(s.ready)).catch(() => setVoiceReady(false));
@@ -1071,14 +1077,16 @@ export default function App() {
       )}
 
       <footer className="status">
-        <span className="meta">
-          <span className="live-dot" />
-          {health
-            ? `${health.models.length} local models · ${
-                health.models.some((m) => m.startsWith("qwen2.5vl")) ? "vision ready" : "no vision model"
-              }`
-            : "connecting to local models…"}
-        </span>
+        <button
+          className={"assistant-dock" + (assistantOpen ? " on" : "")}
+          onClick={() => setAssistantOpen((open) => !open)}
+          aria-haspopup="dialog"
+          aria-expanded={assistantOpen}
+        >
+          <MessageCircle size={15} aria-hidden="true" />
+          <span>Ask anything in your notes and meetings</span>
+          <kbd>Command + Shift + Space</kbd>
+        </button>
         <span className="meta">
           {backupMsg && <span className="backup-msg">{backupMsg}</span>}
           <button className="link" onClick={onBackup}>
@@ -1087,6 +1095,12 @@ export default function App() {
         </span>
       </footer>
       </div>
+
+      <FloatingChat
+        open={assistantOpen}
+        onOpenChange={setAssistantOpen}
+        onMutated={() => refresh().catch(handleErr)}
+      />
 
       {releaseProfile.phoneLan && showPhone && <PhonePanel onClose={() => setShowPhone(false)} />}
     </div>

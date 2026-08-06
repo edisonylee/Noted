@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, Check, Mic, Palette, Sparkles, Square, Volume2, VolumeX, X } from "lucide-react";
+import { ArrowUp, Check, MessageCircle, Mic, Palette, Square, Volume2, VolumeX, X } from "lucide-react";
 import { api, isDesktop, type AskEntity, type AskSource, type BrainVaultStatus, type ChatProposal } from "./api";
 import { colorForType } from "./entityColors";
 import { applyProposal, proposalText } from "./chatActions";
@@ -29,9 +29,8 @@ export function FloatingChat({
   variant?: "floating" | "sheet";
 }) {
   const { themes, previewTheme, clearPreview, activateTheme } = useTheme();
-  const [openState, setOpenState] = useState(false);
-  const open = openProp ?? openState;
-  const setOpen = (o: boolean) => (onOpenChange ? onOpenChange(o) : setOpenState(o));
+  const open = openProp ?? false;
+  const setOpen = (o: boolean) => onOpenChange?.(o);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [asking, setAsking] = useState(false);
@@ -43,6 +42,7 @@ export function FloatingChat({
   const [vaults, setVaults] = useState<BrainVaultStatus[]>([]);
   const recorderRef = useRef<Recorder | null>(null);
   const threadRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     api.voiceStatus().then((s) => setVoiceReady(s.ready)).catch(() => {});
@@ -51,6 +51,19 @@ export function FloatingChat({
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, asking]);
+  useEffect(() => {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => inputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open, onOpenChange]);
   useEffect(() => () => clearPreview(), [clearPreview]);
   const wasOpenRef = useRef(open);
   useEffect(() => {
@@ -173,25 +186,18 @@ export function FloatingChat({
     });
   }
 
-  if (!open) {
-    // In sheet mode (mobile) the parent owns open state via the bottom-nav tab;
-    // render nothing when closed and never show the floating FAB.
-    if (variant === "sheet") return null;
-    return (
-      <button className="fab" onClick={() => setOpen(true)} aria-label="Ask the assistant">
-        <Sparkles size={22} strokeWidth={2} />
-      </button>
-    );
-  }
+  if (!open) return null;
 
   return (
-    <div className={"chat-panel" + (variant === "sheet" ? " chat-sheet" : "")}>
+    <div
+      className={"chat-panel" + (variant === "sheet" ? " chat-sheet" : "")}
+      role="dialog"
+      aria-label="Ask Noted"
+    >
       <div className="chat-panel-head">
-        <span className="assistant-mark">
-          <Sparkles size={15} strokeWidth={2} />
-        </span>
+        <MessageCircle className="chat-panel-icon" size={17} aria-hidden="true" />
         <span className="title">
-          Assistant<span className="sub">your log, answered</span>
+          Ask Noted<span className="sub">your notes and meetings</span>
         </span>
         {vaults.length > 0 && (
           <select
@@ -223,9 +229,8 @@ export function FloatingChat({
       <div className="chat-thread" ref={threadRef}>
         {messages.length === 0 && !asking && (
           <div className="chat-empty">
-            Ask about anything you&rsquo;ve logged.
-            <span className="ex">&ldquo;what was my last workout?&rdquo;</span>
-            <span className="ex">&ldquo;what did I do yesterday?&rdquo;</span>
+            <strong>Your memory is ready.</strong>
+            <span>Ask about a meeting, person, decision, plan, or anything you&rsquo;ve saved.</span>
           </div>
         )}
         {messages.map((m, i) => (
@@ -292,8 +297,9 @@ export function FloatingChat({
           {recording ? <Square size={15} strokeWidth={2.5} /> : <Mic size={17} />}
         </button>
         <input
+          ref={inputRef}
           value={input}
-          placeholder="Ask about your day…"
+          placeholder="Ask your memory…"
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") send(input);

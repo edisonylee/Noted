@@ -235,7 +235,12 @@ export type NoteFolderInfo = {
   note_ids: number[];
 };
 
-export type Health = { models: string[]; vec_version: string };
+export type Health = {
+  models: string[];
+  vec_version: string;
+  assistant_shortcut_enabled: boolean;
+  assistant_shortcut_registered: boolean;
+};
 
 // Model-provider settings. "local" = 100% Ollama; "balanced" routes the
 // extract/OCR hot path to a chosen cloud provider; "hosted" routes every
@@ -466,6 +471,8 @@ export type MeetingDetail = MeetingListRow & {
   audio_me_path: string | null;
   audio_them_path: string | null;
   video_path: string | null; // window recording; null = off/expired/deleted
+  asr_engine: string | null; // resolved engine used when this meeting started
+  asr_model: string | null; // exact local artifact or provider model used
   segments: MeetingSegment[];
   summaries: MeetingSummary[];
   talk_ms: { me: number; them: number };
@@ -623,6 +630,8 @@ export const api = {
     invoke<number>("create_note_folder", { parentId, name, kind }),
   renameNoteFolder: (folderId: number, name: string) =>
     invoke<void>("rename_note_folder", { folderId, name }),
+  moveNoteFolder: (folderId: number, parentId: number | null, beforeId: number | null) =>
+    invoke<void>("move_note_folder", { folderId, parentId, beforeId }),
   deleteNoteFolder: (folderId: number) =>
     invoke<void>("delete_note_folder", { folderId }),
   fileNote: (noteId: number, folderId: number | null) =>

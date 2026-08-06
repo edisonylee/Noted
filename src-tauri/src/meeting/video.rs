@@ -18,7 +18,8 @@
 // video after preflight says the grant already exists. This prevents macOS
 // from presenting the same screen-recording notice on every meeting.
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,6 +28,23 @@ use tauri::Manager;
 
 use super::store;
 use crate::db::Db;
+
+/// Keep video diagnostics beside the retained meeting artifacts. Video used
+/// to report only to process stdout, which made a missing MP4 impossible to
+/// explain after the app closed.
+pub fn log_status(dir: &Path, message: &str) {
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("capture.log"))
+    {
+        let now = chrono::Utc::now().to_rfc3339();
+        let _ = writeln!(file, "{now} video: {message}");
+    }
+}
 
 /// SCRecordingOutput needs macOS 15.0+. Runtime gate, not compile (the app
 /// itself supports 14.4 for the audio tap).
@@ -89,6 +107,7 @@ pub fn spawn(
     if !video_supported() || !permission_granted() {
         return;
     }
+    log_status(&dir, "window recording requested");
     std::thread::spawn(move || {
         #[cfg(target_os = "macos")]
         {
@@ -107,6 +126,7 @@ pub fn spawn(
                 .await
                 {
                     Ok(Some(path)) => {
+                        log_status(&dir, &format!("saved {path}"));
                         {
                             let db = app.state::<Db>();
                             let conn = db.0.lock().unwrap();
@@ -119,8 +139,11 @@ pub fn spawn(
                         );
                         println!("[noted] meeting {meeting_id} window video saved");
                     }
-                    Ok(None) => {}
-                    Err(e) => eprintln!("[noted] window video unavailable: {e}"),
+                    Ok(None) => log_status(&dir, "stopped without a saved MP4"),
+                    Err(e) => {
+                        log_status(&dir, &format!("recorder error: {e}"));
+                        eprintln!("[noted] window video unavailable: {e}");
+                    }
                 }
             });
         }
@@ -263,6 +286,7 @@ mod macos {
                 break w;
             }
             if std::time::Instant::now() > deadline {
+                log_status(dir, "no call-app window found within 15 minutes; skipped");
                 eprintln!(
                     "[noted] meeting {meeting_id}: no meeting-app window found; video skipped"
                 );
@@ -271,6 +295,7 @@ mod macos {
             tokio::time::sleep(Duration::from_millis(POLL_MS * 5)).await;
         };
         let title = window.title().map(|t| t.to_string()).unwrap_or_default();
+        log_status(dir, &format!("recording window {title:?}"));
         println!("[noted] meeting {meeting_id}: recording window “{title}”");
 
         std::fs::create_dir_all(dir)?;

@@ -126,6 +126,17 @@ function MdBlock({ md }: { md: string }) {
 
 type Tab = "notes" | "transcript" | "video" | number; // number = summary index
 
+function transcriptionModelLabel(engine: string | null, model: string | null): string {
+  if (!engine || !model) return "transcription model not recorded";
+  if (engine === "whisper") {
+    const name = model.replace(/^ggml-/, "").replace(/\.bin$/, "");
+    return `transcribed with Whisper ${name}`;
+  }
+  if (engine === "parakeet") return "transcribed with Parakeet TDT 0.6B";
+  if (engine === "hosted") return "transcribed with Hosted Parakeet";
+  return `transcribed with ${engine} ${model}`;
+}
+
 export function MeetingPage({
   id,
   event,
@@ -783,6 +794,11 @@ export function MeetingPage({
               </span>
             )}
             {talkPct != null && !recording && <span>you spoke {talkPct}%</span>}
+            {detail && !recording && (
+              <span title={[detail.asr_engine, detail.asr_model].filter(Boolean).join(" · ")}>
+                {transcriptionModelLabel(detail.asr_engine, detail.asr_model)}
+              </span>
+            )}
           </div>
         </div>
         <span className="spacer" />

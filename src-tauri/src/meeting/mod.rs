@@ -84,7 +84,7 @@ pub struct MeetingsCfg {
     /// Record the meeting app's WINDOW as video (ScreenCaptureKit, macOS 15+;
     /// follows the window even when covered or on another Space). Needs the
     /// one-time Screen Recording permission.
-    #[serde(default = "d_true")]
+    #[serde(default)]
     pub record_video: bool,
     /// Days to keep window videos before the launch-time sweep deletes them
     /// (transcripts and summaries are kept forever). 0 = keep forever.
@@ -149,7 +149,7 @@ impl Default for MeetingsCfg {
             vocabulary: Vec::new(),
             asr_engine: d_engine(),
             mic_aec: true,
-            record_video: crate::release_profile::video_capture(),
+            record_video: false,
             video_keep_days: d_video_days(),
         }
     }
@@ -238,11 +238,8 @@ pub async fn ensure_mic_permission() -> Result<()> {
                 let _ = tx.send(granted);
             }
         });
-        av::CaptureDevice::request_access_for_media_type_ch(
-            media_type,
-            &mut completion,
-        )
-        .map_err(|e| anyhow!("could not request microphone permission: {e:?}"))?;
+        av::CaptureDevice::request_access_for_media_type_ch(media_type, &mut completion)
+            .map_err(|e| anyhow!("could not request microphone permission: {e:?}"))?;
         rx
     };
     match granted_rx.await {
@@ -319,8 +316,15 @@ pub fn parakeet_ready(app: &tauri::AppHandle) -> bool {
 /// fail over a settings/download mismatch).
 pub fn engine_spec(app: &tauri::AppHandle) -> Result<asr::EngineSpec> {
     if crate::provider::use_byok() {
+        let choice = crate::provider::get().byok.transcription;
+        let provider = serde_json::to_value(choice.provider)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| "byok".into());
         return Ok(asr::EngineSpec::Byok {
             vocabulary: cfg().vocabulary,
+            provider,
+            model: choice.model,
         });
     }
     let config = cfg();
@@ -355,6 +359,7 @@ pub fn start(
     source_bundle: Option<String>,
 ) -> Result<i64> {
     let engine = engine_spec(app)?; // fail fast before any DB writes
+    let (asr_engine, asr_model) = engine.provenance();
     let state = app.state::<MeetingState>();
     let mut guard = state.0.lock().unwrap();
     if guard.is_some() {
@@ -374,22 +379,20 @@ pub fn start(
             .as_ref()
             .map(summarize::external_attendees)
             .unwrap_or_default();
-        (
-            asr::vocab_hint(&names, &c.vocabulary),
-            c.vocabulary,
-            names,
-        )
+        (asr::vocab_hint(&names, &c.vocabulary), c.vocabulary, names)
     };
 
     let now = chrono::Utc::now().to_rfc3339();
     let id = {
         let db = app.state::<Db>();
         let conn = db.0.lock().unwrap();
-        store::create_meeting(
+        store::create_meeting_with_asr(
             &conn,
             &title,
             event_id.as_deref(),
             event_json.map(|v| v.to_string()).as_deref(),
+            &asr_engine,
+            &asr_model,
             &now,
         )?
     };
@@ -483,22 +486,31 @@ pub fn start(
     // Window video rides along when enabled (its own dir derivation — audio
     // retention off shouldn't disable video). Fire-and-forget: the worker
     // stamps video_path itself; stop() doesn't wait on it.
-    if crate::release_profile::video_capture() && cfg().record_video {
-        if video::permission_granted() {
-            if let Ok(base) = app.path().app_data_dir() {
+    if cfg().record_video {
+        if let Ok(base) = app.path().app_data_dir() {
+            let video_dir = base.join("meetings").join(id.to_string());
+            if !crate::release_profile::video_capture() {
+                video::log_status(&video_dir, "disabled in this release profile; skipped");
+            } else if !video::video_supported() {
+                video::log_status(&video_dir, "requires macOS 15 or newer; skipped");
+            } else if video::permission_granted() {
                 video::spawn(
                     app.clone(),
                     id,
-                    base.join("meetings").join(id.to_string()),
+                    video_dir,
                     stop.clone(),
                     source_bundle.clone(),
                     cfg().ignore_bundles,
                 );
+            } else {
+                video::log_status(
+                    &video_dir,
+                    "Screen Recording permission is not granted; skipped",
+                );
+                eprintln!(
+                    "[noted] meeting {id}: window video skipped; Screen Recording permission is not granted"
+                );
             }
-        } else {
-            eprintln!(
-                "[noted] meeting {id}: window video skipped; Screen Recording permission is not granted"
-            );
         }
     }
 
@@ -718,7 +730,14 @@ pub fn state_json(app: &tauri::AppHandle) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_asr_engine;
+    use super::{validate_asr_engine, MeetingsCfg};
+
+    #[test]
+    fn window_recording_is_opt_in() {
+        assert!(!MeetingsCfg::default().record_video);
+        let legacy: MeetingsCfg = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!legacy.record_video);
+    }
 
     #[test]
     fn hosted_asr_cannot_start_without_activation() {

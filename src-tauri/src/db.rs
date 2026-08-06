@@ -179,6 +179,8 @@ CREATE TABLE IF NOT EXISTS meetings (
   raw_notes      TEXT NOT NULL DEFAULT '',-- typed during the meeting; always preserved
   audio_me_path  TEXT,                    -- retained WAVs (verifiability); NULL if off
   audio_them_path TEXT,
+  asr_engine     TEXT,                    -- resolved engine used for this recording
+  asr_model      TEXT,                    -- exact model artifact/provider model at start
   note_id        INTEGER REFERENCES notes(id),
   trashed_at     TEXT,                    -- reversible removal; NULL = visible
   created_at     TEXT NOT NULL
@@ -297,9 +299,7 @@ CREATE TABLE IF NOT EXISTS meeting_templates (
 pub fn init(db_path: &Path) -> Result<Connection> {
     // SAFETY: standard sqlite-vec registration. Must run before Connection::open.
     unsafe {
-        sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite3_vec_init as *const ()
-        )));
+        sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
     }
     let conn = Connection::open(db_path)?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
@@ -319,6 +319,8 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     ensure_column(&conn, "entities", "suggested_name", "TEXT")?;
     ensure_column(&conn, "meetings", "video_path", "TEXT")?;
     ensure_column(&conn, "meetings", "trashed_at", "TEXT")?;
+    ensure_column(&conn, "meetings", "asr_engine", "TEXT")?;
+    ensure_column(&conn, "meetings", "asr_model", "TEXT")?;
     initialize_meeting_transcript_index(&conn)?;
     seed_note_folders(&conn)?;
     crate::meeting::store::initialize_one_on_one_speakers(&conn)?;
@@ -462,7 +464,11 @@ pub fn category_catalog(conn: &Connection) -> Result<String> {
         out.push_str(&format!(
             "- {}: {}. shape: {}\n",
             c.name,
-            if c.description.is_empty() { "(no description)" } else { &c.description },
+            if c.description.is_empty() {
+                "(no description)"
+            } else {
+                &c.description
+            },
             serde_json::to_string(&shape).unwrap_or_default()
         ));
     }
@@ -579,9 +585,7 @@ pub fn is_daily_standup(note: &NoteRow) -> bool {
         return false;
     }
 
-    matches(&note.raw_text)
-        || categories.into_iter()
-            .any(matches)
+    matches(&note.raw_text) || categories.into_iter().any(matches)
 }
 
 pub fn list_note_folders(conn: &Connection) -> Result<Vec<NoteFolderInfo>> {
@@ -696,6 +700,129 @@ pub fn rename_note_folder(conn: &Connection, folder_id: i64, name: &str) -> Resu
     Ok(())
 }
 
+/// Move a folder under a new parent and place it before a sibling. A null
+/// `before_id` appends it to the end of the destination. Positions are
+/// normalized in both the old and new parents so later reads have one stable
+/// order, even after repeated drag operations.
+pub fn move_note_folder(
+    conn: &Connection,
+    folder_id: i64,
+    parent_id: Option<i64>,
+    before_id: Option<i64>,
+) -> Result<()> {
+    let (kind, old_parent): (String, Option<i64>) = conn
+        .query_row(
+            "SELECT kind, parent_id FROM note_folders WHERE id = ?1",
+            [folder_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => anyhow::anyhow!("folder not found"),
+            other => other.into(),
+        })?;
+    if kind != "folder" {
+        return Err(anyhow::anyhow!("only folders can be moved"));
+    }
+
+    if let Some(parent_id) = parent_id {
+        let parent_exists = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM note_folders WHERE id = ?1)",
+            [parent_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !parent_exists {
+            return Err(anyhow::anyhow!("destination folder not found"));
+        }
+
+        let creates_cycle = conn.query_row(
+            "WITH RECURSIVE descendants(id) AS (
+               SELECT id FROM note_folders WHERE id = ?1
+               UNION ALL
+               SELECT child.id
+               FROM note_folders child
+               JOIN descendants parent ON child.parent_id = parent.id
+             )
+             SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?2)",
+            rusqlite::params![folder_id, parent_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if creates_cycle {
+            return Err(anyhow::anyhow!("a folder cannot be moved inside itself"));
+        }
+    }
+
+    if let Some(before_id) = before_id {
+        if before_id == folder_id {
+            return Err(anyhow::anyhow!("a folder cannot be placed before itself"));
+        }
+        let before_parent: Option<i64> = conn
+            .query_row(
+                "SELECT parent_id FROM note_folders WHERE id = ?1 AND kind = 'folder'",
+                [before_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    anyhow::anyhow!("destination sibling not found")
+                }
+                other => other.into(),
+            })?;
+        if before_parent != parent_id {
+            return Err(anyhow::anyhow!(
+                "destination sibling has a different parent"
+            ));
+        }
+    }
+
+    let ordered_children = |parent: Option<i64>| -> Result<Vec<i64>> {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM note_folders
+             WHERE parent_id IS ?1 AND kind = 'folder'
+             ORDER BY position, name COLLATE NOCASE, id",
+        )?;
+        let rows = stmt.query_map([parent], |row| row.get::<_, i64>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    };
+
+    let mut destination = ordered_children(parent_id)?;
+    destination.retain(|id| *id != folder_id);
+    let insert_at = match before_id {
+        Some(before_id) => destination
+            .iter()
+            .position(|id| *id == before_id)
+            .ok_or_else(|| anyhow::anyhow!("destination sibling not found"))?,
+        None => destination.len(),
+    };
+    destination.insert(insert_at, folder_id);
+
+    let mut source = if old_parent == parent_id {
+        Vec::new()
+    } else {
+        ordered_children(old_parent)?
+    };
+    source.retain(|id| *id != folder_id);
+
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE note_folders SET parent_id = ?1 WHERE id = ?2",
+        rusqlite::params![parent_id, folder_id],
+    )?;
+    for (position, id) in source.iter().enumerate() {
+        tx.execute(
+            "UPDATE note_folders SET position = ?1 WHERE id = ?2",
+            rusqlite::params![position as i64, id],
+        )?;
+    }
+    for (position, id) in destination.iter().enumerate() {
+        tx.execute(
+            "UPDATE note_folders SET position = ?1 WHERE id = ?2",
+            rusqlite::params![position as i64, id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 pub fn delete_note_folder(conn: &Connection, folder_id: i64) -> Result<()> {
     let changed = conn.execute("DELETE FROM note_folders WHERE id = ?1", [folder_id])?;
     if changed == 0 {
@@ -708,12 +835,7 @@ pub fn delete_note_folder(conn: &Connection, folder_id: i64) -> Result<()> {
 /// space is its inbox state; filing to a child gives it a more specific home.
 /// Auto-filed appearances remain computed from their rule, so the same note can
 /// still belong to a smart view.
-pub fn file_note(
-    conn: &Connection,
-    note_id: i64,
-    folder_id: Option<i64>,
-    now: &str
-) -> Result<()> {
+pub fn file_note(conn: &Connection, note_id: i64, folder_id: Option<i64>, now: &str) -> Result<()> {
     let note_exists = conn.query_row(
         "SELECT EXISTS(
            SELECT 1 FROM notes WHERE id = ?1 AND (origin = 'capture' OR origin IS NULL)
@@ -736,7 +858,10 @@ pub fn file_note(
     }
 
     let tx = conn.unchecked_transaction()?;
-    tx.execute("DELETE FROM note_folder_items WHERE note_id = ?1", [note_id],)?;
+    tx.execute(
+        "DELETE FROM note_folder_items WHERE note_id = ?1",
+        [note_id],
+    )?;
     if let Some(folder_id) = folder_id {
         tx.execute(
             "INSERT INTO note_folder_items (folder_id, note_id, created_at) VALUES (?1, ?2, ?3)",
@@ -822,7 +947,9 @@ pub fn initialize_embedding_fingerprint(conn: &Connection, fingerprint: &str) ->
 fn ensure_embedding_space_ready(conn: &Connection) -> Result<()> {
     let expected = crate::provider::active_embedding_fingerprint();
     if embedding_fingerprint(conn)?.as_deref() != Some(&expected) {
-        return Err(anyhow::anyhow!("semantic search is rebuilding for the selected embedding model"));
+        return Err(anyhow::anyhow!(
+            "semantic search is rebuilding for the selected embedding model"
+        ));
     }
     Ok(())
 }
@@ -948,7 +1075,12 @@ pub fn all_entry_data(conn: &Connection) -> Result<Vec<(i64, String, String, Val
         let date: String = r.get(1)?;
         let raw: String = r.get(2)?;
         let data_str: String = r.get(3)?;
-        Ok((note_id, date, raw, serde_json::from_str(&data_str).unwrap_or(Value::Null),))
+        Ok((
+            note_id,
+            date,
+            raw,
+            serde_json::from_str(&data_str).unwrap_or(Value::Null),
+        ))
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -1079,7 +1211,12 @@ pub fn notes_on_date(conn: &Connection, day: &str, limit: i64) -> Result<Vec<Sea
 /// Semantic search restricted to a single origin (e.g. 'brain:baro') — backs
 /// vault-scoped chat. Pulls a wide KNN candidate pool, then filters to the
 /// origin and ranks. (Fine at personal-KB scale; widen the pool if it grows.)
-pub fn search_notes_scoped(conn: &Connection, qvec: &[f32], k: i64, origin: &str,) -> Result<Vec<SearchHit>> {
+pub fn search_notes_scoped(
+    conn: &Connection,
+    qvec: &[f32],
+    k: i64,
+    origin: &str,
+) -> Result<Vec<SearchHit>> {
     ensure_embedding_space_ready(conn)?;
     let json = serde_json::to_string(qvec)?;
     let mut stmt = conn.prepare(
@@ -1228,7 +1365,11 @@ pub fn search_notes(conn: &Connection, qvec: &[f32], k: i64) -> Result<Vec<Searc
 // ---------------------------------------------------------------------------
 
 /// (event_date, category, data) for entries whose day is within [start, end].
-pub fn entries_between(conn: &Connection, start: &str, end: &str,) -> Result<Vec<(String, String, Value)>> {
+pub fn entries_between(
+    conn: &Connection,
+    start: &str,
+    end: &str,
+) -> Result<Vec<(String, String, Value)>> {
     let mut stmt = conn.prepare(
         "SELECT COALESCE(e.event_date, date(e.created_at)) AS d, COALESCE(c.name,''), e.data_json
          FROM entries e LEFT JOIN categories c ON c.id = e.category_id
@@ -1239,7 +1380,11 @@ pub fn entries_between(conn: &Connection, start: &str, end: &str,) -> Result<Vec
         let date: String = r.get(0)?;
         let cat: String = r.get(1)?;
         let data_str: String = r.get(2)?;
-        Ok((date, cat, serde_json::from_str(&data_str).unwrap_or(Value::Null),))
+        Ok((
+            date,
+            cat,
+            serde_json::from_str(&data_str).unwrap_or(Value::Null),
+        ))
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
@@ -1417,7 +1562,13 @@ pub fn save_note(conn: &mut Connection, input: SaveInput, now: &str) -> Result<i
         tx.execute(
             "INSERT INTO entries (note_id, category_id, data_json, event_date, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![note_id, cat_id, entry.data.to_string(), input.event_date, now],
+            rusqlite::params![
+                note_id,
+                cat_id,
+                entry.data.to_string(),
+                input.event_date,
+                now
+            ],
         )?;
     }
     if let Some(pc) = primary_cat {
@@ -1481,12 +1632,9 @@ fn upsert_category(
 /// agent's `create_category` action — unlike `upsert_category`, this is standalone
 /// (not tied to saving a note) and never bumps a count.
 pub fn create_category(conn: &Connection, name: &str, description: &str, now: &str) -> Result<i64> {
-    if let Ok(id) = conn.query_row(
-        "SELECT id FROM categories WHERE name = ?1",
-        [name],
-        |r| { r.get::<_, i64>(0)
-    }
-    ) {
+    if let Ok(id) = conn.query_row("SELECT id FROM categories WHERE name = ?1", [name], |r| {
+        r.get::<_, i64>(0)
+    }) {
         return Ok(id);
     }
     conn.execute(
@@ -1585,7 +1733,11 @@ fn collect_paths(v: &Value, prefix: String, out: &mut Vec<String>) {
     match v {
         Value::Object(m) => {
             for (k, val) in m {
-                let p = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                let p = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
                 collect_paths(val, p, out);
             }
         }
@@ -1700,9 +1852,7 @@ pub fn entity_neighbors(
 
 /// Every entity with its aliases: (id, name, type, aliases). The catalog is
 /// small (a personal KB), so chat-question matching happens in memory.
-pub fn entities_for_matching(
-    conn: &Connection
-) -> Result<Vec<(i64, String, String, Vec<String>)>> {
+pub fn entities_for_matching(conn: &Connection) -> Result<Vec<(i64, String, String, Vec<String>)>> {
     let mut stmt = conn.prepare("SELECT id, name, type, aliases FROM entities")?;
     let rows = stmt.query_map([], |r| {
         let aliases: String = r.get(3)?;
@@ -1724,7 +1874,11 @@ pub struct EntityMentionRow {
 }
 
 /// Notes that mention an entity, newest first — for the graph's detail panel.
-pub fn entity_detail(conn: &Connection, entity_id: i64, limit: i64,) -> Result<Vec<EntityMentionRow>> {
+pub fn entity_detail(
+    conn: &Connection,
+    entity_id: i64,
+    limit: i64,
+) -> Result<Vec<EntityMentionRow>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT m.note_id, m.event_date, n.raw_text
          FROM entity_mentions m JOIN notes n ON n.id = m.note_id
@@ -1966,10 +2120,20 @@ pub fn merge_entities(conn: &mut Connection, keep_id: i64, drop_id: i64) -> Resu
         rusqlite::params![keep_id, drop_id],
     )?;
     // fold the dropped name + aliases into keep's alias list
-    let dropped_name: String = tx.query_row("SELECT name FROM entities WHERE id = ?1", [drop_id], |r| { r.get(0)
+    let dropped_name: String =
+        tx.query_row("SELECT name FROM entities WHERE id = ?1", [drop_id], |r| {
+            r.get(0)
         })?;
-    let keep_aliases: String = tx.query_row("SELECT aliases FROM entities WHERE id = ?1", [keep_id], |r| r.get(0),)?;
-    let dropped_aliases: String = tx.query_row("SELECT aliases FROM entities WHERE id = ?1", [drop_id], |r| r.get(0),)?;
+    let keep_aliases: String = tx.query_row(
+        "SELECT aliases FROM entities WHERE id = ?1",
+        [keep_id],
+        |r| r.get(0),
+    )?;
+    let dropped_aliases: String = tx.query_row(
+        "SELECT aliases FROM entities WHERE id = ?1",
+        [drop_id],
+        |r| r.get(0),
+    )?;
     let mut set: Vec<String> = serde_json::from_str(&keep_aliases).unwrap_or_default();
     set.push(dropped_name);
     if let Ok(extra) = serde_json::from_str::<Vec<String>>(&dropped_aliases) {
@@ -1983,7 +2147,10 @@ pub fn merge_entities(conn: &mut Connection, keep_id: i64, drop_id: i64) -> Resu
          WHERE id = ?2",
         rusqlite::params![serde_json::to_string(&set)?, keep_id],
     )?;
-    tx.execute("DELETE FROM entity_embeddings WHERE entity_id = ?1", [drop_id],)?;
+    tx.execute(
+        "DELETE FROM entity_embeddings WHERE entity_id = ?1",
+        [drop_id],
+    )?;
     tx.execute("DELETE FROM entities WHERE id = ?1", [drop_id])?;
     tx.commit()?;
     Ok(())
@@ -2121,7 +2288,15 @@ pub fn entity_profile(conn: &Connection, entity_id: i64) -> Result<EntityProfile
         "SELECT name, type, relationship, mention_count, first_seen, last_seen, aliases
          FROM entities WHERE id = ?1",
         [entity_id],
-        |r| { Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
+        |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
             ))
         },
     )?;
@@ -2136,7 +2311,11 @@ pub fn entity_profile(conn: &Connection, entity_id: i64) -> Result<EntityProfile
     )?;
     let mentions = stmt
         .query_map([entity_id], |r| {
-            Ok(PersonMention { date: r.get(0)?, text: r.get(1)?, note_id: r.get(2)?, })
+            Ok(PersonMention {
+                date: r.get(0)?,
+                text: r.get(1)?,
+                note_id: r.get(2)?,
+            })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
@@ -2178,7 +2357,9 @@ pub fn person_profiles(conn: &Connection) -> Result<Vec<PersonProfile>> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut out = Vec::with_capacity(rows.len());
-    for (id, name, relationship, mention_count, first_seen, last_seen, aliases, suggested_name) in rows {
+    for (id, name, relationship, mention_count, first_seen, last_seen, aliases, suggested_name) in
+        rows
+    {
         out.push(PersonProfile {
             id,
             name,
@@ -2234,8 +2415,11 @@ pub fn list_brain_vaults(conn: &Connection) -> Result<Vec<BrainVaultStatus>> {
     let mut out = Vec::with_capacity(rows.len());
     for (vault, root_path, direction, last_git_sha, last_synced_at, enabled) in rows {
         let origin = format!("brain:{vault}");
-        let note_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM notes WHERE origin = ?1", [&origin], |r| r.get(0),)?;
+        let note_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM notes WHERE origin = ?1",
+            [&origin],
+            |r| r.get(0),
+        )?;
         let entity_count: i64 = conn.query_row(
             "SELECT COUNT(DISTINCT m.entity_id) FROM entity_mentions m
              JOIN notes n ON n.id = m.note_id WHERE n.origin = ?1",
@@ -2257,7 +2441,12 @@ pub fn list_brain_vaults(conn: &Connection) -> Result<Vec<BrainVaultStatus>> {
 }
 
 /// Register a vault (or update its root/direction). Idempotent on `vault`.
-pub fn upsert_brain_vault(conn: &Connection, vault: &str, root_path: &str, direction: &str,) -> Result<()> {
+pub fn upsert_brain_vault(
+    conn: &Connection,
+    vault: &str,
+    root_path: &str,
+    direction: &str,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO brain_vaults (vault, root_path, direction) VALUES (?1, ?2, ?3)
          ON CONFLICT(vault) DO UPDATE SET root_path = ?2, direction = ?3",
@@ -2272,7 +2461,12 @@ pub fn remove_brain_vault(conn: &Connection, vault: &str) -> Result<()> {
 }
 
 /// Record a completed sync (advances the git checkpoint for next-time diffing).
-pub fn set_vault_synced(conn: &Connection, vault: &str, git_sha: Option<&str>, now: &str,) -> Result<()> {
+pub fn set_vault_synced(
+    conn: &Connection,
+    vault: &str,
+    git_sha: Option<&str>,
+    now: &str,
+) -> Result<()> {
     conn.execute(
         "UPDATE brain_vaults SET last_git_sha = ?2, last_synced_at = ?3 WHERE vault = ?1",
         rusqlite::params![vault, git_sha, now],
@@ -2282,7 +2476,11 @@ pub fn set_vault_synced(conn: &Connection, vault: &str, git_sha: Option<&str>, n
 
 /// The stored content hash for a brain note, if we've mirrored this file before.
 /// Lets a sync skip files whose content is unchanged.
-pub fn brain_note_hash(conn: &Connection, origin: &str, source_path: &str,) -> Result<Option<String>> {
+pub fn brain_note_hash(
+    conn: &Connection,
+    origin: &str,
+    source_path: &str,
+) -> Result<Option<String>> {
     let h: Option<Option<String>> = conn
         .query_row(
             "SELECT content_hash FROM notes WHERE origin = ?1 AND source_path = ?2",
@@ -2334,7 +2532,8 @@ pub fn upsert_brain_note(
 /// don't leave stale edges.
 pub fn clear_note_mentions(conn: &Connection, note_id: i64) -> Result<()> {
     let ids: Vec<i64> = {
-        let mut stmt = conn.prepare("SELECT DISTINCT entity_id FROM entity_mentions WHERE note_id = ?1")?;
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT entity_id FROM entity_mentions WHERE note_id = ?1")?;
         let v = stmt
             .query_map([note_id], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2422,12 +2621,20 @@ pub fn write_targets(conn: &Connection, vault: Option<&str>) -> Result<Vec<Write
                  ORDER BY m.event_date DESC, m.id DESC",
             )?;
             let v = stmt
-                .query_map([entity_id], |r| { Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                .query_map([entity_id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             v
         };
-        out.push(WriteTarget { entity_id, entity_name, home_note_id, source_path, origin, captures, });
+        out.push(WriteTarget {
+            entity_id,
+            entity_name,
+            home_note_id,
+            source_path,
+            origin,
+            captures,
+        });
     }
     Ok(out)
 }
@@ -2452,22 +2659,40 @@ pub fn people_for_export(conn: &Connection, min_mentions: i64) -> Result<Vec<Per
         )?;
         let v = stmt
             .query_map([min_mentions], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?,))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         v
     };
     let mut out = Vec::with_capacity(ids.len());
     for (id, name, relationship) in ids {
-        let mentions = mentions_for(conn, id)?.into_iter().map(|m| (m.date, m.text)).collect();
-        out.push(PersonExport { id, name, relationship, mentions, });
+        let mentions = mentions_for(conn, id)?
+            .into_iter()
+            .map(|m| (m.date, m.text))
+            .collect();
+        out.push(PersonExport {
+            id,
+            name,
+            relationship,
+            mentions,
+        });
     }
     Ok(out)
 }
 
 /// After a write-back rewrites a brain file, sync the mirror row to the new
 /// content + hash so the next import sees it unchanged (echo suppression).
-pub fn update_brain_note_content(conn: &Connection, note_id: i64, raw_text: &str, hash: &str, now: &str,) -> Result<()> {
+pub fn update_brain_note_content(
+    conn: &Connection,
+    note_id: i64,
+    raw_text: &str,
+    hash: &str,
+    now: &str,
+) -> Result<()> {
     conn.execute(
         "UPDATE notes SET raw_text = ?1, content_hash = ?2, synced_at = ?3 WHERE id = ?4",
         rusqlite::params![raw_text, hash, now, note_id],
@@ -2479,7 +2704,10 @@ pub fn update_brain_note_content(conn: &Connection, note_id: i64, raw_text: &str
 /// touches (optionally one vault) plus the co-mention edges among them that come
 /// from brain notes. Capture-only entities are excluded; people who appear in
 /// both a brain and daily captures are included (they carry a brain mention).
-pub fn work_graph(conn: &Connection, vault: Option<&str>,) -> Result<(Vec<WorkNode>, Vec<GraphEdge>)> {
+pub fn work_graph(
+    conn: &Connection,
+    vault: Option<&str>,
+) -> Result<(Vec<WorkNode>, Vec<GraphEdge>)> {
     let nodes = {
         let mut stmt = conn.prepare(
             "SELECT DISTINCT e.id, e.name, e.type, e.mention_count,
@@ -2516,7 +2744,11 @@ pub fn work_graph(conn: &Connection, vault: Option<&str>,) -> Result<(Vec<WorkNo
         )?;
         let v = stmt
             .query_map(rusqlite::params![vault], |r| {
-                Ok(GraphEdge { source: r.get(0)?, target: r.get(1)?, weight: r.get(2)?, })
+                Ok(GraphEdge {
+                    source: r.get(0)?,
+                    target: r.get(1)?,
+                    weight: r.get(2)?,
+                })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         v

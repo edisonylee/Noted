@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
-import { X, Check, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, Download, Mic, Plus, RefreshCw, Trash2, FolderPlus, Laptop, Gauge, Cloud, KeyRound } from "lucide-react";
-import { api, type BrainVaultStatus, type ByokConfig, type CloudProvider, type GcalStatus, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type ProviderId, type ProviderMode, type ProviderSettings } from "./api";
+import { appDataDir, join } from "@tauri-apps/api/path";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { X, Check, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, CalendarDays, Download, Mic, AudioLines, Plus, RefreshCw, Trash2, FolderPlus, FolderOpen, Laptop, Gauge, Cloud, KeyRound, Palette, Boxes, BookType, MessageCircle } from "lucide-react";
+import { api, isDesktop, type BrainVaultStatus, type ByokConfig, type CloudProvider, type GcalStatus, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type ProviderId, type ProviderMode, type ProviderSettings } from "./api";
 import { ThemesSettings } from "./ThemesSettings";
 import { TranscriptVocabularySettings } from "./TranscriptVocabularySettings";
 import { releaseProfile } from "./releaseProfile";
@@ -13,7 +15,7 @@ type Conn =
   | { state: "ok"; msg: string }
   | { state: "err"; msg: string };
 
-type SettingsSection = "models" | "themes" | "calendar" | "vaults" | "meetings";
+type SettingsSection = "models" | "assistant" | "themes" | "calendar" | "vaults" | "meetings" | "vocabulary";
 
 // Model-provider settings. noted runs 100% local by default; the internally
 // named "balanced" mode sends only new captures to a cloud extract/OCR model.
@@ -42,6 +44,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   const [localTextModel, setLocalTextModel] = useState("");
   const [localVisionModel, setLocalVisionModel] = useState("");
   const [installedModels, setInstalledModels] = useState<string[]>([]);
+  const [assistantShortcut, setAssistantShortcut] = useState<"checking" | "ready" | "unavailable" | "installed-app-only">("checking");
   const [saving, setSaving] = useState(false);
   const [conn, setConn] = useState<Conn>({ state: "idle" });
   const [byok, setByok] = useState<ByokConfig | null>(null);
@@ -82,6 +85,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   const [probing, setProbing] = useState(false);
   const [videoPermissionBusy, setVideoPermissionBusy] = useState(false);
   const [videoPermissionMsg, setVideoPermissionMsg] = useState<string | null>(null);
+  const [recordingsFolderError, setRecordingsFolderError] = useState<string | null>(null);
 
   async function runCaptureProbe() {
     setProbing(true);
@@ -138,6 +142,16 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
       await api.meetingsSettingsSet(next);
     } catch {
       /* re-read on next open */
+    }
+  }
+
+  async function openMeetingRecordings() {
+    setRecordingsFolderError(null);
+    try {
+      const dir = await join(await appDataDir(), "meetings");
+      await revealItemInDir(dir);
+    } catch (e) {
+      setRecordingsFolderError(`Could not open the recordings folder: ${String(e)}`);
     }
   }
 
@@ -243,7 +257,16 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
     });
     // Pulled Ollama models feed the local-model dropdowns; Ollama being down
     // just leaves the current values as the only options.
-    api.health().then((h) => setInstalledModels(h.models)).catch(() => {});
+    api.health().then((h) => {
+      setInstalledModels(h.models);
+      setAssistantShortcut(
+        !h.assistant_shortcut_enabled
+          ? "installed-app-only"
+          : h.assistant_shortcut_registered
+            ? "ready"
+            : "unavailable"
+      );
+    }).catch(() => {});
     api.gcalAuthStatus().then(setGcal);
     api.brainListVaults().then(setVaults).catch(() => {});
     api.brainGetAuto().then(setAutoProp).catch(() => {});
@@ -557,24 +580,40 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
     </label>
   );
 
-  const sections: [SettingsSection, string][] = [
-    ["models", "Models"],
-    ["themes", "Themes"],
-    ["calendar", "Google Calendar"],
-    ["vaults", "Brain vaults"],
-    ["meetings", "Meetings"],
-  ];
+  const sections = [
+    { id: "models", label: "Models", description: "Intelligence and providers", icon: Laptop },
+    { id: "assistant", label: "Assistant", description: "Chat and keyboard shortcut", icon: MessageCircle },
+    { id: "themes", label: "Appearance", description: "Theme and color mode", icon: Palette },
+    { id: "calendar", label: "Calendar", description: "Accounts and schedule sync", icon: CalendarDays },
+    { id: "vaults", label: "Vaults", description: "Obsidian connections", icon: Boxes },
+    { id: "meetings", label: "Meetings", description: "Recording and meeting notes", icon: AudioLines },
+    { id: "vocabulary", label: "Vocabulary", description: "Recognition and corrections", icon: BookType },
+  ] satisfies Array<{
+    id: SettingsSection;
+    label: string;
+    description: string;
+    icon: typeof Laptop;
+  }>;
 
   const inner = (
     <div className="settings-layout">
-      <nav className="settings-nav">
-        {sections.map(([id, label]) => (
-          <button key={id} className={section === id ? "on" : ""} onClick={() => setSection(id)}>
-            {label}
+      <nav className="settings-nav" aria-label="Settings sections">
+        {sections.map(({ id, label, description, icon: Icon }) => (
+          <button
+            key={id}
+            className={section === id ? "on" : ""}
+            onClick={() => setSection(id)}
+            aria-current={section === id ? "page" : undefined}
+          >
+            <Icon size={16} aria-hidden="true" />
+            <span>
+              <strong>{label}</strong>
+              <small>{description}</small>
+            </span>
           </button>
         ))}
       </nav>
-      <div className="settings-body">
+      <div className="settings-body" data-section={section}>
         {section === "models" && (
           <>
         <h3>Models</h3>
@@ -970,13 +1009,42 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
 
         {section === "themes" && <ThemesSettings />}
 
+        {section === "assistant" && (
+          <>
+        <h3>Assistant</h3>
+        <p className="settings-sub">
+          Ask questions across your notes, meetings, people, and connected vaults from anywhere on your Mac.
+        </p>
+
+        <div className="settings-fields assistant-settings">
+          <section className="settings-group">
+            <header className="settings-group-head">
+              <h4>Open from anywhere</h4>
+              <p>The shortcut works while Noted is running, even when another app is in front.</p>
+            </header>
+            <div className="assistant-shortcut-row">
+              <span>
+                <strong>Open Ask Noted</strong>
+                <small>
+                  {assistantShortcut === "ready" && "Ready — the cursor lands in the question box."}
+                  {assistantShortcut === "unavailable" && "Unavailable — quit other Noted builds, then reopen Noted."}
+                  {assistantShortcut === "installed-app-only" && "Available from the installed Noted app, not preview builds."}
+                  {assistantShortcut === "checking" && "Checking the system-wide shortcut…"}
+                </small>
+              </span>
+              <kbd>Command + Shift + Space</kbd>
+            </div>
+          </section>
+        </div>
+          </>
+        )}
+
         {section === "calendar" && (
           <>
         <h3>Google Calendar</h3>
         <p className="settings-sub">
-          Connect one or more Google accounts (work + personal) and the Calendar view consolidates
-          every calendar in one place. Your daily schedule also pushes one-way into a dedicated
-          “noted” calendar in the first account — other calendars are never touched by the sync.
+          Bring work and personal calendars into one view. Choose one account for one-way schedule
+          sync into a dedicated “noted” calendar; your existing calendars are never changed.
         </p>
 
         <div className="settings-fields">
@@ -1101,10 +1169,9 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           <>
         <h3>Brain vaults</h3>
         <p className="settings-sub">
-          <strong>Experimental.</strong> Registered Obsidian vaults import Markdown and wikilinks into
-          your knowledge graph. Work vaults are one-way by default; the personal vault is generated
-          by noted. Write-back only changes noted-managed blocks. Git history is created only when
-          the vault is already a git repository.
+          <strong>Experimental.</strong> Connect Obsidian vaults to import Markdown and wikilinks into
+          your knowledge graph. Noted only writes inside managed blocks, and only creates history
+          when the vault already uses Git.
         </p>
 
         <div className="settings-fields">
@@ -1190,10 +1257,9 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           <>
         <h3>Meetings</h3>
         <p className="settings-sub">
-          noted records meetings bot-free using your mic + system audio. Choose private local
-          transcription{releaseProfile.notedHosted ? " or hosted Parakeet with no model download" : " or your own transcription provider"}.
-          Nothing is captured unless you accept a prompt or hit Record. Speaker separation groups
-          voices; participant names are assigned manually instead of recognized from voiceprints.
+          Record calls without a meeting bot using your microphone and system audio. Nothing starts
+          unless you accept a prompt or press Record. One-on-one attendees can be named from calendar
+          context, and every speaker label remains editable.
         </p>
 
         <div className="settings-fields">
@@ -1202,6 +1268,11 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               System-audio capture needs macOS 14.4+ — recordings here would be mic-only.
             </div>
           )}
+          <section className="settings-group">
+            <header className="settings-group-head">
+              <h4>Capture and storage</h4>
+              <p>Control when Noted offers to record and which original media stays on this Mac.</p>
+            </header>
           <label className="vault-auto">
             <input
               type="checkbox"
@@ -1230,27 +1301,47 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               </em>
             </span>
           </label>
+          {isDesktop && (
+            <>
+              <button
+                type="button"
+                className="ghost-btn test-btn"
+                onClick={() => void openMeetingRecordings()}
+              >
+                <FolderOpen size={14} />
+                Open recordings folder
+              </button>
+              {recordingsFolderError && (
+                <span className="field-hint">{recordingsFolderError}</span>
+              )}
+            </>
+          )}
           {releaseProfile.videoCapture && (
             <>
               <label className="vault-auto">
                 <input
                   type="checkbox"
-                  checked={mcfg?.record_video ?? true}
+                  checked={mcfg?.record_video ?? false}
                   onChange={(e) => mcfg && saveMcfg({ ...mcfg, record_video: e.target.checked })}
                 />
                 <span>
-                  Record the meeting window as video
+                  Record call window
                   <em>
-                    Captures the call app's window itself (macOS 15+, one-time Screen Recording
-                    permission) — covering it with other apps or switching Spaces doesn't
-                    interrupt it. Videos auto-delete after{" "}
+                    Optional. Saves the call app's window as a local MP4 without analyzing the
+                    picture. Requires macOS 15+ and one-time Screen Recording permission.
+                  </em>
+                </span>
+              </label>
+              {mcfg?.record_video && (
+                <div className="meeting-video-permission">
+                  <label className="field-hint">
+                    Delete window recordings after{" "}
                     <input
                       className="inline-days"
                       type="number"
                       min={0}
                       max={365}
                       value={mcfg?.video_keep_days ?? 14}
-                      onClick={(e) => e.preventDefault()}
                       onChange={(e) =>
                         mcfg &&
                         saveMcfg({
@@ -1259,40 +1350,40 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
                         })
                       }
                     />{" "}
-                    days to save space (0 = keep forever); transcripts and summaries are kept.
-                  </em>
-                </span>
-              </label>
-              {mcfg?.record_video && mModel?.video_supported && (
-                <div className="meeting-video-permission">
-                  <div className={"conn-status " + (mModel.video_authorized ? "ok" : "idle")}>
-                    {mModel.video_authorized ? <Check size={13} /> : <Laptop size={13} />}
-                    {mModel.video_authorized
-                      ? "Window recording permission ready"
-                      : "Window recording is paused until permission is granted"}
-                  </div>
-                  {!mModel.video_authorized && (
-                    <button
-                      type="button"
-                      className="ghost-btn test-btn"
-                      onClick={requestVideoPermission}
-                      disabled={videoPermissionBusy}
-                    >
-                      {videoPermissionBusy ? (
-                        <Loader2 size={14} className="spin" />
-                      ) : (
-                        <Laptop size={14} />
+                    days (0 = keep forever). Transcripts and summaries are kept.
+                  </label>
+                  {mModel?.video_supported ? (
+                    <>
+                      <div className={"conn-status " + (mModel.video_authorized ? "ok" : "idle")}>
+                        {mModel.video_authorized ? <Check size={13} /> : <Laptop size={13} />}
+                        {mModel.video_authorized
+                          ? "Window recording permission ready"
+                          : "Window recording is paused until permission is granted"}
+                      </div>
+                      {!mModel.video_authorized && (
+                        <button
+                          type="button"
+                          className="ghost-btn test-btn"
+                          onClick={requestVideoPermission}
+                          disabled={videoPermissionBusy}
+                        >
+                          {videoPermissionBusy ? (
+                            <Loader2 size={14} className="spin" />
+                          ) : (
+                            <Laptop size={14} />
+                          )}
+                          Allow video recording once
+                        </button>
                       )}
-                      Allow video recording once
-                    </button>
+                      <span className="field-hint">
+                        Noted will not ask during a meeting. If access is off, audio and transcription
+                        continue and video is skipped.
+                      </span>
+                    </>
+                  ) : (
+                    <span className="field-hint">Call-window recording needs macOS 15 or newer.</span>
                   )}
-                  <span className="field-hint">
-                    Noted will not ask during a meeting. If access is off, audio and transcription
-                    continue and video is skipped.
-                  </span>
-                  {videoPermissionMsg && (
-                    <span className="field-hint">{videoPermissionMsg}</span>
-                  )}
+                  {videoPermissionMsg && <span className="field-hint">{videoPermissionMsg}</span>}
                 </div>
               )}
             </>
@@ -1312,6 +1403,12 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               </em>
             </span>
           </label>
+          </section>
+          <section className="settings-group">
+            <header className="settings-group-head">
+              <h4>Meeting notes</h4>
+              <p>Choose the structure Noted uses when it turns a transcript into useful notes.</p>
+            </header>
           <label className="field">
             <span className="field-label">Default summary template</span>
             <select
@@ -1432,32 +1529,12 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               )}
             </div>
           </div>
-          <label className="field">
-            <span className="field-label">
-              Preferred terms for new transcripts (comma-separated)
-            </span>
-            <input
-              value={vocabText}
-              onChange={(e) => setVocabText(e.target.value)}
-              onBlur={() =>
-                mcfg &&
-                saveMcfg({
-                  ...mcfg,
-                  vocabulary: vocabText
-                    .split(",")
-                    .map((s) => s.trim())
-                    .filter(Boolean),
-                })
-              }
-              placeholder="a16z, Anthropic, Tauri, SOC 2"
-              spellCheck={false}
-              autoComplete="off"
-            />
-            <span className="field-hint">
-              Helps the speech model recognize names and jargon before correction rules are applied.
-            </span>
-          </label>
-          <TranscriptVocabularySettings />
+          </section>
+          <section className="settings-group">
+            <header className="settings-group-head">
+              <h4>Capture engine</h4>
+              <p>Manage app exclusions, permissions, and local transcription components.</p>
+            </header>
           <label className="field">
             <span className="field-label">
               Never prompt for these apps (comma-separated bundle-id fragments)
@@ -1543,6 +1620,58 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
             )}
           </div>
           {probeMsg && <div className="field-hint">{probeMsg}</div>}
+          </section>
+        </div>
+          </>
+        )}
+
+        {section === "vocabulary" && (
+          <>
+        <h3>Vocabulary</h3>
+        <p className="settings-sub">
+          Teach Noted names, companies, and phrases as speech is transcribed, then set exact
+          corrections for anything it still gets wrong.
+        </p>
+
+        <div className="settings-fields">
+          <section className="settings-group">
+            <header className="settings-group-head">
+              <h4>Live recognition</h4>
+              <p>Guide quick dictation and meeting transcription before the words are saved.</p>
+            </header>
+            <label className="field">
+              <span className="field-label">Names and terms to recognize (comma-separated)</span>
+              <input
+                value={vocabText}
+                onChange={(e) => setVocabText(e.target.value)}
+                onBlur={() =>
+                  mcfg &&
+                  saveMcfg({
+                    ...mcfg,
+                    vocabulary: vocabText
+                      .split(",")
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                  })
+                }
+                placeholder="BARO, a16z, Anthropic, SOC 2"
+                spellCheck={false}
+                autoComplete="off"
+              />
+              <span className="field-hint">
+                Whisper and supported providers use these terms while decoding. Every engine also
+                normalizes close matches before the transcript is saved.
+              </span>
+            </label>
+          </section>
+
+          <section className="settings-group">
+            <header className="settings-group-head">
+              <h4>Correction rules</h4>
+              <p>Repair a recurring mishearing in saved text and every future transcript.</p>
+            </header>
+            <TranscriptVocabularySettings showHeading={false} />
+          </section>
         </div>
           </>
         )}
@@ -1553,7 +1682,10 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   if (page) {
     return (
       <section className="settings-page">
-        <h2 className="settings-title">Settings</h2>
+        <header className="settings-page-head">
+          <h2 className="settings-title">Settings</h2>
+          <p>Choose how Noted looks, thinks, connects, records, and understands your language.</p>
+        </header>
         {inner}
       </section>
     );

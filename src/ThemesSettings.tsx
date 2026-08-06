@@ -85,7 +85,7 @@ export function ThemesSettings() {
       setPendingPack(null);
       setDesignMd("");
       setThemeName("");
-      setMessage("Theme saved for this Mac and phone. An open client refreshes it when focused.");
+      setMessage("Theme saved on this Mac.");
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -162,11 +162,10 @@ export function ThemesSettings() {
 
   return (
     <>
-      <h3>Themes</h3>
+      <h3>Appearance</h3>
       <p className="settings-sub">
-        Swap Noted’s visual system without changing its layout. Everything here is free: presets
-        are bundled, and DESIGN.md files are interpreted by your local Ollama model. Refero MCP is
-        not required.
+        Choose the visual system and color mode used across Noted. Previewing never changes your
+        saved theme until you apply it.
       </p>
 
       <div className="theme-mode-row" role="group" aria-label="Color mode">
@@ -240,7 +239,7 @@ export function ThemesSettings() {
 
       <div className="theme-import">
         <div className="theme-import-head">
-          <span className="assistant-mark"><Sparkles size={14} /></span>
+          <Sparkles className="theme-import-icon" size={16} aria-hidden="true" />
           <div>
             <strong>Import DESIGN.md</strong>
             <span>Paste a style from Refero Styles or upload the Markdown file.</span>

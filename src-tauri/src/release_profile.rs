@@ -45,7 +45,9 @@ pub fn noted_hosted() -> bool {
 }
 
 pub fn phone_lan() -> bool {
-    !is_alpha()
+    // Keep the LAN implementation dormant until phone access is delivered as
+    // a focused companion app instead of a remote view of the Mac interface.
+    false
 }
 
 pub fn diarization() -> bool {
@@ -53,7 +55,7 @@ pub fn diarization() -> bool {
 }
 
 pub fn video_capture() -> bool {
-    !is_alpha()
+    true
 }
 
 pub fn billing() -> bool {
@@ -61,7 +63,10 @@ pub fn billing() -> bool {
 }
 
 pub fn disabled(feature: &str) -> String {
-    format!("{feature} is not included in the {} release profile", name())
+    format!(
+        "{feature} is not included in the {} release profile",
+        name()
+    )
 }
 
 #[cfg(test)]
@@ -75,6 +80,7 @@ mod tests {
         assert!(themes());
         assert!(provider_matrix());
         assert!(google_calendar());
+        assert!(video_capture());
     }
 
     #[test]
@@ -84,8 +90,12 @@ mod tests {
             assert!(!noted_hosted());
             assert!(!phone_lan());
             assert!(!diarization());
-            assert!(!video_capture());
             assert!(!billing());
         }
+    }
+
+    #[test]
+    fn phone_lan_is_paused_for_every_profile() {
+        assert!(!phone_lan());
     }
 }

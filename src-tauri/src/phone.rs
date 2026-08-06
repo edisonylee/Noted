@@ -178,7 +178,8 @@ fn handle_request(app: &AppHandle, inbox: &Path, token: &str, mut req: tiny_http
     // POST /upload — the lightweight photo capture path (unchanged behavior).
     if method == Method::Post && path == "/upload" {
         if !query_token_ok(&url, token) {
-            let _ = req.respond(tiny_http::Response::from_string("forbidden").with_status_code(403));
+            let _ =
+                req.respond(tiny_http::Response::from_string("forbidden").with_status_code(403));
             return;
         }
         let ext = content_type_ext(&req);
@@ -201,7 +202,8 @@ fn handle_request(app: &AppHandle, inbox: &Path, token: &str, mut req: tiny_http
     // POST /api/<command> — the full RPC bridge for the web client.
     if method == Method::Post && path.starts_with("/api/") {
         if !query_token_ok(&url, token) {
-            let _ = req.respond(tiny_http::Response::from_string("forbidden").with_status_code(403));
+            let _ =
+                req.respond(tiny_http::Response::from_string("forbidden").with_status_code(403));
             return;
         }
         let cmd = path.trim_start_matches("/api/").to_string();
@@ -236,11 +238,13 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
                 serde_json::from_value(varg(b, "pack")).map_err(|e| e.to_string())?;
             crate::theme_save(a, pack).await
         }
-        "theme_activate" => { crate::theme_activate(a, sarg(b, "themeId"), oarg(b, "colorMode")).await
+        "theme_activate" => {
+            crate::theme_activate(a, sarg(b, "themeId"), oarg(b, "colorMode")).await
         }
         "theme_set_color_mode" => crate::theme_set_color_mode(a, sarg(b, "colorMode")).await,
         "theme_delete" => crate::theme_delete(a, sarg(b, "themeId")).await,
-        "theme_compile_design" => { crate::theme_compile_design(sarg(b, "designMd"), oarg(b, "name")).await
+        "theme_compile_design" => {
+            crate::theme_compile_design(sarg(b, "designMd"), oarg(b, "name")).await
         }
         "theme_suggest" => {
             let candidates: Vec<crate::themes::ThemeCandidate> =
@@ -249,9 +253,13 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         }
         "health" => crate::health(a).await,
         "categorize_note" => crate::categorize_note(a, sarg(b, "text")).await,
-        "ocr_photo" => crate::ocr_photo(sarg(b, "imageBase64")).await.map(|s| json!(s)),
+        "ocr_photo" => crate::ocr_photo(sarg(b, "imageBase64"))
+            .await
+            .map(|s| json!(s)),
         "categorize_photo" => crate::categorize_photo(a, sarg(b, "imageBase64")).await,
-        "save_image" => crate::save_image(a, sarg(b, "imageBase64"), sarg(b, "ext")).await.map(|s| json!(s)),
+        "save_image" => crate::save_image(a, sarg(b, "imageBase64"), sarg(b, "ext"))
+            .await
+            .map(|s| json!(s)),
         "save_entry" => {
             let args: crate::SaveArgs =
                 serde_json::from_value(varg(b, "args")).map_err(|e| e.to_string())?;
@@ -280,13 +288,16 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
                 .await
                 .map(|id| json!(id))
         }
-        "rename_note_folder" => crate::rename_note_folder(
-            a,
-            iarg(b, "folderId"),
-            sarg(b, "name")
-        )
-        .await
-        .map(|_| Value::Null),
+        "rename_note_folder" => crate::rename_note_folder(a, iarg(b, "folderId"), sarg(b, "name"))
+            .await
+            .map(|_| Value::Null),
+        "move_note_folder" => {
+            let parent_id = b.get("parentId").and_then(|v| v.as_i64());
+            let before_id = b.get("beforeId").and_then(|v| v.as_i64());
+            crate::move_note_folder(a, iarg(b, "folderId"), parent_id, before_id)
+                .await
+                .map(|_| Value::Null)
+        }
         "delete_note_folder" => crate::delete_note_folder(a, iarg(b, "folderId"))
             .await
             .map(|_| Value::Null),
@@ -302,10 +313,12 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
             let entity_id = b.get("entityId").and_then(|v| v.as_i64());
             crate::chat(a, sarg(b, "question"), history, oarg(b, "scope"), entity_id).await
         }
-        "create_category" =>
-            crate::create_category(a, sarg(b, "name"), sarg(b, "description")).await.map(|n| json!(n)),
-        "update_entry" =>
-            crate::update_entry(a, iarg(b, "entryId"), varg(b, "data")).await.map(|n| json!(n)),
+        "create_category" => crate::create_category(a, sarg(b, "name"), sarg(b, "description"))
+            .await
+            .map(|n| json!(n)),
+        "update_entry" => crate::update_entry(a, iarg(b, "entryId"), varg(b, "data"))
+            .await
+            .map(|n| json!(n)),
         "speak" => crate::speak(sarg(b, "text")).map(|_| Value::Null),
         "stop_speaking" => {
             crate::stop_speaking();
@@ -322,10 +335,9 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "read_inbox_image" => crate::read_inbox_image(sarg(b, "path")).await,
         "voice_status" => Ok(crate::voice_status(a)),
         "download_voice_model" => crate::download_voice_model(a).await.map(|ok| json!(ok)),
-        "transcribe" =>
-            crate::transcribe(a, sarg(b, "audioB64"), iarg(b, "sampleRate") as u32)
-                .await
-                .map(|s| json!(s)),
+        "transcribe" => crate::transcribe(a, sarg(b, "audioB64"), iarg(b, "sampleRate") as u32)
+            .await
+            .map(|s| json!(s)),
         // Meetings: reads + notes work from the phone; capture/summarize need
         // the desktop's audio devices and model — clean error, never a 404.
         "meeting_model_status" => Ok(crate::meeting_model_status(a)),
@@ -337,29 +349,17 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
                 .cloned()
                 .and_then(|value| serde_json::from_value(value).ok());
             let sort = b.get("sort").and_then(Value::as_str).map(str::to_owned);
-            crate::meeting_search_transcripts(
-                a,
-                sarg(b, "query"),
-                iarg(b, "limit"),
-                filters,
-                sort,
-            )
-            .await
+            crate::meeting_search_transcripts(a, sarg(b, "query"), iarg(b, "limit"), filters, sort)
+                .await
         }
         "meeting_search_facets" => crate::meeting_search_facets(a).await,
-        "meeting_transcript_vocabulary_list" => {
-            crate::meeting_transcript_vocabulary_list(a).await
-        }
+        "meeting_transcript_vocabulary_list" => crate::meeting_transcript_vocabulary_list(a).await,
         "meeting_transcript_vocabulary_preview" => {
             crate::meeting_transcript_vocabulary_preview(a, sarg(b, "heard")).await
         }
         "meeting_transcript_vocabulary_apply" => {
-            crate::meeting_transcript_vocabulary_apply(
-                a,
-                sarg(b, "heard"),
-                sarg(b, "preferred"),
-            )
-            .await
+            crate::meeting_transcript_vocabulary_apply(a, sarg(b, "heard"), sarg(b, "preferred"))
+                .await
         }
         "meeting_transcript_vocabulary_remove" => {
             crate::meeting_transcript_vocabulary_remove(a, iarg(b, "id"))
@@ -414,20 +414,33 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "meeting_stop" => crate::meeting_stop(a).await.map(|v| json!(v)),
         // Summarize also works remotely — the model runs on the Mac either way,
         // and re-summarizing a finished meeting touches no capture hardware.
-        "meeting_summarize" =>
-            crate::meeting_summarize(a, iarg(b, "id"), oarg(b, "template")).await.map(|v| json!(v)),
-        "meeting_start" | "meeting_template_save" | "meeting_video_request_permission"
-        | "meeting_template_delete" | "meeting_capture_probe" | "download_meeting_model"
-        | "download_speaker_model" | "download_parakeet_model" | "meeting_prompt_payload"
-        | "meeting_dismiss_prompt" | "meetings_settings_set" | "hosted_key_set" | "meeting_export_md" | "meeting_export_pdf"
-        | "set_chrome_theme" =>
-            Err("this action runs on the desktop app only".into()),
+        "meeting_summarize" => crate::meeting_summarize(a, iarg(b, "id"), oarg(b, "template"))
+            .await
+            .map(|v| json!(v)),
+        "meeting_start"
+        | "meeting_template_save"
+        | "meeting_video_request_permission"
+        | "meeting_template_delete"
+        | "meeting_capture_probe"
+        | "download_meeting_model"
+        | "download_speaker_model"
+        | "download_parakeet_model"
+        | "meeting_prompt_payload"
+        | "meeting_dismiss_prompt"
+        | "meetings_settings_set"
+        | "hosted_key_set"
+        | "meeting_export_md"
+        | "meeting_export_pdf"
+        | "set_chrome_theme" => Err("this action runs on the desktop app only".into()),
         "list_entities" => crate::list_entities(a).await,
-        "merge_entities" =>
-            crate::merge_entities(a, iarg(b, "keep"), iarg(b, "drop")).await.map(|_| Value::Null),
+        "merge_entities" => crate::merge_entities(a, iarg(b, "keep"), iarg(b, "drop"))
+            .await
+            .map(|_| Value::Null),
         "suggest_entity_merges" => crate::suggest_entity_merges(a).await,
         "dismiss_merge_suggestion" => {
-            crate::dismiss_merge_suggestion(a, iarg(b, "a"), iarg(b, "b")).await.map(|_| Value::Null)
+            crate::dismiss_merge_suggestion(a, iarg(b, "a"), iarg(b, "b"))
+                .await
+                .map(|_| Value::Null)
         }
         "entity_graph" => crate::entity_graph(a).await,
         "entity_detail" => crate::entity_detail(a, iarg(b, "entityId")).await,
@@ -435,10 +448,13 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "list_people" => crate::list_people(a).await,
         "suggest_person_names" => crate::suggest_person_names(a).await,
         "confirm_person_name" => {
-            crate::confirm_person_name(a, iarg(b, "entityId"), sarg(b, "name")).await.map(|_| Value::Null)
+            crate::confirm_person_name(a, iarg(b, "entityId"), sarg(b, "name"))
+                .await
+                .map(|_| Value::Null)
         }
-        "dismiss_person_name" =>
-            crate::dismiss_person_name(a, iarg(b, "entityId")).await.map(|_| Value::Null),
+        "dismiss_person_name" => crate::dismiss_person_name(a, iarg(b, "entityId"))
+            .await
+            .map(|_| Value::Null),
         "kg_reindex_meetings" => crate::kg_reindex_meetings(a).await,
         "get_provider_settings" => Ok(crate::get_provider_settings()),
         // Keys are camelCase — they must match what api.ts sends (the old
@@ -446,7 +462,9 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "set_provider_settings" => crate::set_provider_settings(
             a,
             sarg(b, "mode"),
-            b.get("confirmEmbeddingRebuild").and_then(|v| v.as_bool()).unwrap_or(false),
+            b.get("confirmEmbeddingRebuild")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             oarg(b, "cloudProvider"),
             oarg(b, "geminiApiKey"),
             oarg(b, "geminiTextModel"),
@@ -465,12 +483,15 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "test_provider" => crate::test_provider().await.map(|s| json!(s)),
         "gcal_auth_status" => Ok(crate::gcal_auth_status()),
         "gcal_set_client" => {
-            crate::gcal_set_client(a, sarg(b, "clientId"), sarg(b, "clientSecret")).map(|_| Value::Null)
+            crate::gcal_set_client(a, sarg(b, "clientId"), sarg(b, "clientSecret"))
+                .map(|_| Value::Null)
         }
         "gcal_begin_auth" => crate::gcal_begin_auth(a).await,
         "gcal_disconnect" => crate::gcal_disconnect(a).map(|_| Value::Null),
         "gcal_sync" => crate::gcal_sync(a, oarg(b, "eventDate")).await,
-        "gcal_clear_day" => crate::gcal_clear_day(a, oarg(b, "eventDate")).await.map(|n| json!(n)),
+        "gcal_clear_day" => crate::gcal_clear_day(a, oarg(b, "eventDate"))
+            .await
+            .map(|n| json!(n)),
         "gcal_list_events" => crate::gcal_list_events(a, oarg(b, "eventDate")).await,
         "gcal_remove_account" => crate::gcal_remove_account(a, sarg(b, "email")),
         "gcal_set_calendar_enabled" => crate::gcal_set_calendar_enabled(
@@ -488,21 +509,23 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "gcal_events_range" => {
             crate::gcal_events_range(a, sarg(b, "startDate"), sarg(b, "endDate")).await
         }
-        "gcal_create_event" => { crate::gcal_create_event(
-            a,
-            sarg(b, "account"),
-            sarg(b, "calendarId"),
-            sarg(b, "title"),
-            sarg(b, "date"),
-            oarg(b, "start"),
-            oarg(b, "end"),
-            oarg(b, "endDate"),
-            oarg(b, "location"),
-            oarg(b, "description"),
-            b.get("addMeet").and_then(|v| v.as_bool()),
-            b.get("guests").and_then(|v| serde_json::from_value(v.clone()).ok()),
-        )
-        .await
+        "gcal_create_event" => {
+            crate::gcal_create_event(
+                a,
+                sarg(b, "account"),
+                sarg(b, "calendarId"),
+                sarg(b, "title"),
+                sarg(b, "date"),
+                oarg(b, "start"),
+                oarg(b, "end"),
+                oarg(b, "endDate"),
+                oarg(b, "location"),
+                oarg(b, "description"),
+                b.get("addMeet").and_then(|v| v.as_bool()),
+                b.get("guests")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            )
+            .await
         }
         "gcal_update_event" => crate::gcal_update_event(
             a,
@@ -536,7 +559,9 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         }
         "brain_list_vaults" => crate::brain_list_vaults(a).await,
         "brain_add_vault" => crate::brain_add_vault(a, sarg(b, "path"), oarg(b, "direction")).await,
-        "brain_remove_vault" => crate::brain_remove_vault(a, sarg(b, "vault")).await.map(|_| Value::Null),
+        "brain_remove_vault" => crate::brain_remove_vault(a, sarg(b, "vault"))
+            .await
+            .map(|_| Value::Null),
         "brain_sync" => crate::brain_sync(a, oarg(b, "vault")).await,
         "work_graph" => crate::work_graph(a, oarg(b, "vault")).await,
         "brain_write_preview" => crate::brain_write_preview(a, oarg(b, "vault")).await,
@@ -545,14 +570,21 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "personal_export" => crate::personal_export(a).await,
         "related_brain" => crate::related_brain(a, sarg(b, "text")).await,
         "brain_get_auto" => Ok(json!(crate::brain_get_auto())),
-        "brain_set_auto" => crate::brain_set_auto(a, b.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),).map(|_| Value::Null),
+        "brain_set_auto" => crate::brain_set_auto(
+            a,
+            b.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+        )
+        .map(|_| Value::Null),
         other => Err(format!("unknown command: {other}")),
     }
 }
 
 // ── arg helpers (read frontend-shaped JSON keys) ────────────────────────────
 fn sarg(b: &Value, k: &str) -> String {
-    b.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+    b.get(k)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 fn iarg(b: &Value, k: &str) -> i64 {
     b.get(k).and_then(|v| v.as_i64()).unwrap_or(0)
@@ -591,11 +623,16 @@ fn serve_static(app: &AppHandle, path: &str, req: tiny_http::Request) {
 
     // 1) Bundled assets (release / `tauri build`).
     let resolver = app.asset_resolver();
-    if let Some(asset) = resolver.get(format!("/{rel}")).or_else(|| resolver.get(rel.to_string())) {
+    if let Some(asset) = resolver
+        .get(format!("/{rel}"))
+        .or_else(|| resolver.get(rel.to_string()))
+    {
         // Tauri's mime guesser doesn't know .webmanifest — correct it so the
         // browser recognizes the PWA manifest (otherwise install is flaky).
         let ct = mime_override(rel).unwrap_or(asset.mime_type.as_str());
-        let _ = req.respond(tiny_http::Response::from_data(asset.bytes).with_header(header("Content-Type", ct)),);
+        let _ = req.respond(
+            tiny_http::Response::from_data(asset.bytes).with_header(header("Content-Type", ct)),
+        );
         return;
     }
 
@@ -623,7 +660,8 @@ fn serve_static(app: &AppHandle, path: &str, req: tiny_http::Request) {
             );
         }
         None => {
-            let _ = req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
+            let _ =
+                req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
         }
     }
 }
@@ -705,7 +743,9 @@ fn content_type_ext(req: &tiny_http::Request) -> String {
 }
 
 fn html_response(body: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
-    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
+    let header =
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+            .unwrap();
     tiny_http::Response::from_string(body).with_header(header)
 }
 

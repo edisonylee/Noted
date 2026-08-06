@@ -220,7 +220,37 @@ pub enum EngineSpec {
     },
     Byok {
         vocabulary: Vec<String>,
+        provider: String,
+        model: String,
     },
+}
+
+impl EngineSpec {
+    /// Stable, non-secret provenance saved with the meeting before capture
+    /// begins. This records the resolved engine, including local fallbacks.
+    pub fn provenance(&self) -> (String, String) {
+        match self {
+            Self::Whisper { model } => (
+                "whisper".into(),
+                model
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("whisper-model")
+                    .to_string(),
+            ),
+            Self::Parakeet { dir } => (
+                "parakeet".into(),
+                dir.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("parakeet-tdt-0.6b")
+                    .to_string(),
+            ),
+            Self::Hosted { .. } => ("hosted".into(), "parakeet-tdt-0.6b".into()),
+            Self::Byok {
+                provider, model, ..
+            } => (provider.clone(), model.clone()),
+        }
+    }
 }
 
 /// Model stays loaded for the whole meeting. Calls are serialized by the
@@ -281,7 +311,7 @@ impl Transcriber {
             EngineSpec::Hosted { vocabulary } => Ok(Self::Hosted {
                 session: crate::hosted::Session::open(vocabulary.clone())?,
             }),
-            EngineSpec::Byok { vocabulary } => Ok(Self::Byok {
+            EngineSpec::Byok { vocabulary, .. } => Ok(Self::Byok {
                 vocabulary: vocabulary.clone(),
             }),
         }
@@ -875,10 +905,7 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                     continue;
                 }
                 if pipe.name == "me"
-                    && is_echo(
-                        &text,
-                        &overlapping_text(&recent_them, seg.t0_ms, seg.t1_ms),
-                    )
+                    && is_echo(&text, &overlapping_text(&recent_them, seg.t0_ms, seg.t1_ms))
                 {
                     eprintln!(
                         "[noted] echo suppressed: {}",
@@ -943,10 +970,7 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                     for (i, mic) in recent_me.iter().enumerate() {
                         if mic.t1 >= seg.t0_ms - ECHO_SLACK_MS
                             && mic.t0 <= seg.t1_ms + ECHO_SLACK_MS
-                            && is_echo(
-                                &mic.text,
-                                &overlapping_text(&recent_them, mic.t0, mic.t1),
-                            )
+                            && is_echo(&mic.text, &overlapping_text(&recent_them, mic.t0, mic.t1))
                         {
                             echoed.push(i);
                         }
@@ -1098,9 +1122,9 @@ pub fn finalize_speakers(
             );
         }
         match store::set_one_on_one_speaker(conn, meeting_id, attendee) {
-            Ok(()) => eprintln!(
-                "[noted] diarization: one-on-one remote speaker labeled {attendee}"
-            ),
+            Ok(()) => {
+                eprintln!("[noted] diarization: one-on-one remote speaker labeled {attendee}")
+            }
             Err(error) => eprintln!("[noted] one-on-one speaker write failed: {error}"),
         }
         return if store::them_segment_times(conn, meeting_id)
@@ -1356,20 +1380,24 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&tmp);
         let conn = crate::db::init(&tmp).unwrap();
-        let meeting_id = store::create_meeting(
+        let meeting_id = store::create_meeting_with_asr(
             &conn,
             "Brian/Edison",
             None,
             None,
+            "whisper",
+            "ggml-large-v3-turbo.bin",
             "2026-08-03T15:00:00Z",
         )
         .unwrap();
-        let first = store::insert_segment(&conn, meeting_id, "them", 0, 5_000, "first")
-            .unwrap();
-        let second = store::insert_segment(&conn, meeting_id, "them", 6_000, 11_000, "second")
-            .unwrap();
-        let third = store::insert_segment(&conn, meeting_id, "them", 12_000, 17_000, "third")
-            .unwrap();
+        let detail = store::get_meeting(&conn, meeting_id).unwrap();
+        assert_eq!(detail["asr_engine"], "whisper");
+        assert_eq!(detail["asr_model"], "ggml-large-v3-turbo.bin");
+        let first = store::insert_segment(&conn, meeting_id, "them", 0, 5_000, "first").unwrap();
+        let second =
+            store::insert_segment(&conn, meeting_id, "them", 6_000, 11_000, "second").unwrap();
+        let third =
+            store::insert_segment(&conn, meeting_id, "them", 12_000, 17_000, "third").unwrap();
         let prints = vec![vp(first, 0, 1), vp(second, 1, 2), vp(third, 0, 3)];
 
         assert_eq!(

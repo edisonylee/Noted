@@ -24,9 +24,11 @@ export const releaseProfile = {
   googleCalendar: true,
   balancedInference: !isAlpha,
   notedHosted: !isAlpha,
-  phoneLan: !isAlpha,
+  // Paused until phone access is a real companion app instead of a LAN-served
+  // remote view of the Mac interface.
+  phoneLan: false,
   diarization: !isAlpha,
-  videoCapture: !isAlpha,
+  videoCapture: true,
   billing: !isAlpha,
 } as const;
 

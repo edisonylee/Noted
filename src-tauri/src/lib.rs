@@ -18,6 +18,17 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+
+const PRIMARY_APP_IDENTIFIER: &str = "com.noted.app";
+
+fn assistant_shortcut() -> Shortcut {
+    Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space)
+}
+
+fn owns_assistant_shortcut(app: &tauri::AppHandle) -> bool {
+    app.config().identifier == PRIMARY_APP_IDENTIFIER
+}
 
 /// The app's fixed timezone. "Today" is always an Eastern calendar day, DST-aware
 /// (EST↔EDT handled by the tz database), regardless of the machine's own timezone.
@@ -74,9 +85,14 @@ async fn theme_save(app: tauri::AppHandle, pack: themes::ThemePack) -> Result<Va
 }
 
 #[tauri::command]
-async fn theme_activate(app: tauri::AppHandle, theme_id: String, color_mode: Option<String>,) -> Result<Value, String> {
+async fn theme_activate(
+    app: tauri::AppHandle,
+    theme_id: String,
+    color_mode: Option<String>,
+) -> Result<Value, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let state = themes::activate(&dir, &theme_id, color_mode.as_deref()).map_err(|e| e.to_string())?;
+    let state =
+        themes::activate(&dir, &theme_id, color_mode.as_deref()).map_err(|e| e.to_string())?;
     serde_json::to_value(state).map_err(|e| e.to_string())
 }
 
@@ -98,15 +114,22 @@ async fn theme_delete(app: tauri::AppHandle, theme_id: String) -> Result<Value, 
 /// `chat_json_local` and therefore cannot route to Gemini in Balanced mode.
 #[tauri::command]
 async fn theme_compile_design(design_md: String, name: Option<String>) -> Result<Value, String> {
-    let pack = themes::compile_design(&design_md, name.as_deref()).await.map_err(|e| e.to_string())?;
+    let pack = themes::compile_design(&design_md, name.as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
     serde_json::to_value(pack).map_err(|e| e.to_string())
 }
 
 /// Pick a frontend-supplied built-in/custom candidate for an assistant request.
 /// Selection is local-only and returns a proposal; it never activates a theme.
 #[tauri::command]
-async fn theme_suggest(prompt: String, candidates: Vec<themes::ThemeCandidate>,) -> Result<Value, String> {
-    themes::suggest(&prompt, &candidates).await.map_err(|e| e.to_string())
+async fn theme_suggest(
+    prompt: String,
+    candidates: Vec<themes::ThemeCandidate>,
+) -> Result<Value, String> {
+    themes::suggest(&prompt, &candidates)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// M0 health check: which models are pulled, plus a sqlite-vec smoke test.
@@ -136,16 +159,22 @@ async fn health(app: tauri::AppHandle) -> Result<Value, String> {
             .map_err(|e| e.to_string())?
     };
 
-    Ok(json!({ "models": models, "vec_version": vec_version }))
+    let assistant_shortcut_enabled = owns_assistant_shortcut(&app);
+    let assistant_shortcut_registered =
+        assistant_shortcut_enabled && app.global_shortcut().is_registered(assistant_shortcut());
+
+    Ok(json!({
+        "models": models,
+        "vec_version": vec_version,
+        "assistant_shortcut_enabled": assistant_shortcut_enabled,
+        "assistant_shortcut_registered": assistant_shortcut_registered,
+    }))
 }
 
 /// Take a messy note, return a *proposal* { category, is_new_category, description, data }.
 /// Nothing is written — the UI reviews this before save_entry.
 #[tauri::command]
-async fn categorize_note(
-    app: tauri::AppHandle,
-    text: String
-) -> Result<Value, String> {
+async fn categorize_note(app: tauri::AppHandle, text: String) -> Result<Value, String> {
     let state = app.state::<Db>();
     // Read the current catalog + known names, then drop the lock before any await.
     let (catalog, known_names) = {
@@ -170,17 +199,16 @@ async fn categorize_note(
 /// a pure schedule that has no structured data to pull.
 #[tauri::command]
 async fn ocr_photo(image_base64: String) -> Result<String, String> {
-    pipeline::transcribe_photo(&image_base64).await.map_err(|e| e.to_string())
+    pipeline::transcribe_photo(&image_base64)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// One-shot vision path: a photo (base64, no data: prefix) is transcribed +
 /// categorized + extracted by the local vision model. Returns a proposal that
 /// also includes `raw_text` (the transcription) for review.
 #[tauri::command]
-async fn categorize_photo(
-    app: tauri::AppHandle,
-    image_base64: String
-) -> Result<Value, String> {
+async fn categorize_photo(app: tauri::AppHandle, image_base64: String) -> Result<Value, String> {
     let state = app.state::<Db>();
     let (catalog, known_names) = {
         let conn = state.0.lock().unwrap();
@@ -272,7 +300,11 @@ async fn save_entry(app: tauri::AppHandle, args: SaveArgs) -> Result<i64, String
     // Trust an explicit reviewed date; fall back to today if the UI sent none.
     let event_date = {
         let d = args.event_date.trim();
-        if d.is_empty() { today_local() } else { d.to_string() }
+        if d.is_empty() {
+            today_local()
+        } else {
+            d.to_string()
+        }
     };
     if args.entries.is_empty() {
         return Err("no entries to save".into());
@@ -347,7 +379,12 @@ async fn save_entry(app: tauri::AppHandle, args: SaveArgs) -> Result<i64, String
             candidates.push(EntityCandidate {
                 name: name.to_string(),
                 etype,
-                fact: e.fact.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(String::from),
+                fact: e
+                    .fact
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from),
                 relationship: e
                     .relationship
                     .as_deref()
@@ -359,12 +396,26 @@ async fn save_entry(app: tauri::AppHandle, args: SaveArgs) -> Result<i64, String
     }
     for name in field_people {
         if seen.insert((entities::normalize(&name), "person".to_string())) {
-            candidates.push(EntityCandidate { name, etype: "person".to_string(), fact: None, relationship: None, });
+            candidates.push(EntityCandidate {
+                name,
+                etype: "person".to_string(),
+                fact: None,
+                relationship: None,
+            });
         }
     }
     if !candidates.is_empty() {
         let snippet = plain_text(&raw, 200);
-        persist_entities(&app, note_id, &event_date, &snippet, &now, candidates, false,).await;
+        persist_entities(
+            &app,
+            note_id,
+            &event_date,
+            &snippet,
+            &now,
+            candidates,
+            false,
+        )
+        .await;
     }
 
     Ok(note_id)
@@ -420,7 +471,11 @@ fact the reflection reveals about them, and the relationship when stated. [] if 
     let recent: Vec<&ChatMsg> = history.iter().rev().take(6).collect();
     let mut convo = String::new();
     for m in recent.into_iter().rev() {
-        let who = if m.role == "assistant" { "journal" } else { "user" };
+        let who = if m.role == "assistant" {
+            "journal"
+        } else {
+            "user"
+        };
         convo.push_str(&format!("{who}: {}\n", m.content));
     }
     let user_msg = if convo.is_empty() {
@@ -683,8 +738,7 @@ async fn create_note_folder(
     let state = app.state::<Db>();
     let now = chrono::Utc::now().to_rfc3339();
     let conn = state.0.lock().unwrap();
-    db::create_note_folder(&conn, parent_id, &name, &kind, "", &now)
-        .map_err(|e| e.to_string())
+    db::create_note_folder(&conn, parent_id, &name, &kind, "", &now).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -696,6 +750,18 @@ async fn rename_note_folder(
     let state = app.state::<Db>();
     let conn = state.0.lock().unwrap();
     db::rename_note_folder(&conn, folder_id, &name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn move_note_folder(
+    app: tauri::AppHandle,
+    folder_id: i64,
+    parent_id: Option<i64>,
+    before_id: Option<i64>,
+) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    db::move_note_folder(&conn, folder_id, parent_id, before_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -724,7 +790,10 @@ async fn generate_recap(app: tauri::AppHandle, period: String) -> Result<Value, 
     let state = app.state::<Db>();
     let today = now_eastern().date_naive();
     let (start, end) = match period.as_str() {
-        "week" => ((today - chrono::Duration::days(6)).to_string(), today.to_string(),),
+        "week" => (
+            (today - chrono::Duration::days(6)).to_string(),
+            today.to_string(),
+        ),
         _ => (today.to_string(), today.to_string()),
     };
 
@@ -735,7 +804,11 @@ async fn generate_recap(app: tauri::AppHandle, period: String) -> Result<Value, 
     let entry_count = entries.len() as i64;
 
     if entries.is_empty() {
-        let label = if period == "week" { "this week" } else { "today" };
+        let label = if period == "week" {
+            "this week"
+        } else {
+            "today"
+        };
         return Ok(json!({
             "content": format!("Nothing logged {label} yet."),
             "period": period, "period_start": start, "period_end": end, "entry_count": 0,
@@ -830,7 +903,10 @@ async fn recap_period(
         db::upsert_recap(&conn, period, start, end, &content, entry_count, &now)
             .map_err(|e| e.to_string())?;
     }
-    let _ = app.emit("recap-generated", json!({ "period": period, "start": start, "end": end }),);
+    let _ = app.emit(
+        "recap-generated",
+        json!({ "period": period, "start": start, "end": end }),
+    );
     Ok(true)
 }
 
@@ -846,7 +922,9 @@ pub fn last_completed_week(today: chrono::NaiveDate) -> (String, String) {
 
 /// The last `n` completed days (yesterday back), as ISO date strings.
 pub fn recent_completed_days(today: chrono::NaiveDate, n: i64) -> Vec<String> {
-    (1..=n).map(|i| (today - chrono::Duration::days(i)).to_string()).collect()
+    (1..=n)
+        .map(|i| (today - chrono::Duration::days(i)).to_string())
+        .collect()
 }
 
 /// Auto-fill recaps for COMPLETED periods (the app may be closed at midnight, so
@@ -942,9 +1020,14 @@ async fn chat(
             })
             .collect();
         let context = pipeline::qa_context(&hits);
-        let mut messages = vec![json!({ "role": "system", "content": pipeline::qa_system(&today_local()) })];
+        let mut messages =
+            vec![json!({ "role": "system", "content": pipeline::qa_system(&today_local()) })];
         for m in &history {
-            let role = if m.role == "assistant" { "assistant" } else { "user" };
+            let role = if m.role == "assistant" {
+                "assistant"
+            } else {
+                "user"
+            };
             messages.push(json!({ "role": role, "content": m.content }));
         }
         messages.push(json!({
@@ -961,7 +1044,11 @@ async fn chat(
 
     // Vault-scoped ask: restrict retrieval to ONE brain so answers about specific
     // work don't bleed across vaults. Read-only (no edit/create routing).
-    if let Some(vault) = scope.as_deref().map(str::trim).filter(|s| !s.is_empty() && *s != "all") {
+    if let Some(vault) = scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "all")
+    {
         let origin = format!("brain:{vault}");
         let hits = {
             let conn = state.0.lock().unwrap();
@@ -987,9 +1074,14 @@ async fn chat(
             })
             .collect();
         let context = pipeline::qa_context(&hits);
-        let mut messages = vec![json!({ "role": "system", "content": pipeline::qa_system(&today_local()) })];
+        let mut messages =
+            vec![json!({ "role": "system", "content": pipeline::qa_system(&today_local()) })];
         for m in &history {
-            let role = if m.role == "assistant" { "assistant" } else { "user" };
+            let role = if m.role == "assistant" {
+                "assistant"
+            } else {
+                "user"
+            };
             messages.push(json!({ "role": role, "content": m.content }));
         }
         messages.push(json!({
@@ -1050,7 +1142,11 @@ async fn chat(
                 .collect();
             let mut seen = HashSet::new();
             let mut hits = Vec::new();
-            for h in recent.into_iter().chain(semantic.into_iter()).chain(graph_hits.into_iter()) {
+            for h in recent
+                .into_iter()
+                .chain(semantic.into_iter())
+                .chain(graph_hits.into_iter())
+            {
                 if seen.insert(h.note_id) {
                     hits.push(h);
                 }
@@ -1092,7 +1188,11 @@ async fn chat(
     // 1) Route the message: answer | create_category | edit_entry.
     let mut convo = String::new();
     for m in &history {
-        let role = if m.role == "assistant" { "assistant" } else { "user" };
+        let role = if m.role == "assistant" {
+            "assistant"
+        } else {
+            "user"
+        };
         convo.push_str(&format!("{role}: {}\n", m.content));
     }
     convo.push_str(&format!("user: {question}"));
@@ -1115,7 +1215,11 @@ async fn chat(
     // 2) Mutating actions return a PROPOSAL (no DB write) for the user to confirm.
     if action == "create_category" {
         if let Some(cat) = routed.as_ref().and_then(|v| v.get("category")) {
-            let raw = cat.get("name").and_then(|n| n.as_str()).unwrap_or("").trim();
+            let raw = cat
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .trim();
             if !raw.is_empty() {
                 let name = pipeline::snap_category(raw, &known);
                 let description = cat
@@ -1146,14 +1250,26 @@ async fn chat(
                     && s[..2].chars().all(|c| c.is_ascii_digit())
                     && s[3..].chars().all(|c| c.is_ascii_digit())
             };
-            let title = ev.get("title").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
-            let date = ev.get("date").and_then(|d| d.as_str()).unwrap_or("").trim().to_string();
+            let title = ev
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let date = ev
+                .get("date")
+                .and_then(|d| d.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
             let date_ok = date.len() == 10
-                && date
-                    .chars()
-                    .enumerate()
-                    .all(|(i, c)| { if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit()
-                    } });
+                && date.chars().enumerate().all(|(i, c)| {
+                    if i == 4 || i == 7 {
+                        c == '-'
+                    } else {
+                        c.is_ascii_digit()
+                    }
+                });
             let start = ev
                 .get("start")
                 .and_then(|s| s.as_str())
@@ -1254,9 +1370,14 @@ async fn chat(
         }
     }
     let context = pipeline::qa_context(&hits);
-    let mut messages = vec![json!({ "role": "system", "content": pipeline::qa_system(&today_local()) })];
+    let mut messages =
+        vec![json!({ "role": "system", "content": pipeline::qa_system(&today_local()) })];
     for m in &history {
-        let role = if m.role == "assistant" { "assistant" } else { "user" };
+        let role = if m.role == "assistant" {
+            "assistant"
+        } else {
+            "user"
+        };
         messages.push(json!({ "role": role, "content": m.content }));
     }
     let user_turn = if let Some((day, label)) = &day_scope {
@@ -1307,7 +1428,8 @@ fn graph_context(
             let at = start + pos;
             let before_ok = at == 0 || !q[..at].chars().next_back().unwrap().is_alphanumeric();
             let after = at + needle.len();
-            let after_ok = after >= q.len() || !q[after..].chars().next().unwrap().is_alphanumeric();
+            let after_ok =
+                after >= q.len() || !q[after..].chars().next().unwrap().is_alphanumeric();
             if before_ok && after_ok {
                 return true;
             }
@@ -1319,8 +1441,7 @@ fn graph_context(
     let mut matched: Vec<i64> = Vec::new();
     if let Ok(all) = db::entities_for_matching(conn) {
         for (id, name, _t, aliases) in &all {
-            if word_hit(&name.to_lowercase())
-                || aliases.iter().any(|a| word_hit(&a.to_lowercase()))
+            if word_hit(&name.to_lowercase()) || aliases.iter().any(|a| word_hit(&a.to_lowercase()))
             {
                 matched.push(*id);
             }
@@ -1347,9 +1468,14 @@ fn graph_context(
     let mut chips: Vec<Value> = Vec::new();
     let mut extra_hits: Vec<db::SearchHit> = Vec::new();
     for id in matched {
-        let Ok(p) = db::entity_profile(conn, id) else { continue; };
+        let Ok(p) = db::entity_profile(conn, id) else {
+            continue;
+        };
         chips.push(json!({ "id": p.id, "name": p.name, "type": p.r#type }));
-        digest.push_str(&format!("- {} ({}, {} mentions", p.name, p.r#type, p.mention_count));
+        digest.push_str(&format!(
+            "- {} ({}, {} mentions",
+            p.name, p.r#type, p.mention_count
+        ));
         if let Some(last) = &p.last_seen {
             digest.push_str(&format!(", last {last}"));
         }
@@ -1364,7 +1490,12 @@ fn graph_context(
             }
         }
         digest.push('\n');
-        for m in p.mentions.iter().filter(|m| !m.text.trim().is_empty()).take(3) {
+        for m in p
+            .mentions
+            .iter()
+            .filter(|m| !m.text.trim().is_empty())
+            .take(3)
+        {
             digest.push_str(&format!("    • {}: {}\n", m.date, m.text.trim()));
         }
         if let Ok(notes) = db::notes_for_entity(conn, id, 3) {
@@ -1450,11 +1581,7 @@ async fn create_category(
 /// Overwrite one entry's structured data — the chat agent's confirmed `edit_entry`
 /// action — then re-embed the affected note so semantic search reflects the fix.
 #[tauri::command]
-async fn update_entry(
-    app: tauri::AppHandle,
-    entry_id: i64,
-    data: Value
-) -> Result<i64, String> {
+async fn update_entry(app: tauri::AppHandle, entry_id: i64, data: Value) -> Result<i64, String> {
     let state = app.state::<Db>();
     if !data.is_object() {
         return Err("entry data must be an object".into());
@@ -1477,7 +1604,9 @@ async fn update_entry(
 /// Speak text aloud via macOS `say` (free, on-device). Cancels any prior speech.
 #[tauri::command]
 fn speak(text: String) -> Result<(), String> {
-    let _ = std::process::Command::new("pkill").args(["-x", "say"]).status();
+    let _ = std::process::Command::new("pkill")
+        .args(["-x", "say"])
+        .status();
     if text.trim().is_empty() {
         return Ok(());
     }
@@ -1490,7 +1619,9 @@ fn speak(text: String) -> Result<(), String> {
 
 #[tauri::command]
 fn stop_speaking() {
-    let _ = std::process::Command::new("pkill").args(["-x", "say"]).status();
+    let _ = std::process::Command::new("pkill")
+        .args(["-x", "say"])
+        .status();
 }
 
 /// Backfill embeddings for any notes that don't have one (e.g. saved while the
@@ -1574,10 +1705,16 @@ async fn backfill_entities(app: tauri::AppHandle) -> Result<i64, String> {
         }
         let candidates: Vec<EntityCandidate> = people
             .into_iter()
-            .map(|name| EntityCandidate { name, etype: "person".to_string(), fact: None, relationship: None, })
+            .map(|name| EntityCandidate {
+                name,
+                etype: "person".to_string(),
+                fact: None,
+                relationship: None,
+            })
             .collect();
         let snippet: String = raw.chars().take(200).collect();
-        added += persist_entities(&app, note_id, &event_date, &snippet, &now, candidates, true).await;
+        added +=
+            persist_entities(&app, note_id, &event_date, &snippet, &now, candidates, true).await;
     }
     Ok(added)
 }
@@ -1633,7 +1770,11 @@ const VOICE_MODEL_URL: &str =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
 
 fn voice_model_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("models");
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("models");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("ggml-base.en.bin"))
 }
@@ -1698,7 +1839,9 @@ async fn transcribe(
         .map_err(|e| e.to_string());
     }
     if meeting::cfg().asr_engine == "hosted" {
-        return hosted::transcribe_batch(&samples, &vocab).await.map_err(|e| e.to_string());
+        return hosted::transcribe_batch(&samples, &vocab)
+            .await
+            .map_err(|e| e.to_string());
     }
     let spec = meeting::engine_spec(&app).map_err(|e| e.to_string())?;
     let hint = meeting::asr::vocab_hint(&[], &vocab);
@@ -1707,8 +1850,8 @@ async fn transcribe(
     // Quick dictation deliberately shares the meeting engine setting so a
     // downloaded turbo/Parakeet model works everywhere in the app.
     tauri::async_runtime::spawn_blocking(move || {
-        let mut transcriber = meeting::asr::Transcriber::new(&spec, hint)
-            .map_err(|e| e.to_string())?;
+        let mut transcriber =
+            meeting::asr::Transcriber::new(&spec, hint).map_err(|e| e.to_string())?;
         transcriber
             .transcribe(&samples)
             .map(|t| meeting::asr::apply_vocab(&t, &vocab))
@@ -1771,7 +1914,9 @@ async fn download_meeting_model(app: tauri::AppHandle) -> Result<bool, String> {
         return Ok(true);
     }
     let tmp = dir.join("ggml-large-v3-turbo.bin.part");
-    let mut resp = reqwest::get(MEETING_MODEL_URL).await.map_err(|e| e.to_string())?;
+    let mut resp = reqwest::get(MEETING_MODEL_URL)
+        .await
+        .map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
         return Err(format!("model download failed: {}", resp.status()));
     }
@@ -1807,7 +1952,10 @@ async fn download_parakeet_model(app: tauri::AppHandle) -> Result<bool, String> 
             .await
             .map_err(|e| e.to_string())?;
         if !resp.status().is_success() {
-            return Err(format!("parakeet download failed ({file}): {}", resp.status()));
+            return Err(format!(
+                "parakeet download failed ({file}): {}",
+                resp.status()
+            ));
         }
         let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
         while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
@@ -1872,8 +2020,8 @@ async fn meeting_start(
     if let Some(ref eid) = event_id {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
-        if let Some(id) = meeting::store::find_meeting_by_event(&conn, eid)
-            .map_err(|e| e.to_string())?
+        if let Some(id) =
+            meeting::store::find_meeting_by_event(&conn, eid).map_err(|e| e.to_string())?
         {
             return Ok(id);
         }
@@ -1927,7 +2075,10 @@ fn hosted_key_set(value: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn meetings_settings_set(app: tauri::AppHandle, settings: meeting::MeetingsCfg,) -> Result<(), String> {
+fn meetings_settings_set(
+    app: tauri::AppHandle,
+    settings: meeting::MeetingsCfg,
+) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     meeting::cfg_update(&dir, settings).map_err(|e| e.to_string())
 }
@@ -1939,8 +2090,14 @@ fn meetings_settings_set(app: tauri::AppHandle, settings: meeting::MeetingsCfg,)
 fn set_chrome_theme(app: tauri::AppHandle, dark: bool) {
     #[cfg(target_os = "macos")]
     if let Some(win) = app.get_webview_window("main") {
-        use window_vibrancy::{apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState,};
-        let _ = win.set_theme(Some(if dark { tauri::Theme::Dark } else { tauri::Theme::Light }));
+        use window_vibrancy::{
+            apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState,
+        };
+        let _ = win.set_theme(Some(if dark {
+            tauri::Theme::Dark
+        } else {
+            tauri::Theme::Light
+        }));
         let _ = clear_vibrancy(&win);
         let material = if dark {
             NSVisualEffectMaterial::HudWindow
@@ -2009,9 +2166,7 @@ async fn meeting_search_facets(app: tauri::AppHandle) -> Result<Value, String> {
 }
 
 #[tauri::command]
-async fn meeting_transcript_vocabulary_list(
-    app: tauri::AppHandle,
-) -> Result<Value, String> {
+async fn meeting_transcript_vocabulary_list(app: tauri::AppHandle) -> Result<Value, String> {
     let state = app.state::<Db>();
     let conn = state.0.lock().unwrap();
     meeting::store::list_transcript_vocabulary(&conn)
@@ -2056,12 +2211,8 @@ async fn meeting_transcript_vocabulary_remove(
 ) -> Result<(), String> {
     let state = app.state::<Db>();
     let conn = state.0.lock().unwrap();
-    meeting::store::remove_transcript_vocabulary(
-        &conn,
-        id,
-        &chrono::Utc::now().to_rfc3339(),
-    )
-    .map_err(|error| error.to_string())
+    meeting::store::remove_transcript_vocabulary(&conn, id, &chrono::Utc::now().to_rfc3339())
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -2128,7 +2279,9 @@ async fn meeting_delete_forever(app: tauri::AppHandle, id: i64) -> Result<(), St
     drop(conn);
     if meeting_dir.exists() {
         if let Err(e) = std::fs::remove_dir_all(&meeting_dir) {
-            eprintln!("[noted] permanently deleted meeting {id}, but retained media cleanup failed: {e}");
+            eprintln!(
+                "[noted] permanently deleted meeting {id}, but retained media cleanup failed: {e}"
+            );
         }
     }
     Ok(())
@@ -2240,7 +2393,11 @@ async fn meeting_assist(app: tauri::AppHandle, id: i64, question: String) -> Res
                     s["speaker"].as_str().unwrap_or("Them").to_string()
                 };
                 let text = s["text"].as_str().unwrap_or("");
-                lines.push(format!("[{:02}:{:02}] {who}: {text}", t0 / 60_000, (t0 / 1_000) % 60));
+                lines.push(format!(
+                    "[{:02}:{:02}] {who}: {text}",
+                    t0 / 60_000,
+                    (t0 / 1_000) % 60
+                ));
             }
         }
         // Tail-cap the context: the last ~8k chars is roughly the last ten
@@ -2255,7 +2412,11 @@ async fn meeting_assist(app: tauri::AppHandle, id: i64, question: String) -> Res
             tail.push(l);
         }
         tail.reverse();
-        let transcript = tail.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
+        let transcript = tail
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         (transcript, notes, title)
     };
     if transcript.is_empty() {
@@ -2273,7 +2434,9 @@ offer to do more. If the transcript doesn't contain the answer, say so plainly."
     } else {
         format!("\nMy notes:\n{notes}\n")
     };
-    let user = format!("Meeting: {title}\nTranscript so far:\n{transcript}\n{notes_block}\nQuestion: {question}");
+    let user = format!(
+        "Meeting: {title}\nTranscript so far:\n{transcript}\n{notes_block}\nQuestion: {question}"
+    );
     let messages = vec![
         json!({ "role": "system", "content": system }),
         json!({ "role": "user", "content": user }),
@@ -2294,7 +2457,8 @@ async fn meeting_video_delete(app: tauri::AppHandle, id: i64) -> Result<(), Stri
     let state = app.state::<Db>();
     let conn = state.0.lock().unwrap();
     let path: Option<String> = conn
-        .query_row("SELECT video_path FROM meetings WHERE id = ?1", [id], |r| { r.get(0)
+        .query_row("SELECT video_path FROM meetings WHERE id = ?1", [id], |r| {
+            r.get(0)
         })
         .map_err(|e| e.to_string())?;
     if let Some(p) = path {
@@ -2324,8 +2488,7 @@ async fn meeting_rediarize(app: tauri::AppHandle, id: i64) -> Result<usize, Stri
             .join(id.to_string());
         let state = h.state::<Db>();
         let conn = state.0.lock().unwrap();
-        meeting::asr::rediarize_from_wav(&conn, &model, &dir, id, true)
-            .map_err(|e| e.to_string())
+        meeting::asr::rediarize_from_wav(&conn, &model, &dir, id, true).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -2363,11 +2526,20 @@ fn meeting_export_path(
         .as_str()
         .unwrap_or("Meeting")
         .chars()
-        .map(|c| { if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '-'
-            } })
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let title = title.trim().to_string();
-    let folder = if title.is_empty() { "Meeting" } else { title.as_str() };
+    let folder = if title.is_empty() {
+        "Meeting"
+    } else {
+        title.as_str()
+    };
     let dir = app
         .path()
         .document_dir()
@@ -2380,7 +2552,11 @@ fn meeting_export_path(
         .as_str()
         .map(|s| s.chars().take(10).collect())
         .unwrap_or_default();
-    let base = if date.is_empty() { title } else { format!("{date} {title}") };
+    let base = if date.is_empty() {
+        title
+    } else {
+        format!("{date} {title}")
+    };
     let mut path = dir.join(format!("{base}.{ext}"));
     let mut n = 2;
     while path.exists() {
@@ -2463,7 +2639,10 @@ async fn meeting_template_delete(app: tauri::AppHandle, name: String) -> Result<
 /// Phase-0 spike: record N seconds of system-audio tap + mic to WAVs so the
 /// permission flow and capture path can be verified end to end.
 #[tauri::command]
-async fn meeting_capture_probe(app: tauri::AppHandle, seconds: Option<u64>,) -> Result<Value, String> {
+async fn meeting_capture_probe(
+    app: tauri::AppHandle,
+    seconds: Option<u64>,
+) -> Result<Value, String> {
     use std::sync::atomic::Ordering;
     meeting::ensure_mic_permission()
         .await
@@ -2484,7 +2663,8 @@ async fn meeting_capture_probe(app: tauri::AppHandle, seconds: Option<u64>,) -> 
     if meeting::capture::tap_supported() {
         let (b, s) = (them.clone(), stop.clone());
         let log = Some(dir.join("probe-capture.log"));
-        threads.push(std::thread::spawn(move || { meeting::capture::run_system_tap(b, s, log)
+        threads.push(std::thread::spawn(move || {
+            meeting::capture::run_system_tap(b, s, log)
         }));
     }
     {
@@ -2507,7 +2687,11 @@ async fn meeting_capture_probe(app: tauri::AppHandle, seconds: Option<u64>,) -> 
     let mut report = serde_json::Map::new();
     for (name, buf) in [("me", &me), ("them", &them)] {
         let (raw, rate) = buf.drain();
-        let pcm = if rate == 0 { Vec::new() } else { voice::resample_to_16k(&raw, rate) };
+        let pcm = if rate == 0 {
+            Vec::new()
+        } else {
+            voice::resample_to_16k(&raw, rate)
+        };
         let rms = if pcm.is_empty() {
             0.0
         } else {
@@ -2537,7 +2721,10 @@ async fn meeting_capture_probe(app: tauri::AppHandle, seconds: Option<u64>,) -> 
             }),
         );
     }
-    report.insert("tap_supported".into(), json!(meeting::capture::tap_supported()),);
+    report.insert(
+        "tap_supported".into(),
+        json!(meeting::capture::tap_supported()),
+    );
     Ok(Value::Object(report))
 }
 
@@ -2692,11 +2879,17 @@ async fn suggest_person_names(app: tauri::AppHandle) -> Result<Value, String> {
             title-case the local part into a plausible name. Names only — \
             never return an email address. JSON: {\"suggestions\":[{\"email\",\"name\"}]}";
         let user = format!("Emails:\n{}", emails.join("\n"));
-        let mut by_email: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        if let Ok(v) = ollama::chat_json_local(&ollama::text_model(), system, &user, None, Some(schema)).await {
+        let mut by_email: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        if let Ok(v) =
+            ollama::chat_json_local(&ollama::text_model(), system, &user, None, Some(schema)).await
+        {
             if let Some(arr) = v["suggestions"].as_array() {
                 for s in arr {
-                    let (e, n) = (s["email"].as_str().unwrap_or(""), s["name"].as_str().unwrap_or("").trim(),);
+                    let (e, n) = (
+                        s["email"].as_str().unwrap_or(""),
+                        s["name"].as_str().unwrap_or("").trim(),
+                    );
                     if !e.is_empty() && !n.is_empty() && !n.contains('@') && n.len() <= 40 {
                         by_email.insert(e.to_lowercase(), n.to_string());
                     }
@@ -2730,7 +2923,11 @@ async fn suggest_person_names(app: tauri::AppHandle) -> Result<Value, String> {
 /// still resolve to the same person; if another person already owns that name,
 /// merge the two first. Voiceprints are untouched — this is KG-side identity.
 #[tauri::command]
-async fn confirm_person_name(app: tauri::AppHandle, entity_id: i64, name: String,) -> Result<(), String> {
+async fn confirm_person_name(
+    app: tauri::AppHandle,
+    entity_id: i64,
+    name: String,
+) -> Result<(), String> {
     let name = name.trim().to_string();
     if name.is_empty() || name.contains('@') {
         return Err("Enter a display name (not an email).".into());
@@ -2811,8 +3008,8 @@ const BRAIN_AUTO_MERGE_SIM: f32 = 0.92;
 struct BrainSyncReport {
     vault: String,
     scanned: usize,
-    imported: usize,   // notes (re)processed this run
-    unchanged: usize,  // skipped — content hash matched
+    imported: usize,  // notes (re)processed this run
+    unchanged: usize, // skipped — content hash matched
     entities_created: usize,
     mentions_added: usize,
     errors: Vec<String>,
@@ -2857,7 +3054,15 @@ async fn resolve_or_create_brain_entity(
         }
     }
     let aliases_json = serde_json::to_string(aliases).unwrap_or_else(|_| "[]".into());
-    match db::create_entity(&conn, display_name, &norm, etype, &aliases_json, event_date, now,) {
+    match db::create_entity(
+        &conn,
+        display_name,
+        &norm,
+        etype,
+        &aliases_json,
+        event_date,
+        now,
+    ) {
         Ok(id) => {
             let _ = db::insert_entity_embedding(&conn, id, &emb);
             Some((id, true))
@@ -2868,8 +3073,15 @@ async fn resolve_or_create_brain_entity(
 
 /// Sync one vault into the KG. Two passes: parse every file first (so wikilinks
 /// can resolve to any note's type/name), then mirror each changed file.
-async fn sync_brain_vault(app: &tauri::AppHandle, vault: &str, root: &std::path::Path,) -> BrainSyncReport {
-    let mut report = BrainSyncReport { vault: vault.to_string(), ..Default::default() };
+async fn sync_brain_vault(
+    app: &tauri::AppHandle,
+    vault: &str,
+    root: &std::path::Path,
+) -> BrainSyncReport {
+    let mut report = BrainSyncReport {
+        vault: vault.to_string(),
+        ..Default::default()
+    };
     let origin = format!("brain:{vault}");
     let now = chrono::Utc::now().to_rfc3339();
     let today = today_local();
@@ -2884,9 +3096,11 @@ async fn sync_brain_vault(app: &tauri::AppHandle, vault: &str, root: &std::path:
         })
         .collect();
     // slug -> (type, display name) for resolving [[wikilink]] targets.
-    let mut home: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+    let mut home: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
     for (_, p) in &parsed {
-        home.entry(p.slug.clone()).or_insert((p.etype.clone(), p.display_name.clone()));
+        home.entry(p.slug.clone())
+            .or_insert((p.etype.clone(), p.display_name.clone()));
     }
 
     for (raw, p) in &parsed {
@@ -2896,7 +3110,9 @@ async fn sync_brain_vault(app: &tauri::AppHandle, vault: &str, root: &std::path:
         let note_id = {
             let state = app.state::<Db>();
             let conn = state.0.lock().unwrap();
-            let prev = db::brain_note_hash(&conn, &origin, &p.rel_path).ok().flatten();
+            let prev = db::brain_note_hash(&conn, &origin, &p.rel_path)
+                .ok()
+                .flatten();
             if prev.as_deref() == Some(p.hash.as_str()) {
                 report.unchanged += 1;
                 continue;
@@ -2913,7 +3129,13 @@ async fn sync_brain_vault(app: &tauri::AppHandle, vault: &str, root: &std::path:
 
         // The note's own subject entity.
         let home_id = match resolve_or_create_brain_entity(
-            app, vault, &p.etype, &p.display_name, &p.aliases, &event_date, &now,
+            app,
+            vault,
+            &p.etype,
+            &p.display_name,
+            &p.aliases,
+            &event_date,
+            &now,
         )
         .await
         {
@@ -2924,7 +3146,10 @@ async fn sync_brain_vault(app: &tauri::AppHandle, vault: &str, root: &std::path:
                 id
             }
             None => {
-                report.errors.push(format!("{}: entity embed failed (is Ollama running?)", p.rel_path));
+                report.errors.push(format!(
+                    "{}: entity embed failed (is Ollama running?)",
+                    p.rel_path
+                ));
                 continue;
             }
         };
@@ -2935,7 +3160,17 @@ async fn sync_brain_vault(app: &tauri::AppHandle, vault: &str, root: &std::path:
             let _ = db::set_entity_home(&conn, home_id, note_id);
             // Rebuild this note's links from scratch so a removed [[link]] drops its edge.
             let _ = db::clear_note_mentions(&conn, note_id);
-            if db::add_mention(&conn, home_id, note_id, None, &p.display_name, &event_date, &now,).is_ok() {
+            if db::add_mention(
+                &conn,
+                home_id,
+                note_id,
+                None,
+                &p.display_name,
+                &event_date,
+                &now,
+            )
+            .is_ok()
+            {
                 report.mentions_added += 1;
             }
         }
@@ -2946,14 +3181,25 @@ async fn sync_brain_vault(app: &tauri::AppHandle, vault: &str, root: &std::path:
                 continue; // unresolved link (target note not in the vault) — skip
             };
             if let Some((tid, created)) =
-                resolve_or_create_brain_entity(app, vault, &tetype, &tname, &[], &event_date, &now).await
+                resolve_or_create_brain_entity(app, vault, &tetype, &tname, &[], &event_date, &now)
+                    .await
             {
                 if created {
                     report.entities_created += 1;
                 }
                 let state = app.state::<Db>();
                 let conn = state.0.lock().unwrap();
-                if db::add_mention(&conn, tid, note_id, None, &p.display_name, &event_date, &now,).is_ok() {
+                if db::add_mention(
+                    &conn,
+                    tid,
+                    note_id,
+                    None,
+                    &p.display_name,
+                    &event_date,
+                    &now,
+                )
+                .is_ok()
+                {
                     report.mentions_added += 1;
                 }
             }
@@ -3004,7 +3250,11 @@ async fn brain_list_vaults(app: tauri::AppHandle) -> Result<Value, String> {
 /// Register a vault by path (its folder name becomes the vault id). `direction`
 /// defaults to "import" (the only direction wired in Phase 1).
 #[tauri::command]
-async fn brain_add_vault(app: tauri::AppHandle, path: String, direction: Option<String>,) -> Result<Value, String> {
+async fn brain_add_vault(
+    app: tauri::AppHandle,
+    path: String,
+    direction: Option<String>,
+) -> Result<Value, String> {
     let root = std::path::PathBuf::from(&path);
     if !root.is_dir() {
         return Err(format!("not a directory: {path}"));
@@ -3099,7 +3349,10 @@ fn vault_roots(app: &tauri::AppHandle) -> std::collections::HashMap<String, Stri
 
 /// Compute (without writing) the managed-region rewrite for every brain note
 /// whose subject has capture mentions. Reads files; never mutates anything.
-fn compute_writes(app: &tauri::AppHandle, vault: Option<&str>,) -> Result<Vec<PlannedWrite>, String> {
+fn compute_writes(
+    app: &tauri::AppHandle,
+    vault: Option<&str>,
+) -> Result<Vec<PlannedWrite>, String> {
     let targets = {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
@@ -3111,7 +3364,9 @@ fn compute_writes(app: &tauri::AppHandle, vault: Option<&str>,) -> Result<Vec<Pl
         let v = t.origin.strip_prefix("brain:").unwrap_or("").to_string();
         let Some(root) = roots.get(&v) else { continue };
         let full = std::path::PathBuf::from(root).join(&t.source_path);
-        let Ok(raw) = std::fs::read_to_string(&full) else { continue; };
+        let Ok(raw) = std::fs::read_to_string(&full) else {
+            continue;
+        };
         let before = brain::extract_managed(&raw);
         let after = brain::render_managed_block(&t.captures);
         let new_raw = brain::apply_managed(&raw, &after);
@@ -3136,7 +3391,10 @@ fn compute_writes(app: &tauri::AppHandle, vault: Option<&str>,) -> Result<Vec<Pl
 
 /// Dry run: what write-back would change, per file. Reads only — writes nothing.
 #[tauri::command]
-async fn brain_write_preview(app: tauri::AppHandle, vault: Option<String>,) -> Result<Value, String> {
+async fn brain_write_preview(
+    app: tauri::AppHandle,
+    vault: Option<String>,
+) -> Result<Value, String> {
     let writes = compute_writes(&app, vault.as_deref())?;
     let preview: Vec<Value> = writes
         .iter()
@@ -3164,7 +3422,8 @@ async fn brain_write_back(app: tauri::AppHandle, vault: Option<String>) -> Resul
         .collect();
     let now = chrono::Utc::now().to_rfc3339();
 
-    let mut by_vault: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut by_vault: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
     let mut files_written = 0usize;
     let mut errors: Vec<String> = Vec::new();
     for w in &changed {
@@ -3178,7 +3437,10 @@ async fn brain_write_back(app: tauri::AppHandle, vault: Option<String>) -> Resul
             let _ = db::update_brain_note_content(&conn, w.note_id, &w.new_raw, &w.new_hash, &now);
         }
         files_written += 1;
-        by_vault.entry(w.vault.clone()).or_default().push(w.rel_path.clone());
+        by_vault
+            .entry(w.vault.clone())
+            .or_default()
+            .push(w.rel_path.clone());
     }
 
     // Commit only the files noted wrote, per vault — the git ledger.
@@ -3243,7 +3505,13 @@ fn compute_personal_writes(app: &tauri::AppHandle) -> Result<Vec<PlannedWrite>, 
             }
             Err(_) => (
                 None,
-                brain::render_new_person_file(&p.name, &slug, p.relationship.as_deref(), &today, &inner,),
+                brain::render_new_person_file(
+                    &p.name,
+                    &slug,
+                    p.relationship.as_deref(),
+                    &today,
+                    &inner,
+                ),
                 true,
             ),
         };
@@ -3286,8 +3554,10 @@ async fn personal_export_preview(app: tauri::AppHandle) -> Result<Value, String>
 /// Apply personal export: write each person note and commit them as one batch.
 #[tauri::command]
 async fn personal_export(app: tauri::AppHandle) -> Result<Value, String> {
-    let changed: Vec<PlannedWrite> =
-        compute_personal_writes(&app)?.into_iter().filter(|w| w.changed).collect();
+    let changed: Vec<PlannedWrite> = compute_personal_writes(&app)?
+        .into_iter()
+        .filter(|w| w.changed)
+        .collect();
     let mut files_written = 0usize;
     let mut paths: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
@@ -3376,7 +3646,8 @@ fn set_byok_settings(
             openai_compatible_api_key,
             ..Default::default()
         },
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     if old_fingerprint.is_none() && count == 0 {
         let state = app.state::<Db>();
         let mut conn = state.0.lock().unwrap();
@@ -3414,8 +3685,14 @@ fn set_provider_settings(
     let count = db::embedding_count(&conn).map_err(|e| e.to_string())?;
     let current_fingerprint = db::embedding_fingerprint(&conn).map_err(|e| e.to_string())?;
     drop(conn);
-    if count > 0 && current_fingerprint.as_deref() != Some(&target_fingerprint) && !confirm_embedding_rebuild {
-        return Err("EMBEDDING_REBUILD_REQUIRED: Changing profiles requires rebuilding semantic search.".into(),);
+    if count > 0
+        && current_fingerprint.as_deref() != Some(&target_fingerprint)
+        && !confirm_embedding_rebuild
+    {
+        return Err(
+            "EMBEDDING_REBUILD_REQUIRED: Changing profiles requires rebuilding semantic search."
+                .into(),
+        );
     }
     provider::update(
         &dir,
@@ -3471,8 +3748,13 @@ async fn test_provider() -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn list_byok_models(provider: provider::ProviderId, base_url: String,) -> Result<Vec<String>, String> {
-    provider::list_byok_models(provider, base_url).await.map_err(|e| e.to_string())
+async fn list_byok_models(
+    provider: provider::ProviderId,
+    base_url: String,
+) -> Result<Vec<String>, String> {
+    provider::list_byok_models(provider, base_url)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3485,10 +3767,19 @@ async fn test_byok_settings(
     openai_compatible_api_key: Option<String>,
 ) -> Result<Value, String> {
     let results = provider::test_byok_candidate(
-        settings, openai_api_key, gemini_api_key, anthropic_api_key,
-        groq_api_key, openai_compatible_api_key,
-    ).await;
-    if results.to_string().contains("failed:") { Err(results.to_string()) } else { Ok(results) }
+        settings,
+        openai_api_key,
+        gemini_api_key,
+        anthropic_api_key,
+        groq_api_key,
+        openai_compatible_api_key,
+    )
+    .await;
+    if results.to_string().contains("failed:") {
+        Err(results.to_string())
+    } else {
+        Ok(results)
+    }
 }
 
 // ── Google Calendar sync (one-way push to a dedicated "noted" calendar) ──────
@@ -3499,7 +3790,11 @@ fn gcal_auth_status() -> Value {
 
 /// Store the user's OAuth client (Desktop-app id + secret) before connecting.
 #[tauri::command]
-fn gcal_set_client(app: tauri::AppHandle, client_id: String, client_secret: String,) -> Result<(), String> {
+fn gcal_set_client(
+    app: tauri::AppHandle,
+    client_id: String,
+    client_secret: String,
+) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     gcal::save_client(&dir, client_id.trim(), client_secret.trim()).map_err(|e| e.to_string())
 }
@@ -3524,31 +3819,46 @@ fn gcal_disconnect(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn gcal_clear_day(app: tauri::AppHandle, event_date: Option<String>) -> Result<u32, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let date = event_date.filter(|s| !s.trim().is_empty()).unwrap_or_else(today_local);
-    gcal::clear_day(&dir, &date).await.map_err(|e| e.to_string())
+    let date = event_date
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(today_local);
+    gcal::clear_day(&dir, &date)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Push a day's schedule to Google Calendar. Defaults to today (Eastern).
 #[tauri::command]
 async fn gcal_sync(app: tauri::AppHandle, event_date: Option<String>) -> Result<Value, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let date = event_date.filter(|s| !s.trim().is_empty()).unwrap_or_else(today_local);
+    let date = event_date
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(today_local);
     let blocks = {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
         db::schedule_blocks_for(&conn, &date).map_err(|e| e.to_string())?
     };
-    let report = gcal::sync(&dir, &date, blocks).await.map_err(|e| e.to_string())?;
+    let report = gcal::sync(&dir, &date, blocks)
+        .await
+        .map_err(|e| e.to_string())?;
     serde_json::to_value(report).map_err(|e| e.to_string())
 }
 
 /// Read a day's events back from every (non-noted) Google calendar, so the Today
 /// empty state can show what the user already has planned. Defaults to today.
 #[tauri::command]
-async fn gcal_list_events(app: tauri::AppHandle, event_date: Option<String>,) -> Result<Value, String> {
+async fn gcal_list_events(
+    app: tauri::AppHandle,
+    event_date: Option<String>,
+) -> Result<Value, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let date = event_date.filter(|s| !s.trim().is_empty()).unwrap_or_else(today_local);
-    let events = gcal::list_events(&dir, &date).await.map_err(|e| e.to_string())?;
+    let date = event_date
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(today_local);
+    let events = gcal::list_events(&dir, &date)
+        .await
+        .map_err(|e| e.to_string())?;
     serde_json::to_value(events).map_err(|e| e.to_string())
 }
 
@@ -3569,7 +3879,8 @@ fn gcal_set_calendar_enabled(
     enabled: bool,
 ) -> Result<Value, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    gcal::set_calendar_enabled(&dir, account.trim(), &calendar_id, enabled).map_err(|e| e.to_string())
+    gcal::set_calendar_enabled(&dir, account.trim(), &calendar_id, enabled)
+        .map_err(|e| e.to_string())
 }
 
 /// Re-pull every connected account's calendar list (new calendars, renames,
@@ -3577,7 +3888,9 @@ fn gcal_set_calendar_enabled(
 #[tauri::command]
 async fn gcal_refresh_calendars(app: tauri::AppHandle) -> Result<Value, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    gcal::refresh_calendars(&dir).await.map_err(|e| e.to_string())
+    gcal::refresh_calendars(&dir)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Pick which account the daily-schedule push targets. Returns auth status.
@@ -3773,7 +4086,10 @@ async fn process_pending_inner(app: &tauri::AppHandle) -> Result<(), String> {
                     .event_date
                     .clone()
                     .filter(|s| !s.trim().is_empty())
-                    .or_else(|| { env.get("event_date").and_then(|d| d.as_str()).map(String::from)
+                    .or_else(|| {
+                        env.get("event_date")
+                            .and_then(|d| d.as_str())
+                            .map(String::from)
                     })
                     .unwrap_or_else(today_local);
                 // The envelope's entries/entities already match SaveArgs' shape
@@ -3810,13 +4126,39 @@ async fn process_pending_inner(app: &tauri::AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    if shortcut == &assistant_shortcut() && event.state() == ShortcutState::Pressed
+                    {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
+                        let _ = app.emit("assistant-shortcut", ());
+                    }
+                })
+                .build(),
+        )
         .setup(|app| {
+            // Preview/Alpha builds may run alongside the installed app. Only
+            // the canonical app claims this system-wide shortcut so the two
+            // builds cannot silently steal it from one another.
+            if owns_assistant_shortcut(app.handle()) {
+                if let Err(e) = app.global_shortcut().register(assistant_shortcut()) {
+                    eprintln!("[noted] assistant shortcut unavailable: {e}");
+                }
+            }
+
             // Dark-glass chrome: native vibrancy behind the (transparent)
             // webview — the sidebar region lets it show through. Follows the
             // window's active state, so it flattens when unfocused.
             #[cfg(target_os = "macos")]
             if let Some(win) = app.get_webview_window("main") {
-                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState,};
+                use window_vibrancy::{
+                    apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState,
+                };
                 if let Err(e) = apply_vibrancy(
                     &win,
                     NSVisualEffectMaterial::HudWindow,
@@ -3873,7 +4215,11 @@ pub fn run() {
                 for (vault, root) in brain::default_vault_roots() {
                     // The personal vault is noted-canonical (export target); work
                     // vaults are Obsidian-canonical (import source).
-                    let dir = if vault == "personal" { "export" } else { "import" };
+                    let dir = if vault == "personal" {
+                        "export"
+                    } else {
+                        "import"
+                    };
                     let _ = db::upsert_brain_vault(&conn, &vault, &root.to_string_lossy(), dir);
                 }
             }
@@ -3888,7 +4234,11 @@ pub fn run() {
                         r.imported,
                         r.entities_created,
                         r.mentions_added,
-                        if r.errors.is_empty() { String::new() } else { format!(", {} errors", r.errors.len()) },
+                        if r.errors.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", {} errors", r.errors.len())
+                        },
                     );
                 }
                 // Embed any notes (incl. freshly imported brain notes) so chat /
@@ -4010,6 +4360,7 @@ pub fn run() {
             list_note_folders,
             create_note_folder,
             rename_note_folder,
+            move_note_folder,
             delete_note_folder,
             file_note,
             chat,

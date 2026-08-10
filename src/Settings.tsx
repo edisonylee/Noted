@@ -6,6 +6,7 @@ import { api, isDesktop, type BrainVaultStatus, type ByokConfig, type CloudProvi
 import { ThemesSettings } from "./ThemesSettings";
 import { TranscriptVocabularySettings } from "./TranscriptVocabularySettings";
 import { releaseProfile } from "./releaseProfile";
+import { SystemSettingsPanel } from "./SystemSettings";
 
 // Live connection status, shown as a persistent badge so "is Gemini actually
 // reachable?" is never a mystery — checked on open and after every save/test.
@@ -23,7 +24,7 @@ type SettingsSection = "models" | "assistant" | "themes" | "calendar" | "vaults"
 // Rendered two ways: `page` (desktop — a real Settings view with a section
 // nav) or as the compact modal (mobile).
 export function SettingsModal({ onClose, page = false }: { onClose: () => void; page?: boolean }) {
-  const [section, setSection] = useState<SettingsSection>("models");
+  const [section, setSection] = useState<SettingsSection | "system">("system");
   const [savedHint, setSavedHint] = useState(false);
   const [s, setS] = useState<ProviderSettings | null>(null);
   const [mode, setMode] = useState<ProviderMode>("local");
@@ -581,6 +582,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   );
 
   const sections = [
+    { id: "system", label: "System", description: "Time zone and regional behavior", icon: CalendarDays },
     { id: "models", label: "Models", description: "Intelligence and providers", icon: Laptop },
     { id: "assistant", label: "Assistant", description: "Chat and keyboard shortcut", icon: MessageCircle },
     { id: "themes", label: "Appearance", description: "Theme and color mode", icon: Palette },
@@ -589,7 +591,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
     { id: "meetings", label: "Meetings", description: "Recording and meeting notes", icon: AudioLines },
     { id: "vocabulary", label: "Vocabulary", description: "Recognition and corrections", icon: BookType },
   ] satisfies Array<{
-    id: SettingsSection;
+    id: SettingsSection | "system";
     label: string;
     description: string;
     icon: typeof Laptop;
@@ -614,6 +616,8 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
         ))}
       </nav>
       <div className="settings-body" data-section={section}>
+        {section === "system" && <SystemSettingsPanel />}
+
         {section === "models" && (
           <>
         <h3>Models</h3>

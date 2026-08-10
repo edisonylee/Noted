@@ -38,7 +38,7 @@ pub struct Active {
     /// Bundle id of the app whose mic use triggered this recording (mic-detect
     /// starts only) — auto-stop watches for it releasing the mic.
     pub source_bundle: Option<String>,
-    /// Scheduled end (minutes from Eastern midnight) + day, when calendar-born.
+    /// Scheduled end (minutes from the configured-zone midnight) + day, when calendar-born.
     pub event_end_min: Option<i64>,
     pub event_date: Option<String>,
     /// True from the moment stop() is accepted until the drain finishes. The

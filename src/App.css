@@ -1255,6 +1255,8 @@ button.today-todo-check:hover:not(:disabled) { border-color: var(--ink-soft); tr
 .field-saved { font-style: normal; font-size: 10.5px; font-weight: 540; text-transform: uppercase; letter-spacing: 0.04em; color: var(--accent); background: rgba(var(--accent-rgb), 0.12); padding: 1px 6px; border-radius: 99px; }
 .field input { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; color: var(--ink); background: var(--surface-2); border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm); padding: 9px 11px; transition: border-color var(--duration-fast) var(--ease); }
 .field input:focus { outline: none; border-color: var(--accent); }
+.system-settings-fields .field select { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; color: var(--ink); background: var(--surface-2); border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm); padding: 9px 11px; }
+.system-settings-fields .field select:focus { outline: none; border-color: var(--accent); }
 .field-hint { font-size: 11.5px; color: var(--faint); line-height: 1.45; }
 .field-hint a { color: var(--accent); text-decoration: none; }
 .field-hint a:hover { text-decoration: underline; }
@@ -2496,6 +2498,8 @@ a.cal-btn { text-decoration: none; }
 .settings-body { width: 100%; min-width: 0; }
 .settings-body h3 { margin: 0 0 6px; font-size: 16px; font-weight: 580; letter-spacing: -0.01em; }
 .settings-body .settings-actions .field-hint { display: inline-flex; align-items: center; gap: 4px; color: var(--good); margin-right: auto; }
+.settings-body .settings-actions .settings-error { color: var(--bad); }
+.system-settings-fields { gap: 0; margin-top: 8px; }
 .assistant-settings { gap: 0; margin-top: 8px; }
 .assistant-shortcut-row {
   display: flex; align-items: center; justify-content: space-between; gap: 20px;

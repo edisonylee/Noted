@@ -170,7 +170,7 @@ mod tests {
 }
 
 fn now_min() -> i64 {
-    let now = crate::now_eastern();
+    let now = crate::now_local();
     (chrono::Timelike::hour(&now) * 60 + chrono::Timelike::minute(&now)) as i64
 }
 

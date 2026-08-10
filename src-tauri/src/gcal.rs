@@ -55,11 +55,8 @@ const CAL_BASE: &str = "https://www.googleapis.com/calendar/v3";
 const SCOPE: &str = "https://www.googleapis.com/auth/calendar";
 const CAL_SUMMARY: &str = "noted"; // the dedicated calendar's title
 
-/// Schedule blocks are stored (and displayed) in Eastern wall-clock time — see
-/// `today_local()` in lib.rs. Calendar datetimes must use the same zone so a
-/// "9:00" block lands at 9:00 Eastern with the correct DST offset, not the
-/// machine's local zone.
-const TZ: chrono_tz::Tz = chrono_tz::America::New_York;
+/// Calendar datetimes use the same user-selected zone as `today_local()` in
+/// lib.rs, so a "9:00" block stays at 9:00 in the app across DST changes.
 
 // ── Config ──────────────────────────────────────────────────────────────────
 fn default_true() -> bool {
@@ -980,7 +977,7 @@ fn parse_hhmm(s: &str) -> Result<i64> {
     Ok(h * 60 + m)
 }
 
-/// RFC3339 (with Eastern offset) for `event_date` at midnight + `minutes`.
+/// RFC3339 (with the configured zone's offset) for `event_date` at midnight + `minutes`.
 /// Minutes ≥ 1440 roll into the next day (handles cross-midnight blocks).
 fn rfc3339_from_minutes(event_date: &str, minutes: i64) -> Result<String> {
     let d = NaiveDate::parse_from_str(event_date, "%Y-%m-%d")?;
@@ -990,11 +987,13 @@ fn rfc3339_from_minutes(event_date: &str, minutes: i64) -> Result<String> {
         + chrono::Duration::minutes(minutes);
     // Spring-forward gaps / fall-back ambiguity: nudge forward an hour so we
     // always get a concrete instant rather than failing.
-    let dt = TZ
+    let time_zone = crate::system_settings::time_zone();
+    let dt = time_zone
         .from_local_datetime(&naive)
         .single()
         .or_else(|| {
-            TZ.from_local_datetime(&(naive + chrono::Duration::hours(1)))
+            time_zone
+                .from_local_datetime(&(naive + chrono::Duration::hours(1)))
                 .single()
         })
         .ok_or_else(|| anyhow!("invalid local time"))?;
@@ -1349,7 +1348,10 @@ fn map_event(it: &Value, cal: &GcalCalendar, account: &str) -> Option<Value> {
     });
     match it.get("start").and_then(|s| s.get("dateTime")).and_then(|s| s.as_str()) {
         Some(sdt) => {
-            let s = chrono::DateTime::parse_from_rfc3339(sdt).ok()?.with_timezone(&TZ);
+            let time_zone = crate::system_settings::time_zone();
+            let s = chrono::DateTime::parse_from_rfc3339(sdt)
+                .ok()?
+                .with_timezone(&time_zone);
             let start_min = (s.hour() * 60 + s.minute()) as i64;
             let end_min = it
                 .get("end")
@@ -1357,7 +1359,7 @@ fn map_event(it: &Value, cal: &GcalCalendar, account: &str) -> Option<Value> {
                 .and_then(|e| e.as_str())
                 .and_then(|edt| chrono::DateTime::parse_from_rfc3339(edt).ok())
                 .map(|e| {
-                    let e = e.with_timezone(&TZ);
+                    let e = e.with_timezone(&time_zone);
                     let days = (e.date_naive() - s.date_naive()).num_days();
                     days * 1440 + (e.hour() * 60 + e.minute()) as i64
                 })
@@ -1727,10 +1729,11 @@ pub async fn remove_event(dir: &Path, account: &str, calendar_id: &str, event_id
 }
 
 // ── Read-back (Today empty state) ─────────────────────────────────────────────
-/// "2026-06-05T09:30:00-04:00" → "09:30" in Eastern wall-clock. None if unparseable.
+/// Convert an RFC3339 instant to wall-clock "HH:MM" in the configured zone.
 fn hhmm_from_rfc3339(s: &str) -> Option<String> {
     let dt = chrono::DateTime::parse_from_rfc3339(s).ok()?;
-    Some(dt.with_timezone(&TZ).format("%H:%M").to_string())
+    let time_zone = crate::system_settings::time_zone();
+    Some(dt.with_timezone(&time_zone).format("%H:%M").to_string())
 }
 
 /// True if the signed-in user has declined this event (so we hide it).
@@ -1753,7 +1756,7 @@ fn is_declined(it: &Value) -> bool {
 /// `start: null, all_day: true`.
 /// Each item: `{ task, start: "HH:MM"|null, end: "HH:MM"|null, all_day, calendar }`.
 pub async fn list_events(dir: &Path, event_date: &str) -> Result<Vec<Value>> {
-    // Day window in Eastern wall-clock — matches how blocks are stored/displayed.
+    // Day window in the configured wall clock — matches stored/displayed blocks.
     let time_min = rfc3339_from_minutes(event_date, 0)?;
     let time_max = rfc3339_from_minutes(event_date, 1440)?;
 

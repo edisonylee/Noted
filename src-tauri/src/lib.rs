@@ -10,6 +10,7 @@ pub mod phone;
 pub mod pipeline;
 pub mod provider;
 pub mod release_profile;
+pub mod system_settings;
 pub mod themes;
 pub mod voice;
 
@@ -30,19 +31,15 @@ fn owns_assistant_shortcut(app: &tauri::AppHandle) -> bool {
     app.config().identifier == PRIMARY_APP_IDENTIFIER
 }
 
-/// The app's fixed timezone. "Today" is always an Eastern calendar day, DST-aware
-/// (EST↔EDT handled by the tz database), regardless of the machine's own timezone.
-const APP_TZ: chrono_tz::Tz = chrono_tz::America::New_York;
-
-/// Current instant as Eastern wall-clock time.
-fn now_eastern() -> chrono::DateTime<chrono_tz::Tz> {
-    chrono::Utc::now().with_timezone(&APP_TZ)
+/// Current instant in the user's configured time zone.
+fn now_local() -> chrono::DateTime<chrono_tz::Tz> {
+    let time_zone = system_settings::time_zone();
+    chrono::Utc::now().with_timezone(&time_zone)
 }
 
-/// Eastern calendar date (YYYY-MM-DD) — the user's "today", not UTC, not the
-/// machine's local zone.
+/// Calendar date (YYYY-MM-DD) in the user's configured time zone.
 fn today_local() -> String {
-    now_eastern().date_naive().to_string()
+    now_local().date_naive().to_string()
 }
 
 /// L2-normalize a vector so the vec0 default L2 distance ranks like cosine.
@@ -65,6 +62,20 @@ fn normalize(mut v: Vec<f32>) -> Vec<f32> {
 async fn theme_state(app: tauri::AppHandle) -> Result<Value, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     serde_json::to_value(themes::read_state(&dir)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn system_settings_get() -> Result<system_settings::SystemSettings, String> {
+    Ok(system_settings::get())
+}
+
+#[tauri::command]
+async fn system_settings_set(
+    app: tauri::AppHandle,
+    time_zone: String,
+) -> Result<system_settings::SystemSettings, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    system_settings::set_time_zone(&dir, &time_zone).map_err(|e| e.to_string())
 }
 
 /// User-imported theme packs. Built-ins ship with the frontend and are not
@@ -788,7 +799,7 @@ async fn file_note(
 #[tauri::command]
 async fn generate_recap(app: tauri::AppHandle, period: String) -> Result<Value, String> {
     let state = app.state::<Db>();
-    let today = now_eastern().date_naive();
+    let today = now_local().date_naive();
     let (start, end) = match period.as_str() {
         "week" => (
             (today - chrono::Duration::days(6)).to_string(),
@@ -931,7 +942,7 @@ pub fn recent_completed_days(today: chrono::NaiveDate, n: i64) -> Vec<String> {
 /// this is lazy catch-up): the last few finished days + the last finished
 /// calendar week (Mon–Sun). Idempotent — `recap_period` skips ones that exist.
 async fn auto_backfill_recaps(app: &tauri::AppHandle) {
-    let today = now_eastern().date_naive();
+    let today = now_local().date_naive();
     for d in recent_completed_days(today, 3) {
         let _ = recap_period(app, "day", &d, &d, false).await;
     }
@@ -1735,7 +1746,7 @@ async fn export_db(app: tauri::AppHandle) -> Result<String, String> {
     if !dest_dir.exists() {
         dest_dir = std::path::PathBuf::from(&home);
     }
-    let ts = now_eastern().format("%Y%m%d-%H%M%S");
+    let ts = now_local().format("%Y%m%d-%H%M%S");
     let dest = dest_dir.join(format!("noted-backup-{ts}.db"));
     std::fs::copy(&db_path, &dest).map_err(|e| e.to_string())?;
     Ok(dest.to_string_lossy().to_string())
@@ -4171,6 +4182,9 @@ pub fn run() {
 
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
+            // Load the user's calendar-day boundary before any capture,
+            // database migration, meeting, or calendar work computes "today".
+            system_settings::init(&dir);
             // Provider mode must be known before the DB seeds the legacy
             // embedding-space marker.
             provider::init(&dir);
@@ -4340,6 +4354,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             theme_state,
+            system_settings_get,
+            system_settings_set,
             theme_list,
             theme_save,
             theme_activate,

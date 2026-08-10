@@ -3,7 +3,8 @@ import ReactDOM from "react-dom/client";
 import "@fontsource-variable/geist";
 import App from "./App";
 import { RecordPrompt } from "./RecordPrompt";
-import { isDesktop } from "./api";
+import { api, isDesktop } from "./api";
+import { configureAppTimeZone } from "./day";
 import { ThemeProvider } from "./useTheme";
 import "./App.css";
 
@@ -36,8 +37,21 @@ const isPromptWindow = (() => {
 // The phone browser keeps solid backgrounds.
 if (isDesktop) document.body.classList.add("vibrant");
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <ThemeProvider>{isPromptWindow ? <RecordPrompt /> : <App />}</ThemeProvider>
-  </React.StrictMode>,
-);
+async function start() {
+  if (!isPromptWindow) {
+    try {
+      const settings = await api.systemSettingsGet();
+      configureAppTimeZone(settings.resolvedTimeZone);
+    } catch {
+      // Offline phone sessions use the last resolved zone cached by day.ts.
+    }
+  }
+
+  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+    <React.StrictMode>
+      <ThemeProvider>{isPromptWindow ? <RecordPrompt /> : <App />}</ThemeProvider>
+    </React.StrictMode>,
+  );
+}
+
+void start();

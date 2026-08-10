@@ -569,6 +569,11 @@ export type Recap = {
 };
 export type RecapRow = Recap & { id: number; created_at: string };
 export type PhoneInfo = { url: string; lan_url: string; token: string; port: number };
+export type SystemSettings = {
+  timeZone: string;
+  resolvedTimeZone: string;
+  systemTimeZone: string;
+};
 
 export type TrendRow = { date: string; label: string; values: Record<string, number> };
 export type Trends = {
@@ -582,6 +587,9 @@ export type Trends = {
 
 export const api = {
   health: () => invoke<Health>("health"),
+  systemSettingsGet: () => invoke<SystemSettings>("system_settings_get"),
+  systemSettingsSet: (timeZone: string) =>
+    invoke<SystemSettings>("system_settings_set", { timeZone }),
   categorize: (text: string) => invoke<Envelope>("categorize_note", { text }),
   categorizePhoto: (imageBase64: string) =>
     invoke<Envelope>("categorize_photo", { imageBase64 }),

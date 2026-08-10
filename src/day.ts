@@ -1,12 +1,44 @@
-// All "today" / "now" reasoning runs in the app's fixed timezone (Eastern), so
-// days are computed the same way no matter where the user's machine is set —
-// and DST (EST↔EDT) is handled automatically by the platform's tz database.
-// This mirrors the Rust `APP_TZ` (America/New_York) on the backend.
-export const APP_TZ = "America/New_York";
+// All "today" / "now" reasoning uses one resolved IANA time zone. The backend
+// owns the persisted preference; this cache keeps first paint and offline phone
+// sessions consistent with the last resolved value.
+const TIME_ZONE_CACHE_KEY = "noted-resolved-time-zone";
 
-// Eastern wall-clock parts for an instant (default: now). hour12:false can
+function validTimeZone(value: string | null | undefined): value is string {
+  if (!value) return false;
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function initialTimeZone(): string {
+  try {
+    const cached = localStorage.getItem(TIME_ZONE_CACHE_KEY);
+    if (validTimeZone(cached)) return cached;
+  } catch {
+    // Storage can be unavailable in restricted browser contexts.
+  }
+  const system = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return validTimeZone(system) ? system : "America/New_York";
+}
+
+export let APP_TZ = initialTimeZone();
+
+export function configureAppTimeZone(timeZone: string): void {
+  if (!validTimeZone(timeZone)) return;
+  APP_TZ = timeZone;
+  try {
+    localStorage.setItem(TIME_ZONE_CACHE_KEY, timeZone);
+  } catch {
+    // The in-memory setting still applies for this session.
+  }
+}
+
+// Configured-zone wall-clock parts for an instant (default: now). hour12:false can
 // surface "24" at midnight in some engines, so callers mod by 24.
-function easternParts(d: Date) {
+function localParts(d: Date) {
   const p = new Intl.DateTimeFormat("en-CA", {
     timeZone: APP_TZ,
     year: "numeric",
@@ -20,21 +52,21 @@ function easternParts(d: Date) {
   return { y: g("year"), mo: g("month"), d: g("day"), h: g("hour"), mi: g("minute") };
 }
 
-// "YYYY-MM-DD" for the given instant in Eastern. The canonical "today".
+// "YYYY-MM-DD" for the given instant in the configured zone. The canonical "today".
 export function easternDay(d: Date = new Date()): string {
-  const { y, mo, d: dd } = easternParts(d);
+  const { y, mo, d: dd } = localParts(d);
   return `${y}-${mo}-${dd}`;
 }
 
-// Minutes since Eastern midnight — for positioning the live "now" marker.
+// Minutes since midnight in the configured zone — for the live "now" marker.
 export function easternMinutes(d: Date = new Date()): number {
-  const { h, mi } = easternParts(d);
+  const { h, mi } = localParts(d);
   return (Number(h) % 24) * 60 + Number(mi);
 }
 
-// Hour 0–23 in Eastern — for time-of-day greetings.
+// Hour 0–23 in the configured zone — for time-of-day greetings.
 export function easternHour(d: Date = new Date()): number {
-  return Number(easternParts(d).h) % 24;
+  return Number(localParts(d).h) % 24;
 }
 
 // Whole-day difference (a − b) between two YYYY-MM-DD strings. Anchored at UTC

@@ -232,6 +232,12 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
     let a = app.clone();
     match cmd {
         "theme_state" => crate::theme_state(a).await,
+        "system_settings_get" => crate::system_settings_get()
+            .await
+            .and_then(|settings| serde_json::to_value(settings).map_err(|e| e.to_string())),
+        "system_settings_set" => crate::system_settings_set(a, sarg(b, "timeZone"))
+            .await
+            .and_then(|settings| serde_json::to_value(settings).map_err(|e| e.to_string())),
         "theme_list" => crate::theme_list(a).await,
         "theme_save" => {
             let pack: crate::themes::ThemePack =

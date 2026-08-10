@@ -3825,7 +3825,7 @@ fn gcal_disconnect(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Clear one day: delete only the events noted pushed for that date from its own
-/// calendar. Defaults to today (Eastern). Returns the count deleted. Leaves the
+/// calendar. Defaults to today in the configured time zone. Returns the count deleted. Leaves the
 /// calendar, other days, other calendars, and the session untouched.
 #[tauri::command]
 async fn gcal_clear_day(app: tauri::AppHandle, event_date: Option<String>) -> Result<u32, String> {
@@ -3838,7 +3838,7 @@ async fn gcal_clear_day(app: tauri::AppHandle, event_date: Option<String>) -> Re
         .map_err(|e| e.to_string())
 }
 
-/// Push a day's schedule to Google Calendar. Defaults to today (Eastern).
+/// Push a day's schedule to Google Calendar. Defaults to today in the configured time zone.
 #[tauri::command]
 async fn gcal_sync(app: tauri::AppHandle, event_date: Option<String>) -> Result<Value, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;

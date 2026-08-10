@@ -339,13 +339,13 @@ export type CalEvent = {
   calendar: string;
 };
 // One event in the Calendar view's range feed. Timed events position by
-// start_min/end_min — minutes from `date`'s Eastern midnight, where end_min
+// start_min/end_min — minutes from `date`'s configured-zone midnight, where end_min
 // > 1440 means it crosses midnight. All-day events carry `end_date` instead
 // (Google's EXCLUSIVE end day).
 export type RangeEvent = {
   id: string;
   title: string;
-  date: string; // YYYY-MM-DD start day (Eastern)
+  date: string; // YYYY-MM-DD start day in the configured zone
   end_date: string | null;
   start_min: number | null;
   end_min: number | null;

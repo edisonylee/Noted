@@ -1278,7 +1278,7 @@ fn conference_link(it: &Value) -> Option<String> {
     None
 }
 /// One Google event → the Calendar view's shape. Timed events carry `date`
-/// (start day, Eastern) plus `start_min`/`end_min` in minutes from that day's
+/// (start day, configured zone) plus `start_min`/`end_min` in minutes from that day's
 /// midnight — `end_min` exceeds 1440 when the event crosses midnight. All-day
 /// events instead carry `end_date`, Google's EXCLUSIVE end day. Returns None
 /// for cancelled ghosts.

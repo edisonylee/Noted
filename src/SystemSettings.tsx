@@ -57,11 +57,13 @@ export function SystemSettingsPanel() {
       .catch((reason) => setError(String(reason)));
   }, []);
 
-  async function saveTimeZone() {
+  async function saveTimeZone(nextPreference: string) {
+    setTimeZonePreference(nextPreference);
     setSaving(true);
     setError(null);
     try {
-      const next = await api.systemSettingsSet(timeZonePreference);
+      const next = await api.systemSettingsSet(nextPreference);
+      setSettings(next);
       configureAppTimeZone(next.resolvedTimeZone);
       window.location.reload();
     } catch (reason) {
@@ -89,8 +91,7 @@ export function SystemSettingsPanel() {
             <select
               value={timeZonePreference}
               onChange={(event) => {
-                setTimeZonePreference(event.target.value);
-                setError(null);
+                void saveTimeZone(event.target.value);
               }}
               disabled={!settings || saving}
             >
@@ -115,25 +116,16 @@ export function SystemSettingsPanel() {
             </select>
             {settings && (
               <span className="field-hint">
-                Current Noted time: {timeZonePreview(
+                {saving ? "Saving time zone…" : <>Current Noted time: {timeZonePreview(
                   timeZonePreference === "system" ? settings.systemTimeZone : timeZonePreference
-                )}
+                )}</>}
               </span>
             )}
           </label>
         </section>
       </div>
 
-      <div className="settings-actions">
-        {error && <span className="field-hint settings-error">{error}</span>}
-        <button
-          className="primary"
-          onClick={saveTimeZone}
-          disabled={!settings || saving || timeZonePreference === settings.timeZone}
-        >
-          {saving ? "Saving…" : "Save time zone"}
-        </button>
-      </div>
+      {error && <div className="settings-actions"><span className="field-hint settings-error">{error}</span></div>}
     </>
   );
 }

@@ -329,14 +329,20 @@ export type SyncReport = {
   deleted: number; // events for blocks removed since the last sync
   errors: string[];
 };
-// One event read back from Google Calendar for the Today empty state. Times are
-// "HH:MM" Eastern wall-clock; all-day events have start/end null and all_day true.
+// One event read back from Google Calendar for Today. Times are "HH:MM" in the configured zone
+// wall-clock; all-day events have start/end null and all_day true. Meeting and
+// account metadata lets a uniquely matching schedule row join in one click.
 export type CalEvent = {
+  id: string;
   task: string;
   start: string | null;
   end: string | null;
   all_day: boolean;
   calendar: string;
+  calendar_id: string;
+  account: string;
+  meet_link: string | null;
+  html_link: string | null;
 };
 // One event in the Calendar view's range feed. Timed events position by
 // start_min/end_min — minutes from `date`'s configured-zone midnight, where end_min
@@ -575,6 +581,11 @@ export type SystemSettings = {
   systemTimeZone: string;
 };
 
+export type StoredImagePayload = {
+  dataBase64: string;
+  mimeType: string;
+};
+
 export type TrendRow = { date: string; label: string; values: Record<string, number> };
 export type Trends = {
   items_field: string | null;
@@ -598,6 +609,8 @@ export const api = {
   ocrPhoto: (imageBase64: string) => invoke<string>("ocr_photo", { imageBase64 }),
   saveImage: (imageBase64: string, ext: string) =>
     invoke<string>("save_image", { imageBase64, ext }),
+  loadImage: (path: string) =>
+    invoke<StoredImagePayload>("load_image", { path }),
   save: (args: {
     raw_text: string;
     source?: string;

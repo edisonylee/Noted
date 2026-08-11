@@ -15,7 +15,7 @@ pub mod themes;
 pub mod voice;
 
 use db::{Db, SaveInput};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
@@ -239,6 +239,26 @@ async fn categorize_photo(app: tauri::AppHandle, image_base64: String) -> Result
 
 /// Persist an uploaded image (base64) under app_data/images and return its path,
 /// so save_entry can reference it. `ext` is e.g. "png" | "jpg".
+const MAX_STORED_IMAGE_BYTES: usize = 25 * 1024 * 1024;
+
+fn stored_image_mime(ext: &str) -> Option<&'static str> {
+    match ext
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "heic" => Some("image/heic"),
+        "heif" => Some("image/heif"),
+        "avif" => Some("image/avif"),
+        _ => None,
+    }
+}
+
 #[tauri::command]
 async fn save_image(
     app: tauri::AppHandle,
@@ -249,21 +269,69 @@ async fn save_image(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(image_base64.as_bytes())
         .map_err(|e| e.to_string())?;
+    if bytes.is_empty() {
+        return Err("Image is empty".into());
+    }
+    if bytes.len() > MAX_STORED_IMAGE_BYTES {
+        return Err("Image is larger than 25 MB".into());
+    }
     let dir = app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("images");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let safe_ext = if ext.chars().all(|c| c.is_ascii_alphanumeric()) && !ext.is_empty() {
-        ext
-    } else {
-        "png".to_string()
-    };
+    let safe_ext = ext.trim().trim_start_matches('.').to_ascii_lowercase();
+    stored_image_mime(&safe_ext).ok_or_else(|| "Unsupported image format".to_string())?;
     let name = format!("{}.{}", chrono::Utc::now().timestamp_micros(), safe_ext);
     let path = dir.join(name);
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredImagePayload {
+    data_base64: String,
+    mime_type: String,
+}
+
+/// Read one editor image from Noted's managed image directory. The document
+/// stores only the local path; bytes are materialized in the webview at render
+/// time so task JSON stays small and the phone surface can use the same node.
+#[tauri::command]
+async fn load_image(app: tauri::AppHandle, path: String) -> Result<StoredImagePayload, String> {
+    use base64::Engine;
+
+    let images_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("images")
+        .canonicalize()
+        .map_err(|_| "Image storage is unavailable".to_string())?;
+    let requested = std::path::PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|_| "Image could not be found".to_string())?;
+    if !requested.starts_with(&images_dir) {
+        return Err("Image is outside Noted's managed storage".into());
+    }
+    let metadata = requested.metadata().map_err(|e| e.to_string())?;
+    if metadata.len() > MAX_STORED_IMAGE_BYTES as u64 {
+        return Err("Image is larger than 25 MB".into());
+    }
+    let ext = requested
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    let mime_type = stored_image_mime(ext)
+        .ok_or_else(|| "Unsupported image format".to_string())?
+        .to_string();
+    let bytes = std::fs::read(requested).map_err(|e| e.to_string())?;
+    Ok(StoredImagePayload {
+        data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        mime_type,
+    })
 }
 
 #[derive(Deserialize)]
@@ -4368,6 +4436,7 @@ pub fn run() {
             ocr_photo,
             categorize_photo,
             save_image,
+            load_image,
             save_entry,
             quick_capture,
             list_notes,

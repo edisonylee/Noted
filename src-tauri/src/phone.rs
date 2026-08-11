@@ -266,6 +266,9 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "save_image" => crate::save_image(a, sarg(b, "imageBase64"), sarg(b, "ext"))
             .await
             .map(|s| json!(s)),
+        "load_image" => crate::load_image(a, sarg(b, "path"))
+            .await
+            .map(|image| json!(image)),
         "save_entry" => {
             let args: crate::SaveArgs =
                 serde_json::from_value(varg(b, "args")).map_err(|e| e.to_string())?;

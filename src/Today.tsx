@@ -1,21 +1,74 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { CalendarCheck, CalendarDays, CalendarX, Camera, Check, Loader, Pencil, Plus, Trash2, X } from "lucide-react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
+import { CalendarCheck, CalendarDays, CalendarX, Camera, Check, ListTodo, Loader, Pencil, Plus, Trash2, Video, X } from "lucide-react";
 import { api, type CalEvent, type EntityCandidate, type NoteRow } from "./api";
 import { fileToImg, type Img } from "./image";
 import { APP_TZ, easternDay, easternMinutes } from "./day";
+import { joinUrl } from "./joinUrl";
+import { buildScheduleGrid, isCurrentInterval } from "./scheduleLayout";
+import { DocumentEditor } from "./editor/DocumentEditor";
+import {
+  TASK_DOCUMENT_VERSION,
+  countOpenDocumentTasks,
+  documentFingerprint,
+  documentPlainText,
+  extractDocumentTasks,
+  normalizeTaskDocument,
+  type DocumentTask,
+  type StructuredDocument,
+} from "./editor/document";
 
-type Block = {
+export type Block = {
   task: string;
   start?: string; // HH:MM (24h)
   end?: string; // HH:MM (24h)
   duration_min?: number;
 };
 
-type Todo = {
-  id: string;
-  text: string;
-  completed: boolean;
-};
+type Todo = DocumentTask;
+
+// Schedule blocks intentionally remain lightweight. Join behavior is resolved
+// from the live calendar feed so a stale meeting URL is never persisted into a
+// hand-edited day. Ambiguous duplicate events stay ordinary editable rows.
+function matchingCalendarEvent(block: Block, events: CalEvent[]): CalEvent | null {
+  const exact = events.filter(
+    (event) =>
+      !event.all_day &&
+      event.task.trim() === block.task.trim() &&
+      (event.start ?? "") === (block.start ?? "") &&
+      (!block.end || (event.end ?? "") === block.end)
+  );
+  if (exact.length === 1) return exact[0];
+
+  // Schedules created before configurable time zones stored Eastern wall-clock
+  // strings. Once the live calendar is available, a unique title is enough to
+  // reconnect that row to the same event and show its current-zone time. Keep
+  // duplicate titles ambiguous so we never silently bind the wrong meeting.
+  const titleMatches = events.filter(
+    (event) => !event.all_day && event.start && event.task.trim() === block.task.trim()
+  );
+  return titleMatches.length === 1 ? titleMatches[0] : null;
+}
+
+export function reconcileScheduleBlocks(blocks: Block[], events: CalEvent[]): Block[] {
+  return blocks.map((block) => {
+    const event = matchingCalendarEvent(block, events);
+    if (!event?.start) return block;
+    return {
+      ...block,
+      start: event.start,
+      ...(event.end ? { end: event.end } : {}),
+    };
+  });
+}
 
 // Minutes since midnight for an "HH:MM" string, or null if absent/unparseable.
 function toMinutes(hhmm?: string): number | null {
@@ -39,16 +92,14 @@ function fmtTime(hhmm?: string): string {
   return `${h12}:${String(m).padStart(2, "0")} ${ampm}`;
 }
 
-// A single-line time label: "10:40 AM", "8:30–10:30 AM" (shared meridiem), or
-// "11:40 AM–12:15 PM" when the range crosses noon.
+// Keep same-meridiem ranges compact while making the actual end unambiguous.
 function fmtRange(start?: string, end?: string): string {
-  const s = toMinutes(start);
-  if (s == null) return "";
-  if (!end) return fmtTime(start);
-  const e = toMinutes(end);
-  if (e == null) return fmtTime(start);
-  const sameHalf = s < 720 === e < 720; // both AM or both PM
-  if (sameHalf) return `${fmtTime(start).replace(/\s?(AM|PM)$/i, "")}–${fmtTime(end)}`;
+  const startMinutes = toMinutes(start);
+  const endMinutes = toMinutes(end);
+  if (startMinutes == null) return "";
+  if (endMinutes == null) return fmtTime(start);
+  const sameMeridiem = startMinutes < 720 === endMinutes < 720;
+  if (sameMeridiem) return `${fmtTime(start).replace(/\s?(AM|PM)$/i, "")}–${fmtTime(end)}`;
   return `${fmtTime(start)}–${fmtTime(end)}`;
 }
 
@@ -94,7 +145,7 @@ function buildTimed(task: string, start: number, end: number | null): { block: B
 // If a block lacks a usable start time, treat its task text as a raw schedule
 // line and recover start/end/duration the same way parseSchedule does — the
 // model sometimes fails to split a line, leaving the time inside `task`
-// ("□ 11:30-12:30 : Workout") so the block would otherwise fall to "Anytime".
+// ("□ 11:30-12:30 : Workout") so the block would otherwise remain untimed.
 // `prev` threads the monotonic cursor across blocks for am/pm inference.
 function salvageBlock(b: Block, prev: number): Block {
   if (toMinutes(b.start) != null) {
@@ -146,7 +197,7 @@ export function parseBlocks(data: Record<string, unknown> | null | undefined): B
     })
     // Drop empties and date-only header blocks. Filtering on load (not just on
     // parse) also cleans schedules saved before date-stripping existed, so a
-    // stored "June 4, 2026" stops showing up under "Anytime".
+    // stored "June 4, 2026" stops showing up as an untimed row.
     .filter((b) => b.task && !isDateOnly(b.task));
 }
 
@@ -177,10 +228,6 @@ export function parseTodos(data: Record<string, unknown> | null | undefined): To
       };
     })
     .filter((item): item is Todo => item != null);
-}
-
-function todoId(): string {
-  return globalThis.crypto?.randomUUID?.() ?? `todo-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 const isSchedule = (cat: string | null) => cat?.toLowerCase() === "schedule";
@@ -231,6 +278,27 @@ function blocksToText(blocks: Block[]): string {
       return `${time} ${b.task}`;
     })
     .join("\n");
+}
+
+// Prefill an existing schedule from structured, timed blocks only. In
+// particular, do not fall back to the note's raw text: task-only daily entries
+// store their checklist there, and treating that text as a schedule is what
+// allowed open tasks to leak into the builder.
+export function scheduleEditorSeed(blocks: Block[]): string {
+  return blocksToText(blocks.filter((block) => toMinutes(block.start) != null));
+}
+
+// Calendar-imported events are the only external source allowed to prefill a
+// new schedule. All-day events remain in Calendar because the schedule itself
+// requires a concrete start time.
+export function calendarEventsToScheduleBlocks(events: CalEvent[]): Block[] {
+  return events
+    .filter((event) => !event.all_day && event.task.trim() && toMinutes(event.start ?? undefined) != null)
+    .map((event) => ({
+      task: event.task,
+      start: event.start!,
+      ...(toMinutes(event.end ?? undefined) != null ? { end: event.end! } : {}),
+    }));
 }
 
 // Inline editing manipulates one explicit day, so order timed blocks by clock
@@ -313,7 +381,7 @@ const MONTH =
 
 // A line that is *only* a date ("Thursday, June 4th", "6/4/2026", "2026-06-04").
 // These ride along in photos to confirm the day — they're a sanity check, not a
-// task, so we drop them rather than parking them under "Anytime". We require a
+// task, so we drop them rather than parking them as untimed rows. We require a
 // real date signal (month/weekday/numeric date) AND that nothing survives once
 // the date pieces are stripped, so "dentist on the 4th" stays a task.
 function isDateOnly(line: string): boolean {
@@ -338,8 +406,8 @@ function isDateOnly(line: string): boolean {
 }
 
 // Turn a typed/transcribed schedule into ordered blocks — deterministic, no LLM.
-// Lines that start with a clock time become timed blocks; everything else is an
-// "Anytime" task. The whole point is reliability: this never hard-fails.
+// Lines that start with a clock time become timed blocks; everything else remains
+// untimed. The whole point is reliability: this never hard-fails.
 export function parseSchedule(text: string): Block[] {
   const blocks: Block[] = [];
   let prev = -1;
@@ -438,16 +506,12 @@ function ScheduleRowForm({
     if (!t) return;
     const parsedStart = parseTime12(start);
     const parsedEnd = parseTime12(end);
-    if (parsedStart == null) {
-      setTimeError({ field: "start", message: "Use a start time like 9:30 AM." });
+    if (!parsedStart) {
+      setTimeError({ field: "start", message: "Add a start time like 9:30 AM. Use Tasks for anything flexible." });
       return;
     }
     if (parsedEnd == null) {
       setTimeError({ field: "end", message: "Use an end time like 10:30 AM." });
-      return;
-    }
-    if (parsedEnd && !parsedStart) {
-      setTimeError({ field: "start", message: "Add a start time before the end time." });
       return;
     }
     if (parsedStart && parsedEnd && parsedStart === parsedEnd) {
@@ -493,7 +557,7 @@ function ScheduleRowForm({
     currentEndMinutes < currentStartMinutes;
 
   return (
-    <div className="today-block today-rowedit">
+    <div className="today-block today-rowedit" role="listitem">
       <div className="today-rowedit-times">
         <label className="today-timefield">
           <span>Start</span>
@@ -586,62 +650,18 @@ export function TodayView({
   notes,
   onSaved,
   onOpenSettings,
+  lead,
 }: {
   notes: NoteRow[];
   onSaved: () => void | Promise<void>;
   onOpenSettings?: () => void;
+  lead?: ReactNode;
 }) {
   // Re-render each minute so the "now" highlight stays accurate through the day.
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 60_000);
     return () => clearInterval(id);
-  }, []);
-
-  // Inline create/edit state — the schedule is made right here, not in Log.
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState("");
-  // Two-step inline confirm for "Clear today" — WKWebView silently swallows
-  // window.confirm() (returns false), so we arm/confirm in-app instead.
-  const [clearArmed, setClearArmed] = useState(false);
-  const [photo, setPhoto] = useState<Img | null>(null);
-  const [photoReading, setPhotoReading] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [editError, setEditError] = useState<string | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
-  const photoRequestRef = useRef(0);
-  const photoTextRef = useRef("");
-  const calWrapRef = useRef<HTMLDivElement>(null); // anchor for the calendar peek popover
-
-  // Inline row editing on the agenda: which block index is open, an "add new"
-  // flag, and a save-in-flight flag shared by both.
-  const [editIdx, setEditIdx] = useState<number | null>(null);
-  const [adding, setAdding] = useState(false);
-  const [rowBusy, setRowBusy] = useState(false);
-
-  // The checklist is intentionally separate from untimed schedule blocks:
-  // "Anytime" is still part of the agenda, while these are finishable tasks.
-  const [todoDraft, setTodoDraft] = useState("");
-  const [todoEditId, setTodoEditId] = useState<string | null>(null);
-  const [todoEditText, setTodoEditText] = useState("");
-  const [todoBusy, setTodoBusy] = useState(false);
-
-  // Google Calendar sync: whether we're connected, and the last sync's outcome.
-  const [gcalConnected, setGcalConnected] = useState<boolean | null>(null);
-  // Today's events pulled back from Google Calendar — shown in the empty state
-  // as a starting point, and on demand via the header "Calendar" peek button.
-  const [calEvents, setCalEvents] = useState<CalEvent[] | null>(null);
-  const [calLoading, setCalLoading] = useState(false);
-  const [calOpen, setCalOpen] = useState(false); // peek popover open?
-  const [sync, setSync] = useState<{
-    state: "idle" | "syncing" | "clearing" | "ok" | "err";
-    msg: string;
-  }>({
-    state: "idle",
-    msg: "",
-  });
-  useEffect(() => {
-    api.gcalAuthStatus().then((st) => setGcalConnected(st.connected)).catch(() => setGcalConnected(false));
   }, []);
 
   const today = easternDay(now);
@@ -659,13 +679,172 @@ export function TodayView({
   );
   const entry = note?.entries.find((e) => isSchedule(e.category));
   const blocks = parseBlocks(entry?.data);
-  const todos = parseTodos(entry?.data);
-  // Only timed blocks can become calendar events; "Anytime" tasks are skipped.
+  const storedTodos = parseTodos(entry?.data);
+  const incomingTaskDocument = normalizeTaskDocument(entry?.data?.task_doc, storedTodos);
+  const incomingTaskFingerprint = documentFingerprint(incomingTaskDocument);
+
+  // Inline create/edit state — the schedule is made right here, not in Log.
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  // Two-step inline confirm for "Clear today" — WKWebView silently swallows
+  // window.confirm() (returns false), so we arm/confirm in-app instead.
+  const [clearArmed, setClearArmed] = useState(false);
+  const [photo, setPhoto] = useState<Img | null>(null);
+  const [photoReading, setPhotoReading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const photoRequestRef = useRef(0);
+  const photoTextRef = useRef("");
+  const calWrapRef = useRef<HTMLDivElement>(null); // anchor for the calendar peek popover
+  const addWrapRef = useRef<HTMLDivElement>(null);
+
+  // Inline row editing on the agenda: which block index is open, an "add new"
+  // flag, and a save-in-flight flag shared by both.
+  const [editIdx, setEditIdx] = useState<number | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [rowBusy, setRowBusy] = useState(false);
+
+  // Tasks use the same structured document shape that future standalone notes
+  // can reuse. Older todo arrays are lifted into a task-list document in memory
+  // and written back in both shapes the first time the document changes.
+  const [taskDocument, setTaskDocument] = useState<StructuredDocument>(() => incomingTaskDocument);
+  const [taskSaveState, setTaskSaveState] = useState<"idle" | "dirty" | "saving" | "saved" | "error">("idle");
+  const taskDocumentRef = useRef(taskDocument);
+  const taskIncomingFingerprintRef = useRef(incomingTaskFingerprint);
+  const taskChangeRevisionRef = useRef(0);
+  const taskPersistedRevisionRef = useRef(0);
+  const taskSaveTimerRef = useRef<number | null>(null);
+  const taskSaveInFlightRef = useRef(false);
+  const taskSavePendingRef = useRef(false);
+  const taskAwaitingEntryRef = useRef(false);
+  const taskEntryIdRef = useRef<number | null>(entry?.id ?? null);
+  const taskBlocksRef = useRef(blocks);
+  const taskTodayRef = useRef(today);
+  const taskOnSavedRef = useRef(onSaved);
+  const taskFlushRef = useRef<() => Promise<void>>(async () => {});
+  const taskMountedRef = useRef(true);
+  const todoDateRef = useRef(today);
+  const agendaRef = useRef<HTMLDivElement>(null);
+  const [agendaHeight, setAgendaHeight] = useState<number | null>(null);
+  // Keep the accepted desktop planner composition intact on first open: the
+  // checklist is docked beside the schedule. Compact/mobile layouts still
+  // begin with it closed so the schedule keeps the full viewport.
+  const [todoOpen, setTodoOpen] = useState(
+    () => typeof window !== "undefined" && window.matchMedia?.("(min-width: 840px)").matches === true
+  );
+  const [todoError, setTodoError] = useState<string | null>(null);
+  const todoToggleRef = useRef<HTMLButtonElement>(null);
+
+  taskDocumentRef.current = taskDocument;
+  taskBlocksRef.current = blocks;
+  taskTodayRef.current = today;
+  taskOnSavedRef.current = onSaved;
+  if (entry?.id != null) {
+    taskEntryIdRef.current = entry.id;
+    taskAwaitingEntryRef.current = false;
+  } else if (!taskAwaitingEntryRef.current) {
+    taskEntryIdRef.current = null;
+  }
+
+  const todos = extractDocumentTasks(taskDocument);
+  const remainingTodos = countOpenDocumentTasks(taskDocument);
+  const taskPanelStyle = (
+    agendaHeight == null ? undefined : { "--today-agenda-height": `${agendaHeight}px` }
+  ) as CSSProperties | undefined;
+
+  // Google Calendar sync: whether we're connected, and the last sync's outcome.
+  const [gcalConnected, setGcalConnected] = useState<boolean | null>(null);
+  // Today's events pulled back from Google Calendar — used for the empty-state
+  // starting point, calendar peek, and direct join links on matching rows.
+  const [calEvents, setCalEvents] = useState<CalEvent[] | null>(null);
+  const [calLoading, setCalLoading] = useState(false);
+  const [calOpen, setCalOpen] = useState(false); // peek popover open?
+  const [addOpen, setAddOpen] = useState(false);
+  const [sync, setSync] = useState<{
+    state: "idle" | "syncing" | "clearing" | "ok" | "err";
+    msg: string;
+  }>({
+    state: "idle",
+    msg: "",
+  });
+  useEffect(() => {
+    api.gcalAuthStatus().then((st) => setGcalConnected(st.connected)).catch(() => setGcalConnected(false));
+  }, []);
+
+  // Only timed blocks can become calendar events; untimed rows are skipped.
   const hasTimed = blocks.some((b) => toMinutes(b.start) != null);
+
+  useLayoutEffect(() => {
+    if (!todoOpen || !agendaRef.current) return;
+    const agenda = agendaRef.current;
+    const measure = () => setAgendaHeight(Math.ceil(agenda.getBoundingClientRect().height));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(agenda);
+    return () => observer.disconnect();
+  }, [blocks.length, note?.id, todoOpen]);
+
+  function closeTodoDrawer(returnFocus = true) {
+    setTodoOpen(false);
+    if (returnFocus) window.requestAnimationFrame(() => todoToggleRef.current?.focus());
+  }
+
+  useEffect(() => {
+    if (!todoOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeTodoDrawer();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [todoOpen]);
+
+  useEffect(() => {
+    // This effect is for a midnight rollover, not initial mount. Closing here
+    // on mount used to immediately undo the desktop-open default above.
+    if (todoDateRef.current === today) return;
+    todoDateRef.current = today;
+    if (taskSaveTimerRef.current != null) window.clearTimeout(taskSaveTimerRef.current);
+    taskSaveTimerRef.current = null;
+    taskChangeRevisionRef.current = 0;
+    taskPersistedRevisionRef.current = 0;
+    taskSavePendingRef.current = false;
+    taskAwaitingEntryRef.current = false;
+    taskEntryIdRef.current = entry?.id ?? null;
+    taskIncomingFingerprintRef.current = incomingTaskFingerprint;
+    taskDocumentRef.current = incomingTaskDocument;
+    setTaskDocument(incomingTaskDocument);
+    setTaskSaveState("idle");
+    setTodoOpen(false);
+    setTodoError(null);
+  }, [today, entry?.id, incomingTaskDocument, incomingTaskFingerprint]);
+
+  // Pull in a newly loaded or externally updated document only while there are
+  // no local edits waiting to be saved. Normal autosave refreshes therefore do
+  // not disturb the selection or move the user's caret.
+  useEffect(() => {
+    if (todoDateRef.current !== today) return;
+    if (taskIncomingFingerprintRef.current === incomingTaskFingerprint) return;
+    taskIncomingFingerprintRef.current = incomingTaskFingerprint;
+    if (taskChangeRevisionRef.current !== taskPersistedRevisionRef.current) return;
+    taskDocumentRef.current = incomingTaskDocument;
+    setTaskDocument(incomingTaskDocument);
+  }, [today, incomingTaskDocument, incomingTaskFingerprint]);
+
+  useEffect(() => {
+    taskMountedRef.current = true;
+    return () => {
+      taskMountedRef.current = false;
+      if (taskSaveTimerRef.current != null) window.clearTimeout(taskSaveTimerRef.current);
+      if (taskChangeRevisionRef.current !== taskPersistedRevisionRef.current) {
+        void taskFlushRef.current();
+      }
+    };
+  }, []);
 
   // Self-heal: when parseBlocks salvaged times the model left buried in `task`
   // (e.g. "□ 11:30-12:30 : Workout" with no start), rewrite the stored row once
-  // so the DB holds clean start/end. This persists the timeline across reloads
+  // so the DB holds clean start/end. This persists the schedule across reloads
   // and lets Google Calendar sync — which reads the stored times — actually push.
   const healedRef = useRef<number | null>(null);
   // In-flight heal write, so a Sync clicked right after capture waits for the
@@ -693,10 +872,8 @@ export function TodayView({
       });
   }, [entry?.id, blocks]);
 
-  // Pull today's real Google Calendar events. Used by both the empty-state card
-  // and the header "Calendar" peek button, so it's a plain loader rather than an
-  // effect. Errors fall back to an empty list (so the UI shows "nothing today").
-  const empty = !blocks.length;
+  // Pull today's real Google Calendar events. Errors fall back to an empty list
+  // so schedule editing remains fully useful when Calendar is unavailable.
   async function loadCalEvents() {
     setCalLoading(true);
     try {
@@ -712,6 +889,7 @@ export function TodayView({
   useEffect(() => {
     setCalEvents(null);
     setCalOpen(false);
+    setAddOpen(false);
   }, [today]);
 
   // Dismiss the peek popover on outside-click or Escape.
@@ -729,11 +907,26 @@ export function TodayView({
     };
   }, [calOpen]);
 
-  // In the empty state, auto-load so events appear without a tap.
   useEffect(() => {
-    if (gcalConnected && empty && calEvents == null && !calLoading) loadCalEvents();
+    if (!addOpen) return;
+    const onDown = (event: MouseEvent) => {
+      if (addWrapRef.current && !addWrapRef.current.contains(event.target as Node)) setAddOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => event.key === "Escape" && setAddOpen(false);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [addOpen]);
+
+  // Auto-load whenever Calendar is connected: populated schedules need the
+  // live meeting metadata too, otherwise their rows cannot become joinable.
+  useEffect(() => {
+    if (gcalConnected && calEvents == null && !calLoading) loadCalEvents();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gcalConnected, empty, calEvents, calLoading]);
+  }, [gcalConnected, calEvents, calLoading]);
 
   // Push today's schedule to Google Calendar. Not connected → open Settings.
   async function syncToGcal() {
@@ -750,7 +943,9 @@ export function TodayView({
       const r = await api.gcalSync(today);
       const pushed = r.created + r.updated;
       const parts = [`Synced ${pushed} block${pushed === 1 ? "" : "s"}`];
-      if (r.skipped) parts.push(`${r.skipped} anytime skipped`);
+      if (r.skipped) {
+        parts.push(`${r.skipped} unscheduled item${r.skipped === 1 ? "" : "s"} skipped`);
+      }
       if (r.duplicates) parts.push(`${r.duplicates} already on calendar`);
       if (r.deleted) parts.push(`${r.deleted} removed`);
       if (r.errors.length) {
@@ -806,55 +1001,53 @@ export function TodayView({
     }
   }
 
-  function editorSeed(): string {
-    if (blocks.length) return blocksToText(blocks);
-    // Older captures may still have useful raw text without structured blocks.
-    // Parse and reserialize it so recovery does not reintroduce 24-hour text.
-    return blocksToText(parseSchedule(note?.raw_text ?? ""));
-  }
-
   function openEditor() {
     // Structured blocks are authoritative. Normalizing them here both prevents
     // stale raw capture text from overwriting inline edits and guarantees the
     // editor opens with explicit 12-hour times.
     photoRequestRef.current += 1;
     photoTextRef.current = "";
-    setDraft(editorSeed());
+    setDraft(scheduleEditorSeed(blocks));
     setPhoto(null);
     setPhotoReading(false);
     setEditError(null);
+    setEditIdx(null);
+    setAdding(false);
+    closeTodoDrawer(false);
     setSync({ state: "idle", msg: "" }); // clear stale sync/clear feedback
     setEditing(true);
   }
 
-  // Seed the editor from today's pulled calendar events: timed events become
-  // timed blocks, all-day events become "Anytime" tasks. The user tweaks and
-  // hits Save, which re-parses through the normal saveDraft path.
+  // Seed the editor from timed calendar events. All-day events remain visible
+  // in Calendar, but no longer become hidden untimed rows now that the agenda
+  // has no "Anytime" section.
   function buildFromEvents(events: CalEvent[]) {
-    const seeded: Block[] = events
-      .filter((e) => e.task.trim())
-      .map((e) =>
-        e.start ? { task: e.task, start: e.start, ...(e.end ? { end: e.end } : {}) } : { task: e.task }
-      );
+    const seeded = calendarEventsToScheduleBlocks(events);
     photoRequestRef.current += 1;
     photoTextRef.current = "";
     setDraft(blocksToText(seeded));
     setPhoto(null);
     setEditError(null);
+    closeTodoDrawer(false);
     setEditing(true);
   }
 
-  // One pulled calendar event → a schedule block (all-day → untimed "Anytime").
-  const calEventToBlock = (e: CalEvent): Block =>
-    e.start ? { task: e.task, start: e.start, ...(e.end ? { end: e.end } : {}) } : { task: e.task };
   // Already on today's schedule? Matched by task + start so re-adds are no-ops.
-  const onSchedule = (e: CalEvent) =>
-    blocks.some((b) => b.task.trim() === e.task.trim() && (b.start ?? "") === (e.start ?? ""));
+  const onSchedule = (e: CalEvent) => {
+    const exact = blocks.some(
+      (b) => b.task.trim() === e.task.trim() && (b.start ?? "") === (e.start ?? "")
+    );
+    if (exact) return true;
+    const sameTitleEvents = (calEvents ?? []).filter(
+      (candidate) => !candidate.all_day && candidate.task.trim() === e.task.trim()
+    );
+    return sameTitleEvents.length === 1 && blocks.some((b) => b.task.trim() === e.task.trim());
+  };
 
   // Append calendar events to the existing schedule (peek popover). Skips any
   // already present, then persists in place via the normal inline-edit path.
   async function addCalEvents(events: CalEvent[]) {
-    const add = events.filter((e) => e.task.trim() && !onSchedule(e)).map(calEventToBlock);
+    const add = calendarEventsToScheduleBlocks(events.filter((event) => !onSchedule(event)));
     if (add.length) await persistBlocks([...blocks, ...add]);
   }
 
@@ -867,8 +1060,9 @@ export function TodayView({
       // Photo capture is a first-class way into the schedule builder. Opening
       // the editor here means the visible photo card works without an Edit step.
       if (!editing) {
-        setDraft(editorSeed());
+        setDraft(scheduleEditorSeed(blocks));
         setSync({ state: "idle", msg: "" });
+        closeTodoDrawer(false);
         setEditing(true);
       }
       const previousPhotoText = photoTextRef.current.trim();
@@ -909,7 +1103,7 @@ export function TodayView({
     } catch (e) {
       if (requestId !== photoRequestRef.current) return;
       if (!editing) {
-        setDraft(editorSeed());
+        setDraft(scheduleEditorSeed(blocks));
         setEditing(true);
       }
       setEditError(String(e));
@@ -954,19 +1148,40 @@ export function TodayView({
       }
 
       // Deterministic parse — instant, offline, never hard-fails on the model.
-      const blocks = parseSchedule(body);
-      if (!blocks.length) {
+      const parsedBlocks = parseSchedule(body);
+      if (!parsedBlocks.length) {
         setEditError('Couldn’t find anything to schedule. Try lines like "9:00 gym" or "2–4pm errands".');
         setBusy(false);
         return;
       }
+
+      const unscheduled = parsedBlocks.filter((block) => toMinutes(block.start) == null);
+      if (unscheduled.length) {
+        setEditError(
+          `Add a time to ${unscheduled.length === 1 ? `“${unscheduled[0].task}”` : "every schedule item"}. Use Tasks for anything flexible.`
+        );
+        return;
+      }
+      // Preserve older hidden untimed rows without allowing new ones into a
+      // view that no longer has an Anytime section.
+      const legacyUntimed = blocks.filter((block) => toMinutes(block.start) == null);
+      const nextBlocks = sortBlocks([...parsedBlocks, ...legacyUntimed]);
 
       await api.save({
         raw_text: body,
         source,
         image_path,
         event_date: today, // always today's schedule
-        entries: [{ category: "schedule", description: "today's schedule", data: { blocks, todos } }],
+        entries: [{
+          category: "schedule",
+          description: "today's schedule",
+          data: {
+            blocks: nextBlocks,
+            todos,
+            task_doc_version: TASK_DOCUMENT_VERSION,
+            task_doc: taskDocument,
+          },
+        }],
         entities,
       });
 
@@ -998,7 +1213,16 @@ export function TodayView({
           raw_text: blocksToText(cleaned),
           source: note?.source ?? "text",
           event_date: today,
-          entries: [{ category: "schedule", description: "today's schedule", data: { blocks: cleaned, todos } }],
+          entries: [{
+            category: "schedule",
+            description: "today's schedule",
+            data: {
+              blocks: cleaned,
+              todos,
+              task_doc_version: TASK_DOCUMENT_VERSION,
+              task_doc: taskDocument,
+            },
+          }],
         });
       }
       setEditIdx(null);
@@ -1014,194 +1238,191 @@ export function TodayView({
   const commitEdit = (idx: number, b: Block) => persistBlocks(blocks.map((x, i) => (i === idx ? b : x)));
   const deleteBlock = (idx: number) => persistBlocks(blocks.filter((_, i) => i !== idx));
   const commitAdd = (b: Block) => persistBlocks([...blocks, b]);
+  const beginAdd = () => {
+    setAddOpen(false);
+    setEditIdx(null);
+    setEditError(null);
+    closeTodoDrawer(false);
+    setAdding(true);
+  };
   const beginEdit = (idx: number) => {
     setAdding(false);
     setEditError(null);
     setEditIdx(idx);
   };
 
-  async function persistTodos(next: Todo[]): Promise<boolean> {
-    if (todoBusy) return false;
-    setTodoBusy(true);
-    setEditError(null);
+  async function flushTaskDocument() {
+    if (taskSaveInFlightRef.current) {
+      taskSavePendingRef.current = true;
+      return;
+    }
+    if (taskChangeRevisionRef.current === taskPersistedRevisionRef.current) return;
+
+    // A first task creates today's schedule entry. If React has not delivered
+    // the refreshed entry id yet, wait for that rather than inserting a second
+    // note while the user keeps typing.
+    if (taskEntryIdRef.current == null && taskAwaitingEntryRef.current) {
+      try {
+        await taskOnSavedRef.current();
+      } catch (error) {
+        if (taskMountedRef.current) {
+          setTodoError(String(error));
+          setTaskSaveState("error");
+        }
+        return;
+      }
+      taskSavePendingRef.current = true;
+      taskSaveTimerRef.current = window.setTimeout(() => void taskFlushRef.current(), 220);
+      return;
+    }
+
+    const snapshot = taskDocumentRef.current;
+    const revision = taskChangeRevisionRef.current;
+    const targetDate = taskTodayRef.current;
+    const text = documentPlainText(snapshot);
+    const nextTodos = extractDocumentTasks(snapshot);
+
+    // There is no reason to create an otherwise empty daily note, but clearing
+    // an existing document must still be persisted.
+    if (taskEntryIdRef.current == null && !text) {
+      taskPersistedRevisionRef.current = revision;
+      taskSavePendingRef.current = false;
+      if (taskMountedRef.current) setTaskSaveState("idle");
+      return;
+    }
+
+    taskSaveInFlightRef.current = true;
+    taskSavePendingRef.current = false;
+    if (taskMountedRef.current) {
+      setTodoError(null);
+      setTaskSaveState("saving");
+    }
+
     try {
-      const cleaned = next
-        .map((todo) => ({ ...todo, text: todo.text.trim() }))
-        .filter((todo) => todo.text);
-      if (entry?.id != null) {
-        await api.updateEntry(entry.id, { todos: cleaned });
+      const entryId = taskEntryIdRef.current;
+      const data = {
+        task_doc_version: TASK_DOCUMENT_VERSION,
+        task_doc: snapshot,
+        todos: nextTodos,
+      };
+      if (entryId != null) {
+        await api.updateEntry(entryId, data);
       } else {
+        taskAwaitingEntryRef.current = true;
         await api.save({
-          raw_text: cleaned
-            .map((todo) => `${todo.completed ? "[x]" : "[ ]"} ${todo.text}`)
-            .join("\n"),
+          raw_text: text,
           source: "text",
-          event_date: today,
+          event_date: targetDate,
           entries: [
             {
               category: "schedule",
               description: "today's schedule and tasks",
-              data: { blocks, todos: cleaned },
+              data: { blocks: taskBlocksRef.current, ...data },
             },
           ],
         });
+        await taskOnSavedRef.current();
       }
-      await onSaved();
-      return true;
-    } catch (e) {
-      setEditError(String(e));
-      return false;
+      taskPersistedRevisionRef.current = revision;
+      if (taskChangeRevisionRef.current === revision) {
+        if (taskMountedRef.current && taskTodayRef.current === targetDate) setTaskSaveState("saved");
+      } else {
+        taskSavePendingRef.current = true;
+      }
+    } catch (error) {
+      taskSavePendingRef.current = false;
+      if (taskMountedRef.current && taskTodayRef.current === targetDate) {
+        setTodoError(String(error));
+        setTaskSaveState("error");
+      }
     } finally {
-      setTodoBusy(false);
+      taskSaveInFlightRef.current = false;
+      if (
+        taskSavePendingRef.current ||
+        taskChangeRevisionRef.current !== taskPersistedRevisionRef.current
+      ) {
+        taskSaveTimerRef.current = window.setTimeout(() => void taskFlushRef.current(), 220);
+      }
     }
   }
+  taskFlushRef.current = flushTaskDocument;
 
-  async function addTodo() {
-    const text = todoDraft.trim();
-    if (!text) return;
-    if (await persistTodos([...todos, { id: todoId(), text, completed: false }])) {
-      setTodoDraft("");
-    }
+  function handleTaskDocumentChange(next: StructuredDocument) {
+    if (documentFingerprint(next) === documentFingerprint(taskDocumentRef.current)) return;
+    taskDocumentRef.current = next;
+    taskChangeRevisionRef.current += 1;
+    taskSavePendingRef.current = true;
+    setTaskDocument(next);
+    setTodoError(null);
+    setTaskSaveState("dirty");
+    if (taskSaveTimerRef.current != null) window.clearTimeout(taskSaveTimerRef.current);
+    taskSaveTimerRef.current = window.setTimeout(() => void taskFlushRef.current(), 750);
   }
 
-  async function commitTodoEdit(id: string) {
-    const text = todoEditText.trim();
-    if (!text) return;
-    if (await persistTodos(todos.map((todo) => (todo.id === id ? { ...todo, text } : todo)))) {
-      setTodoEditId(null);
-      setTodoEditText("");
-    }
-  }
-
-  const renderTodoSection = () => {
-    const remaining = todos.filter((todo) => !todo.completed).length;
+  const renderTodoDrawer = () => {
+    if (!todoOpen) return null;
     return (
-      <section className="today-todos" aria-labelledby="today-todos-title">
-        <div className="today-todos-head">
-          <h2 id="today-todos-title">To do</h2>
-          {todos.length > 0 && (
-            <span>{remaining ? `${remaining} left` : "All done"}</span>
-          )}
-        </div>
+      <>
+        <button
+          type="button"
+          className="today-task-scrim"
+          tabIndex={-1}
+          aria-label="Close tasks"
+          onClick={() => closeTodoDrawer()}
+        />
+        <aside
+          id="today-task-drawer"
+          className="today-task-drawer"
+          style={taskPanelStyle}
+          role="dialog"
+          aria-modal="false"
+          aria-labelledby="today-tasks-title"
+        >
+          <div className="today-task-drawer-head">
+            <div className="today-task-title">
+              <h2 id="today-tasks-title">
+                Tasks <span>· {remainingTodos}</span>
+              </h2>
+              {taskSaveState !== "idle" && (
+                <span className={`today-task-save-state ${taskSaveState}`} aria-live="polite">
+                  {taskSaveState === "dirty" && "Unsaved"}
+                  {taskSaveState === "saving" && <><Loader size={11} className="spin" /> Saving</>}
+                  {taskSaveState === "saved" && "Saved"}
+                  {taskSaveState === "error" && "Not saved"}
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              className="today-task-close"
+              onClick={() => closeTodoDrawer()}
+              aria-label="Close tasks"
+            >
+              <X size={17} />
+            </button>
+          </div>
 
-        {todos.length > 0 ? (
-          <ul className="today-todo-list">
-            {todos.map((todo) => (
-              <li className={"today-todo" + (todo.completed ? " completed" : "")} key={todo.id}>
-                <button
-                  type="button"
-                  className="today-todo-check"
-                  aria-label={todo.completed ? `Mark ${todo.text} incomplete` : `Complete ${todo.text}`}
-                  aria-pressed={todo.completed}
-                  disabled={todoBusy}
-                  onClick={() =>
-                    void persistTodos(
-                      todos.map((item) =>
-                        item.id === todo.id ? { ...item, completed: !item.completed } : item
-                      )
-                    )
-                  }
-                >
-                  {todo.completed && <Check size={13} strokeWidth={2.4} />}
-                </button>
-
-                {todoEditId === todo.id ? (
-                  <input
-                    className="today-todo-edit"
-                    value={todoEditText}
-                    autoFocus
-                    disabled={todoBusy}
-                    aria-label={`Edit ${todo.text}`}
-                    onChange={(e) => setTodoEditText(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void commitTodoEdit(todo.id);
-                      if (e.key === "Escape") setTodoEditId(null);
-                    }}
-                    onBlur={() => void commitTodoEdit(todo.id)}
-                  />
-                ) : (
-                  <button
-                    type="button"
-                    className="today-todo-text"
-                    disabled={todoBusy}
-                    onDoubleClick={() => {
-                      setTodoEditId(todo.id);
-                      setTodoEditText(todo.text);
-                    }}
-                  >
-                    {todo.text}
-                  </button>
-                )}
-
-                {todoEditId !== todo.id && (
-                  <div className="today-todo-actions">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setTodoEditId(todo.id);
-                        setTodoEditText(todo.text);
-                      }}
-                      disabled={todoBusy}
-                      aria-label={`Edit ${todo.text}`}
-                      title="Edit task"
-                    >
-                      <Pencil size={13} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void persistTodos(todos.filter((item) => item.id !== todo.id))}
-                      disabled={todoBusy}
-                      aria-label={`Delete ${todo.text}`}
-                      title="Delete task"
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="today-todos-empty">Keep the small things here, outside your timeline.</p>
-        )}
-
-        <div className="today-todo-add">
-          <span className="today-todo-check" aria-hidden="true" />
-          <input
-            value={todoDraft}
-            disabled={todoBusy}
-            placeholder="Add a task…"
-            aria-label="New to-do"
-            onChange={(e) => setTodoDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void addTodo();
-            }}
-          />
-          <button
-            type="button"
-            disabled={todoBusy || !todoDraft.trim()}
-            onClick={() => void addTodo()}
-            aria-label="Add task"
-          >
-            {todoBusy ? <Loader size={14} className="spin" /> : <Plus size={15} />}
-          </button>
-        </div>
-      </section>
+          <section className="today-todos" aria-label="Today's tasks">
+            <DocumentEditor
+              value={taskDocument}
+              onChange={handleTaskDocumentChange}
+              placeholder="Type a task, note, or idea…"
+              ariaLabel="Today's tasks and notes"
+            />
+            {todoError && <div className="error today-task-error">{todoError}</div>}
+          </section>
+        </aside>
+      </>
     );
   };
 
-  // A quiet pill at the foot of the schedule — photo capture is an entry
-  // point, not a headline section competing with the schedule itself.
-  const PhotoEntry = () => (
-    <button
-      type="button"
-      className="today-addrow"
-      onClick={() => fileRef.current?.click()}
-      disabled={busy}
-      title="Turn handwriting or a screenshot into today’s plan"
-    >
-      <Camera size={15} /> Add a photo
-    </button>
+  const renderScheduleShell = (content: ReactNode) => (
+    <div className={"today-shell" + (todoOpen ? " tasks-open" : "")}>
+      <div className="today today-shell-head">{Head(true)}</div>
+      <div className="today-shell-lead">{lead}</div>
+      <div className="today today-shell-body">{content}</div>
+      {renderTodoDrawer()}
+    </div>
   );
 
   const Head = (withEdit: boolean) => (
@@ -1213,96 +1434,156 @@ export function TodayView({
         </div>
         {withEdit && (
           <div className="today-headbtns">
-            {gcalConnected && (
-              <div className="today-calwrap" ref={calWrapRef}>
-                <button
-                  className={"today-edit" + (calOpen ? " active" : "")}
-                  onClick={() => {
-                    setCalOpen((o) => !o);
-                    if (calEvents == null && !calLoading) loadCalEvents();
-                  }}
-                  aria-expanded={calOpen}
-                  title="See today's Google Calendar events"
-                >
-                  <CalendarDays size={14} /> Calendar
-                </button>
-                {calOpen && (
-                  <div className="today-calpop" role="dialog" aria-label="Today's calendar events">
-                    <div className="today-calpop-head">
-                      <span>From your calendar</span>
-                      <button
-                        className="today-calpop-x"
-                        onClick={() => setCalOpen(false)}
-                        aria-label="Close"
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                    {calLoading && calEvents == null ? (
-                      <div className="today-calpop-msg">
-                        <Loader size={14} className="spin" /> Loading…
-                      </div>
-                    ) : !calEvents || calEvents.length === 0 ? (
-                      <div className="today-calpop-msg">Nothing on your calendar today.</div>
-                    ) : (
-                      <>
-                        <ul className="today-calpop-list">
-                          {calEvents.map((e, i) => {
-                            const added = onSchedule(e);
-                            return (
-                              <li key={i} className="today-calpop-row">
-                                <span className="today-cal-time">
-                                  {e.all_day ? "All day" : fmtTime(e.start ?? undefined)}
-                                </span>
-                                <span className="today-cal-task">{e.task}</span>
-                                <button
-                                  className="today-calpop-add"
-                                  disabled={added || rowBusy}
-                                  onClick={() => addCalEvents([e])}
-                                  title={added ? "Already on schedule" : "Add to schedule"}
-                                  aria-label={added ? "Already on schedule" : "Add to schedule"}
-                                >
-                                  {added ? <Check size={14} /> : <Plus size={14} />}
-                                </button>
-                              </li>
-                            );
-                          })}
-                        </ul>
-                        {calEvents.some((e) => !onSchedule(e)) && (
-                          <button
-                            className="today-make today-calpop-all"
-                            disabled={rowBusy}
-                            onClick={() => addCalEvents(calEvents)}
-                          >
-                            <Plus size={16} /> Add all to schedule
-                          </button>
-                        )}
-                      </>
-                    )}
+            <div className="today-calwrap" ref={calWrapRef}>
+              <button
+                className={"today-edit" + (calOpen ? " active" : "")}
+                onClick={() => {
+                  if (gcalConnected === false) {
+                    onOpenSettings?.();
+                    return;
+                  }
+                  setAddOpen(false);
+                  setCalOpen((open) => !open);
+                  if (calEvents == null && !calLoading) void loadCalEvents();
+                }}
+                aria-expanded={calOpen}
+                title={gcalConnected === false ? "Connect Google Calendar" : "View and sync Google Calendar"}
+              >
+                <CalendarDays size={14} /> {gcalConnected === false ? "Connect calendar" : "Calendar sync"}
+              </button>
+              {gcalConnected && calOpen && (
+                <div className="today-calpop" role="dialog" aria-label="Calendar sync">
+                  <div className="today-calpop-head">
+                    <span>Calendar sync</span>
+                    <button
+                      className="today-calpop-x"
+                      onClick={() => setCalOpen(false)}
+                      aria-label="Close"
+                    >
+                      <X size={14} />
+                    </button>
                   </div>
-                )}
-              </div>
-            )}
-            <button
-              className="today-edit"
-              onClick={syncToGcal}
-              disabled={sync.state === "syncing" || sync.state === "clearing" || (!!gcalConnected && !hasTimed)}
-              title={
-                gcalConnected
-                  ? "Push today's schedule to Google Calendar"
-                  : "Connect Google Calendar in Settings"
-              }
-            >
-              {sync.state === "syncing" ? (
-                <Loader size={14} className="spin" />
-              ) : (
-                <CalendarCheck size={14} />
+                  {calLoading && calEvents == null ? (
+                    <div className="today-calpop-msg">
+                      <Loader size={14} className="spin" /> Loading…
+                    </div>
+                  ) : !calEvents || calEvents.length === 0 ? (
+                    <div className="today-calpop-msg">Nothing on your calendar today.</div>
+                  ) : (
+                    <>
+                      <ul className="today-calpop-list">
+                        {calEvents.map((e, i) => {
+                          const addable = !e.all_day && Boolean(e.start);
+                          const added = addable && onSchedule(e);
+                          const meetingUrl = e.meet_link ? joinUrl(e.meet_link, e.account) : null;
+                          return (
+                            <li
+                              key={e.id || i}
+                              className={"today-calpop-row" + (meetingUrl ? " joinable" : "")}
+                            >
+                              {meetingUrl && (
+                                <a
+                                  className="today-cal-event-hit"
+                                  href={meetingUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  aria-label={`Join ${e.task}`}
+                                />
+                              )}
+                              <span className="today-cal-time">
+                                {e.all_day ? "All day" : fmtTime(e.start ?? undefined)}
+                              </span>
+                              <span className="today-cal-task">{e.task}</span>
+                              {meetingUrl && <Video size={13} className="today-cal-join-icon" aria-hidden="true" />}
+                              <button
+                                className="today-calpop-add"
+                                disabled={!addable || added || rowBusy}
+                                onClick={() => addCalEvents([e])}
+                                title={!addable ? "All-day events stay in Calendar" : added ? "Already on schedule" : "Add to schedule"}
+                                aria-label={!addable ? "All-day event" : added ? "Already on schedule" : "Add to schedule"}
+                              >
+                                {added ? <Check size={14} /> : addable ? <Plus size={14} /> : null}
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                      {calEvents.some((e) => e.start && !onSchedule(e)) && (
+                        <button
+                          className="today-make today-calpop-all"
+                          disabled={rowBusy}
+                          onClick={() => addCalEvents(calEvents)}
+                        >
+                          <Plus size={16} /> Add all to schedule
+                        </button>
+                      )}
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    className="today-calpop-sync"
+                    onClick={() => void syncToGcal()}
+                    disabled={sync.state === "syncing" || sync.state === "clearing" || !hasTimed}
+                  >
+                    {sync.state === "syncing" ? <Loader size={14} className="spin" /> : <CalendarCheck size={14} />}
+                    Sync today’s schedule
+                  </button>
+                </div>
               )}
-              {gcalConnected === false ? "Connect Calendar" : "Sync"}
+            </div>
+            <button
+              ref={todoToggleRef}
+              type="button"
+              className="today-edit today-tasks-toggle"
+              onClick={() => (todoOpen ? closeTodoDrawer() : setTodoOpen(true))}
+              aria-expanded={todoOpen}
+              aria-controls="today-task-drawer"
+            >
+              <ListTodo size={14} /> Tasks · {remainingTodos}
             </button>
-            <button className="today-edit today-edit-primary" onClick={openEditor} aria-label={blocks.length ? "Edit schedule" : "Create schedule"}>
-              <Pencil size={14} /> {blocks.length ? "Edit schedule" : "Create schedule"}
-            </button>
+            <div className="today-calwrap" ref={addWrapRef}>
+              <button
+                type="button"
+                className={"today-edit today-edit-primary" + (addOpen ? " active" : "")}
+                onClick={() => {
+                  setCalOpen(false);
+                  setAddOpen((open) => !open);
+                }}
+                aria-expanded={addOpen}
+                aria-haspopup="dialog"
+                aria-label={blocks.length ? "Edit day" : "Create day"}
+              >
+                <Pencil size={14} /> {blocks.length ? "Edit day" : "Create day"}
+              </button>
+              {addOpen && (
+                <div className="today-addpop" role="dialog" aria-label="Edit schedule">
+                  <button type="button" onClick={beginAdd}>
+                    <Plus size={14} /> New item
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || photoReading}
+                    onClick={() => {
+                      setAddOpen(false);
+                      setEditIdx(null);
+                      setAdding(false);
+                      fileRef.current?.click();
+                    }}
+                  >
+                    <Camera size={14} /> From photo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAddOpen(false);
+                      openEditor();
+                    }}
+                  >
+                    <Pencil size={14} /> Edit entire day
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -1426,9 +1707,9 @@ export function TodayView({
   // ---- Empty state ----
   if (!blocks.length) {
     const showCal = gcalConnected && calEvents && calEvents.length > 0;
-    return (
-      <div className="today">
-        {Head(true)}
+    const timedCalEvents = calEvents?.filter((event) => event.start) ?? [];
+    return renderScheduleShell(
+      <>
         {showCal && (
           <div className="today-empty">
             <div className="today-cal">
@@ -1436,18 +1717,34 @@ export function TodayView({
                 <CalendarDays size={15} /> From your calendar
               </div>
               <ul className="today-cal-list">
-                {calEvents!.map((e, i) => (
-                  <li key={i} className="today-cal-row">
-                    <span className="today-cal-time">
-                      {e.all_day ? "All day" : fmtTime(e.start ?? undefined)}
-                    </span>
-                    <span className="today-cal-task">{e.task}</span>
-                    <span className="today-cal-tag">{e.calendar}</span>
-                  </li>
-                ))}
+                {calEvents!.map((event, i) => {
+                  const meetingUrl = event.meet_link ? joinUrl(event.meet_link, event.account) : null;
+                  return (
+                    <li key={event.id || i} className={"today-cal-row" + (meetingUrl ? " joinable" : "")}>
+                      {meetingUrl && (
+                        <a
+                          className="today-cal-event-hit"
+                          href={meetingUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label={`Join ${event.task}`}
+                        />
+                      )}
+                      <span className="today-cal-time">
+                        {event.all_day ? "All day" : fmtTime(event.start ?? undefined)}
+                      </span>
+                      <span className="today-cal-task">{event.task}</span>
+                      {meetingUrl && <Video size={13} className="today-cal-join-icon" aria-hidden="true" />}
+                      <span className="today-cal-tag">{event.calendar}</span>
+                    </li>
+                  );
+                })}
               </ul>
-              <button className="today-make today-cal-build" onClick={() => buildFromEvents(calEvents!)}>
-                <Plus size={16} /> Build schedule from these
+              <button
+                className="today-make today-cal-build"
+                onClick={() => (timedCalEvents.length ? buildFromEvents(timedCalEvents) : openEditor())}
+              >
+                <Plus size={16} /> {timedCalEvents.length ? "Build schedule from these" : "Create schedule"}
               </button>
             </div>
           </div>
@@ -1462,152 +1759,241 @@ export function TodayView({
             </button>
           </div>
         )}
-        {renderTodoSection()}
-        <div className="today-footrow">
-          <PhotoEntry />
-        </div>
-      </div>
+      </>
     );
   }
 
   // ---- Agenda ----
   const nowMin = easternMinutes(now);
+  const scheduleHourPx = 44;
+  const scheduleGridPad = 16;
+  const displayBlocks = reconcileScheduleBlocks(blocks, calEvents ?? []);
+  const grid = buildScheduleGrid(displayBlocks, { pixelsPerHour: scheduleHourPx });
 
-  const rows = layoutRows(blocks);
-  const untimed = blocks.filter((b) => toMinutes(b.start) == null);
+  const eventState = (item: (typeof grid.items)[number]) => {
+    const isNow = isCurrentInterval(item, nowMin);
+    return { isNow, isPast: !isNow && nowMin >= item.end };
+  };
 
-  const currentIdx = rows.findIndex((r) => nowMin >= r.start && nowMin < r.effEnd);
+  const meetingFor = (block: Block) => {
+    const calendarEvent = matchingCalendarEvent(block, calEvents ?? []);
+    return calendarEvent?.meet_link
+      ? joinUrl(calendarEvent.meet_link, calendarEvent.account)
+      : null;
+  };
 
-  return (
-    <div className="today">
-      {Head(true)}
+  const eventClasses = (
+    base: string,
+    item: (typeof grid.items)[number],
+    meetingUrl: string | null,
+  ) => {
+    const { isNow, isPast } = eventState(item);
+    return (
+      base +
+      (meetingUrl ? " joinable" : "") +
+      (isNow ? " now" : "") +
+      (isPast ? " past" : "")
+    );
+  };
 
-      <div className="today-agenda">
-        {rows.map((r, i) => {
-          const idx = blocks.indexOf(r.b);
-          if (idx === editIdx) {
-            return (
-              <ScheduleRowForm
-                key={`edit-${idx}`}
-                init={r.b}
-                busy={rowBusy}
-                onCommit={(b) => commitEdit(idx, b)}
-                onCancel={() => setEditIdx(null)}
-                onDelete={() => deleteBlock(idx)}
-              />
-            );
-          }
-          const isNow = i === currentIdx;
-          const isPast = !isNow && nowMin >= r.effEnd;
-          return (
-            <div
-              key={i}
-              className={"today-block editable" + (isNow ? " now" : "") + (isPast ? " past" : "")}
-              onDoubleClick={() => beginEdit(idx)}
-              title="Double-click to edit"
-            >
-              {/* Always show a connected range: each block runs to the next
-                  block's start (or +1h for the last), so no row collapses to a
-                  lone start time. layoutRows already folds in any explicit end. */}
-              <div className="today-time">{fmtRange(r.b.start, minToStr(r.effEnd))}</div>
-              <div className="today-rail">
-                <span className="today-dot" />
-              </div>
-              <div className="today-info">
-                <span className="today-task">{r.b.task}</span>
-                {fmtDur(r.b.duration_min) && (
-                  <span className="today-dur">{fmtDur(r.b.duration_min)}</span>
-                )}
-                {isNow && <span className="today-nowtag">now</span>}
-                <button
-                  type="button"
-                  className="today-row-edit-trigger"
-                  onClick={() => beginEdit(idx)}
-                  aria-label={`Edit ${r.b.task}`}
-                  title="Edit schedule item"
-                >
-                  <Pencil size={13} />
-                </button>
-              </div>
-            </div>
-          );
-        })}
-
-        {untimed.length > 0 && (
-          <div className="today-untimed">
-            <div className="today-untimed-label">Anytime</div>
-            {untimed.map((b) => {
-              const idx = blocks.indexOf(b);
-              if (idx === editIdx) {
-                return (
-                  <ScheduleRowForm
-                    key={`edit-${idx}`}
-                    init={b}
-                    busy={rowBusy}
-                    onCommit={(nb) => commitEdit(idx, nb)}
-                    onCancel={() => setEditIdx(null)}
-                    onDelete={() => deleteBlock(idx)}
-                  />
-                );
-              }
-              return (
-                <div
-                  className="today-block untimed editable"
-                  key={idx}
-                  onDoubleClick={() => beginEdit(idx)}
-                  title="Double-click to edit"
-                >
-                  <div className="today-time today-dash">—</div>
-                  <div className="today-rail">
-                    <span className="today-dot" />
-                  </div>
-                  <div className="today-info">
-                    <span className="today-task">{b.task}</span>
-                    {fmtDur(b.duration_min) && (
-                      <span className="today-dur">{fmtDur(b.duration_min)}</span>
-                    )}
-                    <button
-                      type="button"
-                      className="today-row-edit-trigger"
-                      onClick={() => beginEdit(idx)}
-                      aria-label={`Edit ${b.task}`}
-                      title="Edit schedule item"
-                    >
-                      <Pencil size={13} />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {adding ? (
+  return renderScheduleShell(
+    <>
+      <div className="today-agenda" ref={agendaRef}>
+        {adding && (
           <ScheduleRowForm
             init={{ task: "" }}
             busy={rowBusy}
             onCommit={commitAdd}
             onCancel={() => setAdding(false)}
           />
-        ) : (
-          <div className="today-footrow">
-            <button
-              className="today-addrow"
-              onClick={() => {
-                setEditIdx(null);
-                setAdding(true);
-              }}
-            >
-              <Plus size={15} /> Add to schedule
-            </button>
-            <PhotoEntry />
-          </div>
         )}
+        <div
+          className="today-time-grid"
+          style={{ height: `${grid.heightPx + scheduleGridPad * 2}px` }}
+          role="list"
+          aria-label="Daily schedule, proportional time grid"
+        >
+          <div className="today-grid-hours" aria-hidden="true">
+            {grid.hourMarks.map((minute) => (
+              <div
+                className="today-grid-hour"
+                key={minute}
+                style={{ top: `${scheduleGridPad + ((minute - grid.start) / 60) * scheduleHourPx}px` }}
+              >
+                <span>{fmtTime(minToStr(minute)).replace(":00", "")}</span>
+              </div>
+            ))}
+          </div>
+          <div className="today-grid-events">
+            {grid.items.map((item) => {
+              const idx = item.index;
+              const block = item.block;
+              if (idx === editIdx) {
+                return (
+                  <div
+                    className="today-grid-edit"
+                    key={`grid-edit-${idx}`}
+                    style={{ top: `${scheduleGridPad + item.topPx}px` }}
+                  >
+                    <ScheduleRowForm
+                      init={block}
+                      busy={rowBusy}
+                      onCommit={(next) => commitEdit(idx, next)}
+                      onCancel={() => setEditIdx(null)}
+                      onDelete={() => deleteBlock(idx)}
+                    />
+                  </div>
+                );
+              }
+
+              const meetingUrl = meetingFor(block);
+              const { isNow } = eventState(item);
+              const compact = item.heightPx < 52;
+              const range = fmtRange(block.start, minToStr(item.end));
+              const laneGap = 4;
+              const left = item.leftFraction * 100;
+              const width = item.widthFraction * 100;
+              const laneOffset = (item.lane * laneGap) / item.laneCount;
+              const laneReduction = ((item.laneCount - 1) * laneGap) / item.laneCount;
+              return (
+                <div
+                  key={`grid-event-${idx}`}
+                  className={
+                    eventClasses("today-grid-event editable", item, meetingUrl) +
+                    (compact ? " compact" : "")
+                  }
+                  style={{
+                    top: `${scheduleGridPad + item.topPx}px`,
+                    height: `${item.heightPx}px`,
+                    left: `calc(${left}% + ${laneOffset}px)`,
+                    width: `calc(${width}% - ${laneReduction}px)`,
+                  }}
+                  onDoubleClick={meetingUrl ? undefined : () => beginEdit(idx)}
+                  title={meetingUrl ? `Join ${block.task}` : "Double-click to edit"}
+                  role="listitem"
+                  aria-label={`${block.task}, ${range}${isNow ? ", now" : ""}`}
+                >
+                  {meetingUrl && (
+                    <a
+                      className="today-event-hit"
+                      href={meetingUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      aria-label={`Join ${block.task}, ${range}`}
+                    />
+                  )}
+                  <div className="today-grid-event-content">
+                    <span className="today-grid-event-time">{range}</span>
+                    <span className="today-task">{block.task}</span>
+                    {!compact && (
+                      <span className="today-grid-event-meta">
+                        {isNow && <span className="today-nowtag">now</span>}
+                        <span>{fmtDur(item.durationMinutes)}</span>
+                        {meetingUrl && (
+                          <span className="today-event-join">
+                            <Video size={12} aria-hidden="true" /> Join meeting
+                          </span>
+                        )}
+                      </span>
+                    )}
+                  </div>
+                  {compact && meetingUrl && <Video className="today-grid-event-video" size={13} aria-hidden="true" />}
+                  <button
+                    type="button"
+                    className="today-row-edit-trigger"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      beginEdit(idx);
+                    }}
+                    aria-label={`Edit ${block.task}`}
+                    title="Edit schedule item"
+                  >
+                    <Pencil size={13} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="today-ledger" role="list" aria-label="Daily schedule">
+          {grid.items.map((item) => {
+            const idx = item.index;
+            const block = item.block;
+            if (idx === editIdx) {
+              return (
+                <ScheduleRowForm
+                  key={`ledger-edit-${idx}`}
+                  init={block}
+                  busy={rowBusy}
+                  onCommit={(next) => commitEdit(idx, next)}
+                  onCancel={() => setEditIdx(null)}
+                  onDelete={() => deleteBlock(idx)}
+                />
+              );
+            }
+            const meetingUrl = meetingFor(block);
+            const { isNow } = eventState(item);
+            const range = fmtRange(block.start, minToStr(item.end));
+            return (
+              <div
+                key={`ledger-event-${idx}`}
+                className={eventClasses("today-block editable", item, meetingUrl)}
+                onDoubleClick={meetingUrl ? undefined : () => beginEdit(idx)}
+                title={meetingUrl ? `Join ${block.task}` : "Double-click to edit"}
+                role="listitem"
+                aria-label={`${block.task}, ${range}${isNow ? ", now" : ""}`}
+              >
+                {meetingUrl && (
+                  <a
+                    className="today-event-hit"
+                    href={meetingUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label={`Join ${block.task}, ${range}`}
+                  />
+                )}
+                <div className="today-time" aria-hidden="true">
+                  <span>{fmtTime(block.start)}</span>
+                  <span className="today-time-end">{fmtTime(minToStr(item.end))}</span>
+                </div>
+                <div className="today-info">
+                  <div className="today-task-stack">
+                    <span className="today-task">{block.task}</span>
+                    {isNow && (
+                      <span className="today-current-meta">
+                        <span className="today-nowtag">now</span>
+                        <span>Ends at {fmtTime(minToStr(item.end))}</span>
+                      </span>
+                    )}
+                    {meetingUrl && (
+                      <span className="today-event-join">
+                        <Video size={12} aria-hidden="true" /> Join meeting
+                      </span>
+                    )}
+                  </div>
+                  <span className="today-dur">{fmtDur(item.durationMinutes)}</span>
+                  <button
+                    type="button"
+                    className="today-row-edit-trigger"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      beginEdit(idx);
+                    }}
+                    aria-label={`Edit ${block.task}`}
+                    title="Edit schedule item"
+                  >
+                    <Pencil size={13} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
       </div>
 
-      {renderTodoSection()}
-
       {editError && !editing && <div className="error today-rowerror">{editError}</div>}
-    </div>
+    </>
   );
 }

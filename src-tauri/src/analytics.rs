@@ -74,7 +74,11 @@ pub fn build_trends(entries: &[(String, Value)]) -> Trends {
                     values.insert(m.clone(), n.clone());
                 }
             }
-            rows.push(TrendRow { date: date.clone(), label, values });
+            rows.push(TrendRow {
+                date: date.clone(),
+                label,
+                values,
+            });
         }
     }
 
@@ -124,7 +128,10 @@ fn items_of<'a>(data: &'a Value, items_field: &Option<String>) -> Vec<&'a Map<St
 
 fn detect_label_field(items: &[&Map<String, Value>]) -> Option<String> {
     for pref in LABEL_PREFERENCES {
-        if items.iter().any(|it| it.get(*pref).map_or(false, |v| v.is_string())) {
+        if items
+            .iter()
+            .any(|it| it.get(*pref).map_or(false, |v| v.is_string()))
+        {
             return Some(pref.to_string());
         }
     }

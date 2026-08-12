@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "./events";
-import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, ListTodo, Loader, MessageCircle, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Square, StickyNote, Sun } from "lucide-react";
+import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, ListTodo, Loader, MessageCircle, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Square, StickyNote, Sun, Video } from "lucide-react";
 import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg, type Img } from "./image";
@@ -9,7 +9,7 @@ import { useConnection } from "./useConnection";
 import { MobileCapture } from "./MobileCapture";
 import { BottomNav, type MobileTab } from "./BottomNav";
 import { useTheme } from "./useTheme";
-import { api, TokenError, OfflineError, type CategoryInfo, type EntityCandidate, type Envelope, type NoteRow, type RangeEvent, type RelatedBrain } from "./api";
+import { api, TokenError, OfflineError, type CategoryInfo, type EntityCandidate, type Envelope, type NoteFolderInfo, type NoteRow, type RangeEvent, type RelatedBrain } from "./api";
 import { DataView } from "./DataView";
 import { CalendarView } from "./Calendar";
 import { JournalView } from "./Journal";
@@ -22,8 +22,18 @@ import { releaseProfile } from "./releaseProfile";
 import { ComingUp } from "./ComingUp";
 import { NotesView } from "./NotesView";
 import { AskView } from "./AskView";
+import { AgentContextApproval } from "./AgentContextApproval";
 import { WeatherHome } from "./Weather";
 import { APP_TZ, easternDay, easternHour } from "./day";
+import {
+  filingContextLabel,
+  hasStoredFilingContext,
+  isFilingContext,
+  onFilingContextChange,
+  readFilingContext,
+  writeFilingContext,
+  type FilingContext,
+} from "./filingContext";
 import "./App.css";
 
 type Phase = "idle" | "thinking" | "review";
@@ -40,6 +50,73 @@ type ReviewCard = {
   description: string;
   routedBy?: "header" | "classifier";
 };
+
+type SavedFilingMessage = {
+  path: string;
+  spaceId: number | null;
+  reason: string;
+  eventId: number | null;
+  canUndo: boolean;
+};
+
+function folderIsWithin(folder: NoteFolderInfo, rootId: number, folders: NoteFolderInfo[]): boolean {
+  let current: NoteFolderInfo | undefined = folder;
+  const seen = new Set<number>();
+  while (current && !seen.has(current.id)) {
+    if (current.id === rootId) return true;
+    seen.add(current.id);
+    const parentId: number | null = current.parent_id;
+    current = parentId == null
+      ? undefined
+      : folders.find((candidate) => candidate.id === parentId);
+  }
+  return false;
+}
+
+function folderPathLabel(folderId: number, folders: NoteFolderInfo[]): string {
+  const names: string[] = [];
+  let current = folders.find((folder) => folder.id === folderId);
+  const seen = new Set<number>();
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    names.unshift(current.name);
+    const parentId: number | null = current.parent_id;
+    current = parentId == null
+      ? undefined
+      : folders.find((folder) => folder.id === parentId);
+  }
+  const path = names.join(" / ");
+  const target = folders.find((folder) => folder.id === folderId);
+  return target?.kind === "space" ? `${path} / Inbox` : path;
+}
+
+function folderSpaceId(folderId: number, folders: NoteFolderInfo[]): number | null {
+  let current = folders.find((folder) => folder.id === folderId);
+  const seen = new Set<number>();
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    if (current.parent_id == null) return current.kind === "space" ? current.id : null;
+    current = folders.find((folder) => folder.id === current!.parent_id);
+  }
+  return null;
+}
+
+function isDailyStandupDraft(rawText: string, cards: ReviewCard[]): boolean {
+  const categories = cards.map((card) => card.catName.trim().toLowerCase());
+  if (categories.includes("schedule")) return false;
+  const matches = (value: string) => {
+    const lower = value.toLowerCase();
+    const spaced = lower.replace(/[-_]/g, " ");
+    return (
+      lower.includes("standup") ||
+      lower.includes("stand-up") ||
+      spaced.includes("daily stand up") ||
+      spaced.includes("stand up meeting") ||
+      spaced.includes("daily scrum")
+    );
+  };
+  return matches(rawText) || categories.some(matches);
+}
 
 // Time-adaptive home greeting: planning prompt in the morning → recap prompt at night.
 function homeGreeting(): { dateLine: string; title: string } {
@@ -63,6 +140,7 @@ function homeGreeting(): { dateLine: string; title: string } {
 
 export default function App() {
   const { theme, toggle } = useTheme();
+  const [appTimeZone, setAppTimeZone] = useState(APP_TZ);
   const [view, setView] = useState<View>("ask");
   // Entity to open in Knowledge (set when a related-brain chip is clicked).
   const [knowledgeEntity, setKnowledgeEntity] = useState<number | null>(null);
@@ -85,14 +163,39 @@ export default function App() {
 
   const [notes, setNotes] = useState<NoteRow[]>([]);
   const [cats, setCats] = useState<CategoryInfo[]>([]);
+  const [folders, setFolders] = useState<NoteFolderInfo[]>([]);
+  const [filingContext, setFilingContextState] = useState<FilingContext>(readFilingContext);
+  const [reviewFilingContext, setReviewFilingContext] = useState<FilingContext | null>(null);
+  const [destinationFolderId, setDestinationFolderId] = useState<number | null>(null);
+  const [destinationTouched, setDestinationTouched] = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(false);
 
   // Phone capture + backup
   const [showPhone, setShowPhone] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [backupMsg, setBackupMsg] = useState<string | null>(null);
-  const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [savedMsg, setSavedMsg] = useState<SavedFilingMessage | null>(null);
+  const [undoingSave, setUndoingSave] = useState(false);
+  const [savingCapture, setSavingCapture] = useState(false);
+  const savingCaptureRef = useRef(false);
   const [needsRepair, setNeedsRepair] = useState(false); // 403 from a stale phone token
+
+  useEffect(() => onFilingContextChange(setFilingContextState), []);
+
+  function chooseFilingContext(context: FilingContext) {
+    setFilingContextState(context);
+    if (phase === "review") setReviewFilingContext(context);
+    writeFilingContext(context);
+    const matchingSpace = folders.find(
+      (folder) =>
+        folder.kind === "space" && folder.name.trim().toLowerCase() === context
+    );
+    if (matchingSpace) {
+      localStorage.setItem("noted-active-space", String(matchingSpace.id));
+    }
+    setDestinationFolderId(null);
+    setDestinationTouched(false);
+  }
 
   // Mobile-first layout: phone viewports get a bottom-nav + dedicated capture
   // screen instead of the desktop topbar/review flow.
@@ -122,6 +225,7 @@ export default function App() {
     const subs = [
       listen("note-filed", () => refreshRef.current()),
       listen("capture-needs-attention", () => refreshRef.current()),
+      listen("meeting-summarized", () => refreshRef.current()),
       listen("assistant-shortcut", () => setAssistantOpen(true)),
     ];
     return () => {
@@ -156,8 +260,8 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Meetings: the open meeting page (a today sub-view) + the global
-  // recording indicator in the topbar.
+  // Meetings: the open meeting page (a today sub-view) + the persistent
+  // recording control in the sidebar.
   const [meetingOpen, setMeetingOpen] = useState<{
     id: number | null;
     event?: Partial<RangeEvent>;
@@ -165,6 +269,7 @@ export default function App() {
   const [recMeeting, setRecMeeting] = useState<{ id: number; title: string } | null>(null);
   const [meetingControlAction, setMeetingControlAction] = useState<"starting" | "stopping" | null>(null);
   const [meetingControlError, setMeetingControlError] = useState<string | null>(null);
+  const [recordModeMenu, setRecordModeMenu] = useState(false);
   useEffect(() => {
     api
       .meetingState()
@@ -188,11 +293,24 @@ export default function App() {
     };
   }, []);
 
+  function openRecordingMeeting() {
+    if (!recMeeting) return;
+    setRecordModeMenu(false);
+    setView("today");
+    setMeetingOpen({ id: recMeeting.id });
+  }
+
   // The sidebar control is the always-available manual path: it starts an
-  // event-less recording immediately, then becomes the matching stop button.
+  // event-less recording immediately. While recording, opening the meeting and
+  // stopping it are deliberately separate actions so returning to the live
+  // transcript cannot end the capture by accident.
   // Calendar meetings still keep their richer pre-meeting page and metadata.
-  async function toggleMeetingRecording() {
+  async function toggleMeetingRecording(captureMode?: "online" | "in_person") {
     if (meetingControlAction) return;
+    if (!recMeeting && !captureMode) {
+      setRecordModeMenu((open) => !open);
+      return;
+    }
     const action = recMeeting ? "stopping" : "starting";
     setMeetingControlAction(action);
     setMeetingControlError(null);
@@ -200,7 +318,8 @@ export default function App() {
       if (recMeeting) {
         await api.meetingStop();
       } else {
-        const id = await api.meetingStart({ title: "Meeting" });
+        const id = await api.meetingStart({ title: "Meeting", filingContext, captureMode });
+        setRecordModeMenu(false);
         setView("today");
         setMeetingOpen({ id });
       }
@@ -224,7 +343,7 @@ export default function App() {
           (e) => e.category?.toLowerCase() === "schedule" && parseBlocks(e.data).length > 0
         )
     );
-  }, [notes]);
+  }, [notes, appTimeZone]);
   // A pasted image or an in-flight categorize/review always forces it open.
   const composerVisible = view === "capture" || composerOpen || !hasSchedule || phase !== "idle" || img != null;
 
@@ -246,12 +365,33 @@ export default function App() {
   const recorderRef = useRef<Recorder | null>(null);
 
   const refresh = async () => {
-    const [n, c] = await Promise.all([
+    const [n, c, f] = await Promise.all([
       api.listNotes(),
       api.listCategories(),
+      api.listNoteFolders(),
     ]);
     setNotes(n);
     setCats(c);
+    setFolders(f);
+    // Preserve the space selected by older builds the first time the explicit
+    // Work/Personal context preference is introduced.
+    if (!hasStoredFilingContext()) {
+      const previousSpaceId = Number(localStorage.getItem("noted-active-space"));
+      const previousSpace = f.find(
+        (folder) => folder.id === previousSpaceId && folder.kind === "space"
+      );
+      const previousContext = previousSpace?.name.trim().toLowerCase();
+      const migratedContext = isFilingContext(previousContext) ? previousContext : "work";
+      setFilingContextState(migratedContext);
+      writeFilingContext(migratedContext);
+      const migratedSpace = f.find(
+        (folder) =>
+          folder.kind === "space" && folder.name.trim().toLowerCase() === migratedContext
+      );
+      if (migratedSpace) {
+        localStorage.setItem("noted-active-space", String(migratedSpace.id));
+      }
+    }
   };
 
   // Phone web client only: watch the connection to the Mac and auto-recover when
@@ -359,6 +499,39 @@ export default function App() {
     [cards]
   );
   const allValid = cardParses.every((p) => p.ok);
+  const activeFilingContext = reviewFilingContext ?? filingContext;
+  const contextSpace = useMemo(
+    () =>
+      folders.find(
+        (folder) =>
+          folder.kind === "space" && folder.name.trim().toLowerCase() === activeFilingContext
+      ),
+    [activeFilingContext, folders]
+  );
+  const contextFilingTargets = useMemo(
+    () =>
+      contextSpace == null
+        ? []
+        : folders.filter((folder) => folderIsWithin(folder, contextSpace.id, folders)),
+    [contextSpace, folders]
+  );
+  const automaticDestination =
+    activeFilingContext === "work" &&
+    isDailyStandupDraft(source === "photo" ? ocrText : text, cards)
+      ? contextFilingTargets.find((folder) => folder.auto_rule === "daily_standup")
+      : undefined;
+  const resolvedDestinationId = destinationTouched
+    ? destinationFolderId
+    : automaticDestination?.id ?? contextSpace?.id ?? null;
+  const resolvedDestinationPath =
+    resolvedDestinationId == null ? "Needs filing" : folderPathLabel(resolvedDestinationId, folders);
+  const destinationReason = destinationTouched
+    ? `You chose ${resolvedDestinationPath}.`
+    : automaticDestination
+      ? "Matched your approved Daily Standup rule."
+      : contextSpace
+        ? `No folder rule matched. This stays in ${filingContextLabel(activeFilingContext)} Inbox.`
+        : "The selected context is unavailable. This note will stay in Needs filing.";
 
   const updateCard = (i: number, patch: Partial<ReviewCard>) =>
     setCards((cs) => cs.map((c, idx) => (idx === i ? { ...c, ...patch } : c)));
@@ -379,7 +552,7 @@ export default function App() {
     setImg(await fileToImg(file));
   }
 
-  function enterReview(env: Envelope, src: Source) {
+  function enterReview(env: Envelope, src: Source, capturedContext: FilingContext) {
     setCards(
       env.entries.map((e) => ({
         catName: e.category,
@@ -392,16 +565,20 @@ export default function App() {
     setEventDate(env.event_date ?? "");
     setDateWasExtracted(!!env.date_was_extracted);
     setEntityChips(env.entities ?? []);
+    setReviewFilingContext(capturedContext);
+    setDestinationFolderId(null);
+    setDestinationTouched(false);
     setSource(src);
     setPhase("review");
   }
 
   async function onCategorizeText() {
     if (!text.trim()) return;
+    const capturedContext = filingContext;
     setError(null);
     setPhase("thinking");
     try {
-      enterReview(await api.categorize(text.trim()), "text");
+      enterReview(await api.categorize(text.trim()), "text", capturedContext);
     } catch (e) {
       setError(String(e));
       setPhase("idle");
@@ -411,6 +588,7 @@ export default function App() {
   async function beginNoteReview({ text: draftText, img: draftImg }: { text: string; img: Img | null }) {
     const raw = draftText.trim();
     if (!raw && !draftImg) return;
+    const capturedContext = filingContext;
     setError(null);
     setPhase("thinking");
     try {
@@ -425,7 +603,7 @@ export default function App() {
       }
       setText(raw);
       setImg(draftImg);
-      enterReview(env, draftImg ? "photo" : "text");
+      enterReview(env, draftImg ? "photo" : "text", capturedContext);
       setMeetingOpen(null);
       setView("capture");
     } catch (e) {
@@ -435,14 +613,18 @@ export default function App() {
     }
   }
 
-  async function ingestPhoto(base64: string, ext: string) {
+  async function ingestPhoto(
+    base64: string,
+    ext: string,
+    capturedContext: FilingContext = filingContext
+  ) {
     setMeetingOpen(null);
     setView("capture");
     setImg({ base64, ext, dataUrl: `data:image/${ext === "jpg" ? "jpeg" : ext};base64,${base64}` });
     setError(null);
     setPhase("thinking");
     try {
-      enterReview(await api.categorizePhoto(base64), "photo");
+      enterReview(await api.categorizePhoto(base64), "photo", capturedContext);
     } catch (e) {
       setError(String(e));
       setPhase("idle");
@@ -458,7 +640,7 @@ export default function App() {
     const un = listen<{ path: string }>("photo-received", async (e) => {
       try {
         const { base64, ext } = await api.readInboxImage(e.payload.path);
-        await ingestPhoto(base64, ext);
+        await ingestPhoto(base64, ext, readFilingContext());
       } catch (err) {
         setError(String(err));
       }
@@ -479,8 +661,16 @@ export default function App() {
   }
 
   async function onSave() {
-    if (!cards.length || !allValid) return;
+    if (!cards.length || !allValid || savingCaptureRef.current) return;
+    savingCaptureRef.current = true;
+    setSavingCapture(true);
     setError(null);
+    const fallbackPath = resolvedDestinationPath;
+    const fallbackReason = destinationReason;
+    const fallbackSpaceId = contextSpace?.id ?? null;
+    const confirmedContextInbox =
+      destinationTouched && resolvedDestinationId === contextSpace?.id;
+    let noteId: number;
     try {
       let image_path: string | null = null;
       if (source === "photo" && img) {
@@ -499,21 +689,80 @@ export default function App() {
           relationship: e.relationship?.trim() || undefined,
         }))
         .filter((e) => e.name && e.type);
-      await api.save({
+      noteId = await api.save({
         raw_text: source === "photo" ? ocrText : text.trim(),
         source,
         image_path,
         event_date: eventDate,
         entries,
         entities,
+        filing_context: activeFilingContext,
+        folder_id: destinationTouched ? resolvedDestinationId : undefined,
       });
-      const savedCats = Array.from(new Set(entries.map((e) => e.category))).join(", ");
-      resetAll();
-      await refresh();
-      setSavedMsg(savedCats);
-      setTimeout(() => setSavedMsg(null), 4000);
     } catch (e) {
       setError(String(e));
+      savingCaptureRef.current = false;
+      setSavingCapture(false);
+      return;
+    }
+
+    // The note is committed at this point. Leave review immediately so a
+    // failed follow-up read can never invite a duplicate retry.
+    resetAll();
+    try {
+      const nextFolders = await api.listNoteFolders();
+      const savedPlacement = nextFolders
+        .flatMap((folder) =>
+          folder.explicit_filings.map((filing) => ({ folder, filing }))
+        )
+        .find(({ filing }) => filing.note_id === noteId);
+      setSavedMsg({
+        path: savedPlacement ? folderPathLabel(savedPlacement.folder.id, nextFolders) : "Needs filing",
+        spaceId: savedPlacement
+          ? folderSpaceId(savedPlacement.folder.id, nextFolders)
+          : null,
+        reason: savedPlacement?.filing.reason ?? "No filing context was recorded.",
+        eventId: savedPlacement?.filing.event_id ?? null,
+        canUndo:
+          !confirmedContextInbox &&
+          savedPlacement?.filing.event_id != null &&
+          (savedPlacement.filing.source === "rule" || savedPlacement.filing.source === "manual"),
+      });
+      if (
+        savedPlacement?.filing.source !== "rule" &&
+        savedPlacement?.filing.source !== "manual"
+      ) {
+        window.setTimeout(() => setSavedMsg(null), 5000);
+      }
+    } catch (e) {
+      console.warn("note saved, but filing details could not be refreshed", e);
+      setSavedMsg({
+        path: fallbackPath,
+        spaceId: fallbackSpaceId,
+        reason: `Saved successfully. ${fallbackReason}`,
+        eventId: null,
+        canUndo: false,
+      });
+    } finally {
+      await refresh().catch((e) =>
+        console.warn("note saved, but the library refresh is still pending", e)
+      );
+      savingCaptureRef.current = false;
+      setSavingCapture(false);
+    }
+  }
+
+  async function undoSavedFiling() {
+    if (!savedMsg?.eventId || undoingSave) return;
+    setUndoingSave(true);
+    try {
+      await api.undoNoteFiling(savedMsg.eventId);
+      await refresh();
+      setSavedMsg(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setUndoingSave(false);
     }
   }
 
@@ -527,6 +776,9 @@ export default function App() {
     setEventDate("");
     setDateWasExtracted(false);
     setEntityChips([]);
+    setReviewFilingContext(null);
+    setDestinationFolderId(null);
+    setDestinationTouched(false);
     setPhase("idle");
     setView("ask");
   }
@@ -612,6 +864,7 @@ export default function App() {
         />
 
         {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+        <AgentContextApproval />
       </div>
     );
   }
@@ -683,31 +936,71 @@ export default function App() {
           </button>
         </nav>
         <span className="spacer" data-tauri-drag-region />
-        <button
-          className={"rec-pill" + (recMeeting ? " active" : "")}
-          onClick={toggleMeetingRecording}
-          disabled={meetingControlAction != null}
-          title={recMeeting ? `Stop recording: ${recMeeting.title}` : "Start a recording"}
-        >
-          {meetingControlAction ? (
-            <Loader size={13} className="spin" />
-          ) : recMeeting ? (
-            <span className="bars" aria-hidden>
-              <i />
-              <i />
-              <i />
-            </span>
-          ) : (
-            <Mic size={14} />
-          )}
-          {meetingControlAction
-            ? meetingControlAction === "stopping"
-              ? "Stopping…"
-              : "Starting…"
-            : recMeeting
-              ? "Stop recording"
-              : "Start recording"}
-        </button>
+        {recordModeMenu && !recMeeting && (
+          <div className="record-mode-menu" role="menu" aria-label="Recording type">
+            <button role="menuitem" onClick={() => void toggleMeetingRecording("in_person")}>
+              <Mic size={15} />
+              <span><strong>In-person meeting</strong><small>Room microphone · separates speakers after</small></span>
+            </button>
+            <button role="menuitem" onClick={() => void toggleMeetingRecording("online")}>
+              <Video size={15} />
+              <span><strong>Online call</strong><small>Microphone + system audio</small></span>
+            </button>
+          </div>
+        )}
+        {recMeeting ? (
+          <div className="sidebar-live-meeting" role="group" aria-label={`Recording ${recMeeting.title}`}>
+            <button
+              type="button"
+              className="sidebar-live-open"
+              onClick={openRecordingMeeting}
+              disabled={meetingControlAction === "stopping"}
+              title={`Open meeting: ${recMeeting.title}`}
+              aria-current={meetingOpen?.id === recMeeting.id ? "page" : undefined}
+            >
+              <span className="bars" aria-hidden>
+                <i />
+                <i />
+                <i />
+              </span>
+              <span className="sidebar-live-copy">
+                <strong>Open meeting</strong>
+                <small>{recMeeting.title}</small>
+              </span>
+            </button>
+            <button
+              type="button"
+              className="sidebar-live-stop"
+              onClick={() => void toggleMeetingRecording()}
+              disabled={meetingControlAction != null}
+              title={meetingControlAction === "stopping" ? "Stopping recording" : `Stop recording: ${recMeeting.title}`}
+              aria-label={meetingControlAction === "stopping" ? "Stopping recording" : `Stop recording: ${recMeeting.title}`}
+            >
+              {meetingControlAction === "stopping" ? (
+                <Loader size={12} className="spin" />
+              ) : (
+                <Square size={10} fill="currentColor" />
+              )}
+              <span aria-live="polite">{meetingControlAction === "stopping" ? "Wait" : "Stop"}</span>
+            </button>
+          </div>
+        ) : (
+          <button
+            className="rec-pill"
+            onClick={() => void toggleMeetingRecording()}
+            disabled={meetingControlAction != null}
+            title="Start a recording"
+          >
+            {meetingControlAction ? (
+              <Loader size={13} className="spin" />
+            ) : (
+              <Mic size={14} />
+            )}
+            {meetingControlAction
+              ? "Starting…"
+              : recordModeMenu ? "Close" : "Start recording"}
+          </button>
+        )}
         {meetingControlError && (
           <span className="sidebar-record-error" role="alert">
             {meetingControlError}
@@ -745,10 +1038,12 @@ export default function App() {
         {view === "settings" ? (
           <SettingsModal page onClose={goHome} />
         ) : view === "ask" ? (
-          <WeatherHome>
+          <WeatherHome onTimeZoneChange={setAppTimeZone}>
             <AskView
               onMutated={() => refresh().catch(handleErr)}
               onSaveNote={beginNoteReview}
+              filingContext={filingContext}
+              onFilingContextChange={chooseFilingContext}
               onOpenEntity={(id) => {
                 setKnowledgeEntity(id);
                 setView("knowledge");
@@ -777,19 +1072,25 @@ export default function App() {
           />
         ) : view === "today" ? (
           <div className="schedule-page">
-            <ComingUp
-              onOpenEvent={(ev) => setMeetingOpen({ id: null, event: ev })}
-              onOpenMeeting={(id) => setMeetingOpen({ id })}
-              activeMeetingId={recMeeting?.id ?? null}
-            />
             <TodayView
               notes={notes}
               onSaved={() => refresh().catch(handleErr)}
               onOpenSettings={() => setView("settings")}
+              lead={(
+                <ComingUp
+                  onOpenEvent={(ev) => {
+                    if (ev.meet_link || ev.attendee_count >= 2) {
+                      setMeetingOpen({ id: null, event: ev });
+                    } else {
+                      setView("calendar");
+                    }
+                  }}
+                />
+              )}
             />
           </div>
         ) : (
-        <WeatherHome>
+        <WeatherHome onTimeZoneChange={setAppTimeZone}>
         <div className="capture-workspace">
         <div className="log-hero">
         {!composerVisible ? (
@@ -878,9 +1179,21 @@ export default function App() {
                       ? "Stop"
                       : voiceReady === false
                         ? "Enable voice"
-                        : "Speak"}
+                  : "Speak"}
               </button>
             )}
+            <label className="capture-context">
+              <span>File in</span>
+              <select
+                value={filingContext}
+                onChange={(event) => chooseFilingContext(event.target.value as FilingContext)}
+                disabled={busy}
+                aria-label="Filing context"
+              >
+                <option value="work">Work</option>
+                <option value="personal">Personal</option>
+              </select>
+            </label>
             <span className="hint">{img ? "review the transcription next" : "⌘↵ to file"}</span>
             {img ? (
               <button className="primary" onClick={onCategorizePhoto} disabled={busy}>
@@ -928,7 +1241,7 @@ export default function App() {
         {error && <div className="error">{error}</div>}
 
         {phase === "review" && cards.length > 0 && (
-          <section className="review">
+          <section className="review" aria-busy={savingCapture}>
             <div className="review-head">
               <div className="cat-edit date-edit">
                 <label>Date</label>
@@ -940,6 +1253,52 @@ export default function App() {
               <span className="review-count">
                 {cards.length} {cards.length === 1 ? "entry" : "entries"} from this note
               </span>
+              <div className="filing-destination">
+                <div className="filing-destination-controls">
+                  <label htmlFor="review-filing-context">
+                    <span>Context</span>
+                    <select
+                      id="review-filing-context"
+                      value={activeFilingContext}
+                      onChange={(event) =>
+                        chooseFilingContext(event.target.value as FilingContext)
+                      }
+                    >
+                      <option value="work">Work</option>
+                      <option value="personal">Personal</option>
+                    </select>
+                  </label>
+                  <label htmlFor="review-filing-folder">
+                    <span>Save in</span>
+                    <select
+                      id="review-filing-folder"
+                      value={resolvedDestinationId ?? ""}
+                      disabled={contextSpace == null}
+                      aria-describedby="review-filing-reason"
+                      onChange={(event) => {
+                        setDestinationFolderId(Number(event.target.value));
+                        setDestinationTouched(true);
+                      }}
+                    >
+                      {contextFilingTargets.map((folder) => {
+                        const fullPath = folderPathLabel(folder.id, folders);
+                        const label =
+                          folder.id === contextSpace?.id
+                            ? "Inbox"
+                            : fullPath.replace(`${contextSpace?.name} / `, "");
+                        return (
+                          <option key={folder.id} value={folder.id}>
+                            {label}
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </label>
+                </div>
+                <p id="review-filing-reason" role="status" aria-live="polite">
+                  {destinationReason}
+                </p>
+              </div>
             </div>
 
             {source === "photo" && (
@@ -960,7 +1319,7 @@ export default function App() {
                   <div className="entry-card" key={i}>
                     <div className="entry-head">
                       <div className="cat-edit">
-                        <label>Category</label>
+                        <label>Topic</label>
                         <input
                           value={card.catName}
                           onChange={(e) => updateCard(i, { catName: e.target.value })}
@@ -1054,11 +1413,13 @@ export default function App() {
             )}
 
             <div className="review-actions">
-              <button onClick={resetAll}>Discard all</button>
-              <button className="primary" onClick={onSave} disabled={!allValid}>
-                {cards.length > 1
+              <button onClick={resetAll} disabled={savingCapture}>Discard all</button>
+              <button className="primary" onClick={onSave} disabled={!allValid || savingCapture}>
+                {savingCapture
+                  ? "Saving…"
+                  : cards.length > 1
                   ? `Save ${cards.length} entries`
-                  : `Save to ${cards[0].catName.trim().toLowerCase() || "…"}`}
+                  : "Save note"}
               </button>
             </div>
           </section>
@@ -1071,9 +1432,35 @@ export default function App() {
       </main>
 
       {savedMsg && (
-        <button className="saved-toast" onClick={() => setView("knowledge")}>
-          <Check size={15} /> Filed under <strong>{savedMsg}</strong> · view in knowledge
-        </button>
+        <div className="saved-toast" role="status" aria-live="polite">
+          <Check size={15} />
+          <span>
+            Saved in <strong>{savedMsg.path}</strong>
+            <small>{savedMsg.reason}</small>
+          </span>
+          {savedMsg.canUndo && (
+            <button onClick={() => void undoSavedFiling()} disabled={undoingSave}>
+              {undoingSave ? "Undoing…" : "Undo"}
+            </button>
+          )}
+          <button
+            onClick={() => {
+              if (savedMsg.spaceId != null) {
+                localStorage.setItem("noted-active-space", String(savedMsg.spaceId));
+              }
+              setView("notes");
+            }}
+          >
+            View in Notes
+          </button>
+          <button
+            className="dismiss"
+            onClick={() => setSavedMsg(null)}
+            aria-label="Dismiss saved note message"
+          >
+            ×
+          </button>
+        </div>
       )}
 
       <footer className="status">
@@ -1084,7 +1471,7 @@ export default function App() {
           aria-expanded={assistantOpen}
         >
           <MessageCircle size={15} aria-hidden="true" />
-          <span>Ask anything in your notes and meetings</span>
+          <span>Ask anything or schedule a meeting</span>
           <kbd>Command + Shift + Space</kbd>
         </button>
         <span className="meta">
@@ -1103,6 +1490,7 @@ export default function App() {
       />
 
       {releaseProfile.phoneLan && showPhone && <PhonePanel onClose={() => setShowPhone(false)} />}
+      <AgentContextApproval />
     </div>
   );
 }

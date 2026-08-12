@@ -3,10 +3,12 @@
 // "emergent schema" logic: each category grows an additive shape + field
 // frequency map from the notes the user actually saves.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::Result;
+use rand::{rngs::OsRng, RngCore};
 use rusqlite::{ffi::sqlite3_auto_extension, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -40,7 +42,9 @@ CREATE TABLE IF NOT EXISTS notes (
   origin       TEXT NOT NULL DEFAULT 'capture',
   source_path  TEXT,   -- vault-relative file path (brain notes); sync key
   content_hash TEXT,   -- last-synced content hash (change detection + echo suppression)
-  synced_at    TEXT
+  synced_at    TEXT,
+  filing_context TEXT,                 -- work|personal; NULL for legacy/imported notes
+  trashed_at   TEXT                    -- reversible removal for ordinary capture notes
 );
 
 CREATE TABLE IF NOT EXISTS entries (
@@ -68,12 +72,50 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_note_folders_parent_name
   ON note_folders(COALESCE(parent_id, 0), name COLLATE NOCASE);
 
 CREATE TABLE IF NOT EXISTS note_folder_items (
-  folder_id  INTEGER NOT NULL REFERENCES note_folders(id) ON DELETE CASCADE,
-  note_id    INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  folder_id INTEGER NOT NULL REFERENCES note_folders(id) ON DELETE CASCADE,
+  note_id   INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  source    TEXT NOT NULL DEFAULT 'manual',
+  reason    TEXT NOT NULL DEFAULT 'Previously filed by you.',
+  event_id  INTEGER REFERENCES note_filing_events(id) ON DELETE SET NULL,
   created_at TEXT NOT NULL,
   PRIMARY KEY (folder_id, note_id)
 );
 CREATE INDEX IF NOT EXISTS idx_note_folder_items_note ON note_folder_items(note_id);
+
+-- Every filing decision is immutable history. note_folder_items is only the
+-- current one-home projection; from_event_id connects a transition to the
+-- exact state it replaced, and undoes_event_id makes reversals auditable.
+CREATE TABLE IF NOT EXISTS note_filing_events (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  note_id          INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+  from_folder_id   INTEGER REFERENCES note_folders(id) ON DELETE SET NULL,
+  to_folder_id     INTEGER REFERENCES note_folders(id) ON DELETE SET NULL,
+  from_path        TEXT,
+  to_path          TEXT,
+  from_context     TEXT,
+  to_context       TEXT,
+  source           TEXT NOT NULL CHECK(source IN ('context', 'rule', 'manual', 'undo')),
+  reason           TEXT NOT NULL,
+  from_event_id    INTEGER REFERENCES note_filing_events(id) ON DELETE SET NULL,
+  undoes_event_id  INTEGER REFERENCES note_filing_events(id) ON DELETE SET NULL,
+  created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_note_filing_events_note
+  ON note_filing_events(note_id, id DESC);
+
+-- Deterministic meeting filing. Email identities are exact, normalized keys;
+-- priority decides which destination wins when an event spans identities.
+-- A deleted destination leaves the rule visible but disabled (folder_id NULL)
+-- instead of silently redirecting future meetings somewhere else.
+CREATE TABLE IF NOT EXISTS meeting_filing_rules (
+  email      TEXT PRIMARY KEY COLLATE NOCASE,
+  folder_id  INTEGER REFERENCES note_folders(id) ON DELETE SET NULL,
+  priority   INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_meeting_filing_rules_priority
+  ON meeting_filing_rules(priority, email);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS embeddings USING vec0(
   note_id   INTEGER PRIMARY KEY,
@@ -147,6 +189,7 @@ CREATE TABLE IF NOT EXISTS pending_captures (
   source      TEXT NOT NULL DEFAULT 'text',
   image_path  TEXT,
   event_date  TEXT,
+  filing_context TEXT,                   -- work|personal; NULL for legacy/unknown
   created_at  TEXT NOT NULL,
   error       TEXT,
   attempts    INTEGER NOT NULL DEFAULT 0
@@ -165,23 +208,32 @@ CREATE TABLE IF NOT EXISTS brain_vaults (
 
 -- Meeting recorder. A meeting is a capture session (mic + system audio, two
 -- streams); its transcript lives in meeting_segments (large, append-heavy —
--- deliberately NOT in entries.data_json). The AI summary is ALSO filed as a
--- regular note under the 'meetings' category so search/embeddings/KG see it;
--- note_id links back to that note.
+-- deliberately NOT in entries.data_json). A searchable projection containing
+-- the primary summary plus user-authored notes is filed under the 'meetings'
+-- category; note_id links that projection back to this canonical meeting.
 CREATE TABLE IF NOT EXISTS meetings (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  public_id      TEXT,                    -- stable UUIDv7 used outside the database boundary
   title          TEXT NOT NULL,
   event_id       TEXT,                    -- gcal event id when calendar-matched
   event_json     TEXT,                    -- event snapshot: attendees, meet_link, times
   started_at     TEXT,
   ended_at       TEXT,
   status         TEXT NOT NULL DEFAULT 'recording', -- recording|summarizing|done|failed
-  raw_notes      TEXT NOT NULL DEFAULT '',-- typed during the meeting; always preserved
+  raw_notes      TEXT NOT NULL DEFAULT '',-- canonical user-authored notes owned by this meeting
+  notes_document_json TEXT,                -- formatting for the same notes; never a separate note record
   audio_me_path  TEXT,                    -- retained WAVs (verifiability); NULL if off
   audio_them_path TEXT,
+  capture_mode   TEXT NOT NULL DEFAULT 'online', -- online (mic + system) | in_person (room mic)
   asr_engine     TEXT,                    -- resolved engine used for this recording
   asr_model      TEXT,                    -- exact model artifact/provider model at start
-  note_id        INTEGER REFERENCES notes(id),
+  note_id        INTEGER REFERENCES notes(id), -- searchable meeting projection; not a second source of truth
+  filing_context TEXT,                   -- work|personal snapshot taken at recording start
+  route_folder_id INTEGER REFERENCES note_folders(id) ON DELETE SET NULL,
+  route_email    TEXT,                    -- normalized rule identity that matched
+  route_via      TEXT,                    -- source_account|organizer|creator|attendee|manual
+  route_status   TEXT NOT NULL DEFAULT 'needs_filing', -- matched|needs_filing|manual
+  route_updated_at TEXT,
   trashed_at     TEXT,                    -- reversible removal; NULL = visible
   created_at     TEXT NOT NULL
 );
@@ -192,6 +244,7 @@ CREATE TABLE IF NOT EXISTS meeting_segments (
   channel    TEXT NOT NULL,               -- 'me' (mic) | 'them' (system audio)
   t0_ms      INTEGER NOT NULL,
   t1_ms      INTEGER NOT NULL,
+  voiced_ms  INTEGER,                     -- active VAD frames; NULL on legacy rows
   text       TEXT NOT NULL,
   speaker    TEXT                         -- NULL = channel default; diarization fills later
 );
@@ -275,9 +328,9 @@ CREATE TABLE IF NOT EXISTS meeting_speakers (
   PRIMARY KEY (meeting_id, label)
 );
 
--- Named voiceprints across meetings: once a speaker is renamed, future
--- meetings whose cluster centroid matches auto-label with the name.
--- `embedding` is a running mean over `samples` segments.
+-- Legacy voiceprint rows retained for additive-schema compatibility. Current
+-- meeting labeling never reads or writes this table: group-call identities are
+-- manual, while a true calendar 1:1 uses its sole external attendee.
 CREATE TABLE IF NOT EXISTS speaker_profiles (
   name       TEXT PRIMARY KEY,
   embedding  BLOB NOT NULL,
@@ -292,7 +345,53 @@ CREATE TABLE IF NOT EXISTS meeting_templates (
   prompt  TEXT NOT NULL,
   builtin INTEGER NOT NULL DEFAULT 0
 );
+
+-- Metadata-only record of an approved or denied disclosure to a registered
+-- local agent. Context Pass plaintext is never stored in SQLite.
+CREATE TABLE IF NOT EXISTS agent_context_receipts (
+  id              TEXT PRIMARY KEY,
+  request_id      TEXT NOT NULL,
+  pass_id         TEXT,
+  client_id       TEXT NOT NULL,
+  client_name     TEXT NOT NULL,
+  runtime_name    TEXT,
+  purpose         TEXT NOT NULL,
+  resource_uri    TEXT,
+  resource_title  TEXT,
+  source_revision TEXT,
+  packet_hash     TEXT,
+  included_json   TEXT NOT NULL DEFAULT '{}',
+  status          TEXT NOT NULL,
+  total_bytes     INTEGER NOT NULL DEFAULT 0,
+  delivered_bytes INTEGER NOT NULL DEFAULT 0,
+  requested_at    TEXT NOT NULL,
+  decided_at      TEXT,
+  completed_at    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_agent_context_receipts_created
+  ON agent_context_receipts(requested_at DESC);
 "#;
+
+/// Generate a UUIDv7-compatible public identifier without exposing a SQLite
+/// row id. The 48-bit timestamp keeps creation order while 74 random bits make
+/// identifiers unguessable for the local-agent boundary.
+pub fn new_public_id() -> String {
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    let timestamp = timestamp_ms.to_be_bytes();
+    bytes[..6].copy_from_slice(&timestamp[2..]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+    )
+}
 
 /// Register sqlite-vec as an auto extension (process-wide, must happen before
 /// the connection is opened) and create the schema. Called once at startup.
@@ -313,22 +412,146 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     ensure_column(&conn, "notes", "source_path", "TEXT")?;
     ensure_column(&conn, "notes", "content_hash", "TEXT")?;
     ensure_column(&conn, "notes", "synced_at", "TEXT")?;
+    ensure_column(&conn, "notes", "filing_context", "TEXT")?;
+    ensure_column(&conn, "notes", "trashed_at", "TEXT")?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notes_trashed_at ON notes(trashed_at)",
+        [],
+    )?;
+    ensure_column(
+        &conn,
+        "note_folder_items",
+        "source",
+        "TEXT NOT NULL DEFAULT 'manual'",
+    )?;
+    ensure_column(
+        &conn,
+        "note_folder_items",
+        "reason",
+        "TEXT NOT NULL DEFAULT 'Previously filed by you.'",
+    )?;
+    ensure_column(
+        &conn,
+        "note_folder_items",
+        "event_id",
+        "INTEGER REFERENCES note_filing_events(id) ON DELETE SET NULL",
+    )?;
+    // The former schema allowed more than one explicit membership per note,
+    // even though every UI move already replaced the prior membership. Repair
+    // any hand-edited/imported duplicates before enforcing the one-home model.
+    conn.execute(
+        "DELETE FROM note_folder_items AS older
+         WHERE EXISTS (
+           SELECT 1 FROM note_folder_items AS newer
+           WHERE newer.note_id = older.note_id
+             AND (newer.created_at > older.created_at
+               OR (newer.created_at = older.created_at AND newer.rowid > older.rowid))
+         )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_note_folder_items_one_home
+         ON note_folder_items(note_id)",
+        [],
+    )?;
+    ensure_column(&conn, "pending_captures", "filing_context", "TEXT")?;
     ensure_column(&conn, "entities", "home_note_id", "INTEGER")?;
     // Person naming: AI-proposed display name awaiting the user's confirm
     // (people filed from meeting attendees start out named by raw email).
     ensure_column(&conn, "entities", "suggested_name", "TEXT")?;
     ensure_column(&conn, "meetings", "video_path", "TEXT")?;
+    ensure_column(&conn, "meetings", "public_id", "TEXT")?;
     ensure_column(&conn, "meetings", "trashed_at", "TEXT")?;
     ensure_column(&conn, "meetings", "asr_engine", "TEXT")?;
     ensure_column(&conn, "meetings", "asr_model", "TEXT")?;
+    ensure_column(&conn, "meetings", "notes_document_json", "TEXT")?;
+    ensure_column(
+        &conn,
+        "meetings",
+        "capture_mode",
+        "TEXT NOT NULL DEFAULT 'online'",
+    )?;
+    ensure_column(&conn, "meetings", "filing_context", "TEXT")?;
+    ensure_column(
+        &conn,
+        "meetings",
+        "route_folder_id",
+        "INTEGER REFERENCES note_folders(id) ON DELETE SET NULL",
+    )?;
+    ensure_column(&conn, "meetings", "route_email", "TEXT")?;
+    ensure_column(&conn, "meetings", "route_via", "TEXT")?;
+    ensure_column(
+        &conn,
+        "meetings",
+        "route_status",
+        "TEXT NOT NULL DEFAULT 'needs_filing'",
+    )?;
+    ensure_column(&conn, "meetings", "route_updated_at", "TEXT")?;
+    // Future conversation pace uses speech-only VAD time. Historical rows stay
+    // NULL so the UI can withhold pace instead of presenting padded spans as
+    // precise articulation timing.
+    ensure_column(&conn, "meeting_segments", "voiced_ms", "INTEGER")?;
+    backfill_meeting_public_ids(&conn)?;
+    initialize_meeting_filing_provenance(&conn)?;
     initialize_meeting_transcript_index(&conn)?;
     seed_note_folders(&conn)?;
+    seed_note_folder_structure_v2(&conn)?;
+    initialize_semantic_folder_rules(&conn)?;
     crate::meeting::store::initialize_one_on_one_speakers(&conn)?;
     initialize_embedding_fingerprint(&conn, &crate::provider::active_embedding_fingerprint())?;
     // Note: the reserved catch-all "misc" is not pre-seeded — the classifier is
     // told about it by name in the prompt, and it's created on first real use
     // (so an unused misc never clutters the catalog/UI).
     Ok(conn)
+}
+
+fn backfill_meeting_public_ids(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT id FROM meetings WHERE public_id IS NULL OR trim(public_id) = '' ORDER BY id",
+    )?;
+    let ids = statement
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for id in ids {
+        conn.execute(
+            "UPDATE meetings SET public_id = ?2 WHERE id = ?1",
+            rusqlite::params![id, new_public_id()],
+        )?;
+    }
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_meetings_public_id ON meetings(public_id)",
+        [],
+    )?;
+    Ok(())
+}
+
+/// Existing explicit folder memberships predate route provenance and are
+/// necessarily user-owned. Mark them manual once so backfill can never move
+/// those notes. Everything else starts in the reviewable needs-filing state.
+fn initialize_meeting_filing_provenance(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE meetings
+         SET route_folder_id = (
+               SELECT i.folder_id FROM note_folder_items i
+               WHERE i.note_id = meetings.note_id
+               ORDER BY i.created_at DESC, i.folder_id LIMIT 1
+             ),
+             route_email = NULL,
+             route_via = 'manual',
+             route_status = 'manual',
+             route_updated_at = COALESCE(route_updated_at, created_at)
+         WHERE route_via IS NULL
+           AND note_id IS NOT NULL
+           AND EXISTS (SELECT 1 FROM note_folder_items i WHERE i.note_id = meetings.note_id)",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE meetings SET route_status = 'needs_filing'
+         WHERE route_status IS NULL OR route_status = ''",
+        [],
+    )?;
+    Ok(())
 }
 
 /// Existing databases predate the transcript FTS table. Rebuild it once from
@@ -402,6 +625,115 @@ fn seed_note_folders(conn: &Connection) -> Result<()> {
     )?;
     tx.commit()?;
     Ok(())
+}
+
+/// Add the agreed Work and Personal organization once. Folder placement stays
+/// user-owned: this creates empty destinations but does not guess where notes
+/// belong. The marker also means later renames or deletions are respected.
+fn seed_note_folder_structure_v2(conn: &Connection) -> Result<()> {
+    let seeded: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_metadata WHERE key = 'note_folders_v2_seeded'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if seeded.is_some() {
+        return Ok(());
+    }
+
+    let work_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM note_folders
+             WHERE parent_id IS NULL AND kind = 'space' AND name = 'Work' COLLATE NOCASE",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let personal_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM note_folders
+             WHERE parent_id IS NULL AND kind = 'space' AND name = 'Personal' COLLATE NOCASE",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let has_all_roots = work_id.is_some() && personal_id.is_some();
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let tx = conn.unchecked_transaction()?;
+    for (parent_id, names) in [
+        (work_id, &["Symphony", "Side Projects", "Career"][..]),
+        (
+            personal_id,
+            &[
+                "Health",
+                "Finances",
+                "Home",
+                "Relationships",
+                "Travel",
+                "Personal Learning",
+            ][..],
+        ),
+    ] {
+        let Some(parent_id) = parent_id else {
+            continue;
+        };
+        for name in names {
+            tx.execute(
+                "INSERT OR IGNORE INTO note_folders
+                   (parent_id, name, kind, auto_rule, position, created_at)
+                 VALUES (
+                   ?1,
+                   ?2,
+                   'folder',
+                   '',
+                   (SELECT COALESCE(MAX(position), -1) + 1
+                    FROM note_folders WHERE parent_id IS ?1),
+                   ?3
+                 )",
+                rusqlite::params![parent_id, name, now],
+            )?;
+        }
+    }
+    if has_all_roots {
+        tx.execute(
+            "INSERT INTO app_metadata (key, value) VALUES ('note_folders_v2_seeded', '1')",
+            [],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Give conventional meeting folders durable semantics once, without making
+/// their display names part of every future routing decision. Renaming one of
+/// these folders preserves the rule; deleting it removes the destination.
+fn initialize_semantic_folder_rules(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE note_folders SET auto_rule = 'one_on_one'
+         WHERE auto_rule = '' AND kind = 'folder'
+           AND lower(replace(replace(name, '-', ' '), '_', ' '))
+               IN ('one on ones', 'one on one', '1:1s', '1:1')",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE note_folders SET auto_rule = 'external_partner'
+         WHERE auto_rule = '' AND kind = 'folder'
+           AND lower(replace(replace(name, '-', ' '), '_', ' '))
+               IN ('partner meetings', 'partner meeting', 'partners')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn inferred_folder_rule(name: &str) -> &'static str {
+    let normalized = name.trim().to_lowercase().replace(['-', '_'], " ");
+    match normalized.as_str() {
+        "one on ones" | "one on one" | "1:1s" | "1:1" => "one_on_one",
+        "partner meetings" | "partner meeting" | "partners" => "external_partner",
+        _ => "",
+    }
 }
 
 /// Add a column if a pre-existing table is missing it. No-op on fresh DBs where
@@ -491,6 +823,7 @@ pub struct NoteRow {
     pub entries: Vec<NoteEntry>,
     pub event_date: String,
     pub created_at: String,
+    pub trashed_at: Option<String>,
 }
 
 /// Parse a `json_group_array(json_object('category',..,'data',..))` string into
@@ -512,26 +845,35 @@ fn parse_note_entries(s: &str) -> Vec<NoteEntry> {
         .collect()
 }
 
-pub fn list_notes(conn: &Connection) -> Result<Vec<NoteRow>> {
+fn list_notes_by_trash(conn: &Connection, trashed: bool) -> Result<Vec<NoteRow>> {
     // One row per note; its entries (category + data) aggregated into a JSON
     // array. Ordered by the day the thing happened (latest entry event_date),
-    // falling back to the save day for any legacy rows without one.
+    // falling back to the save day for any legacy rows without one. Meeting
+    // notes keep their separate meeting-owned Trash lifecycle.
     let mut stmt = conn.prepare(
         "SELECT n.id, COALESCE(n.title, ''), n.raw_text, n.source,
                 COALESCE(MAX(e.event_date), date(n.created_at)) AS event_date,
                 json_group_array(json_object('id', e.id, 'category', c.name, 'data', json(e.data_json))) AS entries,
-                n.created_at
+                n.created_at, n.trashed_at
          FROM notes n
          LEFT JOIN entries e ON e.note_id = n.id
          LEFT JOIN categories c ON c.id = e.category_id
          WHERE (n.origin = 'capture' OR n.origin IS NULL)
-           AND NOT EXISTS (
-             SELECT 1 FROM meetings m WHERE m.note_id = n.id AND m.trashed_at IS NOT NULL
+           AND (
+             (?1 = 0 AND n.trashed_at IS NULL AND NOT EXISTS (
+               SELECT 1 FROM meetings m
+               WHERE m.note_id = n.id AND m.trashed_at IS NOT NULL
+             ))
+             OR
+             (?1 = 1 AND n.trashed_at IS NOT NULL AND NOT EXISTS (
+               SELECT 1 FROM meetings m WHERE m.note_id = n.id
+             ))
            )
          GROUP BY n.id
-         ORDER BY event_date DESC, n.id DESC",
+         ORDER BY CASE WHEN ?1 = 1 THEN n.trashed_at ELSE event_date END DESC,
+                  n.id DESC",
     )?;
-    let rows = stmt.query_map([], |r| {
+    let rows = stmt.query_map([trashed], |r| {
         let entries_str: String = r.get(5)?;
         Ok(NoteRow {
             id: r.get(0)?,
@@ -541,16 +883,166 @@ pub fn list_notes(conn: &Connection) -> Result<Vec<NoteRow>> {
             event_date: r.get(4)?,
             entries: parse_note_entries(&entries_str),
             created_at: r.get(6)?,
+            trashed_at: r.get(7)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+pub fn list_notes(conn: &Connection) -> Result<Vec<NoteRow>> {
+    list_notes_by_trash(conn, false)
+}
+
+pub fn list_trashed_notes(conn: &Connection) -> Result<Vec<NoteRow>> {
+    list_notes_by_trash(conn, true)
+}
+
+fn ordinary_note_state(
+    conn: &Connection,
+    note_id: i64,
+) -> Result<(Option<String>, Option<String>)> {
+    let row = conn
+        .query_row(
+            "SELECT n.trashed_at, n.image_path,
+                    COALESCE(n.origin, 'capture'),
+                    EXISTS(SELECT 1 FROM meetings m WHERE m.note_id = n.id)
+             FROM notes n WHERE n.id = ?1",
+            [note_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("note not found"))?;
+    if row.2 != "capture" {
+        return Err(anyhow::anyhow!("only captured notes can be moved to Trash"));
+    }
+    if row.3 {
+        return Err(anyhow::anyhow!(
+            "meeting notes must use the meeting Trash lifecycle"
+        ));
+    }
+    Ok((row.0, row.1))
+}
+
+/// Refresh cached counts against visible notes while leaving the underlying
+/// rows intact so moving a note out of Trash restores its knowledge context.
+fn refresh_visible_note_aggregates(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "UPDATE categories SET entry_count =
+           (SELECT COUNT(*)
+            FROM entries e JOIN notes n ON n.id = e.note_id
+            WHERE e.category_id = categories.id AND n.trashed_at IS NULL)",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE entities SET
+           mention_count =
+             (SELECT COUNT(*)
+              FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+              WHERE m.entity_id = entities.id AND n.trashed_at IS NULL),
+           first_seen =
+             (SELECT MIN(m.event_date)
+              FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+              WHERE m.entity_id = entities.id AND n.trashed_at IS NULL),
+           last_seen =
+             (SELECT MAX(m.event_date)
+              FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+              WHERE m.entity_id = entities.id AND n.trashed_at IS NULL)",
+        [],
+    )?;
+    Ok(())
+}
+
+pub fn trash_note(conn: &Connection, note_id: i64, now: &str) -> Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    let (trashed_at, _) = ordinary_note_state(&tx, note_id)?;
+    if trashed_at.is_some() {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE notes SET trashed_at = ?2 WHERE id = ?1",
+        rusqlite::params![note_id, now],
+    )?;
+    refresh_visible_note_aggregates(&tx)?;
+    tx.commit()?;
+    Ok(true)
+}
+
+pub fn restore_note(conn: &Connection, note_id: i64) -> Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    let (trashed_at, _) = ordinary_note_state(&tx, note_id)?;
+    if trashed_at.is_none() {
+        return Ok(false);
+    }
+    tx.execute(
+        "UPDATE notes SET trashed_at = NULL WHERE id = ?1",
+        [note_id],
+    )?;
+    refresh_visible_note_aggregates(&tx)?;
+    tx.commit()?;
+    Ok(true)
+}
+
+#[derive(Debug)]
+pub struct DeletedNote {
+    pub image_path: Option<String>,
+}
+
+/// Permanently remove an ordinary note only after it has entered Trash. Folder
+/// memberships and filing history cascade from `notes`; the remaining derived
+/// data has explicit cleanup because its foreign keys intentionally do not.
+pub fn delete_note_forever(conn: &mut Connection, note_id: i64) -> Result<Option<DeletedNote>> {
+    let tx = conn.transaction()?;
+    let (trashed_at, image_path) = ordinary_note_state(&tx, note_id)?;
+    if trashed_at.is_none() {
+        return Ok(None);
+    }
+
+    tx.execute(
+        "UPDATE entities SET home_note_id = NULL WHERE home_note_id = ?1",
+        [note_id],
+    )?;
+    tx.execute("DELETE FROM entity_mentions WHERE note_id = ?1", [note_id])?;
+    tx.execute("DELETE FROM embeddings WHERE note_id = ?1", [note_id])?;
+    tx.execute("DELETE FROM entries WHERE note_id = ?1", [note_id])?;
+    tx.execute("DELETE FROM notes WHERE id = ?1", [note_id])?;
+    let image_path = match image_path {
+        Some(path) => {
+            let still_referenced: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM notes WHERE image_path = ?1)",
+                [&path],
+                |row| row.get(0),
+            )?;
+            (!still_referenced).then_some(path)
+        }
+        None => None,
+    };
+    refresh_visible_note_aggregates(&tx)?;
+    tx.commit()?;
+
+    Ok(Some(DeletedNote { image_path }))
+}
+
 // ---------------------------------------------------------------------------
 // Spaces and folders. These are user-owned organization, independent from the
-// extraction categories above. Auto rules are deterministic saved views, so a
-// newly captured stand-up appears beside older ones without a migration job.
+// extraction categories above. New captures materialize one primary filing;
+// the computed rule path below remains only for untouched legacy notes.
 // ---------------------------------------------------------------------------
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct NoteFolderItemInfo {
+    pub note_id: i64,
+    pub filing_context: Option<String>,
+    pub source: String,
+    pub reason: String,
+    pub event_id: Option<i64>,
+}
 
 #[derive(Serialize, Debug)]
 pub struct NoteFolderInfo {
@@ -560,9 +1052,10 @@ pub struct NoteFolderInfo {
     pub kind: String,
     pub auto_rule: String,
     pub note_ids: Vec<i64>,
+    pub explicit_filings: Vec<NoteFolderItemInfo>,
 }
 
-pub fn is_daily_standup(note: &NoteRow) -> bool {
+fn matches_daily_standup<'a>(raw_text: &str, categories: impl Iterator<Item = &'a str>) -> bool {
     fn matches(value: &str) -> bool {
         let lower = value.to_lowercase();
         let spaced = lower.replace(['-', '_'], " ");
@@ -573,11 +1066,7 @@ pub fn is_daily_standup(note: &NoteRow) -> bool {
             || spaced.contains("daily scrum")
     }
 
-    let categories: Vec<&str> = note
-        .entries
-        .iter()
-        .filter_map(|entry| entry.category.as_deref())
-        .collect();
+    let categories: Vec<&str> = categories.collect();
     if categories
         .iter()
         .any(|category| category.trim().eq_ignore_ascii_case("schedule"))
@@ -585,7 +1074,16 @@ pub fn is_daily_standup(note: &NoteRow) -> bool {
         return false;
     }
 
-    matches(&note.raw_text) || categories.into_iter().any(matches)
+    matches(raw_text) || categories.into_iter().any(matches)
+}
+
+pub fn is_daily_standup(note: &NoteRow) -> bool {
+    matches_daily_standup(
+        &note.raw_text,
+        note.entries
+            .iter()
+            .filter_map(|entry| entry.category.as_deref()),
+    )
 }
 
 pub fn list_note_folders(conn: &Connection) -> Result<Vec<NoteFolderInfo>> {
@@ -602,29 +1100,63 @@ pub fn list_note_folders(conn: &Connection) -> Result<Vec<NoteFolderInfo>> {
             kind: r.get(3)?,
             auto_rule: r.get(4)?,
             note_ids: Vec::new(),
+            explicit_filings: Vec::new(),
         })
     })?;
     let mut folders = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(stmt);
 
-    let auto_notes = if folders.iter().any(|folder| !folder.auto_rule.is_empty()) {
+    let auto_notes = if folders
+        .iter()
+        .any(|folder| folder.auto_rule == "daily_standup")
+    {
         list_notes(conn)?
     } else {
         Vec::new()
     };
+    let decided_note_ids: HashSet<i64> = conn
+        .prepare(
+            "SELECT note_id FROM note_folder_items
+             UNION
+             SELECT note_id FROM note_filing_events",
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
 
     for folder in &mut folders {
         let mut item_stmt = conn.prepare(
-            "SELECT note_id FROM note_folder_items WHERE folder_id = ?1 ORDER BY note_id DESC",
+            "SELECT i.note_id, n.filing_context, COALESCE(i.source, 'manual'),
+                    COALESCE(i.reason, 'Previously filed by you.'), i.event_id
+             FROM note_folder_items i
+             JOIN notes n ON n.id = i.note_id
+             WHERE i.folder_id = ?1 AND n.trashed_at IS NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM meetings m
+                 WHERE m.note_id = n.id AND m.trashed_at IS NOT NULL
+               )
+             ORDER BY i.note_id DESC",
         )?;
-        let ids = item_stmt.query_map([folder.id], |r| r.get::<_, i64>(0))?;
-        let mut note_ids = ids.collect::<rusqlite::Result<Vec<_>>>()?;
+        let items = item_stmt.query_map([folder.id], |row| {
+            Ok(NoteFolderItemInfo {
+                note_id: row.get(0)?,
+                filing_context: row.get(1)?,
+                source: row.get(2)?,
+                reason: row.get(3)?,
+                event_id: row.get(4)?,
+            })
+        })?;
+        folder.explicit_filings = items.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut note_ids = folder
+            .explicit_filings
+            .iter()
+            .map(|item| item.note_id)
+            .collect::<Vec<_>>();
 
         if folder.auto_rule == "daily_standup" {
             note_ids.extend(
                 auto_notes
                     .iter()
-                    .filter(|note| is_daily_standup(note))
+                    .filter(|note| !decided_note_ids.contains(&note.id) && is_daily_standup(note))
                     .map(|note| note.id),
             );
         }
@@ -647,9 +1179,17 @@ pub fn create_note_folder(
     if name.is_empty() {
         return Err(anyhow::anyhow!("folder name cannot be empty"));
     }
-    if !matches!(auto_rule, "" | "daily_standup") {
+    if !matches!(
+        auto_rule,
+        "" | "daily_standup" | "one_on_one" | "external_partner"
+    ) {
         return Err(anyhow::anyhow!("unknown folder rule"));
     }
+    let auto_rule = if auto_rule.is_empty() {
+        inferred_folder_rule(name)
+    } else {
+        auto_rule
+    };
     match parent_id {
         None if kind != "space" => {
             return Err(anyhow::anyhow!("a root item must be a space"));
@@ -751,6 +1291,17 @@ pub fn move_note_folder(
         }
     }
 
+    let destination_parent = parent_id.ok_or_else(|| {
+        anyhow::anyhow!("folders must remain inside the Work or Personal context")
+    })?;
+    let source_context = folder_filing_context(conn, folder_id)?;
+    let destination_context = folder_filing_context(conn, destination_parent)?;
+    if source_context != destination_context {
+        return Err(anyhow::anyhow!(
+            "folders cannot move between Work and Personal"
+        ));
+    }
+
     if let Some(before_id) = before_id {
         if before_id == folder_id {
             return Err(anyhow::anyhow!("a folder cannot be placed before itself"));
@@ -824,21 +1375,367 @@ pub fn move_note_folder(
 }
 
 pub fn delete_note_folder(conn: &Connection, folder_id: i64) -> Result<()> {
-    let changed = conn.execute("DELETE FROM note_folders WHERE id = ?1", [folder_id])?;
-    if changed == 0 {
-        return Err(anyhow::anyhow!("folder not found"));
+    let now = chrono::Utc::now().to_rfc3339();
+    let tx = conn.unchecked_transaction()?;
+    let kind = tx
+        .query_row(
+            "SELECT kind FROM note_folders WHERE id = ?1",
+            [folder_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("folder not found"))?;
+    if kind == "space" {
+        return Err(anyhow::anyhow!(
+            "Work and Personal contexts cannot be deleted"
+        ));
     }
+
+    let affected_notes = {
+        let mut stmt = tx.prepare(
+            "WITH RECURSIVE subtree(id) AS (
+               SELECT id FROM note_folders WHERE id = ?1
+               UNION ALL
+               SELECT child.id FROM note_folders child
+               JOIN subtree parent ON child.parent_id = parent.id
+             )
+             SELECT DISTINCT i.note_id, i.folder_id
+             FROM note_folder_items i JOIN subtree s ON s.id = i.folder_id",
+        )?;
+        let rows = stmt.query_map([folder_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let deleted_path = note_folder_path(&tx, folder_id)?;
+    for (note_id, previous_folder_id) in affected_notes {
+        let context = tx.query_row(
+            "SELECT filing_context FROM notes WHERE id = ?1",
+            [note_id],
+            |row| row.get::<_, Option<String>>(0),
+        )?;
+        let context = match context {
+            Some(context) => normalized_filing_context(&context)?,
+            // Old explicit memberships predate persisted context. Their
+            // actual folder ancestry is still authoritative at deletion time.
+            None => folder_filing_context(&tx, previous_folder_id)?,
+        };
+        let inbox_id = context_space_id(&tx, &context)?;
+        let reason = format!(
+            "Moved to {} / Inbox because {deleted_path} was deleted.",
+            if context == "work" {
+                "Work"
+            } else {
+                "Personal"
+            }
+        );
+        filing_transition(
+            &tx,
+            note_id,
+            Some(inbox_id),
+            "context",
+            &reason,
+            Some(&context),
+            None,
+            &now,
+        )?;
+        sync_linked_meeting_route(&tx, note_id, Some(inbox_id), "context", &now)?;
+    }
+
+    // Keep disabled rules visible for repair, and make unresolved automatic
+    // routes honest. Manual provenance remains manual even though deleting its
+    // destination naturally removes the folder membership via CASCADE.
+    tx.execute(
+        "WITH RECURSIVE subtree(id) AS (
+           SELECT id FROM note_folders WHERE id = ?1
+           UNION ALL
+           SELECT child.id FROM note_folders child JOIN subtree ON child.parent_id = subtree.id
+         )
+         UPDATE meeting_filing_rules SET folder_id = NULL, updated_at = ?2
+         WHERE folder_id IN (SELECT id FROM subtree)",
+        rusqlite::params![folder_id, now],
+    )?;
+    tx.execute(
+        "WITH RECURSIVE subtree(id) AS (
+           SELECT id FROM note_folders WHERE id = ?1
+           UNION ALL
+           SELECT child.id FROM note_folders child JOIN subtree ON child.parent_id = subtree.id
+         )
+         UPDATE meetings SET route_folder_id = NULL,
+                route_via = 'destination_missing', route_status = 'needs_filing',
+                route_updated_at = ?2
+         WHERE route_folder_id IN (SELECT id FROM subtree)
+           AND COALESCE(route_status, 'needs_filing') <> 'manual'",
+        rusqlite::params![folder_id, now],
+    )?;
+    tx.execute("DELETE FROM note_folders WHERE id = ?1", [folder_id])?;
+    tx.commit()?;
     Ok(())
 }
 
-/// Move a note's explicit filing to one space or folder. Filing directly to a
-/// space is its inbox state; filing to a child gives it a more specific home.
-/// Auto-filed appearances remain computed from their rule, so the same note can
-/// still belong to a smart view.
-pub fn file_note(conn: &Connection, note_id: i64, folder_id: Option<i64>, now: &str) -> Result<()> {
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct NoteFilingReceipt {
+    pub event_id: i64,
+    pub note_id: i64,
+    pub folder_id: Option<i64>,
+    pub previous_folder_id: Option<i64>,
+    pub filing_context: Option<String>,
+    pub previous_context: Option<String>,
+    pub source: String,
+    pub reason: String,
+}
+
+#[derive(Debug)]
+struct CurrentFiling {
+    folder_id: Option<i64>,
+    event_id: Option<i64>,
+    path: Option<String>,
+    context: Option<String>,
+}
+
+fn note_folder_path(conn: &Connection, folder_id: i64) -> Result<String> {
+    let mut names = Vec::new();
+    let mut current = Some(folder_id);
+    let mut seen = HashSet::new();
+    while let Some(id) = current {
+        if !seen.insert(id) {
+            return Err(anyhow::anyhow!("folder hierarchy contains a cycle"));
+        }
+        let row = conn
+            .query_row(
+                "SELECT name, parent_id FROM note_folders WHERE id = ?1",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()?;
+        let Some((name, parent_id)) = row else {
+            return Err(anyhow::anyhow!("filing target not found"));
+        };
+        names.push(name);
+        current = parent_id;
+    }
+    names.reverse();
+    Ok(names.join(" / "))
+}
+
+fn normalized_filing_context(value: &str) -> Result<String> {
+    let context = value.trim().to_lowercase();
+    if !matches!(context.as_str(), "work" | "personal") {
+        return Err(anyhow::anyhow!("filing context must be work or personal"));
+    }
+    Ok(context)
+}
+
+fn context_space_id(conn: &Connection, context: &str) -> Result<i64> {
+    let context = normalized_filing_context(context)?;
+    conn.query_row(
+        "SELECT id FROM note_folders
+         WHERE parent_id IS NULL AND kind = 'space' AND name = ?1 COLLATE NOCASE",
+        [context],
+        |row| row.get(0),
+    )
+    .map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => anyhow::anyhow!("filing context not found"),
+        other => other.into(),
+    })
+}
+
+pub(crate) fn folder_filing_context(conn: &Connection, folder_id: i64) -> Result<String> {
+    let mut current = folder_id;
+    let mut seen = HashSet::new();
+    loop {
+        if !seen.insert(current) {
+            return Err(anyhow::anyhow!("folder hierarchy contains a cycle"));
+        }
+        let (name, kind, parent_id) = conn
+            .query_row(
+                "SELECT name, kind, parent_id FROM note_folders WHERE id = ?1",
+                [current],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => anyhow::anyhow!("filing target not found"),
+                other => other.into(),
+            })?;
+        match parent_id {
+            Some(parent_id) => current = parent_id,
+            None if kind == "space" => return normalized_filing_context(&name),
+            None => return Err(anyhow::anyhow!("filing target is outside a context")),
+        }
+    }
+}
+
+/// Resolve the Work/Personal root that owns a filing destination.
+pub fn note_folder_context(conn: &Connection, folder_id: i64) -> Result<String> {
+    folder_filing_context(conn, folder_id)
+}
+
+fn folder_is_in_context(conn: &Connection, folder_id: i64, context: &str) -> Result<bool> {
+    Ok(folder_filing_context(conn, folder_id)? == normalized_filing_context(context)?)
+}
+
+fn current_filing(conn: &Connection, note_id: i64) -> Result<Option<CurrentFiling>> {
+    let item = conn
+        .query_row(
+            "SELECT i.folder_id, i.event_id, n.filing_context
+             FROM note_folder_items i
+             JOIN notes n ON n.id = i.note_id
+             WHERE i.note_id = ?1 LIMIT 1",
+            [note_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    if let Some((folder_id, event_id, context)) = item {
+        return Ok(Some(CurrentFiling {
+            folder_id: Some(folder_id),
+            event_id,
+            path: Some(note_folder_path(conn, folder_id)?),
+            context,
+        }));
+    }
+
+    let event = conn
+        .query_row(
+            "SELECT to_folder_id, id, to_path, to_context
+             FROM note_filing_events WHERE note_id = ?1 ORDER BY id DESC LIMIT 1",
+            [note_id],
+            |row| {
+                Ok(CurrentFiling {
+                    folder_id: row.get(0)?,
+                    event_id: Some(row.get(1)?),
+                    path: row.get(2)?,
+                    context: row.get(3)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(event)
+}
+
+pub(crate) fn filing_transition(
+    conn: &Connection,
+    note_id: i64,
+    folder_id: Option<i64>,
+    source: &str,
+    reason: &str,
+    filing_context: Option<&str>,
+    undoes_event_id: Option<i64>,
+    now: &str,
+) -> Result<NoteFilingReceipt> {
+    if !matches!(source, "context" | "rule" | "manual" | "undo") {
+        return Err(anyhow::anyhow!("unknown filing source"));
+    }
+    let current = current_filing(conn, note_id)?;
+    let previous_folder_id = current.as_ref().and_then(|item| item.folder_id);
+    let previous_path = current.as_ref().and_then(|item| item.path.as_deref());
+    let previous_event_id = current.as_ref().and_then(|item| item.event_id);
+    let previous_context = current.as_ref().and_then(|item| item.context.as_deref());
+    let target_path = folder_id.map(|id| note_folder_path(conn, id)).transpose()?;
+
+    conn.execute(
+        "INSERT INTO note_filing_events
+           (note_id, from_folder_id, to_folder_id, from_path, to_path,
+            from_context, to_context, source, reason, from_event_id,
+            undoes_event_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        rusqlite::params![
+            note_id,
+            previous_folder_id,
+            folder_id,
+            previous_path,
+            target_path,
+            previous_context,
+            filing_context,
+            source,
+            reason,
+            previous_event_id,
+            undoes_event_id,
+            now,
+        ],
+    )?;
+    let event_id = conn.last_insert_rowid();
+
+    conn.execute(
+        "UPDATE notes SET filing_context = ?2 WHERE id = ?1",
+        rusqlite::params![note_id, filing_context],
+    )?;
+
+    conn.execute(
+        "DELETE FROM note_folder_items WHERE note_id = ?1",
+        [note_id],
+    )?;
+    if let Some(folder_id) = folder_id {
+        conn.execute(
+            "INSERT INTO note_folder_items
+               (folder_id, note_id, source, reason, event_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![folder_id, note_id, source, reason, event_id, now],
+        )?;
+    }
+
+    Ok(NoteFilingReceipt {
+        event_id,
+        note_id,
+        folder_id,
+        previous_folder_id,
+        filing_context: filing_context.map(String::from),
+        previous_context: previous_context.map(String::from),
+        source: source.to_string(),
+        reason: reason.to_string(),
+    })
+}
+
+fn sync_linked_meeting_route(
+    conn: &Connection,
+    note_id: i64,
+    folder_id: Option<i64>,
+    filing_source: &str,
+    now: &str,
+) -> Result<()> {
+    let (route_via, route_status) = match filing_source {
+        "rule" => ("filing_rule", "matched"),
+        "context" => ("context_inbox", "needs_filing"),
+        "manual" => ("manual", "manual"),
+        _ if folder_id.is_some() => ("undo", "manual"),
+        _ => ("undo", "needs_filing"),
+    };
+    conn.execute(
+        "UPDATE meetings SET filing_context =
+                    (SELECT filing_context FROM notes WHERE id = ?1),
+                route_folder_id = ?2, route_email = NULL,
+                route_via = ?3, route_status = ?4, route_updated_at = ?5
+         WHERE note_id = ?1",
+        rusqlite::params![note_id, folder_id, route_via, route_status, now],
+    )?;
+    Ok(())
+}
+
+/// Move a note's one explicit filing. Every manual choice appends an audit
+/// event, even when the destination is unchanged, because confirming an
+/// automatic destination is itself a sticky human decision.
+pub fn file_note(
+    conn: &Connection,
+    note_id: i64,
+    folder_id: Option<i64>,
+    now: &str,
+) -> Result<NoteFilingReceipt> {
     let note_exists = conn.query_row(
         "SELECT EXISTS(
-           SELECT 1 FROM notes WHERE id = ?1 AND (origin = 'capture' OR origin IS NULL)
+           SELECT 1 FROM notes
+           WHERE id = ?1 AND (origin = 'capture' OR origin IS NULL)
+             AND trashed_at IS NULL
          )",
         [note_id],
         |r| r.get::<_, bool>(0),
@@ -858,28 +1755,153 @@ pub fn file_note(conn: &Connection, note_id: i64, folder_id: Option<i64>, now: &
     }
 
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "DELETE FROM note_folder_items WHERE note_id = ?1",
-        [note_id],
+    let filing_context = match folder_id {
+        Some(folder_id) => Some(folder_filing_context(&tx, folder_id)?),
+        None => tx
+            .query_row(
+                "SELECT filing_context FROM notes WHERE id = ?1",
+                [note_id],
+                |row| row.get::<_, Option<String>>(0),
+            )?
+            .map(|value| normalized_filing_context(&value))
+            .transpose()?,
+    };
+    let reason = match folder_id {
+        Some(folder_id) => format!("Moved to {} by you.", note_folder_path(&tx, folder_id)?),
+        None => "Removed from folders by you.".to_string(),
+    };
+    let receipt = filing_transition(
+        &tx,
+        note_id,
+        folder_id,
+        "manual",
+        &reason,
+        filing_context.as_deref(),
+        None,
+        now,
     )?;
-    if let Some(folder_id) = folder_id {
-        tx.execute(
-            "INSERT INTO note_folder_items (folder_id, note_id, created_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![folder_id, note_id, now],
-        )?;
-    }
+    sync_linked_meeting_route(&tx, note_id, folder_id, "manual", now)?;
     tx.commit()?;
-    Ok(())
+    Ok(receipt)
+}
+
+/// Reverse exactly the filing event the caller observed. A stale receipt never
+/// rewinds a newer manual move; the current event and destination must match.
+pub fn undo_note_filing(conn: &Connection, event_id: i64, now: &str) -> Result<NoteFilingReceipt> {
+    let tx = conn.unchecked_transaction()?;
+    let event = tx
+        .query_row(
+            "SELECT note_id, from_folder_id, to_folder_id, from_path, to_path,
+                    from_context, to_context, reason, from_event_id
+             FROM note_filing_events WHERE id = ?1",
+            [event_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| anyhow::anyhow!("filing event not found"))?;
+    let (
+        note_id,
+        from_folder_id,
+        to_folder_id,
+        from_path,
+        _to_path,
+        from_context,
+        to_context,
+        old_reason,
+        from_event_id,
+    ) = event;
+
+    let note_is_trashed: bool = tx.query_row(
+        "SELECT trashed_at IS NOT NULL FROM notes WHERE id = ?1",
+        [note_id],
+        |row| row.get(0),
+    )?;
+    if note_is_trashed {
+        return Err(anyhow::anyhow!(
+            "restore the note before changing its filing"
+        ));
+    }
+
+    let current = current_filing(&tx, note_id)?
+        .ok_or_else(|| anyhow::anyhow!("filing changed since this action"))?;
+    if current.event_id != Some(event_id)
+        || current.folder_id != to_folder_id
+        || current.context != to_context
+    {
+        return Err(anyhow::anyhow!("filing changed since this action"));
+    }
+    if from_folder_id.is_none() && from_path.is_some() {
+        return Err(anyhow::anyhow!("the previous folder no longer exists"));
+    }
+    if let Some(folder_id) = from_folder_id {
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM note_folders WHERE id = ?1)",
+            [folder_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(anyhow::anyhow!("the previous folder no longer exists"));
+        }
+    }
+
+    let restored_label = from_path.as_deref().unwrap_or("Unfiled");
+    let reason = format!("Restored {restored_label} by undoing: {old_reason}");
+    let receipt = filing_transition(
+        &tx,
+        note_id,
+        from_folder_id,
+        "undo",
+        &reason,
+        from_context.as_deref(),
+        Some(event_id),
+        now,
+    )?;
+    let restored_source = from_event_id
+        .and_then(|id| {
+            tx.query_row(
+                "SELECT source FROM note_filing_events WHERE id = ?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        })
+        .unwrap_or_else(|| {
+            if from_folder_id.is_some() {
+                "manual".to_string()
+            } else {
+                "context".to_string()
+            }
+        });
+    sync_linked_meeting_route(&tx, note_id, from_folder_id, &restored_source, now)?;
+    tx.commit()?;
+    Ok(receipt)
 }
 
 /// Refresh the human-readable body of a generated note. Its semantic index
 /// and knowledge mentions are derived data, so discard both before rebuilding
 /// them from the corrected content.
 pub fn refresh_note_text(conn: &Connection, note_id: i64, raw_text: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE notes SET raw_text = ?2 WHERE id = ?1",
+    let changed = conn.execute(
+        "UPDATE notes SET raw_text = ?2 WHERE id = ?1 AND trashed_at IS NULL",
         rusqlite::params![note_id, raw_text],
     )?;
+    if changed == 0 {
+        return Err(anyhow::anyhow!("note not found"));
+    }
     conn.execute("DELETE FROM embeddings WHERE note_id = ?1", [note_id])?;
     clear_note_mentions(conn, note_id)?;
     Ok(())
@@ -892,7 +1914,8 @@ pub fn update_note(conn: &Connection, note_id: i64, title: &str, raw_text: &str)
     let previous = conn
         .query_row(
             "SELECT raw_text FROM notes
-             WHERE id = ?1 AND (origin = 'capture' OR origin IS NULL)",
+             WHERE id = ?1 AND (origin = 'capture' OR origin IS NULL)
+               AND trashed_at IS NULL",
             [note_id],
             |r| r.get::<_, String>(0),
         )
@@ -994,6 +2017,7 @@ pub fn all_note_embedding_inputs(conn: &Connection) -> Result<Vec<(i64, String)>
          FROM notes n
          LEFT JOIN entries e ON e.note_id = n.id
          LEFT JOIN categories c ON c.id = e.category_id
+         WHERE n.trashed_at IS NULL
          GROUP BY n.id ORDER BY n.id",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -1019,7 +2043,8 @@ pub fn notes_missing_embeddings(conn: &Connection) -> Result<Vec<(i64, String)>>
          FROM notes n
          LEFT JOIN entries e ON e.note_id = n.id
          LEFT JOIN categories c ON c.id = e.category_id
-         WHERE n.id NOT IN (SELECT note_id FROM embeddings)
+         WHERE n.trashed_at IS NULL
+           AND n.id NOT IN (SELECT note_id FROM embeddings)
          GROUP BY n.id",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -1037,7 +2062,7 @@ pub fn note_embed_text(conn: &Connection, note_id: i64) -> Result<String> {
          FROM notes n
          LEFT JOIN entries e ON e.note_id = n.id
          LEFT JOIN categories c ON c.id = e.category_id
-         WHERE n.id = ?1
+         WHERE n.id = ?1 AND n.trashed_at IS NULL
          GROUP BY n.id",
         [note_id],
         |r| r.get(0),
@@ -1049,8 +2074,10 @@ pub fn note_embed_text(conn: &Connection, note_id: i64) -> Result<String> {
 pub fn category_entries(conn: &Connection, category: &str) -> Result<Vec<(String, Value)>> {
     let mut stmt = conn.prepare(
         "SELECT COALESCE(e.event_date, date(e.created_at)), e.data_json
-         FROM entries e JOIN categories c ON c.id = e.category_id
-         WHERE c.name = ?1
+         FROM entries e
+         JOIN categories c ON c.id = e.category_id
+         JOIN notes n ON n.id = e.note_id
+         WHERE c.name = ?1 AND n.trashed_at IS NULL
          ORDER BY COALESCE(e.event_date, date(e.created_at))",
     )?;
     let rows = stmt.query_map([category], |r| {
@@ -1068,6 +2095,7 @@ pub fn all_entry_data(conn: &Connection) -> Result<Vec<(i64, String, String, Val
     let mut stmt = conn.prepare(
         "SELECT e.note_id, COALESCE(e.event_date, date(e.created_at)), n.raw_text, e.data_json
          FROM entries e JOIN notes n ON n.id = e.note_id
+         WHERE n.trashed_at IS NULL
          ORDER BY e.note_id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -1093,8 +2121,11 @@ pub fn schedule_blocks_for(conn: &Connection, event_date: &str) -> Result<Vec<Va
     let data_str: Option<String> = conn
         .query_row(
             "SELECT e.data_json
-             FROM entries e JOIN categories c ON c.id = e.category_id
+             FROM entries e
+             JOIN categories c ON c.id = e.category_id
+             JOIN notes n ON n.id = e.note_id
              WHERE c.name = 'schedule' AND e.event_date = ?1
+               AND n.trashed_at IS NULL
              ORDER BY e.id DESC LIMIT 1",
             [event_date],
             |r| r.get(0),
@@ -1120,8 +2151,10 @@ pub struct EntryRow {
 pub fn note_entries(conn: &Connection, note_id: i64) -> Result<Vec<EntryRow>> {
     let mut stmt = conn.prepare(
         "SELECT e.id, c.name, COALESCE(e.event_date, date(e.created_at)), e.data_json
-         FROM entries e LEFT JOIN categories c ON c.id = e.category_id
-         WHERE e.note_id = ?1
+         FROM entries e
+         JOIN notes n ON n.id = e.note_id
+         LEFT JOIN categories c ON c.id = e.category_id
+         WHERE e.note_id = ?1 AND n.trashed_at IS NULL
          ORDER BY e.id",
     )?;
     let rows = stmt.query_map([note_id], |r| {
@@ -1157,6 +2190,7 @@ pub fn recent_entries(conn: &Connection, limit: i64) -> Result<Vec<SearchHit>> {
          LEFT JOIN categories pc ON pc.id = n.category_id
          LEFT JOIN entries e ON e.note_id = n.id
          WHERE (n.origin = 'capture' OR n.origin IS NULL)
+           AND n.trashed_at IS NULL
          GROUP BY n.id
          ORDER BY d DESC, n.id DESC
          LIMIT ?1",
@@ -1188,6 +2222,7 @@ pub fn notes_on_date(conn: &Connection, day: &str, limit: i64) -> Result<Vec<Sea
          LEFT JOIN categories pc ON pc.id = n.category_id
          JOIN entries e ON e.note_id = n.id
          WHERE (n.origin = 'capture' OR n.origin IS NULL)
+           AND n.trashed_at IS NULL
            AND COALESCE(e.event_date, date(e.created_at)) = ?1
          GROUP BY n.id
          ORDER BY n.id DESC
@@ -1230,7 +2265,7 @@ pub fn search_notes_scoped(
          JOIN notes n ON n.id = e.note_id
          LEFT JOIN categories pc ON pc.id = n.category_id
          LEFT JOIN entries en ON en.note_id = n.id
-         WHERE n.origin = ?3
+         WHERE n.origin = ?3 AND n.trashed_at IS NULL
          GROUP BY e.note_id
          ORDER BY e.distance
          LIMIT ?2",
@@ -1266,7 +2301,7 @@ pub fn search_notes_brain(conn: &Connection, qvec: &[f32], k: i64) -> Result<Vec
          JOIN notes n ON n.id = e.note_id
          LEFT JOIN categories pc ON pc.id = n.category_id
          LEFT JOIN entries en ON en.note_id = n.id
-         WHERE n.origin LIKE 'brain:%'
+         WHERE n.origin LIKE 'brain:%' AND n.trashed_at IS NULL
          GROUP BY e.note_id
          ORDER BY e.distance
          LIMIT ?2",
@@ -1297,7 +2332,7 @@ pub fn notes_for_entity(conn: &Connection, entity_id: i64, limit: i64) -> Result
          JOIN notes n ON n.id = m.note_id
          LEFT JOIN categories pc ON pc.id = n.category_id
          LEFT JOIN entries en ON en.note_id = n.id
-         WHERE m.entity_id = ?1
+         WHERE m.entity_id = ?1 AND n.trashed_at IS NULL
          GROUP BY n.id
          ORDER BY d DESC, n.id DESC
          LIMIT ?2",
@@ -1331,6 +2366,19 @@ pub fn entity_name_type(conn: &Connection, entity_id: i64) -> Result<Option<(Str
 pub fn search_notes(conn: &Connection, qvec: &[f32], k: i64) -> Result<Vec<SearchHit>> {
     ensure_embedding_space_ready(conn)?;
     let json = serde_json::to_string(qvec)?;
+    // sqlite-vec applies LIMIT while finding nearest neighbors. Retained Trash
+    // vectors must not consume the caller's visible result budget, so include
+    // enough extra candidates to cover every currently trashed vector and
+    // apply the requested limit again after filtering.
+    let trashed_vectors: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM embeddings v JOIN notes n ON n.id = v.note_id
+         WHERE n.trashed_at IS NOT NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    let visible_limit = k.max(0);
+    let candidate_limit = visible_limit.saturating_add(trashed_vectors);
     let mut stmt = conn.prepare(
         "SELECT e.note_id, e.distance, pc.name,
                 COALESCE(MAX(en.event_date), date(n.created_at)), n.raw_text,
@@ -1342,21 +2390,26 @@ pub fn search_notes(conn: &Connection, qvec: &[f32], k: i64) -> Result<Vec<Searc
          JOIN notes n ON n.id = e.note_id
          LEFT JOIN categories pc ON pc.id = n.category_id
          LEFT JOIN entries en ON en.note_id = n.id
+         WHERE n.trashed_at IS NULL
          GROUP BY e.note_id
-         ORDER BY e.distance",
+         ORDER BY e.distance
+         LIMIT ?3",
     )?;
-    let rows = stmt.query_map(rusqlite::params![json, k], |r| {
-        let data_str: Option<String> = r.get(5)?;
-        Ok(SearchHit {
-            note_id: r.get(0)?,
-            distance: r.get(1)?,
-            category: r.get(2)?,
-            event_date: r.get(3)?,
-            raw_text: r.get(4)?,
-            data: data_str.and_then(|s| serde_json::from_str(&s).ok()),
-            origin: r.get(6)?,
-        })
-    })?;
+    let rows = stmt.query_map(
+        rusqlite::params![json, candidate_limit, visible_limit],
+        |r| {
+            let data_str: Option<String> = r.get(5)?;
+            Ok(SearchHit {
+                note_id: r.get(0)?,
+                distance: r.get(1)?,
+                category: r.get(2)?,
+                event_date: r.get(3)?,
+                raw_text: r.get(4)?,
+                data: data_str.and_then(|s| serde_json::from_str(&s).ok()),
+                origin: r.get(6)?,
+            })
+        },
+    )?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
@@ -1372,8 +2425,10 @@ pub fn entries_between(
 ) -> Result<Vec<(String, String, Value)>> {
     let mut stmt = conn.prepare(
         "SELECT COALESCE(e.event_date, date(e.created_at)) AS d, COALESCE(c.name,''), e.data_json
-         FROM entries e LEFT JOIN categories c ON c.id = e.category_id
-         WHERE d BETWEEN ?1 AND ?2
+         FROM entries e
+         JOIN notes n ON n.id = e.note_id
+         LEFT JOIN categories c ON c.id = e.category_id
+         WHERE d BETWEEN ?1 AND ?2 AND n.trashed_at IS NULL
          ORDER BY d",
     )?;
     let rows = stmt.query_map([start, end], |r| {
@@ -1461,6 +2516,7 @@ pub struct PendingCapture {
     pub source: String,
     pub image_path: Option<String>,
     pub event_date: Option<String>,
+    pub filing_context: Option<String>,
 }
 
 /// Queue a raw capture for later categorization. Returns its id.
@@ -1470,12 +2526,22 @@ pub fn insert_pending(
     source: &str,
     image_path: Option<&str>,
     event_date: Option<&str>,
+    filing_context: Option<&str>,
     now: &str,
 ) -> Result<i64> {
+    let filing_context = filing_context.map(normalized_filing_context).transpose()?;
     conn.execute(
-        "INSERT INTO pending_captures (raw_text, source, image_path, event_date, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![raw_text, source, image_path, event_date, now],
+        "INSERT INTO pending_captures
+           (raw_text, source, image_path, event_date, filing_context, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            raw_text,
+            source,
+            image_path,
+            event_date,
+            filing_context,
+            now
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -1483,17 +2549,20 @@ pub fn insert_pending(
 /// Pending captures still worth processing (under the retry cap), oldest first.
 pub fn list_pending(conn: &Connection, max_attempts: i64) -> Result<Vec<PendingCapture>> {
     let mut stmt = conn.prepare(
-        "SELECT id, raw_text, source, image_path, event_date
+        "SELECT id, raw_text, source, image_path, event_date,
+                COALESCE(filing_context, '')
          FROM pending_captures WHERE attempts < ?1 ORDER BY id ASC",
     )?;
     let rows = stmt
-        .query_map([max_attempts], |r| {
+        .query_map([max_attempts], |row| {
+            let filing_context = row.get::<_, String>(5)?;
             Ok(PendingCapture {
-                id: r.get(0)?,
-                raw_text: r.get(1)?,
-                source: r.get(2)?,
-                image_path: r.get(3)?,
-                event_date: r.get(4)?,
+                id: row.get(0)?,
+                raw_text: row.get(1)?,
+                source: row.get(2)?,
+                image_path: row.get(3)?,
+                event_date: row.get(4)?,
+                filing_context: (!filing_context.is_empty()).then_some(filing_context),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1545,13 +2614,20 @@ pub struct SaveInput {
 /// Write one note plus its entries (one per category), creating/evolving each
 /// category. The note's `category_id` points at the first ("primary") entry's
 /// category for back-compat with single-category reads. Returns the note id.
-pub fn save_note(conn: &mut Connection, input: SaveInput, now: &str) -> Result<i64> {
-    let tx = conn.transaction()?;
-
+fn save_note_in_transaction(
+    tx: &rusqlite::Transaction,
+    input: &SaveInput,
+    now: &str,
+) -> Result<i64> {
     tx.execute(
         "INSERT INTO notes (raw_text, source, image_path, category_id, created_at)
          VALUES (?1, ?2, ?3, NULL, ?4)",
-        rusqlite::params![input.raw_text, input.source, input.image_path, now],
+        rusqlite::params![
+            input.raw_text.as_str(),
+            input.source.as_str(),
+            input.image_path.as_deref(),
+            now
+        ],
     )?;
     let note_id = tx.last_insert_rowid();
 
@@ -1566,7 +2642,7 @@ pub fn save_note(conn: &mut Connection, input: SaveInput, now: &str) -> Result<i
                 note_id,
                 cat_id,
                 entry.data.to_string(),
-                input.event_date,
+                input.event_date.as_str(),
                 now
             ],
         )?;
@@ -1578,8 +2654,191 @@ pub fn save_note(conn: &mut Connection, input: SaveInput, now: &str) -> Result<i
         )?;
     }
 
+    Ok(note_id)
+}
+
+pub fn save_note(conn: &mut Connection, input: SaveInput, now: &str) -> Result<i64> {
+    let tx = conn.transaction()?;
+    let note_id = save_note_in_transaction(&tx, &input, now)?;
+
     tx.commit()?;
     Ok(note_id)
+}
+
+fn approved_daily_standup_folder(conn: &Connection, work_space_id: i64) -> Result<Option<i64>> {
+    conn.query_row(
+        "WITH RECURSIVE descendants(id) AS (
+           SELECT id FROM note_folders WHERE id = ?1
+           UNION ALL
+           SELECT child.id FROM note_folders child
+           JOIN descendants parent ON child.parent_id = parent.id
+         )
+         SELECT folder.id
+         FROM note_folders folder JOIN descendants d ON d.id = folder.id
+         WHERE folder.auto_rule = 'daily_standup'
+         ORDER BY folder.position, folder.id LIMIT 1",
+        [work_space_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Refine a broad identity destination with the approved deterministic rule
+/// beneath it. Today the only materialized rule is Daily Standup; keeping this
+/// resolution in the DB layer makes new saves and historical meeting backfills
+/// agree on the same final folder.
+pub(crate) fn automatic_rule_destination_for_note(
+    conn: &Connection,
+    note_id: i64,
+    requested_folder_id: i64,
+) -> Result<i64> {
+    if folder_filing_context(conn, requested_folder_id)? != "work" {
+        return Ok(requested_folder_id);
+    }
+    let raw_text = conn.query_row(
+        "SELECT raw_text FROM notes WHERE id = ?1",
+        [note_id],
+        |row| row.get::<_, String>(0),
+    )?;
+    let categories = conn
+        .prepare(
+            "SELECT c.name FROM entries e
+             JOIN categories c ON c.id = e.category_id
+             WHERE e.note_id = ?1 ORDER BY e.id",
+        )?
+        .query_map([note_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !matches_daily_standup(&raw_text, categories.iter().map(String::as_str)) {
+        return Ok(requested_folder_id);
+    }
+    Ok(approved_daily_standup_folder(conn, requested_folder_id)?.unwrap_or(requested_folder_id))
+}
+
+/// Save a new capture and its reviewed placement as one transaction. Every
+/// note first enters the selected context Inbox. A reviewed destination wins;
+/// otherwise only the approved Work Daily Standup rule may move it deeper.
+pub fn save_note_with_initial_filing_source(
+    conn: &mut Connection,
+    input: SaveInput,
+    filing_context: &str,
+    requested_folder_id: Option<i64>,
+    requested_source: &str,
+    requested_reason: Option<&str>,
+    now: &str,
+) -> Result<i64> {
+    let filing_context = normalized_filing_context(filing_context)?;
+    if !matches!(requested_source, "manual" | "rule") {
+        return Err(anyhow::anyhow!(
+            "reviewed filing source must be manual or rule"
+        ));
+    }
+    let is_standup = matches_daily_standup(
+        &input.raw_text,
+        input.entries.iter().map(|entry| entry.category.as_str()),
+    );
+    let tx = conn.transaction()?;
+    let context_id = context_space_id(&tx, &filing_context)?;
+    if let Some(folder_id) = requested_folder_id {
+        if !folder_is_in_context(&tx, folder_id, &filing_context)? {
+            return Err(anyhow::anyhow!(
+                "reviewed folder must be inside the selected context"
+            ));
+        }
+    }
+    let broad_requested_folder_id = requested_folder_id;
+    let requested_folder_id =
+        if requested_source == "rule" && filing_context == "work" && is_standup {
+            requested_folder_id
+                .map(|folder_id| {
+                    approved_daily_standup_folder(&tx, folder_id)
+                        .map(|approved| approved.unwrap_or(folder_id))
+                })
+                .transpose()?
+        } else {
+            requested_folder_id
+        };
+
+    let note_id = save_note_in_transaction(&tx, &input, now)?;
+    let context_label = if filing_context == "work" {
+        "Work"
+    } else {
+        "Personal"
+    };
+    filing_transition(
+        &tx,
+        note_id,
+        Some(context_id),
+        "context",
+        &format!("Saved to {context_label} / Inbox because {context_label} was selected."),
+        Some(&filing_context),
+        None,
+        now,
+    )?;
+
+    if let Some(folder_id) = requested_folder_id {
+        let path = note_folder_path(&tx, folder_id)?;
+        let reason = if broad_requested_folder_id != Some(folder_id) {
+            format!(
+                "Filed in {path} because it matched your approved Daily Standup rule within the meeting account destination."
+            )
+        } else {
+            requested_reason.map(String::from).unwrap_or_else(|| {
+                if requested_source == "rule" {
+                    format!("Filed in {path} by an approved rule.")
+                } else {
+                    format!("Chosen before saving: {path}.")
+                }
+            })
+        };
+        filing_transition(
+            &tx,
+            note_id,
+            Some(folder_id),
+            requested_source,
+            &reason,
+            Some(&filing_context),
+            None,
+            now,
+        )?;
+    } else if filing_context == "work" && is_standup {
+        if let Some(folder_id) = approved_daily_standup_folder(&tx, context_id)? {
+            let path = note_folder_path(&tx, folder_id)?;
+            filing_transition(
+                &tx,
+                note_id,
+                Some(folder_id),
+                "rule",
+                &format!("Filed in {path} because it matched your approved Daily Standup rule."),
+                Some(&filing_context),
+                None,
+                now,
+            )?;
+        }
+    }
+
+    tx.commit()?;
+    Ok(note_id)
+}
+
+/// Reviewed capture wrapper: an explicitly selected destination is a sticky
+/// manual decision. Meeting/calendar rules use the source-aware variant above.
+pub fn save_note_with_initial_filing(
+    conn: &mut Connection,
+    input: SaveInput,
+    filing_context: &str,
+    requested_folder_id: Option<i64>,
+    now: &str,
+) -> Result<i64> {
+    save_note_with_initial_filing_source(
+        conn,
+        input,
+        filing_context,
+        requested_folder_id,
+        "manual",
+        None,
+        now,
+    )
 }
 
 /// Upsert a category and evolve its schema additively from this entry's data.
@@ -1651,7 +2910,9 @@ pub fn create_category(conn: &Connection, name: &str, description: &str, now: &s
 pub fn update_entry_data(conn: &Connection, entry_id: i64, data: &Value) -> Result<i64> {
     let (note_id, cur): (i64, String) = conn
         .query_row(
-            "SELECT note_id, data_json FROM entries WHERE id = ?1",
+            "SELECT e.note_id, e.data_json
+             FROM entries e JOIN notes n ON n.id = e.note_id
+             WHERE e.id = ?1 AND n.trashed_at IS NULL",
             [entry_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -1802,6 +3063,8 @@ pub fn entity_edges(conn: &Connection) -> Result<Vec<GraphEdge>> {
         "SELECT a.entity_id, b.entity_id, COUNT(DISTINCT a.note_id) AS w
          FROM entity_mentions a
          JOIN entity_mentions b ON a.note_id = b.note_id AND a.entity_id < b.entity_id
+         JOIN notes n ON n.id = a.note_id
+         WHERE n.trashed_at IS NULL
          GROUP BY a.entity_id, b.entity_id",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -1839,7 +3102,8 @@ pub fn entity_neighbors(
          FROM entity_mentions a
          JOIN entity_mentions b ON a.note_id = b.note_id AND b.entity_id != a.entity_id
          JOIN entities ent ON ent.id = b.entity_id
-         WHERE a.entity_id = ?1
+         JOIN notes n ON n.id = a.note_id
+         WHERE a.entity_id = ?1 AND n.trashed_at IS NULL
          GROUP BY b.entity_id
          ORDER BY w DESC, ent.mention_count DESC
          LIMIT ?2",
@@ -1882,7 +3146,7 @@ pub fn entity_detail(
     let mut stmt = conn.prepare(
         "SELECT DISTINCT m.note_id, m.event_date, n.raw_text
          FROM entity_mentions m JOIN notes n ON n.id = m.note_id
-         WHERE m.entity_id = ?1
+         WHERE m.entity_id = ?1 AND n.trashed_at IS NULL
          ORDER BY m.event_date DESC, m.note_id DESC
          LIMIT ?2",
     )?;
@@ -2143,7 +3407,18 @@ pub fn merge_entities(conn: &mut Connection, keep_id: i64, drop_id: i64) -> Resu
     set.dedup();
     tx.execute(
         "UPDATE entities SET aliases = ?1,
-             mention_count = (SELECT COUNT(*) FROM entity_mentions WHERE entity_id = ?2)
+             mention_count =
+               (SELECT COUNT(*)
+                FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+                WHERE m.entity_id = ?2 AND n.trashed_at IS NULL),
+             first_seen =
+               (SELECT MIN(m.event_date)
+                FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+                WHERE m.entity_id = ?2 AND n.trashed_at IS NULL),
+             last_seen =
+               (SELECT MAX(m.event_date)
+                FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+                WHERE m.entity_id = ?2 AND n.trashed_at IS NULL)
          WHERE id = ?2",
         rusqlite::params![serde_json::to_string(&set)?, keep_id],
     )?;
@@ -2244,9 +3519,10 @@ pub struct PersonProfile {
 /// `context` column).
 pub fn mentions_for(conn: &Connection, entity_id: i64) -> Result<Vec<PersonMention>> {
     let mut stmt = conn.prepare(
-        "SELECT event_date, COALESCE(context, ''), note_id
-         FROM entity_mentions WHERE entity_id = ?1
-         ORDER BY event_date DESC, id DESC",
+        "SELECT m.event_date, COALESCE(m.context, ''), m.note_id
+         FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+         WHERE m.entity_id = ?1 AND n.trashed_at IS NULL
+         ORDER BY m.event_date DESC, m.id DESC",
     )?;
     let rows = stmt.query_map([entity_id], |r| {
         Ok(PersonMention {
@@ -2306,7 +3582,7 @@ pub fn entity_profile(conn: &Connection, entity_id: i64) -> Result<EntityProfile
                 COALESCE(NULLIF(m.context, ''), substr(replace(n.raw_text, char(10), ' '), 1, 140)),
                 m.note_id
          FROM entity_mentions m JOIN notes n ON n.id = m.note_id
-         WHERE m.entity_id = ?1
+         WHERE m.entity_id = ?1 AND n.trashed_at IS NULL
          ORDER BY m.event_date DESC, m.id DESC",
     )?;
     let mentions = stmt
@@ -2416,13 +3692,14 @@ pub fn list_brain_vaults(conn: &Connection) -> Result<Vec<BrainVaultStatus>> {
     for (vault, root_path, direction, last_git_sha, last_synced_at, enabled) in rows {
         let origin = format!("brain:{vault}");
         let note_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM notes WHERE origin = ?1",
+            "SELECT COUNT(*) FROM notes WHERE origin = ?1 AND trashed_at IS NULL",
             [&origin],
             |r| r.get(0),
         )?;
         let entity_count: i64 = conn.query_row(
             "SELECT COUNT(DISTINCT m.entity_id) FROM entity_mentions m
-             JOIN notes n ON n.id = m.note_id WHERE n.origin = ?1",
+             JOIN notes n ON n.id = m.note_id
+             WHERE n.origin = ?1 AND n.trashed_at IS NULL",
             [&origin],
             |r| r.get(0),
         )?;
@@ -2542,7 +3819,20 @@ pub fn clear_note_mentions(conn: &Connection, note_id: i64) -> Result<()> {
     conn.execute("DELETE FROM entity_mentions WHERE note_id = ?1", [note_id])?;
     for id in ids {
         conn.execute(
-            "UPDATE entities SET mention_count = (SELECT COUNT(*) FROM entity_mentions WHERE entity_id = ?1) WHERE id = ?1",
+            "UPDATE entities SET
+               mention_count =
+                 (SELECT COUNT(*)
+                  FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+                  WHERE m.entity_id = ?1 AND n.trashed_at IS NULL),
+               first_seen =
+                 (SELECT MIN(m.event_date)
+                  FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+                  WHERE m.entity_id = ?1 AND n.trashed_at IS NULL),
+               last_seen =
+                 (SELECT MAX(m.event_date)
+                  FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+                  WHERE m.entity_id = ?1 AND n.trashed_at IS NULL)
+             WHERE id = ?1",
             [id],
         )?;
     }
@@ -2590,10 +3880,13 @@ pub fn write_targets(conn: &Connection, vault: Option<&str>) -> Result<Vec<Write
             "SELECT e.id, e.name, e.home_note_id, n.source_path, n.origin
              FROM entities e JOIN notes n ON n.id = e.home_note_id
              WHERE n.origin LIKE 'brain:%' AND (?1 IS NULL OR n.origin = 'brain:' || ?1)
+               AND n.trashed_at IS NULL
                AND n.source_path IS NOT NULL
                AND EXISTS (
                  SELECT 1 FROM entity_mentions m JOIN notes cn ON cn.id = m.note_id
-                 WHERE m.entity_id = e.id AND (cn.origin = 'capture' OR cn.origin IS NULL)
+                 WHERE m.entity_id = e.id
+                   AND (cn.origin = 'capture' OR cn.origin IS NULL)
+                   AND cn.trashed_at IS NULL
                )
              ORDER BY e.name",
         )?;
@@ -2617,7 +3910,9 @@ pub fn write_targets(conn: &Connection, vault: Option<&str>) -> Result<Vec<Write
                 "SELECT m.event_date,
                         COALESCE(NULLIF(m.context, ''), substr(replace(cn.raw_text, char(10), ' '), 1, 160))
                  FROM entity_mentions m JOIN notes cn ON cn.id = m.note_id
-                 WHERE m.entity_id = ?1 AND (cn.origin = 'capture' OR cn.origin IS NULL)
+                 WHERE m.entity_id = ?1
+                   AND (cn.origin = 'capture' OR cn.origin IS NULL)
+                   AND cn.trashed_at IS NULL
                  ORDER BY m.event_date DESC, m.id DESC",
             )?;
             let v = stmt
@@ -2716,6 +4011,7 @@ pub fn work_graph(
              JOIN entity_mentions m ON m.entity_id = e.id
              JOIN notes n ON n.id = m.note_id
              WHERE n.origin LIKE 'brain:%'
+               AND n.trashed_at IS NULL
                AND (?1 IS NULL OR n.origin = 'brain:' || ?1)
              ORDER BY e.mention_count DESC, e.name",
         )?;
@@ -2739,6 +4035,7 @@ pub fn work_graph(
              JOIN entity_mentions b ON a.note_id = b.note_id AND a.entity_id < b.entity_id
              JOIN notes n ON n.id = a.note_id
              WHERE n.origin LIKE 'brain:%'
+               AND n.trashed_at IS NULL
                AND (?1 IS NULL OR n.origin = 'brain:' || ?1)
              GROUP BY a.entity_id, b.entity_id",
         )?;

@@ -17,19 +17,45 @@ fn entity_create_mention_exact_and_merge() {
             source: "text".into(),
             image_path: None,
             event_date: "2026-06-02".into(),
-            entries: vec![EntryInput { category: "gym".into(), description: String::new(), data: json!({}) }],
+            entries: vec![EntryInput {
+                category: "gym".into(),
+                description: String::new(),
+                data: json!({}),
+            }],
         },
         "2026-06-02T00:00:00Z",
     )
     .unwrap();
 
-    let jake = db::create_entity(&conn, "Jake", "jake", "person", "[]", "2026-06-02", "now").unwrap();
-    let pf = db::create_entity(&conn, "Planet Fitness", "planet fitness", "place", "[]", "2026-06-02", "now").unwrap();
+    let jake =
+        db::create_entity(&conn, "Jake", "jake", "person", "[]", "2026-06-02", "now").unwrap();
+    let pf = db::create_entity(
+        &conn,
+        "Planet Fitness",
+        "planet fitness",
+        "place",
+        "[]",
+        "2026-06-02",
+        "now",
+    )
+    .unwrap();
     db::add_mention(&conn, jake, note_id, None, "with jake", "2026-06-02", "now").unwrap();
-    db::add_mention(&conn, pf, note_id, None, "at planet fitness", "2026-06-02", "now").unwrap();
+    db::add_mention(
+        &conn,
+        pf,
+        note_id,
+        None,
+        "at planet fitness",
+        "2026-06-02",
+        "now",
+    )
+    .unwrap();
 
     // exact match is type-scoped
-    assert_eq!(db::entity_exact(&conn, "jake", "person").unwrap(), Some(jake));
+    assert_eq!(
+        db::entity_exact(&conn, "jake", "person").unwrap(),
+        Some(jake)
+    );
     assert_eq!(db::entity_exact(&conn, "jake", "place").unwrap(), None);
 
     // a duplicate "PF" of type place gets merged into Planet Fitness
@@ -38,15 +64,31 @@ fn entity_create_mention_exact_and_merge() {
     db::merge_entities(&mut conn, pf, pf2).unwrap();
 
     // "PF" now resolves to Planet Fitness via the folded-in alias
-    assert_eq!(db::entity_exact(&conn, "pf", "place").unwrap(), Some(pf), "PF alias -> Planet Fitness");
+    assert_eq!(
+        db::entity_exact(&conn, "pf", "place").unwrap(),
+        Some(pf),
+        "PF alias -> Planet Fitness"
+    );
 
     let count: i64 = conn
-        .query_row("SELECT mention_count FROM entities WHERE id = ?1", [pf], |r| r.get(0))
+        .query_row(
+            "SELECT mention_count FROM entities WHERE id = ?1",
+            [pf],
+            |r| r.get(0),
+        )
         .unwrap();
-    assert_eq!(count, 2, "both mentions belong to the kept entity after merge");
+    assert_eq!(
+        count, 2,
+        "both mentions belong to the kept entity after merge"
+    );
 
-    let remaining: i64 = conn.query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0)).unwrap();
-    assert_eq!(remaining, 2, "jake + planet fitness; the PF duplicate is gone");
+    let remaining: i64 = conn
+        .query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        remaining, 2,
+        "jake + planet fitness; the PF duplicate is gone"
+    );
 
     let _ = std::fs::remove_file(&tmp);
 }

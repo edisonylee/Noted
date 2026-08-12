@@ -4,6 +4,31 @@
 
 import { api, type ChatProposal } from "./api";
 
+function displayDate(iso: string): string {
+  const [year, month, day] = iso.split("-").map(Number);
+  if (!year || !month || !day) return iso;
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: year === new Date().getFullYear() ? undefined : "numeric",
+  }).format(new Date(year, month - 1, day));
+}
+
+function displayTime(hhmm: string): string {
+  const [hour, minute] = hhmm.split(":").map(Number);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return hhmm;
+  const suffix = hour >= 12 ? "PM" : "AM";
+  return `${hour % 12 || 12}:${String(minute).padStart(2, "0")} ${suffix}`;
+}
+
+function eventWhen(p: Extract<ChatProposal, { action: "create_event" }>): string {
+  const date = displayDate(p.date);
+  return p.start
+    ? `${date} · ${displayTime(p.start)}${p.end ? `–${displayTime(p.end)}` : ""}`
+    : `${date} · all day`;
+}
+
 export function proposalText(p: ChatProposal): string {
   if (p.action === "create_category") {
     return p.already_exists
@@ -11,7 +36,7 @@ export function proposalText(p: ChatProposal): string {
       : `Create a new category “${p.name}”?`;
   }
   if (p.action === "create_event") {
-    const when = p.start ? `${p.date} ${p.start}${p.end ? `–${p.end}` : ""}` : `${p.date} (all day)`;
+    const when = eventWhen(p);
     const extras = [
       p.guests.length ? `invite ${p.guests.join(", ")}` : "",
       p.meet ? "with a Meet link" : "",
@@ -62,6 +87,6 @@ export async function applyProposal(p: ChatProposal): Promise<string> {
     addMeet: p.meet || undefined,
     guests: p.guests.length ? p.guests : undefined,
   });
-  const when = p.start ? `${p.date} at ${p.start}` : p.date;
+  const when = eventWhen(p);
   return `Created “${p.title}” on ${when}${p.guests.length ? ` — invites sent to ${p.guests.join(", ")}` : ""}.`;
 }

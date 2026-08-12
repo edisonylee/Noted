@@ -31,18 +31,49 @@ fn note_with_people_feeds_graph_and_people_views() {
 
     // Entities exactly as save_entry persists them: the curated person fact goes
     // into the mention's context; relationship is set on the entity.
-    let jake = db::create_entity(&conn, "Jake", "jake", "person", "[]", "2026-06-02", "now").unwrap();
-    let chipotle = db::create_entity(&conn, "Chipotle", "chipotle", "place", "[]", "2026-06-02", "now").unwrap();
+    let jake =
+        db::create_entity(&conn, "Jake", "jake", "person", "[]", "2026-06-02", "now").unwrap();
+    let chipotle = db::create_entity(
+        &conn,
+        "Chipotle",
+        "chipotle",
+        "place",
+        "[]",
+        "2026-06-02",
+        "now",
+    )
+    .unwrap();
     db::set_entity_relationship(&conn, jake, "friend").unwrap();
-    db::add_mention(&conn, jake, note_id, None, "started a new job", "2026-06-02", "now").unwrap();
-    db::add_mention(&conn, chipotle, note_id, None, "lunch with Jake at Chipotle", "2026-06-02", "now").unwrap();
+    db::add_mention(
+        &conn,
+        jake,
+        note_id,
+        None,
+        "started a new job",
+        "2026-06-02",
+        "now",
+    )
+    .unwrap();
+    db::add_mention(
+        &conn,
+        chipotle,
+        note_id,
+        None,
+        "lunch with Jake at Chipotle",
+        "2026-06-02",
+        "now",
+    )
+    .unwrap();
 
     // 1) Co-mention edge links the person and the place (shared note).
     let edges = db::entity_edges(&conn).unwrap();
     assert_eq!(edges.len(), 1, "one co-mention edge");
     assert_eq!(edges[0].weight, 1);
     let pair = (edges[0].source, edges[0].target);
-    assert!(pair == (jake, chipotle) || pair == (chipotle, jake), "edge connects Jake & Chipotle");
+    assert!(
+        pair == (jake, chipotle) || pair == (chipotle, jake),
+        "edge connects Jake & Chipotle"
+    );
 
     // 2) entity_detail surfaces the originating note for the entity.
     let detail = db::entity_detail(&conn, jake, 10).unwrap();
@@ -52,12 +83,19 @@ fn note_with_people_feeds_graph_and_people_views() {
     // 3) People view: the person, with relationship + the curated fact as mention
     // text; the place is excluded (not person-typed).
     let people = db::person_profiles(&conn).unwrap();
-    assert_eq!(people.len(), 1, "only the person-typed entity appears in People");
+    assert_eq!(
+        people.len(),
+        1,
+        "only the person-typed entity appears in People"
+    );
     let p = &people[0];
     assert_eq!(p.name, "Jake");
     assert_eq!(p.relationship.as_deref(), Some("friend"));
     assert_eq!(p.mentions.len(), 1);
-    assert_eq!(p.mentions[0].text, "started a new job", "curated fact is the mention text");
+    assert_eq!(
+        p.mentions[0].text, "started a new job",
+        "curated fact is the mention text"
+    );
     assert_eq!(p.mentions[0].note_id, note_id);
 
     let _ = std::fs::remove_file(&tmp);

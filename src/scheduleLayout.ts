@@ -146,8 +146,8 @@ export function computeEventGeometry(
 export function scheduleGridBounds(
   events: readonly ScheduleInterval[],
   {
-    defaultStart = 8 * 60,
-    defaultEnd = 20 * 60,
+    defaultStart = 6 * 60,
+    defaultEnd = 24 * 60,
     tick = 60,
   }: { defaultStart?: number; defaultEnd?: number; tick?: number } = {},
 ): { start: number; end: number } {
@@ -160,14 +160,80 @@ export function scheduleGridBounds(
   };
 }
 
+export function snapScheduleMinute(value: number, stepMinutes = 15): number {
+  const step = Number.isFinite(stepMinutes) && stepMinutes > 0 ? stepMinutes : 15;
+  return Math.round(value / step) * step;
+}
+
+export function scheduleMinuteFromGridOffset(
+  offsetPx: number,
+  {
+    gridStart,
+    pixelsPerHour,
+    stepMinutes = 15,
+  }: {
+    gridStart: number;
+    pixelsPerHour: number;
+    stepMinutes?: number;
+  },
+): number {
+  if (!Number.isFinite(pixelsPerHour) || pixelsPerHour <= 0) return gridStart;
+  const minute = gridStart + (offsetPx / pixelsPerHour) * 60;
+  return snapScheduleMinute(minute, stepMinutes);
+}
+
+export function scheduleEndFromResizeDelta(
+  start: number,
+  initialEnd: number,
+  deltaPx: number,
+  {
+    pixelsPerHour,
+    stepMinutes = 15,
+    maxEnd = Number.POSITIVE_INFINITY,
+  }: {
+    pixelsPerHour: number;
+    stepMinutes?: number;
+    maxEnd?: number;
+  },
+): number {
+  const step = Number.isFinite(stepMinutes) && stepMinutes > 0 ? stepMinutes : 15;
+  if (!Number.isFinite(pixelsPerHour) || pixelsPerHour <= 0) {
+    return Math.min(maxEnd, Math.max(start + step, initialEnd));
+  }
+  const deltaMinutes = Math.round(((deltaPx / pixelsPerHour) * 60) / step) * step;
+  return Math.min(maxEnd, Math.max(start + step, initialEnd + deltaMinutes));
+}
+
+export function scheduleStartFromResizeDelta(
+  initialStart: number,
+  end: number,
+  deltaPx: number,
+  {
+    pixelsPerHour,
+    stepMinutes = 15,
+    minStart = Number.NEGATIVE_INFINITY,
+  }: {
+    pixelsPerHour: number;
+    stepMinutes?: number;
+    minStart?: number;
+  },
+): number {
+  const step = Number.isFinite(stepMinutes) && stepMinutes > 0 ? stepMinutes : 15;
+  if (!Number.isFinite(pixelsPerHour) || pixelsPerHour <= 0) {
+    return Math.max(minStart, Math.min(end - step, initialStart));
+  }
+  const deltaMinutes = Math.round(((deltaPx / pixelsPerHour) * 60) / step) * step;
+  return Math.max(minStart, Math.min(end - step, initialStart + deltaMinutes));
+}
+
 export function buildScheduleGrid<T extends ScheduleClockBlock>(
   blocks: readonly T[],
   {
     pixelsPerHour = 44,
     minHeightPx = 40,
     gapPx = 3,
-    defaultStart = 8 * 60,
-    defaultEnd = 20 * 60,
+    defaultStart = 6 * 60,
+    defaultEnd = 24 * 60,
   }: {
     pixelsPerHour?: number;
     minHeightPx?: number;

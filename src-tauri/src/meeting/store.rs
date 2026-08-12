@@ -3,12 +3,474 @@
 // recording. The AI summary is additionally filed as a regular note (see
 // summarize.rs) so search/embeddings/KG stay unchanged.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, Result};
 use rusqlite::{types::Value as SqlValue, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+
+const EXPLICIT_RECORDING_CONTEXT_KEY: &str = "_noted_recording_filing_context_v1";
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MeetingFilingRule {
+    pub email: String,
+    pub folder_id: Option<i64>,
+    pub folder_name: Option<String>,
+    pub folder_path: Option<String>,
+    pub priority: i64,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeetingRoute {
+    pub folder_id: Option<i64>,
+    pub email: Option<String>,
+    pub via: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeetingFilingDecision {
+    pub filing_context: Option<String>,
+    pub route: MeetingRoute,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MeetingFilingBackfillItem {
+    pub meeting_id: i64,
+    pub note_id: i64,
+    pub title: String,
+    pub status: String,
+    pub folder_id: Option<i64>,
+    pub folder_name: Option<String>,
+    pub folder_path: Option<String>,
+    pub email: Option<String>,
+    pub via: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct MeetingFilingBackfillPreview {
+    pub token: String,
+    pub eligible: i64,
+    pub would_file: i64,
+    pub needs_filing: i64,
+    pub already_filed: i64,
+    pub manual: i64,
+    pub items: Vec<MeetingFilingBackfillItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+pub struct MeetingFilingBackfillApply {
+    pub reviewed: i64,
+    pub filed: i64,
+    pub needs_filing: i64,
+    pub skipped: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NoteFilingReviewState {
+    folder_id: Option<i64>,
+    source: Option<String>,
+    event_id: Option<i64>,
+    filing_context: Option<String>,
+    latest_event_id: Option<i64>,
+    latest_event_source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MeetingFilingBackfillReviewItem {
+    meeting_id: i64,
+    note_id: i64,
+    title: String,
+    event_json: Option<String>,
+    stored_route_status: String,
+    stored_route_via: String,
+    stored_route_folder_id: Option<i64>,
+    stored_route_email: Option<String>,
+    stored_filing_context: Option<String>,
+    stored_route_updated_at: Option<String>,
+    filing: NoteFilingReviewState,
+    item: MeetingFilingBackfillItem,
+}
+
+#[derive(Debug, Clone)]
+struct MeetingFilingBackfillReview {
+    database_key: String,
+    items: Vec<MeetingFilingBackfillReviewItem>,
+}
+
+enum MeetingFilingBackfillInspection {
+    Manual,
+    AlreadyFiled,
+    Eligible(MeetingFilingBackfillReviewItem),
+}
+
+static MEETING_FILING_BACKFILL_REVIEWS: OnceLock<
+    Mutex<HashMap<String, MeetingFilingBackfillReview>>,
+> = OnceLock::new();
+
+fn meeting_filing_backfill_reviews() -> &'static Mutex<HashMap<String, MeetingFilingBackfillReview>>
+{
+    MEETING_FILING_BACKFILL_REVIEWS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn normalize_owner_email(email: &str) -> Result<String> {
+    let email = email.trim().to_lowercase();
+    let mut parts = email.split('@');
+    let local = parts.next().unwrap_or_default();
+    let domain = parts.next().unwrap_or_default();
+    if local.is_empty()
+        || domain.is_empty()
+        || parts.next().is_some()
+        || email.chars().any(char::is_whitespace)
+    {
+        return Err(anyhow!("enter a valid email address"));
+    }
+    Ok(email)
+}
+
+fn normalized_email(email: &str) -> Option<String> {
+    normalize_owner_email(email).ok()
+}
+
+fn folder_name_and_path(conn: &Connection, folder_id: i64) -> Result<Option<(String, String)>> {
+    let mut current = Some(folder_id);
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    while let Some(id) = current {
+        if !seen.insert(id) {
+            return Err(anyhow!("folder hierarchy contains a cycle"));
+        }
+        let row = conn
+            .query_row(
+                "SELECT name, parent_id FROM note_folders WHERE id = ?1",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()?;
+        let Some((name, parent_id)) = row else {
+            return Ok(None);
+        };
+        names.push(name);
+        current = parent_id;
+    }
+    let name = names.first().cloned().unwrap_or_default();
+    names.reverse();
+    Ok(Some((name, names.join(" / "))))
+}
+
+pub fn meeting_filing_rules(conn: &Connection) -> Result<Vec<MeetingFilingRule>> {
+    let mut stmt = conn.prepare(
+        "SELECT email, folder_id, priority
+         FROM meeting_filing_rules ORDER BY priority, email COLLATE NOCASE",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    rows.into_iter()
+        .map(|(email, folder_id, priority)| {
+            let destination = folder_id
+                .map(|id| folder_name_and_path(conn, id))
+                .transpose()?
+                .flatten();
+            Ok(MeetingFilingRule {
+                email,
+                folder_id,
+                folder_name: destination.as_ref().map(|(name, _)| name.clone()),
+                folder_path: destination.as_ref().map(|(_, path)| path.clone()),
+                priority,
+                enabled: folder_id.is_some() && destination.is_some(),
+            })
+        })
+        .collect()
+}
+
+fn renumber_filing_rules(conn: &Connection, emails: &[String]) -> Result<()> {
+    for (priority, email) in emails.iter().enumerate() {
+        conn.execute(
+            "UPDATE meeting_filing_rules SET priority = ?2 WHERE email = ?1",
+            rusqlite::params![email, priority as i64],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn set_meeting_filing_rule(
+    conn: &Connection,
+    email: &str,
+    folder_id: i64,
+    priority: Option<i64>,
+    now: &str,
+) -> Result<MeetingFilingRule> {
+    let email = normalize_owner_email(email)?;
+    let destination_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM note_folders WHERE id = ?1)",
+        [folder_id],
+        |row| row.get(0),
+    )?;
+    if !destination_exists {
+        return Err(anyhow!("filing destination not found"));
+    }
+    // Routing must never make recording fail later. Only destinations rooted
+    // in the canonical Work/Personal contexts can supply filing provenance.
+    crate::db::note_folder_context(conn, folder_id)?;
+
+    let mut emails: Vec<String> = conn
+        .prepare(
+            "SELECT email FROM meeting_filing_rules
+             WHERE email <> ?1 COLLATE NOCASE ORDER BY priority, email COLLATE NOCASE",
+        )?
+        .query_map([&email], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let insertion = priority.unwrap_or(emails.len() as i64).max(0) as usize;
+    emails.insert(insertion.min(emails.len()), email.clone());
+
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO meeting_filing_rules (email, folder_id, priority, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4)
+         ON CONFLICT(email) DO UPDATE SET
+           folder_id = excluded.folder_id,
+           priority = excluded.priority,
+           updated_at = excluded.updated_at",
+        rusqlite::params![email, folder_id, insertion as i64, now],
+    )?;
+    renumber_filing_rules(&tx, &emails)?;
+    tx.commit()?;
+    repair_one_on_one_speakers(conn)?;
+
+    meeting_filing_rules(conn)?
+        .into_iter()
+        .find(|rule| rule.email == email)
+        .ok_or_else(|| anyhow!("filing rule was not saved"))
+}
+
+pub fn delete_meeting_filing_rules(conn: &Connection, emails: &[String]) -> Result<usize> {
+    let emails = emails
+        .iter()
+        .map(|email| normalize_owner_email(email))
+        .collect::<Result<HashSet<_>>>()?;
+    let tx = conn.unchecked_transaction()?;
+    let mut changed = 0usize;
+    for email in emails {
+        changed += tx.execute(
+            "DELETE FROM meeting_filing_rules WHERE email = ?1",
+            [&email],
+        )?;
+    }
+    let remaining: Vec<String> = tx
+        .prepare("SELECT email FROM meeting_filing_rules ORDER BY priority, email COLLATE NOCASE")?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    renumber_filing_rules(&tx, &remaining)?;
+    tx.commit()?;
+    // This is intentionally unconditional: callers also use it immediately
+    // after removing a remembered calendar account, which changes owner
+    // identity even when that account never had a filing rule.
+    repair_one_on_one_speakers(conn)?;
+    Ok(changed)
+}
+
+pub fn delete_meeting_filing_rule(conn: &Connection, email: &str) -> Result<bool> {
+    Ok(delete_meeting_filing_rules(conn, &[email.to_string()])? > 0)
+}
+
+pub fn reorder_meeting_filing_rules(
+    conn: &Connection,
+    emails: &[String],
+) -> Result<Vec<MeetingFilingRule>> {
+    let normalized = emails
+        .iter()
+        .map(|email| normalize_owner_email(email))
+        .collect::<Result<Vec<_>>>()?;
+    let unique = normalized.iter().cloned().collect::<HashSet<_>>();
+    if unique.len() != normalized.len() {
+        return Err(anyhow!("filing rule order contains duplicate emails"));
+    }
+    let existing = meeting_filing_rules(conn)?
+        .into_iter()
+        .map(|rule| rule.email)
+        .collect::<HashSet<_>>();
+    if unique != existing {
+        return Err(anyhow!(
+            "filing rule order must include every saved email exactly once"
+        ));
+    }
+    let tx = conn.unchecked_transaction()?;
+    renumber_filing_rules(&tx, &normalized)?;
+    tx.commit()?;
+    repair_one_on_one_speakers(conn)?;
+    meeting_filing_rules(conn)
+}
+
+pub fn configured_owner_emails(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT email FROM meeting_filing_rules")?;
+    let mut emails = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<HashSet<_>>>()?;
+    emails.extend(crate::gcal::configured_account_emails());
+    Ok(emails)
+}
+
+fn event_identity_sources(event: &Value) -> HashMap<String, &'static str> {
+    let mut identities = HashMap::new();
+    let mut add = |email: &str, via: &'static str| {
+        if let Some(email) = normalized_email(email) {
+            identities.entry(email).or_insert(via);
+        }
+    };
+    if let Some(email) = event.get("account").and_then(Value::as_str) {
+        add(email, "source_account");
+    }
+    if let Some(email) = event
+        .get("organizer_email")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            event
+                .get("organizer")
+                .and_then(Value::as_str)
+                .filter(|s| s.contains('@'))
+        })
+    {
+        add(email, "organizer");
+    }
+    if let Some(email) = event.get("creator_email").and_then(Value::as_str) {
+        add(email, "creator");
+    }
+    if let Some(emails) = event.get("attendee_emails").and_then(Value::as_array) {
+        for email in emails.iter().filter_map(Value::as_str) {
+            add(email, "attendee");
+        }
+    } else if let Some(attendees) = event.get("attendees").and_then(Value::as_array) {
+        for attendee in attendees {
+            if let Some(email) = attendee
+                .as_str()
+                .or_else(|| attendee.get("email").and_then(Value::as_str))
+            {
+                add(email, "attendee");
+            }
+        }
+    }
+    if let Some(emails) = event.get("associated_emails").and_then(Value::as_array) {
+        for email in emails.iter().filter_map(Value::as_str) {
+            add(email, "attendee");
+        }
+    }
+    identities
+}
+
+pub fn resolve_meeting_route(conn: &Connection, event: Option<&Value>) -> Result<MeetingRoute> {
+    let Some(event) = event else {
+        return Ok(MeetingRoute {
+            folder_id: None,
+            email: None,
+            via: "no_event".into(),
+            status: "needs_filing".into(),
+        });
+    };
+    let identities = event_identity_sources(event);
+    for rule in meeting_filing_rules(conn)?
+        .into_iter()
+        .filter(|rule| rule.enabled)
+    {
+        if let Some(via) = identities.get(&rule.email) {
+            return Ok(MeetingRoute {
+                folder_id: rule.folder_id,
+                email: Some(rule.email),
+                via: (*via).into(),
+                status: "matched".into(),
+            });
+        }
+    }
+    Ok(MeetingRoute {
+        folder_id: None,
+        email: None,
+        via: "no_matching_rule".into(),
+        status: "needs_filing".into(),
+    })
+}
+
+fn normalize_filing_context(filing_context: Option<&str>) -> Result<Option<String>> {
+    let filing_context = filing_context
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+    if filing_context
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "work" | "personal"))
+    {
+        return Err(anyhow!("filing context must be work or personal"));
+    }
+    Ok(filing_context)
+}
+
+fn explicit_recording_context(event: Option<&Value>) -> Option<&str> {
+    event?
+        .get(EXPLICIT_RECORDING_CONTEXT_KEY)
+        .and_then(Value::as_str)
+}
+
+fn event_json_with_explicit_recording_context(
+    event_json: Option<&str>,
+    parsed_event: Option<&Value>,
+    filing_context: Option<&str>,
+) -> Option<String> {
+    let Some(filing_context) = filing_context else {
+        return event_json.map(str::to_string);
+    };
+    let mut event = match parsed_event {
+        Some(Value::Object(object)) => Value::Object(object.clone()),
+        None if event_json.is_none() => json!({}),
+        _ => return event_json.map(str::to_string),
+    };
+    event.as_object_mut().expect("event object").insert(
+        EXPLICIT_RECORDING_CONTEXT_KEY.into(),
+        Value::String(filing_context.into()),
+    );
+    Some(event.to_string())
+}
+
+/// Resolve account routing and an explicit recording context as one decision.
+/// The recording context is a direct user choice, so a rule may refine it
+/// within the same context but may never move the recording across contexts.
+pub fn resolve_meeting_filing(
+    conn: &Connection,
+    event: Option<&Value>,
+    filing_context: Option<&str>,
+) -> Result<MeetingFilingDecision> {
+    let filing_context = normalize_filing_context(filing_context)?;
+    let mut route = resolve_meeting_route(conn, event)?;
+    let route_context = route
+        .folder_id
+        .map(|folder_id| crate::db::folder_filing_context(conn, folder_id))
+        .transpose()?;
+
+    if filing_context
+        .as_ref()
+        .zip(route_context.as_ref())
+        .is_some_and(|(selected, routed)| selected != routed)
+    {
+        route.folder_id = None;
+        route.via = "context_override".into();
+        route.status = "needs_filing".into();
+    }
+
+    Ok(MeetingFilingDecision {
+        filing_context: filing_context.or(route_context),
+        route,
+    })
+}
 
 pub fn create_meeting(
     conn: &Connection,
@@ -17,7 +479,9 @@ pub fn create_meeting(
     event_json: Option<&str>,
     now: &str,
 ) -> Result<i64> {
-    create_meeting_row(conn, title, event_id, event_json, None, None, now)
+    create_meeting_row(
+        conn, title, event_id, event_json, None, None, None, "online", now,
+    )
 }
 
 pub fn create_meeting_with_asr(
@@ -29,6 +493,45 @@ pub fn create_meeting_with_asr(
     asr_model: &str,
     now: &str,
 ) -> Result<i64> {
+    create_meeting_with_asr_in_context(
+        conn, title, event_id, event_json, asr_engine, asr_model, None, now,
+    )
+}
+
+pub fn create_meeting_with_asr_in_context(
+    conn: &Connection,
+    title: &str,
+    event_id: Option<&str>,
+    event_json: Option<&str>,
+    asr_engine: &str,
+    asr_model: &str,
+    filing_context: Option<&str>,
+    now: &str,
+) -> Result<i64> {
+    create_meeting_with_asr_in_context_and_mode(
+        conn,
+        title,
+        event_id,
+        event_json,
+        asr_engine,
+        asr_model,
+        filing_context,
+        "online",
+        now,
+    )
+}
+
+pub fn create_meeting_with_asr_in_context_and_mode(
+    conn: &Connection,
+    title: &str,
+    event_id: Option<&str>,
+    event_json: Option<&str>,
+    asr_engine: &str,
+    asr_model: &str,
+    filing_context: Option<&str>,
+    capture_mode: &str,
+    now: &str,
+) -> Result<i64> {
     create_meeting_row(
         conn,
         title,
@@ -36,6 +539,8 @@ pub fn create_meeting_with_asr(
         event_json,
         Some(asr_engine),
         Some(asr_model),
+        filing_context,
+        capture_mode,
         now,
     )
 }
@@ -47,13 +552,45 @@ fn create_meeting_row(
     event_json: Option<&str>,
     asr_engine: Option<&str>,
     asr_model: Option<&str>,
+    filing_context: Option<&str>,
+    capture_mode: &str,
     now: &str,
 ) -> Result<i64> {
+    let explicit_filing_context = normalize_filing_context(filing_context)?;
+    let parsed_event = event_json.and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+    let decision = resolve_meeting_filing(
+        conn,
+        parsed_event.as_ref(),
+        explicit_filing_context.as_deref(),
+    )?;
+    let stored_event_json = event_json_with_explicit_recording_context(
+        event_json,
+        parsed_event.as_ref(),
+        explicit_filing_context.as_deref(),
+    );
+    let route = decision.route;
+    let public_id = crate::db::new_public_id();
     conn.execute(
         "INSERT INTO meetings
-            (title, event_id, event_json, started_at, status, asr_engine, asr_model, created_at)
-         VALUES (?1, ?2, ?3, ?4, 'recording', ?5, ?6, ?4)",
-        rusqlite::params![title, event_id, event_json, now, asr_engine, asr_model],
+            (public_id, title, event_id, event_json, started_at, status, asr_engine, asr_model,
+             filing_context, route_folder_id, route_email, route_via, route_status,
+             route_updated_at, created_at, capture_mode)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'recording', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?5, ?5, ?13)",
+        rusqlite::params![
+            public_id,
+            title,
+            event_id,
+            stored_event_json,
+            now,
+            asr_engine,
+            asr_model,
+            decision.filing_context,
+            route.folder_id,
+            route.email,
+            route.via,
+            route.status,
+            capture_mode,
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -121,14 +658,25 @@ pub fn delete_meeting_forever(conn: &mut Connection, id: i64) -> Result<bool> {
         tx.execute("DELETE FROM notes WHERE id = ?1", [note_id])?;
         tx.execute(
             "UPDATE categories SET entry_count =
-               (SELECT COUNT(*) FROM entries e WHERE e.category_id = categories.id)",
+               (SELECT COUNT(*)
+                FROM entries e JOIN notes n ON n.id = e.note_id
+                WHERE e.category_id = categories.id AND n.trashed_at IS NULL)",
             [],
         )?;
         tx.execute(
             "UPDATE entities SET
-               mention_count = (SELECT COUNT(*) FROM entity_mentions m WHERE m.entity_id = entities.id),
-               first_seen = (SELECT MIN(event_date) FROM entity_mentions m WHERE m.entity_id = entities.id),
-               last_seen = (SELECT MAX(event_date) FROM entity_mentions m WHERE m.entity_id = entities.id)",
+               mention_count =
+                 (SELECT COUNT(*)
+                  FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+                  WHERE m.entity_id = entities.id AND n.trashed_at IS NULL),
+               first_seen =
+                 (SELECT MIN(m.event_date)
+                  FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+                  WHERE m.entity_id = entities.id AND n.trashed_at IS NULL),
+               last_seen =
+                 (SELECT MAX(m.event_date)
+                  FROM entity_mentions m JOIN notes n ON n.id = m.note_id
+                  WHERE m.entity_id = entities.id AND n.trashed_at IS NULL)",
             [],
         )?;
     }
@@ -178,6 +726,31 @@ pub fn set_notes(conn: &Connection, id: i64, notes: &str) -> Result<()> {
     conn.execute(
         "UPDATE meetings SET raw_notes = ?2 WHERE id = ?1",
         rusqlite::params![id, notes],
+    )?;
+    Ok(())
+}
+
+/// Persist the user-owned meeting document while retaining a plain-text
+/// projection for summaries, search context, exports, and older clients.
+pub fn set_notes_document(
+    conn: &Connection,
+    id: i64,
+    notes: &str,
+    notes_document_json: Option<&str>,
+) -> Result<()> {
+    let notes_document_json = notes_document_json
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(document) = notes_document_json {
+        let parsed: Value = serde_json::from_str(document)
+            .map_err(|error| anyhow!("meeting notes document is not valid JSON: {error}"))?;
+        if parsed.get("type").and_then(Value::as_str) != Some("doc") {
+            return Err(anyhow!("meeting notes document must be a document"));
+        }
+    }
+    conn.execute(
+        "UPDATE meetings SET raw_notes = ?2, notes_document_json = ?3 WHERE id = ?1",
+        rusqlite::params![id, notes, notes_document_json],
     )?;
     Ok(())
 }
@@ -255,12 +828,976 @@ pub fn set_note_id(conn: &Connection, id: i64, note_id: i64) -> Result<()> {
     Ok(())
 }
 
+fn note_filing(conn: &Connection, note_id: i64) -> Result<Option<(i64, String)>> {
+    conn.query_row(
+        "SELECT folder_id, COALESCE(source, 'manual')
+         FROM note_folder_items WHERE note_id = ?1
+         ORDER BY created_at DESC, folder_id LIMIT 1",
+        [note_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn filing_is_sticky(
+    conn: &Connection,
+    note_id: i64,
+    route_status: &str,
+    filing: &Option<(i64, String)>,
+) -> Result<bool> {
+    if route_status == "manual"
+        || filing
+            .as_ref()
+            .is_some_and(|(_, source)| matches!(source.as_str(), "manual" | "undo"))
+    {
+        return Ok(true);
+    }
+    let latest_source = conn
+        .query_row(
+            "SELECT source FROM note_filing_events
+             WHERE note_id = ?1 ORDER BY id DESC LIMIT 1",
+            [note_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(latest_source
+        .as_deref()
+        .is_some_and(|source| matches!(source, "manual" | "undo")))
+}
+
+fn meeting_route_reason(
+    conn: &Connection,
+    folder_id: i64,
+    route_email: Option<&str>,
+    route_via: &str,
+) -> Result<String> {
+    let destination = folder_name_and_path(conn, folder_id)?
+        .map(|(_, path)| path)
+        .ok_or_else(|| anyhow!("filing destination not found"))?;
+    Ok(match route_email {
+        Some(email) => {
+            format!("Filed in {destination} because {email} matched the meeting {route_via}.")
+        }
+        None => format!("Filed in {destination} by its meeting rule."),
+    })
+}
+
+/// Whether `folder_id` is the route destination itself or a more-specific
+/// descendant. Existing automatic organization below an account-level route
+/// is deliberate and should not be flattened back to the parent folder.
+fn folder_is_within(conn: &Connection, folder_id: i64, ancestor_id: i64) -> Result<bool> {
+    let mut current = Some(folder_id);
+    let mut seen = HashSet::new();
+    while let Some(id) = current {
+        if id == ancestor_id {
+            return Ok(true);
+        }
+        if !seen.insert(id) {
+            return Err(anyhow!("folder hierarchy contains a cycle"));
+        }
+        current = conn
+            .query_row(
+                "SELECT parent_id FROM note_folders WHERE id = ?1",
+                [id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten();
+    }
+    Ok(false)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RoutingParticipant {
+    email: String,
+    local: String,
+    domain: String,
+}
+
+#[derive(Debug)]
+struct RoutingFolderCandidate {
+    id: i64,
+    name: String,
+    auto_rule: String,
+    depth: i64,
+    event_json: Option<String>,
+}
+
+fn email_parts(value: &str) -> Option<RoutingParticipant> {
+    let email = normalized_email(value)?;
+    let (local, domain) = email.split_once('@')?;
+    Some(RoutingParticipant {
+        email: email.clone(),
+        local: local.to_string(),
+        domain: domain.to_string(),
+    })
+}
+
+fn routing_participants(conn: &Connection, event: &Value) -> Vec<RoutingParticipant> {
+    let mut owners = configured_owner_emails(conn).unwrap_or_default();
+    if let Some(account) = event.get("account").and_then(Value::as_str) {
+        if let Some(account) = normalized_email(account) {
+            owners.insert(account);
+        }
+    }
+    let Some(attendees) = event.get("attendees").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    attendees
+        .iter()
+        .filter(|attendee| {
+            !attendee
+                .get("self")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                && !attendee
+                    .get("resource")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                && !attendee
+                    .get("status")
+                    .or_else(|| attendee.get("responseStatus"))
+                    .or_else(|| attendee.get("response_status"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|status| status.eq_ignore_ascii_case("declined"))
+        })
+        .filter_map(|attendee| {
+            attendee
+                .as_str()
+                .or_else(|| attendee.get("email").and_then(Value::as_str))
+                .and_then(email_parts)
+        })
+        .filter(|participant| !owners.contains(&participant.email))
+        .filter(|participant| seen.insert(participant.email.clone()))
+        .collect()
+}
+
+fn public_email_domain(domain: &str) -> bool {
+    matches!(
+        domain,
+        "gmail.com"
+            | "googlemail.com"
+            | "outlook.com"
+            | "hotmail.com"
+            | "live.com"
+            | "yahoo.com"
+            | "icloud.com"
+            | "me.com"
+            | "proton.me"
+            | "protonmail.com"
+    )
+}
+
+fn domain_label(domain: &str) -> &str {
+    domain.split('.').next().unwrap_or(domain)
+}
+
+fn normalized_folder_words(name: &str) -> Vec<String> {
+    name.to_lowercase()
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn meeting_routing_candidates(
+    conn: &Connection,
+    broad_folder_id: i64,
+    current_note_id: i64,
+) -> Result<Vec<RoutingFolderCandidate>> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE descendants(id, depth) AS (
+           SELECT id, 0 FROM note_folders WHERE id = ?1
+           UNION ALL
+           SELECT child.id, parent.depth + 1
+           FROM note_folders child JOIN descendants parent ON child.parent_id = parent.id
+         )
+         SELECT folder.id, folder.name, folder.auto_rule, descendants.depth, meeting.event_json
+         FROM descendants
+         JOIN note_folders folder ON folder.id = descendants.id
+         LEFT JOIN note_folder_items filing ON filing.folder_id = folder.id
+         LEFT JOIN meetings meeting
+           ON meeting.note_id = filing.note_id
+          AND meeting.note_id <> ?2
+          AND meeting.trashed_at IS NULL
+         WHERE descendants.depth > 0
+         ORDER BY descendants.depth DESC, folder.position, folder.id",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![broad_folder_id, current_note_id], |row| {
+        Ok(RoutingFolderCandidate {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            auto_rule: row.get(2)?,
+            depth: row.get(3)?,
+            event_json: row.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Refine a broad account destination using calendar facts and existing folder
+/// organization. Exact participant/company homes win, then semantic meeting
+/// folders, while the broad account folder remains the safe fallback.
+fn automatic_meeting_destination(
+    conn: &Connection,
+    note_id: i64,
+    broad_folder_id: i64,
+    event: Option<&Value>,
+) -> Result<i64> {
+    let standup_destination =
+        crate::db::automatic_rule_destination_for_note(conn, note_id, broad_folder_id)?;
+    if standup_destination != broad_folder_id {
+        return Ok(standup_destination);
+    }
+    let Some(event) = event else {
+        return Ok(broad_folder_id);
+    };
+    let participants = routing_participants(conn, event);
+    let participant_count = external_attendees_for_event(conn, event).len();
+    if participant_count == 0 {
+        return Ok(broad_folder_id);
+    }
+    let account_domain = event
+        .get("account")
+        .and_then(Value::as_str)
+        .and_then(email_parts)
+        .map(|participant| participant.domain);
+    let emails = participants
+        .iter()
+        .map(|participant| participant.email.as_str())
+        .collect::<HashSet<_>>();
+    let company_domains = participants
+        .iter()
+        .map(|participant| participant.domain.as_str())
+        .filter(|domain| !public_email_domain(domain))
+        .filter(|domain| account_domain.as_deref() != Some(*domain))
+        .collect::<HashSet<_>>();
+    let candidates = meeting_routing_candidates(conn, broad_folder_id, note_id)?;
+    let mut best: Option<(i64, i64, i64)> = None;
+    for candidate in &candidates {
+        let words = normalized_folder_words(&candidate.name);
+        let domain_name_match = company_domains
+            .iter()
+            .any(|domain| words.iter().any(|word| word == domain_label(domain)));
+        let person_name_match = participant_count == 1
+            && participants.iter().any(|participant| {
+                participant.local.len() >= 3 && words.iter().any(|word| word == &participant.local)
+            });
+        let historical = candidate
+            .event_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .map(|event| routing_participants(conn, &event))
+            .unwrap_or_default();
+        let historical_emails = historical
+            .iter()
+            .map(|participant| participant.email.as_str())
+            .collect::<HashSet<_>>();
+        let exact_participants = !emails.is_empty() && emails == historical_emails;
+        let historical_domains = historical
+            .iter()
+            .map(|participant| participant.domain.as_str())
+            .filter(|domain| !public_email_domain(domain))
+            .filter(|domain| account_domain.as_deref() != Some(*domain))
+            .collect::<HashSet<_>>();
+        let learned_company = !company_domains.is_disjoint(&historical_domains);
+        let score = if person_name_match {
+            400
+        } else if domain_name_match {
+            350
+        } else if exact_participants {
+            300
+        } else if learned_company {
+            250
+        } else {
+            0
+        };
+        if score > 0 {
+            let ranked = (score, candidate.depth, -candidate.id);
+            if best.is_none_or(|current| ranked > current) {
+                best = Some(ranked);
+            }
+        }
+    }
+    if let Some((_, _, negative_id)) = best {
+        return Ok(-negative_id);
+    }
+    if participant_count == 1 {
+        if let Some(folder) = candidates
+            .iter()
+            .find(|folder| folder.auto_rule == "one_on_one")
+        {
+            return Ok(folder.id);
+        }
+    }
+    if !company_domains.is_empty() {
+        if let Some(folder) = candidates
+            .iter()
+            .find(|folder| folder.auto_rule == "external_partner")
+        {
+            return Ok(folder.id);
+        }
+    }
+    Ok(broad_folder_id)
+}
+
+/// Link the first generated note and apply the route captured when recording
+/// began. A context inbox is only a provisional home and can be superseded by
+/// an identity route; recording-context overrides, manual filings, and undo
+/// restorations remain sticky.
+pub fn set_note_id_and_apply_route(
+    conn: &Connection,
+    meeting_id: i64,
+    note_id: i64,
+    now: &str,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let route = tx
+        .query_row(
+            "SELECT COALESCE(route_status, 'needs_filing'), route_folder_id,
+                    route_email, COALESCE(route_via, 'no_event'), event_json
+             FROM meetings WHERE id = ?1",
+            [meeting_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((status, folder_id, route_email, route_via, event_json)) = route else {
+        return Err(anyhow!("meeting not found"));
+    };
+    let event = event_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+    tx.execute(
+        "UPDATE meetings SET note_id = ?2 WHERE id = ?1",
+        rusqlite::params![meeting_id, note_id],
+    )?;
+
+    let existing_filing = note_filing(&tx, note_id)?;
+    if filing_is_sticky(&tx, note_id, &status, &existing_filing)? {
+        let existing_folder = existing_filing.as_ref().map(|(folder_id, _)| *folder_id);
+        tx.execute(
+            "UPDATE meetings SET filing_context =
+                        (SELECT filing_context FROM notes WHERE id = ?2),
+                    route_folder_id = ?3, route_email = NULL,
+                    route_via = 'manual', route_status = 'manual', route_updated_at = ?4
+             WHERE id = ?1",
+            rusqlite::params![meeting_id, note_id, existing_folder, now],
+        )?;
+        tx.commit()?;
+        return Ok(());
+    }
+
+    if status == "matched" {
+        if let Some(broad_folder_id) = folder_id {
+            let destination_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM note_folders WHERE id = ?1)",
+                [broad_folder_id],
+                |row| row.get(0),
+            )?;
+            if destination_exists {
+                let refined_folder =
+                    automatic_meeting_destination(&tx, note_id, broad_folder_id, event.as_ref())?;
+                let destination_folder = match existing_filing.as_ref() {
+                    Some((existing_folder, source))
+                        if source == "rule"
+                            && *existing_folder != broad_folder_id
+                            && refined_folder == broad_folder_id
+                            && folder_is_within(&tx, *existing_folder, broad_folder_id)? =>
+                    {
+                        *existing_folder
+                    }
+                    _ => refined_folder,
+                };
+                let filing_is_current =
+                    existing_filing
+                        .as_ref()
+                        .is_some_and(|(existing_folder, source)| {
+                            source == "rule" && *existing_folder == destination_folder
+                        });
+                if filing_is_current {
+                    let context = crate::db::note_folder_context(&tx, destination_folder)?;
+                    tx.execute(
+                        "UPDATE notes SET filing_context = ?2 WHERE id = ?1",
+                        rusqlite::params![note_id, context],
+                    )?;
+                    tx.execute(
+                        "UPDATE meetings SET filing_context = ?2,
+                                route_folder_id = ?3, route_email = ?4,
+                                route_via = ?5, route_status = 'matched', route_updated_at = ?6
+                         WHERE id = ?1",
+                        rusqlite::params![
+                            meeting_id,
+                            context,
+                            destination_folder,
+                            route_email,
+                            route_via,
+                            now,
+                        ],
+                    )?;
+                } else {
+                    let reason = meeting_route_reason(
+                        &tx,
+                        destination_folder,
+                        route_email.as_deref(),
+                        &route_via,
+                    )?;
+                    let context = crate::db::note_folder_context(&tx, destination_folder)?;
+                    crate::db::filing_transition(
+                        &tx,
+                        note_id,
+                        Some(destination_folder),
+                        "rule",
+                        &reason,
+                        Some(&context),
+                        None,
+                        now,
+                    )?;
+                    tx.execute(
+                        "UPDATE meetings SET filing_context = ?2,
+                                route_folder_id = ?3, route_email = ?4,
+                                route_via = ?5, route_status = 'matched', route_updated_at = ?6
+                         WHERE id = ?1",
+                        rusqlite::params![
+                            meeting_id,
+                            context,
+                            destination_folder,
+                            route_email,
+                            route_via,
+                            now,
+                        ],
+                    )?;
+                }
+                tx.commit()?;
+                return Ok(());
+            }
+        }
+        tx.execute(
+            "UPDATE meetings SET filing_context =
+                        (SELECT filing_context FROM notes WHERE id = ?2),
+                    route_folder_id = NULL, route_email = ?3,
+                    route_via = 'destination_missing', route_status = 'needs_filing',
+                    route_updated_at = ?4 WHERE id = ?1",
+            rusqlite::params![meeting_id, note_id, route_email, now],
+        )?;
+    } else if let Some((existing_folder, _)) = existing_filing
+        .as_ref()
+        .filter(|(_, source)| source == "rule")
+    {
+        // A prior automatic rule remains a deliberate home when the current
+        // identity rules no longer produce a replacement.
+        let context = crate::db::note_folder_context(&tx, *existing_folder)?;
+        tx.execute(
+            "UPDATE notes SET filing_context = ?2 WHERE id = ?1",
+            rusqlite::params![note_id, context],
+        )?;
+        tx.execute(
+            "UPDATE meetings SET filing_context = ?2, route_folder_id = ?3,
+                    route_email = NULL, route_via = 'filing_rule',
+                    route_status = 'matched', route_updated_at = ?4 WHERE id = ?1",
+            rusqlite::params![meeting_id, context, existing_folder, now],
+        )?;
+    } else {
+        tx.execute(
+            "UPDATE meetings SET filing_context =
+                        (SELECT filing_context FROM notes WHERE id = ?2),
+                    route_folder_id = ?3, route_email = NULL,
+                    route_via = ?4, route_status = 'needs_filing',
+                    route_updated_at = ?5 WHERE id = ?1",
+            rusqlite::params![
+                meeting_id,
+                note_id,
+                existing_filing.as_ref().map(|(folder_id, _)| *folder_id),
+                route_via,
+                now,
+            ],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn filing_backfill_rows(
+    conn: &Connection,
+) -> Result<
+    Vec<(
+        i64,
+        i64,
+        String,
+        Option<String>,
+        String,
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )>,
+> {
+    let mut stmt = conn.prepare(
+        "SELECT id, note_id, title, event_json, COALESCE(route_status, 'needs_filing'),
+                COALESCE(route_via, 'no_event'), route_folder_id, route_email,
+                filing_context, route_updated_at
+         FROM meetings WHERE note_id IS NOT NULL AND trashed_at IS NULL ORDER BY id",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn backfill_item(
+    conn: &Connection,
+    meeting_id: i64,
+    note_id: i64,
+    title: String,
+    route: MeetingRoute,
+) -> Result<MeetingFilingBackfillItem> {
+    let destination = route
+        .folder_id
+        .map(|folder_id| folder_name_and_path(conn, folder_id))
+        .transpose()?
+        .flatten();
+    Ok(MeetingFilingBackfillItem {
+        meeting_id,
+        note_id,
+        title,
+        status: route.status,
+        folder_id: route.folder_id,
+        folder_name: destination.as_ref().map(|(name, _)| name.clone()),
+        folder_path: destination.map(|(_, path)| path),
+        email: route.email,
+        via: route.via,
+    })
+}
+
+fn note_filing_review_state(conn: &Connection, note_id: i64) -> Result<NoteFilingReviewState> {
+    let (filing_context, folder_id, source, event_id) = conn
+        .query_row(
+            "SELECT n.filing_context, i.folder_id, i.source, i.event_id
+             FROM notes n
+             LEFT JOIN note_folder_items i ON i.note_id = n.id
+             WHERE n.id = ?1",
+            [note_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or_else(|| anyhow!("backfill note not found"))?;
+    let latest_event = conn
+        .query_row(
+            "SELECT id, source FROM note_filing_events
+             WHERE note_id = ?1 ORDER BY id DESC LIMIT 1",
+            [note_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    Ok(NoteFilingReviewState {
+        folder_id,
+        source,
+        event_id,
+        filing_context,
+        latest_event_id: latest_event.as_ref().map(|(id, _)| *id),
+        latest_event_source: latest_event.map(|(_, source)| source),
+    })
+}
+
+fn resolve_backfill_route(
+    conn: &Connection,
+    event: Option<&Value>,
+    meeting_filing_context: Option<&str>,
+) -> Result<MeetingRoute> {
+    let Some(captured_context) = explicit_recording_context(event) else {
+        return resolve_meeting_route(conn, event);
+    };
+    let captured_context = normalize_filing_context(Some(captured_context))?
+        .ok_or_else(|| anyhow!("explicit recording context is missing"))?;
+    let meeting_filing_context = normalize_filing_context(meeting_filing_context)?
+        .ok_or_else(|| anyhow!("explicit recording context is missing"))?;
+    if captured_context != meeting_filing_context {
+        return Err(anyhow!("explicit recording context provenance changed"));
+    }
+    Ok(resolve_meeting_filing(conn, event, Some(&meeting_filing_context))?.route)
+}
+
+fn inspect_meeting_filing_backfill_row(
+    conn: &Connection,
+    meeting_id: i64,
+    note_id: i64,
+    title: String,
+    event_json: Option<String>,
+    route_status: String,
+    route_via: String,
+    route_folder_id: Option<i64>,
+    route_email: Option<String>,
+    meeting_filing_context: Option<String>,
+    route_updated_at: Option<String>,
+) -> Result<MeetingFilingBackfillInspection> {
+    let filing_state = note_filing_review_state(conn, note_id)?;
+    let filing = filing_state.folder_id.zip(filing_state.source.clone());
+    if filing_is_sticky(conn, note_id, &route_status, &filing)? {
+        return Ok(MeetingFilingBackfillInspection::Manual);
+    }
+
+    let event = event_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+    let mut route =
+        resolve_backfill_route(conn, event.as_ref(), meeting_filing_context.as_deref())?;
+    let broad_route_folder = route.folder_id;
+    if route.status == "matched" {
+        if let Some(folder_id) = route.folder_id {
+            route.folder_id = Some(automatic_meeting_destination(
+                conn,
+                note_id,
+                folder_id,
+                event.as_ref(),
+            )?);
+        }
+    }
+    let automatic_is_current = match filing.as_ref() {
+        Some((_, source)) if source == "rule" && route.status != "matched" => true,
+        Some((folder_id, source)) if source == "rule" => match route.folder_id {
+            Some(route_folder) if *folder_id == route_folder => true,
+            Some(route_folder) if Some(route_folder) == broad_route_folder => {
+                let broad = broad_route_folder.expect("matched route folder");
+                *folder_id != broad && folder_is_within(conn, *folder_id, broad)?
+            }
+            Some(_) => false,
+            None => false,
+        },
+        _ => false,
+    };
+    if automatic_is_current {
+        return Ok(MeetingFilingBackfillInspection::AlreadyFiled);
+    }
+    let item = backfill_item(conn, meeting_id, note_id, title.clone(), route)?;
+    Ok(MeetingFilingBackfillInspection::Eligible(
+        MeetingFilingBackfillReviewItem {
+            meeting_id,
+            note_id,
+            title,
+            event_json,
+            stored_route_status: route_status,
+            stored_route_via: route_via,
+            stored_route_folder_id: route_folder_id,
+            stored_route_email: route_email,
+            stored_filing_context: meeting_filing_context,
+            stored_route_updated_at: route_updated_at,
+            filing: filing_state,
+            item,
+        },
+    ))
+}
+
+fn inspect_meeting_filing_backfill(
+    conn: &Connection,
+    meeting_id: i64,
+) -> Result<Option<MeetingFilingBackfillInspection>> {
+    let row = conn
+        .query_row(
+            "SELECT note_id, title, event_json,
+                    COALESCE(route_status, 'needs_filing'),
+                    COALESCE(route_via, 'no_event'), route_folder_id, route_email,
+                    filing_context, route_updated_at
+             FROM meetings
+             WHERE id = ?1 AND note_id IS NOT NULL AND trashed_at IS NULL",
+            [meeting_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(
+        |(
+            note_id,
+            title,
+            event_json,
+            route_status,
+            route_via,
+            route_folder_id,
+            route_email,
+            filing_context,
+            route_updated_at,
+        )| {
+            inspect_meeting_filing_backfill_row(
+                conn,
+                meeting_id,
+                note_id,
+                title,
+                event_json,
+                route_status,
+                route_via,
+                route_folder_id,
+                route_email,
+                filing_context,
+                route_updated_at,
+            )
+        },
+    )
+    .transpose()
+}
+
+fn meeting_filing_backfill_database_key(conn: &Connection) -> Result<String> {
+    let mut stmt = conn.prepare("PRAGMA database_list")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    })?;
+    for row in rows {
+        let (name, file) = row?;
+        if name == "main" {
+            return Ok(if file.is_empty() {
+                format!("memory:{conn:p}")
+            } else {
+                file
+            });
+        }
+    }
+    Err(anyhow!("main database not found"))
+}
+
+fn random_backfill_token() -> String {
+    let bytes = rand::random::<[u8; 32]>();
+    let mut token = String::with_capacity(64);
+    for byte in bytes {
+        token.push_str(&format!("{byte:02x}"));
+    }
+    token
+}
+
+fn remember_meeting_filing_backfill_review(
+    conn: &Connection,
+    items: Vec<MeetingFilingBackfillReviewItem>,
+) -> Result<String> {
+    let database_key = meeting_filing_backfill_database_key(conn)?;
+    let mut reviews = meeting_filing_backfill_reviews()
+        .lock()
+        .map_err(|_| anyhow!("meeting filing review state is unavailable"))?;
+    // A newer preview for the same database supersedes older approval. This
+    // also bounds memory without invalidating previews in other test/app DBs.
+    reviews.retain(|_, review| review.database_key != database_key);
+    let mut token = random_backfill_token();
+    while reviews.contains_key(&token) {
+        token = random_backfill_token();
+    }
+    reviews.insert(
+        token.clone(),
+        MeetingFilingBackfillReview {
+            database_key,
+            items,
+        },
+    );
+    Ok(token)
+}
+
+fn take_meeting_filing_backfill_review(
+    conn: &Connection,
+    token: &str,
+) -> Result<MeetingFilingBackfillReview> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(anyhow!("filing preview token is required; preview again"));
+    }
+    let database_key = meeting_filing_backfill_database_key(conn)?;
+    let mut reviews = meeting_filing_backfill_reviews()
+        .lock()
+        .map_err(|_| anyhow!("meeting filing review state is unavailable"))?;
+    let review = reviews
+        .remove(token)
+        .ok_or_else(|| anyhow!("filing preview expired; preview again"))?;
+    if review.database_key != database_key {
+        return Err(anyhow!(
+            "filing preview belongs to another database; preview again"
+        ));
+    }
+    Ok(review)
+}
+
+/// Read-only historical review. Context inbox membership is provisional and
+/// remains eligible for an identity route; manual choices, recording-context
+/// overrides, and undo restorations are sticky.
+pub fn meeting_filing_backfill_preview(conn: &Connection) -> Result<MeetingFilingBackfillPreview> {
+    let mut preview = MeetingFilingBackfillPreview::default();
+    let mut review_items = Vec::new();
+    for (
+        meeting_id,
+        note_id,
+        title,
+        event_json,
+        route_status,
+        route_via,
+        route_folder_id,
+        route_email,
+        filing_context,
+        route_updated_at,
+    ) in filing_backfill_rows(conn)?
+    {
+        match inspect_meeting_filing_backfill_row(
+            conn,
+            meeting_id,
+            note_id,
+            title,
+            event_json,
+            route_status,
+            route_via,
+            route_folder_id,
+            route_email,
+            filing_context,
+            route_updated_at,
+        )? {
+            MeetingFilingBackfillInspection::Manual => preview.manual += 1,
+            MeetingFilingBackfillInspection::AlreadyFiled => preview.already_filed += 1,
+            MeetingFilingBackfillInspection::Eligible(review) => {
+                preview.eligible += 1;
+                if review.item.status == "matched" {
+                    preview.would_file += 1;
+                } else {
+                    preview.needs_filing += 1;
+                }
+                preview.items.push(review.item.clone());
+                review_items.push(review);
+            }
+        }
+    }
+    preview.token = remember_meeting_filing_backfill_review(conn, review_items)?;
+    Ok(preview)
+}
+
+/// Apply exactly one reviewed historical batch. The opaque token is one-shot;
+/// every previewed row, filing projection, route, and destination is validated
+/// before any write. New eligible meetings are intentionally outside the batch.
+pub fn meeting_filing_backfill_apply(
+    conn: &Connection,
+    token: &str,
+    now: &str,
+) -> Result<MeetingFilingBackfillApply> {
+    let review = take_meeting_filing_backfill_review(conn, token)?;
+    // Acquire the write reservation before validation so another SQLite
+    // connection cannot change a reviewed row between the checks and writes.
+    let tx = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    for expected in &review.items {
+        let current = inspect_meeting_filing_backfill(&tx, expected.meeting_id)?;
+        match current {
+            Some(MeetingFilingBackfillInspection::Eligible(current)) if current == *expected => {}
+            _ => {
+                return Err(anyhow!(
+                    "filing preview is stale; preview again before applying"
+                ));
+            }
+        }
+    }
+
+    let mut report = MeetingFilingBackfillApply {
+        reviewed: review.items.len() as i64,
+        ..MeetingFilingBackfillApply::default()
+    };
+    for reviewed in review.items {
+        let meeting_id = reviewed.meeting_id;
+        let note_id = reviewed.note_id;
+        let route = reviewed.item;
+        if route.status == "matched" {
+            let folder_id = route
+                .folder_id
+                .ok_or_else(|| anyhow!("reviewed filing destination is missing"))?;
+            let reason = meeting_route_reason(&tx, folder_id, route.email.as_deref(), &route.via)?;
+            let context = crate::db::note_folder_context(&tx, folder_id)?;
+            crate::db::filing_transition(
+                &tx,
+                note_id,
+                Some(folder_id),
+                "rule",
+                &reason,
+                Some(&context),
+                None,
+                now,
+            )?;
+            tx.execute(
+                "UPDATE meetings SET filing_context = ?2, route_folder_id = ?3,
+                        route_email = ?4, route_via = ?5, route_status = 'matched',
+                        route_updated_at = ?6 WHERE id = ?1",
+                rusqlite::params![meeting_id, context, folder_id, route.email, route.via, now],
+            )?;
+            report.filed += 1;
+        } else {
+            tx.execute(
+                "UPDATE meetings SET filing_context =
+                            (SELECT filing_context FROM notes WHERE id = ?2),
+                        route_folder_id = ?3, route_email = NULL,
+                        route_via = ?4, route_status = 'needs_filing',
+                        route_updated_at = ?5 WHERE id = ?1",
+                rusqlite::params![
+                    meeting_id,
+                    note_id,
+                    reviewed.filing.folder_id,
+                    route.via,
+                    now,
+                ],
+            )?;
+            report.needs_filing += 1;
+        }
+    }
+    tx.commit()?;
+    Ok(report)
+}
+
 pub fn insert_segment(
     conn: &Connection,
     meeting_id: i64,
     channel: &str,
     t0_ms: i64,
     t1_ms: i64,
+    text: &str,
+) -> Result<i64> {
+    insert_segment_with_voice_time(conn, meeting_id, channel, t0_ms, t1_ms, None, text)
+}
+
+/// Persist a transcript row with speech-only VAD timing. Keeping this separate
+/// from the legacy helper lets deterministic fixtures and repaired historical
+/// transcripts remain explicitly unknown instead of fabricating precise pace.
+pub fn insert_segment_with_voice_time(
+    conn: &Connection,
+    meeting_id: i64,
+    channel: &str,
+    t0_ms: i64,
+    t1_ms: i64,
+    voiced_ms: Option<i64>,
     text: &str,
 ) -> Result<i64> {
     // Vocabulary is a deterministic post-ASR layer. Capture must never be
@@ -271,9 +1808,10 @@ pub fn insert_segment(
         text.to_string()
     });
     conn.execute(
-        "INSERT INTO meeting_segments (meeting_id, channel, t0_ms, t1_ms, text)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![meeting_id, channel, t0_ms, t1_ms, normalized],
+        "INSERT INTO meeting_segments
+           (meeting_id, channel, t0_ms, t1_ms, voiced_ms, text)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![meeting_id, channel, t0_ms, t1_ms, voiced_ms, normalized],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -289,10 +1827,14 @@ pub fn delete_segment(conn: &Connection, id: i64) -> Result<()> {
 /// Reset every them-segment's speaker — the stop pass calls this before
 /// writing final labels so no provisional live label survives it.
 pub fn clear_them_speakers(conn: &Connection, meeting_id: i64) -> Result<()> {
+    clear_channel_speakers(conn, meeting_id, "them")
+}
+
+pub fn clear_channel_speakers(conn: &Connection, meeting_id: i64, channel: &str) -> Result<()> {
     conn.execute(
         "UPDATE meeting_segments SET speaker = NULL
-         WHERE meeting_id = ?1 AND channel = 'them'",
-        [meeting_id],
+         WHERE meeting_id = ?1 AND channel = ?2",
+        rusqlite::params![meeting_id, channel],
     )?;
     Ok(())
 }
@@ -310,12 +1852,22 @@ pub fn clear_meeting_speakers(conn: &Connection, meeting_id: i64) -> Result<()> 
 /// (id, t0_ms, t1_ms) of a meeting's them-segments in timeline order — feeds
 /// recovery diarization from the retained WAV.
 pub fn them_segment_times(conn: &Connection, meeting_id: i64) -> Result<Vec<(i64, i64, i64)>> {
+    segment_times(conn, meeting_id, "them")
+}
+
+pub fn segment_times(
+    conn: &Connection,
+    meeting_id: i64,
+    channel: &str,
+) -> Result<Vec<(i64, i64, i64)>> {
     let mut stmt = conn.prepare(
         "SELECT id, t0_ms, t1_ms FROM meeting_segments
-         WHERE meeting_id = ?1 AND channel = 'them' ORDER BY t0_ms",
+         WHERE meeting_id = ?1 AND channel = ?2 ORDER BY t0_ms",
     )?;
     let rows = stmt
-        .query_map([meeting_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .query_map(rusqlite::params![meeting_id, channel], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -373,6 +1925,11 @@ pub fn rename_speaker(conn: &Connection, meeting_id: i64, from: &str, to: &str) 
     let to = to.trim();
     if to.is_empty() || to == "Me" || to == "Them" || to.starts_with("__") {
         return Err(anyhow::anyhow!("invalid speaker name"));
+    }
+    // A no-op rename must remain a no-op. Without this guard, the merge path
+    // finds the same row as both source and destination, then deletes it.
+    if from == to {
+        return Ok(());
     }
     if from == "Them" {
         conn.execute(
@@ -443,7 +2000,12 @@ pub fn rename_speaker(conn: &Connection, meeting_id: i64, from: &str, to: &str) 
     Ok(())
 }
 
-fn external_attendees_from_raw(event_json: Option<&str>) -> Vec<String> {
+pub fn external_attendees_for_event(conn: &Connection, event_json: &Value) -> Vec<String> {
+    let owners = configured_owner_emails(conn).unwrap_or_default();
+    super::summarize::external_attendees_excluding(event_json, &owners)
+}
+
+fn external_attendees_from_raw(conn: &Connection, event_json: Option<&str>) -> Vec<String> {
     let Some(raw) = event_json else {
         return Vec::new();
     };
@@ -451,7 +2013,7 @@ fn external_attendees_from_raw(event_json: Option<&str>) -> Vec<String> {
         return Vec::new();
     };
     let mut seen = HashSet::new();
-    super::summarize::external_attendees(&value)
+    external_attendees_for_event(conn, &value)
         .into_iter()
         .filter(|name| seen.insert(name.to_lowercase()))
         .collect()
@@ -482,23 +2044,47 @@ pub fn set_one_on_one_speaker(conn: &Connection, meeting_id: i64, name: &str) ->
     Ok(())
 }
 
-/// One-time repair for saved one-on-ones created before calendar-aware speaker
-/// naming. Only anonymous labels are rewritten; a name the user entered by hand
-/// remains authoritative.
-pub fn initialize_one_on_one_speakers(conn: &Connection) -> Result<()> {
-    let initialized: Option<String> = conn
+fn one_on_one_identity_fingerprint(conn: &Connection) -> Result<String> {
+    let mut owners = configured_owner_emails(conn)?
+        .into_iter()
+        .collect::<Vec<_>>();
+    owners.sort();
+    let mut hasher = Sha256::new();
+    hasher.update(b"meeting-one-on-one-speakers-v2\0");
+    for owner in owners {
+        hasher.update(owner.as_bytes());
+        hasher.update(b"\0");
+    }
+    let digest = hasher.finalize();
+    let mut fingerprint = String::with_capacity(64);
+    for byte in digest {
+        fingerprint.push_str(&format!("{byte:02x}"));
+    }
+    Ok(fingerprint)
+}
+
+/// Repair historical one-on-ones whenever the set of owner identities changes.
+/// Calendar membership is the strongest available ground truth: in a true 1:1
+/// every remote line belongs to its sole external attendee, including rows that
+/// an old automatic voice profile incorrectly named "Brian". The fingerprint
+/// prevents the pass from repeatedly overwriting edits once identities settle.
+pub fn repair_one_on_one_speakers(conn: &Connection) -> Result<usize> {
+    const FINGERPRINT_KEY: &str = "meeting_one_on_one_speakers_identity_v2";
+    let fingerprint = one_on_one_identity_fingerprint(conn)?;
+    let repaired_fingerprint: Option<String> = conn
         .query_row(
-            "SELECT value FROM app_metadata WHERE key = 'meeting_one_on_one_speakers_v1'",
-            [],
+            "SELECT value FROM app_metadata WHERE key = ?1",
+            [FINGERPRINT_KEY],
             |row| row.get(0),
         )
         .optional()?;
-    if initialized.is_some() {
-        return Ok(());
+    if repaired_fingerprint.as_deref() == Some(&fingerprint) {
+        return Ok(0);
     }
 
+    let tx = conn.unchecked_transaction()?;
     let meetings = {
-        let mut stmt = conn.prepare("SELECT id, event_json FROM meetings ORDER BY id")?;
+        let mut stmt = tx.prepare("SELECT id, event_json FROM meetings ORDER BY id")?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
@@ -507,49 +2093,48 @@ pub fn initialize_one_on_one_speakers(conn: &Connection) -> Result<()> {
         rows
     };
 
+    let mut repaired = 0usize;
     for (meeting_id, event_json) in meetings {
-        let attendees = external_attendees_from_raw(event_json.as_deref());
+        let attendees = external_attendees_from_raw(&tx, event_json.as_deref());
         if attendees.len() != 1 {
             continue;
         }
         let attendee = &attendees[0];
-        let mut labels = BTreeSet::new();
-        {
-            let mut stmt = conn.prepare(
-                "SELECT DISTINCT COALESCE(NULLIF(speaker, ''), 'Them')
-                 FROM meeting_segments
-                 WHERE meeting_id = ?1 AND channel = 'them'",
-            )?;
-            labels.extend(
-                stmt.query_map([meeting_id], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?,
-            );
-        }
-        {
-            let mut stmt =
-                conn.prepare("SELECT label FROM meeting_speakers WHERE meeting_id = ?1")?;
-            labels.extend(
-                stmt.query_map([meeting_id], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?,
-            );
-        }
-        for label in labels.into_iter().filter(|label| anonymous_speaker(label)) {
-            rename_speaker(conn, meeting_id, &label, attendee)?;
+        let changed_segments = tx.execute(
+            "UPDATE meeting_segments SET speaker = ?2
+             WHERE meeting_id = ?1 AND channel = 'them'
+               AND COALESCE(speaker, '') <> ?2",
+            rusqlite::params![meeting_id, attendee],
+        )?;
+        // These centroids were the source of stale cross-meeting names and no
+        // longer describe distinct speakers once the calendar proves a 1:1.
+        let changed_speakers = tx.execute(
+            "DELETE FROM meeting_speakers WHERE meeting_id = ?1",
+            [meeting_id],
+        )?;
+        if changed_segments > 0 || changed_speakers > 0 {
+            repaired += 1;
         }
     }
 
-    conn.execute(
-        "INSERT INTO app_metadata (key, value)
-         VALUES ('meeting_one_on_one_speakers_v1', '1')",
-        [],
+    tx.execute(
+        "INSERT INTO app_metadata (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![FINGERPRINT_KEY, fingerprint],
     )?;
+    tx.commit()?;
+    Ok(repaired)
+}
+
+pub fn initialize_one_on_one_speakers(conn: &Connection) -> Result<()> {
+    repair_one_on_one_speakers(conn)?;
     Ok(())
 }
 
 /// Full transcript, timeline order, interleaved across channels.
 pub fn list_segments(conn: &Connection, meeting_id: i64) -> Result<Vec<Value>> {
     let mut stmt = conn.prepare(
-        "SELECT id, channel, t0_ms, t1_ms, text, speaker
+        "SELECT id, channel, t0_ms, t1_ms, voiced_ms, text, speaker
          FROM meeting_segments WHERE meeting_id = ?1 ORDER BY t0_ms ASC, id ASC",
     )?;
     let rows = stmt
@@ -559,8 +2144,9 @@ pub fn list_segments(conn: &Connection, meeting_id: i64) -> Result<Vec<Value>> {
                 "channel": r.get::<_, String>(1)?,
                 "t0_ms": r.get::<_, i64>(2)?,
                 "t1_ms": r.get::<_, i64>(3)?,
-                "text": r.get::<_, String>(4)?,
-                "speaker": r.get::<_, Option<String>>(5)?,
+                "voiced_ms": r.get::<_, Option<i64>>(4)?,
+                "text": r.get::<_, String>(5)?,
+                "speaker": r.get::<_, Option<String>>(6)?,
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -670,7 +2256,7 @@ fn meeting_search_candidates(conn: &Connection) -> Result<Vec<MeetingSearchCandi
     let mut candidates = Vec::new();
     for row in rows {
         let (id, title, event_json, note_id) = row?;
-        let attendees = external_attendees_from_raw(event_json.as_deref());
+        let attendees = external_attendees_from_raw(conn, event_json.as_deref());
         let mut people = attendees.clone();
         people.extend(spoken_names.remove(&id).unwrap_or_default());
         let mut seen = HashSet::new();
@@ -802,6 +2388,20 @@ fn meeting_type<'a>(
     } else {
         ("other", "Other meeting")
     }
+}
+
+fn meeting_types_by_id(conn: &Connection) -> Result<HashMap<i64, String>> {
+    let candidates = meeting_search_candidates(conn)?;
+    let (_, standup_notes) = folder_search_data(conn)?;
+    Ok(candidates
+        .iter()
+        .map(|meeting| {
+            (
+                meeting.id,
+                meeting_type(meeting, &standup_notes).0.to_string(),
+            )
+        })
+        .collect())
 }
 
 pub fn transcript_search_facets(conn: &Connection) -> Result<TranscriptSearchFacets> {
@@ -975,6 +2575,8 @@ pub fn search_transcripts_filtered_sorted(
     let mut sql = String::from(
         "SELECT s.id, m.id, m.title, m.started_at, s.t0_ms,
                 CASE
+                  WHEN COALESCE(m.capture_mode, 'online') = 'in_person'
+                    THEN COALESCE(NULLIF(s.speaker, ''), 'Speaker')
                   WHEN s.channel = 'me' THEN 'Me'
                   ELSE COALESCE(NULLIF(s.speaker, ''), 'Them')
                 END AS speaker,
@@ -1521,11 +3123,15 @@ pub fn list_trashed_meetings(conn: &Connection, limit: i64) -> Result<Vec<Value>
 }
 
 fn list_meetings_by_trash(conn: &Connection, limit: i64, trashed: bool) -> Result<Vec<Value>> {
+    let meeting_types = meeting_types_by_id(conn)?;
     let mut stmt = conn.prepare(
         "SELECT m.id, m.title, m.started_at, m.ended_at, m.status, m.note_id, m.event_json,
                 (SELECT COUNT(*) FROM meeting_segments s WHERE s.meeting_id = m.id),
                 (SELECT COUNT(DISTINCT y.template) FROM meeting_summaries y WHERE y.meeting_id = m.id),
-                m.trashed_at
+                m.trashed_at, m.route_folder_id, m.route_email,
+                COALESCE(m.route_via, 'no_event'),
+                COALESCE(m.route_status, 'needs_filing'), m.filing_context,
+                COALESCE(m.capture_mode, 'online')
          FROM meetings m
          WHERE (?2 = 1 AND m.trashed_at IS NOT NULL)
             OR (?2 = 0 AND m.trashed_at IS NULL)
@@ -1545,6 +3151,16 @@ fn list_meetings_by_trash(conn: &Connection, limit: i64, trashed: bool) -> Resul
                 "segment_count": r.get::<_, i64>(7)?,
                 "summary_count": r.get::<_, i64>(8)?,
                 "trashed_at": r.get::<_, Option<String>>(9)?,
+                "route_folder_id": r.get::<_, Option<i64>>(10)?,
+                "route_email": r.get::<_, Option<String>>(11)?,
+                "route_via": r.get::<_, String>(12)?,
+                "route_status": r.get::<_, String>(13)?,
+                "filing_context": r.get::<_, Option<String>>(14)?,
+                "capture_mode": r.get::<_, String>(15)?,
+                "meeting_type": meeting_types
+                    .get(&r.get::<_, i64>(0)?)
+                    .cloned()
+                    .unwrap_or_else(|| "other".to_string()),
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1553,30 +3169,44 @@ fn list_meetings_by_trash(conn: &Connection, limit: i64, trashed: bool) -> Resul
 
 /// Everything the meeting page needs in one call.
 pub fn get_meeting(conn: &Connection, id: i64) -> Result<Value> {
+    let meeting_type = meeting_types_by_id(conn)?
+        .remove(&id)
+        .unwrap_or_else(|| "other".to_string());
     let meta = conn.query_row(
-        "SELECT id, title, event_id, event_json, started_at, ended_at, status, raw_notes,
+        "SELECT id, public_id, title, event_id, event_json, started_at, ended_at, status, raw_notes,
                 audio_me_path, audio_them_path, note_id, video_path, trashed_at,
-                asr_engine, asr_model
+                asr_engine, asr_model, route_folder_id, route_email,
+                COALESCE(route_via, 'no_event'), COALESCE(route_status, 'needs_filing'),
+                filing_context, COALESCE(capture_mode, 'online'), notes_document_json
          FROM meetings WHERE id = ?1",
         [id],
         |r| {
             Ok(json!({
                 "id": r.get::<_, i64>(0)?,
-                "title": r.get::<_, String>(1)?,
-                "event_id": r.get::<_, Option<String>>(2)?,
-                "event_json": r.get::<_, Option<String>>(3)?
+                "public_id": r.get::<_, String>(1)?,
+                "title": r.get::<_, String>(2)?,
+                "event_id": r.get::<_, Option<String>>(3)?,
+                "event_json": r.get::<_, Option<String>>(4)?
                     .and_then(|s| serde_json::from_str::<Value>(&s).ok()),
-                "started_at": r.get::<_, Option<String>>(4)?,
-                "ended_at": r.get::<_, Option<String>>(5)?,
-                "status": r.get::<_, String>(6)?,
-                "raw_notes": r.get::<_, String>(7)?,
-                "audio_me_path": r.get::<_, Option<String>>(8)?,
-                "audio_them_path": r.get::<_, Option<String>>(9)?,
-                "note_id": r.get::<_, Option<i64>>(10)?,
-                "video_path": r.get::<_, Option<String>>(11)?,
-                "trashed_at": r.get::<_, Option<String>>(12)?,
-                "asr_engine": r.get::<_, Option<String>>(13)?,
-                "asr_model": r.get::<_, Option<String>>(14)?,
+                "started_at": r.get::<_, Option<String>>(5)?,
+                "ended_at": r.get::<_, Option<String>>(6)?,
+                "status": r.get::<_, String>(7)?,
+                "raw_notes": r.get::<_, String>(8)?,
+                "audio_me_path": r.get::<_, Option<String>>(9)?,
+                "audio_them_path": r.get::<_, Option<String>>(10)?,
+                "note_id": r.get::<_, Option<i64>>(11)?,
+                "video_path": r.get::<_, Option<String>>(12)?,
+                "trashed_at": r.get::<_, Option<String>>(13)?,
+                "asr_engine": r.get::<_, Option<String>>(14)?,
+                "asr_model": r.get::<_, Option<String>>(15)?,
+                "route_folder_id": r.get::<_, Option<i64>>(16)?,
+                "route_email": r.get::<_, Option<String>>(17)?,
+                "route_via": r.get::<_, String>(18)?,
+                "route_status": r.get::<_, String>(19)?,
+                "filing_context": r.get::<_, Option<String>>(20)?,
+                "capture_mode": r.get::<_, String>(21)?,
+                "notes_document_json": r.get::<_, Option<String>>(22)?,
+                "meeting_type": meeting_type,
             }))
         },
     )?;
@@ -1584,11 +3214,30 @@ pub fn get_meeting(conn: &Connection, id: i64) -> Result<Value> {
     let summaries = list_summaries(conn, id)?;
     let (me_ms, them_ms) = talk_time(conn, id)?;
     let speakers = list_meeting_speakers(conn, id)?;
+    let event = &meta["event_json"];
+    let expected_remote_speakers = event["attendees"].as_array().map(|attendees| {
+        let visible_remote = external_attendees_for_event(conn, event).len();
+        let full_count = event["attendee_count"]
+            .as_u64()
+            .map(|count| count as usize)
+            .unwrap_or(attendees.len());
+        if full_count > attendees.len() {
+            let visible_self = attendees
+                .iter()
+                .filter(|attendee| attendee["self"].as_bool().unwrap_or(false))
+                .count();
+            full_count.saturating_sub(visible_self)
+        } else {
+            visible_remote
+        }
+    });
+    let conversation = super::analytics::build(&segments, expected_remote_speakers);
     let mut out = meta;
     out["segments"] = json!(segments);
     out["summaries"] = json!(summaries);
     out["talk_ms"] = json!({ "me": me_ms, "them": them_ms });
     out["speakers"] = json!(speakers);
+    out["conversation"] = conversation;
     Ok(out)
 }
 
@@ -1603,70 +3252,110 @@ pub const DEFAULT_TEMPLATE: &str = "Meeting";
 const BUILTIN_TEMPLATES: &[(&str, &str)] = &[
     (
         "Meeting",
-        "General meeting notes. Sections, in this order: \
-         'Summary' — a full paragraph (4-6 sentences): what the meeting was about, \
-         who drove it, the main threads, and how each was left. \
-         'Discussion' — the heart of the notes and the LONGEST section: detailed \
-         bullets covering every topic discussed, in order. Open each topic with a \
-         bold lead ('**Pricing** — …'), then one bullet per substantive point: \
-         decisions and the reasoning behind them, options considered and rejected, \
-         numbers, dates, names, disagreements, and how each thread was left. \
-         'Key Takeaways' — the 5-10 points that matter most, each a complete \
-         sentence carrying its own specifics. \
-         'Chapters' — the conversation's phases as a timeline: each item gets the \
-         timestamp where the topic started and a 1-2 line gist. \
-         'Action Items' — every task, commitment, deadline, or follow-up as \
-         'Owner — verb phrase by date' (use Me/Them or a stated name as owner). \
-         'Key Questions' — questions raised that were NOT resolved in the meeting.",
+        "General meeting notes. Use only sections with real content, in this order: \
+         'Overview' — a concise 2-4 sentence readout stating what materially changed \
+         or became clearer, why it matters when that rationale was stated, and the \
+         most consequential next move or unresolved condition. If nothing changed, \
+         say that plainly instead of merely listing the topics discussed. \
+         'Decisions' — explicit decisions and settled direction, including the \
+         decisive reasoning or tradeoff when stated; never repeat a task here. \
+         'Action Items' — every explicit commitment and anything the group said still \
+         needs to be done, checked, confirmed, reviewed, sent, or followed up; include \
+         ownerless work as Unassigned. \
+         'Key Discussion' — comprehensive, substantive bullets covering each topic \
+         or workstream that materially advanced, including the concrete facts, \
+         options, examples, constraints, feedback, and reasoning not already captured \
+         above. Use a short bold lead for each distinct topic, followed by enough \
+         context that someone who missed the meeting can understand what was discussed. \
+         'Open Questions & Risks' — unresolved questions, dependencies, objections, \
+         and risks that still need attention; do not repeat scheduled follow-ups or \
+         committed tasks here.",
     ),
     (
         "1:1",
-        "One-on-one meeting notes. Sections, in this order: \
-         'Summary' — a full paragraph capturing the tone and main threads. \
-         'Updates' — progress and wins each person shared, as detailed bullets that \
-         keep the specifics (project names, numbers, dates, who was involved). \
-         'Blockers & Concerns' — every problem raised, the context behind it, and \
-         how it landed. \
-         'Feedback' — feedback exchanged in either direction, quoted where sharp. \
-         'Discussion' — anything substantive outside the above, topic by topic, \
-         with the reasoning and details preserved. \
-         'Action Items' — commitments as 'Owner — verb phrase by date'. \
-         'Key Questions' — open questions to revisit next time.",
+        "One-on-one notes. Use only sections with real content, in this order: \
+         'Overview' — a concise paragraph with the most important update and how \
+         the conversation left it. \
+         'Updates & Wins' — concrete progress, changes, and wins shared. \
+         'Feedback & Support' — feedback, requests for help, and support offered, \
+         preserving the context and examples. \
+         'Blockers & Concerns' — problems, dependencies, and concerns raised. \
+         'Decisions & Commitments' — settled direction and explicit commitments. \
+         'Action Items' — concrete follow-ups. \
+         'To Revisit' — unresolved topics for the next conversation.",
     ),
     (
         "Standup",
         "Daily standup notes. Sections, in this order: \
-         'Summary' — two sentences max. \
-         'Progress' — what was done, per person where stated. \
-         'Next' — what each person is doing next. \
-         'Blockers' — anything blocking, and who owns unblocking it. \
-         'Action Items' — as 'Owner — verb phrase by date'.",
+         'Snapshot' — one or two sentences on overall progress and the most \
+         consequential blocker or change. \
+         'Since Last Time' — completed work and concrete progress, grouped by \
+         person or workstream when known. \
+         'Next' — stated next work, grouped by person or workstream when known. \
+         'Blockers' — active blockers, dependencies, and the stated owner of \
+         unblocking work. \
+         'Action Items' — follow-ups beyond the normal next-work updates.",
     ),
     (
         "Interview",
         "Interview notes (candidate, user research, or journalistic). Sections: \
-         'Summary' — a full paragraph: who was interviewed, the ground covered, \
-         and the overall read. \
-         'Background' — the experience and context the interviewee gave, as \
-         detailed bullets (roles, companies, dates, scope). \
-         'Highlights' — the strongest answers or moments: what was asked, how they \
-         answered, and why it landed, with short quotes. \
-         'Concerns' — weak answers, risks, or open doubts, each with the moment \
-         that raised it. \
-         'Chapters' — question areas as a timeline with timestamps. \
-         'Action Items' — follow-ups as 'Owner — verb phrase by date'.",
+         'Overview' — a concise paragraph naming the subject, purpose, and most \
+         important evidence gathered without making an unsupported verdict. \
+         'Background & Context' — relevant history, role, behaviors, or situation. \
+         'Evidence & Themes' — substantive answers, examples, needs, and recurring \
+         patterns, with the question context when useful. \
+         'Gaps & Concerns' — missing evidence, contradictions, risks, and questions \
+         not answered. \
+         'Follow-ups' — validation steps, requests, and next interviews or actions.",
     ),
     (
         "Lecture",
         "Lecture or talk notes. Sections, in this order: \
-         'Summary' — a full paragraph: the thesis of the talk and the arc of its \
-         argument. \
-         'Key Concepts' — each concept as a bullet with the explanation actually \
-         given: definitions, numbers, and the examples used to make the point. \
-         'Chapters' — the talk's arc as a timeline with timestamps. \
+         'Thesis' — a concise paragraph with the central claim and how the talk \
+         supports it. \
+         'Key Ideas' — concepts and arguments with their definitions, evidence, \
+         and stated caveats. \
          'Examples & References' — concrete examples, papers, books, or tools \
          mentioned, each with why it came up. \
-         'Key Questions' — audience questions and any left unanswered.",
+         'Questions & Implications' — audience questions, unresolved points, and \
+         practical implications worth carrying forward.",
+    ),
+    (
+        "Project Update",
+        "Project update notes. Use only sections with real content, in this order: \
+         'Status' — a concise paragraph stating whether the work is on track, what \
+         changed, and the latest outcome; do not infer a status not stated. \
+         'Progress' — completed work and measurable movement since the last update. \
+         'Decisions' — settled product, technical, scope, or sequencing choices. \
+         'Risks & Blockers' — active risks, dependencies, blockers, and mitigations. \
+         'Next Milestones' — stated upcoming checkpoints, deliverables, and dates. \
+         'Action Items' — concrete commitments and follow-ups.",
+    ),
+    (
+        "Client Call",
+        "Client or customer call notes. Use only sections with real content, in this order: \
+         'Outcome' — a concise paragraph with the purpose, what changed, and where \
+         the relationship or work now stands. \
+         'Client Priorities' — needs, goals, constraints, objections, and success \
+         criteria stated by the client. \
+         'Decisions' — decisions and agreements reached. \
+         'Commitments' — promises made by either side, including stated dates. \
+         'Risks & Open Questions' — unresolved concerns, dependencies, and gaps. \
+         'Action Items' — concrete next steps and follow-ups.",
+    ),
+    (
+        "Brainstorm",
+        "Brainstorm notes. Use only sections with real content, in this order: \
+         'Goal' — a concise paragraph stating the problem or opportunity explored \
+         and where the session landed. \
+         'Strongest Ideas' — distinct ideas with the problem they solve and any \
+         stated evidence or advantage. \
+         'Constraints & Tradeoffs' — feasibility concerns, dependencies, risks, and \
+         meaningful objections. \
+         'Decisions' — ideas selected, rejected, combined, or deferred, with stated \
+         reasoning. \
+         'Experiments & Action Items' — concrete validation steps and owners. \
+         'Parking Lot' — promising ideas explicitly left for later.",
     ),
 ];
 

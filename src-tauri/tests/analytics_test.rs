@@ -33,15 +33,24 @@ fn discovers_gym_structure() {
     let bench_rows: Vec<_> = t.rows.iter().filter(|r| r.label == "bench").collect();
     assert_eq!(bench_rows.len(), 2);
     assert_eq!(bench_rows[1].values.get("weight").unwrap(), &json!(190));
-    assert_eq!(t.count_by_date, vec![("2026-06-09".into(), 1), ("2026-06-11".into(), 1)]);
+    assert_eq!(
+        t.count_by_date,
+        vec![("2026-06-09".into(), 1), ("2026-06-11".into(), 1)]
+    );
 }
 
 #[test]
 fn handles_flat_category() {
     // meals: no array-of-objects; the data object itself is the item
     let entries = vec![
-        ("2026-06-09".to_string(), json!({"meal":"burrito bowl","calories":750})),
-        ("2026-06-10".to_string(), json!({"meal":"salad","calories":420})),
+        (
+            "2026-06-09".to_string(),
+            json!({"meal":"burrito bowl","calories":750}),
+        ),
+        (
+            "2026-06-10".to_string(),
+            json!({"meal":"salad","calories":420}),
+        ),
     ];
     let t = build_trends(&entries);
     assert_eq!(t.items_field, None);

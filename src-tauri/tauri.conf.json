@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.noted.app",
   "build": {
-    "beforeDevCommand": "bun run dev",
+    "beforeDevCommand": "bun run build:diarizer && bun run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun run build",
+    "beforeBuildCommand": "bun run build:desktop",
     "frontendDist": "../dist"
   },
   "app": {
@@ -33,6 +33,7 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
+    "resources": ["resources/*"],
     "macOS": {
       "minimumSystemVersion": "10.15",
       "signingIdentity": "-",

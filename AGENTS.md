@@ -4,13 +4,35 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## What noted is
 
-A local-first personal-knowledge app (Tauri 2 + React 19). You capture a note by typing, speaking, or photographing it; a local model (Ollama) categorizes it, extracts structured data, and files it. Over time it builds a searchable knowledge base, a daily schedule, recaps/trends, and a people/self knowledge graph. Default mode runs **100% locally**; an optional "Balanced" mode offloads only OCR/extract to Google Gemini. The primary (and only fully supported) platform is **macOS**.
+A local-first personal context system (Tauri 2 + React 19). Meeting capture is
+the initial product wedge, while notes, calendar, schedule, journal, people, and
+future sources build one source-grounded context layer for the user and agents
+they explicitly authorize. Local mode runs fully on the Mac; Hosted, BYOK, and
+legacy Balanced profiles are optional. The primary (and only fully supported)
+platform is **macOS**.
 
-See `README.md` for the user-facing overview, `PROTOCOL.md` for the note-extraction contract, and `.impeccable.md` for the active design direction (note: `DESIGN.md` describes an older "Crisp Data Canvas" theme that has been superseded by the warm/Geist direction in `.impeccable.md` — the latter is authoritative, confirmed by `@fontsource-variable/geist` in `package.json`).
+See `PRODUCT_STRATEGY.md` and `ROADMAP.md` for the product direction and phase
+gates, `docs/COMPETITIVE_LANDSCAPE.md` for competitor evidence and must-win
+standards, `README.md` for the user-facing overview, `PROTOCOL.md` for the
+note-extraction contract, and `.impeccable.md` for the active design direction
+(note: `DESIGN.md` describes an older "Crisp Data Canvas" theme that has been
+superseded by the warm/Geist direction in `.impeccable.md` — the latter is
+authoritative, confirmed by `@fontsource-variable/geist` in `package.json`).
+
+Before changing product positioning, describing a capability as differentiated,
+or adding parity work because a competitor shipped it, consult the competitive
+landscape. Never claim that Noted is the first or only product in this category;
+separate shipped capabilities, plans, hypotheses, and vendor claims.
 
 ## Commands
 
 The package manager is **bun** (`bun.lock` is committed; `tauri.conf.json` invokes `bun run`). npm also works.
+
+### App target
+
+Use the standard Noted app for routine development, testing, real local data, and local installation: `bun run tauri dev`, `bun run tauri build`, or `bun run app:update` (`/Applications/noted.app`, bundle id `com.noted.app`). `Noted Alpha.app` and `bun run tauri:alpha` are a separate local QA sandbox reserved for explicitly requested release-readiness or distribution validation; they are not the public artifact. The public prerelease uses the `alpha` feature profile but is packaged as `Noted` through `tauri.beta.conf.json`.
+
+Do not build, install, or launch Noted Alpha unless the user specifically asks for release validation, and never leave Alpha, `tauri dev`, and the installed standard app running together. App variants isolate runtime data, not source edits: parallel coding sessions must use separate Git worktrees or clearly divided file ownership. See “Development and release targets” in `README.md`.
 
 ```sh
 bun install

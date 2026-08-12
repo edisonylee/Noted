@@ -216,6 +216,7 @@ export type NoteRow = {
   entries: NoteEntry[];
   event_date: string;
   created_at: string;
+  trashed_at?: string | null;
 };
 
 export type CategoryInfo = {
@@ -233,6 +234,26 @@ export type NoteFolderInfo = {
   kind: "space" | "folder";
   auto_rule: "" | "daily_standup";
   note_ids: number[];
+  explicit_filings: NoteFolderItemInfo[];
+};
+
+export type NoteFolderItemInfo = {
+  note_id: number;
+  filing_context: "work" | "personal" | null;
+  source: "context" | "rule" | "manual" | "undo";
+  reason: string;
+  event_id: number | null;
+};
+
+export type NoteFilingReceipt = {
+  event_id: number;
+  note_id: number;
+  folder_id: number | null;
+  previous_folder_id: number | null;
+  filing_context: "work" | "personal" | null;
+  previous_context: "work" | "personal" | null;
+  source: "context" | "rule" | "manual" | "undo";
+  reason: string;
 };
 
 export type Health = {
@@ -319,12 +340,49 @@ export type GcalStatus = {
   calendar_id: string | null;
   accounts: GcalAccountInfo[];
 };
+
+// Deterministic meeting filing. Rules match exact Google identities and run
+// in priority order; they never rely on model inference or broad domains.
+export type MeetingFilingRule = {
+  email: string;
+  folder_id: number | null;
+  folder_name: string | null;
+  folder_path: string | null;
+  priority: number;
+  enabled: boolean;
+};
+export type MeetingFilingBackfillItem = {
+  meeting_id: number;
+  note_id: number;
+  title: string;
+  status: string;
+  folder_id: number | null;
+  folder_name: string | null;
+  folder_path: string | null;
+  email: string | null;
+  via: string;
+};
+export type MeetingFilingBackfillPreview = {
+  token: string;
+  eligible: number;
+  would_file: number;
+  needs_filing: number;
+  already_filed: number;
+  manual: number;
+  items: MeetingFilingBackfillItem[];
+};
+export type MeetingFilingBackfillApply = {
+  reviewed: number;
+  filed: number;
+  needs_filing: number;
+  skipped: number;
+};
 // One remembered guest for event-form autocomplete (harvested from events).
 export type GcalContact = { email: string; name: string };
 export type SyncReport = {
   created: number;
   updated: number;
-  skipped: number; // untimed ("Anytime") blocks, not pushable as events
+  skipped: number; // legacy untimed blocks, not pushable as events
   duplicates: number; // blocks already on another calendar at the same start+end
   deleted: number; // events for blocks removed since the last sync
   errors: string[];
@@ -367,8 +425,13 @@ export type RangeEvent = {
   meet_link: string | null; // Meet/Zoom/Teams join URL (conference data, or found in location/description)
   html_link: string | null; // open the event in Google Calendar's web UI
   organizer: string | null;
+  organizer_email?: string | null;
+  creator_email?: string | null;
   attendees: { name: string; email: string; status: string; self: boolean }[]; // capped at 12, rooms excluded
+  attendee_emails?: string[]; // uncapped normalized identities used for deterministic meeting filing
+  associated_emails?: string[]; // source account + organizer + creator + attendee identities
   attendee_count: number; // real total (rooms excluded)
+  ical_uid?: string | null;
 };
 // Fields the Calendar view's create/edit forms submit.
 export type EventInput = {
@@ -390,9 +453,12 @@ export type EventInput = {
 // (system audio) segments, and each summarize run adds a template-named tab.
 export type MeetingSegment = {
   id: number;
+  // Physical capture source, not participant identity. In-person meetings use
+  // the local mic for everyone and distinguish people with `speaker`.
   channel: "me" | "them";
   t0_ms: number;
   t1_ms: number;
+  voiced_ms: number | null; // speech-only VAD frames; null on historical rows
   text: string;
   speaker: string | null; // diarized name once available; null = channel default
 };
@@ -401,6 +467,11 @@ export type MeetingSummary = {
   template: string;
   content_md: string;
   created_at: string;
+};
+export type MeetingSpeakerUpdateResult = {
+  speakers_updated: number;
+  summaries_refreshed: number;
+  summary_refresh_error: string | null;
 };
 export type MeetingStatus = "recording" | "summarizing" | "done" | "failed";
 export type MeetingListRow = {
@@ -414,6 +485,13 @@ export type MeetingListRow = {
   segment_count: number;
   summary_count: number;
   trashed_at: string | null;
+  meeting_type?: "daily_standup" | "one_on_one" | "group" | "other";
+  route_status?: "matched" | "manual" | "needs_filing";
+  route_folder_id?: number | null;
+  route_email?: string | null;
+  route_via?: string | null;
+  filing_context?: "work" | "personal" | null;
+  capture_mode: "online" | "in_person";
 };
 export type TranscriptSearchHit = {
   segment_id: number;
@@ -471,9 +549,41 @@ export type MeetingSpeaker = {
   suggested: string | null;
   seg_count: number;
 };
+export type MeetingConversationParticipant = {
+  label: string;
+  channel: "me" | "them";
+  talk_ms: number;
+  share_pct: number;
+  words: number;
+  pace_wpm: number | null;
+  speech_bursts: number;
+  median_speech_burst_ms: number;
+};
+export type MeetingConversation = {
+  available: boolean;
+  timing_basis: "voice_activity" | "segment_bounds";
+  speaker_time_ms: number;
+  transcript_words: number;
+  expected_remote_speakers: number | null;
+  detected_remote_speakers: number;
+  speaker_coverage_pct: number | null;
+  unattributed_remote_ms: number;
+  unattributed_remote_pct: number | null;
+  speaker_detail_available: boolean;
+  speaker_detail_reason:
+    | "available"
+    | "not_enough_speech"
+    | "no_remote_speech"
+    | "low_attribution"
+    | "speaker_count_mismatch";
+  channels: MeetingConversationParticipant[];
+  speakers: MeetingConversationParticipant[];
+};
 export type MeetingDetail = MeetingListRow & {
+  public_id: string;
   event_id: string | null;
   raw_notes: string;
+  notes_document_json: string | null;
   audio_me_path: string | null;
   audio_them_path: string | null;
   video_path: string | null; // window recording; null = off/expired/deleted
@@ -483,6 +593,7 @@ export type MeetingDetail = MeetingListRow & {
   summaries: MeetingSummary[];
   talk_ms: { me: number; them: number };
   speakers: MeetingSpeaker[];
+  conversation?: MeetingConversation;
 };
 export type MeetingLiveState = {
   active: boolean;
@@ -496,6 +607,8 @@ export type MeetingModelStatus = {
   turbo: boolean;
   base: boolean;
   speaker: boolean; // voice-embedding model for per-speaker labels
+  in_person_supported: boolean; // FluidAudio requires macOS 14+
+  in_person_diarizer: boolean; // FluidAudio offline diarization models are ready
   parakeet: boolean; // Parakeet-TDT ASR engine files present
   hosted: boolean; // scoped Noted API key exists in macOS Keychain
   tap_supported: boolean;
@@ -525,6 +638,83 @@ export type MeetingsCfg = {
   record_video: boolean;
   /** Days before the launch-time sweep deletes window videos; 0 = keep forever. */
   video_keep_days: number;
+};
+
+// ── Permissioned local agent access (vendor-neutral MCP) ───────────────────
+export type AgentClient = {
+  id: string;
+  name: string;
+  created_at: string;
+  revoked_at: string | null;
+  last_seen_at: string | null;
+};
+export type AgentAccessStatus = {
+  enabled: boolean;
+  clients: AgentClient[];
+  pending_count: number;
+  helper_command: string;
+};
+export type AgentClientSetup = {
+  client: AgentClient;
+  config_json: string;
+  command: string;
+};
+export type AgentContextOptions = {
+  include_summary: boolean;
+  include_notes: boolean;
+  include_transcript: boolean;
+  max_bytes?: number | null;
+};
+export type AgentMeetingCandidate = {
+  meeting_id: number;
+  title: string;
+  started_at: string | null;
+  attendees: string[];
+  segment_count: number;
+  summary_available: boolean;
+  notes_available: boolean;
+};
+export type AgentContextRequest = {
+  id: string;
+  client_name: string;
+  runtime_name: string | null;
+  purpose: string;
+  query: string;
+  created_at: string;
+  expires_at: string;
+  requested: AgentContextOptions;
+  candidates: AgentMeetingCandidate[];
+};
+export type AgentContextPreview = {
+  request_id: string;
+  meeting_id: number;
+  title: string;
+  resource_uri: string;
+  source_revision: string;
+  packet_hash: string;
+  content: string;
+  total_bytes: number;
+  estimated_tokens: number;
+  included: { summary: boolean; notes: boolean; transcript: boolean };
+};
+export type AgentContextResolveResult = {
+  status: "approved" | "denied";
+  request_id: string;
+  pass_id: string | null;
+};
+export type AgentContextReceipt = {
+  id: string;
+  client_name: string;
+  runtime_name: string | null;
+  purpose: string;
+  resource_uri: string | null;
+  resource_title: string | null;
+  status: string;
+  total_bytes: number;
+  delivered_bytes: number;
+  requested_at: string;
+  decided_at: string | null;
+  completed_at: string | null;
 };
 
 // The Journal agent's response: a companion reply (null if the local model was
@@ -597,6 +787,37 @@ export type Trends = {
 };
 
 export const api = {
+  // Vendor-neutral local MCP clients. All content release still requires an
+  // exact approval in the trusted desktop app.
+  agentAccessStatus: () => invoke<AgentAccessStatus>("agent_access_status"),
+  agentAccessSetEnabled: (enabled: boolean) =>
+    invoke<AgentAccessStatus>("agent_access_set_enabled", { enabled }),
+  agentClientCreate: (name: string) =>
+    invoke<AgentClientSetup>("agent_client_create", { name }),
+  agentClientRevoke: (clientId: string) =>
+    invoke<AgentAccessStatus>("agent_client_revoke", { clientId }),
+  agentContextPending: () =>
+    invoke<AgentContextRequest[]>("agent_context_pending"),
+  agentContextPreview: (
+    requestId: string,
+    meetingId: number,
+    options: AgentContextOptions,
+  ) => invoke<AgentContextPreview>("agent_context_preview", { requestId, meetingId, options }),
+  agentContextResolve: (args: {
+    requestId: string;
+    decision: "approve" | "deny";
+    meetingId?: number;
+    options?: AgentContextOptions;
+    previewHash?: string;
+  }) => invoke<AgentContextResolveResult>("agent_context_resolve", {
+    requestId: args.requestId,
+    decision: args.decision,
+    meetingId: args.meetingId ?? null,
+    options: args.options ?? null,
+    previewHash: args.previewHash ?? null,
+  }),
+  agentContextReceipts: () =>
+    invoke<AgentContextReceipt[]>("agent_context_receipts"),
   health: () => invoke<Health>("health"),
   systemSettingsGet: () => invoke<SystemSettings>("system_settings_get"),
   systemSettingsSet: (timeZone: string) =>
@@ -618,11 +839,18 @@ export const api = {
     event_date: string;
     entries: { category: string; description?: string; data: Record<string, unknown> }[];
     entities?: EntityCandidate[];
+    filing_context?: "work" | "personal";
+    folder_id?: number | null;
   }) => invoke<number>("save_entry", { args }),
   // Instant capture: queue raw text/photo on the Mac (no LLM wait); the Mac
   // categorizes + files it in the background. Returns a pending id.
-  quickCapture: (rawText: string, source?: string, imagePath?: string, eventDate?: string) =>
-    invoke<number>("quick_capture", { rawText, source, imagePath, eventDate }),
+  quickCapture: (
+    rawText: string,
+    source?: string,
+    imagePath?: string,
+    eventDate?: string,
+    filingContext?: "work" | "personal"
+  ) => invoke<number>("quick_capture", { rawText, source, imagePath, eventDate, filingContext }),
   listEntities: () => invoke<EntityRow[]>("list_entities"),
   mergeEntities: (keep: number, drop: number) => invoke<void>("merge_entities", { keep, drop }),
   suggestEntityMerges: () => invoke<MergeSuggestion[]>("suggest_entity_merges"),
@@ -645,6 +873,11 @@ export const api = {
   listNotes: () => invoke<NoteRow[]>("list_notes"),
   updateNote: (noteId: number, title: string, rawText: string) =>
     invoke<void>("update_note", { noteId, title, rawText }),
+  noteTrashList: () => invoke<NoteRow[]>("note_trash_list"),
+  noteTrash: (noteId: number) => invoke<void>("note_trash", { noteId }),
+  noteRestore: (noteId: number) => invoke<void>("note_restore", { noteId }),
+  noteDeleteForever: (noteId: number) =>
+    invoke<void>("note_delete_forever", { noteId }),
   listCategories: () => invoke<CategoryInfo[]>("list_categories"),
   listNoteFolders: () => invoke<NoteFolderInfo[]>("list_note_folders"),
   createNoteFolder: (parentId: number | null, name: string, kind: "space" | "folder") =>
@@ -656,7 +889,9 @@ export const api = {
   deleteNoteFolder: (folderId: number) =>
     invoke<void>("delete_note_folder", { folderId }),
   fileNote: (noteId: number, folderId: number | null) =>
-    invoke<void>("file_note", { noteId, folderId }),
+    invoke<NoteFilingReceipt>("file_note", { noteId, folderId }),
+  undoNoteFiling: (eventId: number) =>
+    invoke<NoteFilingReceipt>("undo_note_filing", { eventId }),
   // `scope` (a brain vault name) restricts retrieval to that vault; `entityId`
   // pins the answer to one item (its brain note + every capture mentioning it).
   chat: (
@@ -785,11 +1020,29 @@ export const api = {
     invoke<void>("gcal_update_event", { eventId, moveTo, meet, ...ev }),
   gcalDeleteEvent: (account: string, calendarId: string, eventId: string) =>
     invoke<void>("gcal_delete_event", { account, calendarId, eventId }),
+  // Exact-identity meeting filing. The first matching rule wins; leaving
+  // priority null appends a new rule behind the existing ones.
+  meetingFilingRules: () => invoke<MeetingFilingRule[]>("meeting_filing_rules"),
+  setMeetingFilingRule: (email: string, folderId: number, priority?: number | null) =>
+    invoke<MeetingFilingRule>("meeting_filing_rule_set", {
+      email,
+      folderId,
+      priority: priority ?? null,
+    }),
+  deleteMeetingFilingRule: (email: string) =>
+    invoke<boolean>("meeting_filing_rule_delete", { email }),
+  reorderMeetingFilingRules: (emails: string[]) =>
+    invoke<MeetingFilingRule[]>("meeting_filing_rules_reorder", { emails }),
+  meetingFilingBackfillPreview: () =>
+    invoke<MeetingFilingBackfillPreview>("meeting_filing_backfill_preview"),
+  meetingFilingBackfillApply: (token: string) =>
+    invoke<MeetingFilingBackfillApply>("meeting_filing_backfill_apply", { token }),
   // Meetings (local Granola). Capture commands are desktop-only — the phone
   // bridge returns a clean error for them; reads work everywhere.
   meetingModelStatus: () => invoke<MeetingModelStatus>("meeting_model_status"),
   downloadMeetingModel: () => invoke<boolean>("download_meeting_model"),
   downloadSpeakerModel: () => invoke<boolean>("download_speaker_model"),
+  downloadInPersonDiarizer: () => invoke<boolean>("download_in_person_diarizer"),
   downloadParakeetModel: () => invoke<boolean>("download_parakeet_model"),
   meetingStart: (args: {
     title?: string;
@@ -797,6 +1050,8 @@ export const api = {
     eventJson?: unknown;
     retainAudio?: boolean;
     sourceBundle?: string;
+    filingContext?: "work" | "personal";
+    captureMode?: "online" | "in_person";
   }) => invoke<number>("meeting_start", { ...args }),
   meetingPromptPayload: () => invoke<PromptPayload | null>("meeting_prompt_payload"),
   meetingDismissPrompt: (bundleId?: string) =>
@@ -841,8 +1096,8 @@ export const api = {
   meetingTrash: (id: number) => invoke<void>("meeting_trash", { id }),
   meetingRestore: (id: number) => invoke<void>("meeting_restore", { id }),
   meetingDeleteForever: (id: number) => invoke<void>("meeting_delete_forever", { id }),
-  meetingSetNotes: (id: number, notes: string) =>
-    invoke<void>("meeting_set_notes", { id, notes }),
+  meetingSetNotes: (id: number, notes: string, notesDocumentJson?: string | null) =>
+    invoke<void>("meeting_set_notes", { id, notes, notesDocumentJson }),
   meetingSetTitle: (id: number, title: string) =>
     invoke<void>("meeting_set_title", { id, title }),
   meetingSetSummary: (id: number, summaryId: number, contentMd: string) =>
@@ -852,8 +1107,12 @@ export const api = {
   // Rename propagates only within this meeting. Future meetings stay anonymous.
   meetingRenameSpeaker: (id: number, from: string, to: string) =>
     invoke<void>("meeting_rename_speaker", { id, from, to }),
-  // Rebuild anonymous speaker labels from retained audio.
-  meetingRediarize: (id: number) => invoke<number>("meeting_rediarize", { id }),
+  // Apply all label changes first, then refresh generated meeting notes once.
+  meetingRenameSpeakers: (id: number, changes: { from: string; to: string }[]) =>
+    invoke<MeetingSpeakerUpdateResult>("meeting_rename_speakers", { id, changes }),
+  // Rebuild anonymous labels, then refresh generated meeting notes once.
+  meetingRediarize: (id: number) =>
+    invoke<MeetingSpeakerUpdateResult>("meeting_rediarize", { id }),
   // Explicit one-time macOS Screen Recording request. Meeting start never asks.
   meetingVideoRequestPermission: () => invoke<boolean>("meeting_video_request_permission"),
   // Delete the window video now instead of waiting out the retention window.
@@ -864,7 +1123,8 @@ export const api = {
     invoke<{ answer: string }>("meeting_assist", { id, question }),
   // Writes "<date> <title>.md" into ~/Downloads; resolves to the path.
   meetingExportMd: (id: number) => invoke<string>("meeting_export_md", { id }),
-  meetingExportPdf: (id: number) => invoke<string>("meeting_export_pdf", { id }),
+  meetingExportPdf: (id: number, kind: "brief" | "transcript" = "brief", summaryId?: number) =>
+    invoke<string>("meeting_export_pdf", { id, kind, summaryId }),
   meetingTemplates: () => invoke<MeetingTemplate[]>("meeting_templates"),
   meetingTemplateSave: (name: string, prompt: string) =>
     invoke<void>("meeting_template_save", { name, prompt }),

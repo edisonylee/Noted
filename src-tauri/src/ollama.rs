@@ -65,7 +65,9 @@ pub async fn chat_json(
     // capture never hard-fails.
     if crate::provider::use_cloud_for_extract() {
         let vision = images.as_ref().map(|v| !v.is_empty()).unwrap_or(false);
-        match crate::provider::cloud_chat_json(system, user, images.clone(), format.clone(), vision).await {
+        match crate::provider::cloud_chat_json(system, user, images.clone(), format.clone(), vision)
+            .await
+        {
             Ok(v) => return Ok(v),
             Err(e) => eprintln!("[noted] cloud extract failed, falling back to local: {e}"),
         }
@@ -173,7 +175,11 @@ pub async fn chat_text(model: &str, system: &str, user: &str) -> Result<String> 
         ],
     });
     let client = reqwest::Client::new();
-    let resp = client.post(format!("{BASE}/api/chat")).json(&body).send().await?;
+    let resp = client
+        .post(format!("{BASE}/api/chat"))
+        .json(&body)
+        .send()
+        .await?;
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -204,7 +210,11 @@ pub async fn chat_messages(model: &str, messages: Vec<Value>, temperature: f32) 
         "messages": messages,
     });
     let client = reqwest::Client::new();
-    let resp = client.post(format!("{BASE}/api/chat")).json(&body).send().await?;
+    let resp = client
+        .post(format!("{BASE}/api/chat"))
+        .json(&body)
+        .send()
+        .await?;
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -241,5 +251,8 @@ pub async fn embed(input: &str) -> Result<Vec<f32>> {
         .and_then(|e| e.get(0))
         .and_then(|e| e.as_array())
         .ok_or_else(|| anyhow!("no embeddings in response"))?;
-    Ok(arr.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect())
+    Ok(arr
+        .iter()
+        .filter_map(|x| x.as_f64().map(|f| f as f32))
+        .collect())
 }

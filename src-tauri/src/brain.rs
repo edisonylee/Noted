@@ -36,7 +36,9 @@ pub fn auto_propagate() -> bool {
 }
 
 pub fn init_auto(dir: &Path) {
-    let on = std::fs::read_to_string(dir.join(AUTO_FILE)).map(|s| s.trim() != "0").unwrap_or(true);
+    let on = std::fs::read_to_string(dir.join(AUTO_FILE))
+        .map(|s| s.trim() != "0")
+        .unwrap_or(true);
     AUTO_PROPAGATE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -49,17 +51,17 @@ pub fn set_auto_propagate(dir: &Path, on: bool) {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedNote {
     pub vault: String,
-    pub rel_path: String,        // vault-relative file path (the sync key)
-    pub slug: String,            // kebab id: frontmatter `name`, else filename stem
-    pub display_name: String,    // human entity name ("Yi", "BARO")
-    pub etype: String,           // person | project | decision | reference | doc
+    pub rel_path: String,     // vault-relative file path (the sync key)
+    pub slug: String,         // kebab id: frontmatter `name`, else filename stem
+    pub display_name: String, // human entity name ("Yi", "BARO")
+    pub etype: String,        // person | project | decision | reference | doc
     pub status: Option<String>,
     pub event_date: Option<String>, // frontmatter `updated` || `created` (YYYY-MM-DD)
     pub tags: Vec<String>,
     pub aliases: Vec<String>,
-    pub wikilinks: Vec<String>,  // target slugs, deduped, self-link removed
+    pub wikilinks: Vec<String>, // target slugs, deduped, self-link removed
     pub managed: Option<String>, // current content of the noted-managed region
-    pub hash: String,            // sha256 of the full raw file (change detection)
+    pub hash: String,           // sha256 of the full raw file (change detection)
 }
 
 /// First path segment → entity type. The fallback for anything else (top-level
@@ -141,7 +143,10 @@ fn display_name(title: Option<&str>, slug: &str) -> String {
 /// empty frontmatter and the whole input as body.
 fn split_frontmatter(raw: &str) -> (&str, &str) {
     let trimmed = raw.strip_prefix('\u{feff}').unwrap_or(raw); // tolerate BOM
-    let rest = match trimmed.strip_prefix("---\n").or_else(|| trimmed.strip_prefix("---\r\n")) {
+    let rest = match trimmed
+        .strip_prefix("---\n")
+        .or_else(|| trimmed.strip_prefix("---\r\n"))
+    {
         Some(r) => r,
         None => return ("", raw),
     };
@@ -170,7 +175,9 @@ fn parse_frontmatter(fm: &str) -> std::collections::HashMap<String, Value> {
         if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
-        let Some((key, val)) = line.split_once(':') else { continue };
+        let Some((key, val)) = line.split_once(':') else {
+            continue;
+        };
         let key = key.trim().to_lowercase();
         let val = val.trim();
         if val.is_empty() {
@@ -193,18 +200,31 @@ fn parse_frontmatter(fm: &str) -> std::collections::HashMap<String, Value> {
 
 fn unquote(s: &str) -> String {
     let s = s.trim();
-    let s = s.strip_prefix('"').and_then(|x| x.strip_suffix('"')).unwrap_or(s);
-    let s = s.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')).unwrap_or(s);
+    let s = s
+        .strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .unwrap_or(s);
+    let s = s
+        .strip_prefix('\'')
+        .and_then(|x| x.strip_suffix('\''))
+        .unwrap_or(s);
     s.trim().to_string()
 }
 
 fn fm_string(map: &std::collections::HashMap<String, Value>, key: &str) -> Option<String> {
-    map.get(key).and_then(|v| v.as_str()).map(|s| s.to_string()).filter(|s| !s.is_empty())
+    map.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn fm_array(map: &std::collections::HashMap<String, Value>, key: &str) -> Vec<String> {
     match map.get(key) {
-        Some(Value::Array(a)) => a.iter().filter_map(|v| v.as_str()).map(String::from).collect(),
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(String::from)
+            .collect(),
         Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
         _ => Vec::new(),
     }
@@ -269,7 +289,9 @@ pub fn parse_note(vault: &str, rel_path: &str, raw: &str) -> ParsedNote {
     let (fm_raw, body) = split_frontmatter(raw);
     let fm = parse_frontmatter(fm_raw);
 
-    let slug = fm_string(&fm, "name").map(|s| s.to_lowercase()).unwrap_or_else(|| slug_from_path(rel_path));
+    let slug = fm_string(&fm, "name")
+        .map(|s| s.to_lowercase())
+        .unwrap_or_else(|| slug_from_path(rel_path));
     let title = fm_string(&fm, "title");
     let etype = fm_string(&fm, "type")
         .and_then(|t| type_from_frontmatter(&t))
@@ -318,7 +340,9 @@ pub fn collect_markdown_files(root: &Path) -> Vec<(String, String)> {
     return out;
 
     fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
@@ -453,7 +477,12 @@ pub fn git_commit_paths(root: &Path, paths: &[String], message: &str) -> Option<
     if !committed.status.success() {
         return None; // e.g. nothing staged changed
     }
-    let sha = Command::new("git").arg("-C").arg(root).args(["rev-parse", "--short", "HEAD"]).output().ok()?;
+    let sha = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
     let sha = String::from_utf8_lossy(&sha.stdout).trim().to_string();
     (!sha.is_empty()).then_some(sha)
 }
@@ -461,7 +490,12 @@ pub fn git_commit_paths(root: &Path, paths: &[String], message: &str) -> Option<
 /// Current git HEAD sha of a vault (recorded as the sync checkpoint). None if the
 /// path isn't a git repo or git is unavailable.
 pub fn git_head(root: &Path) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(root).args(["rev-parse", "HEAD"]).output().ok()?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -499,9 +533,15 @@ mod tests {
         assert_eq!(n.status.as_deref(), Some("active"));
         assert_eq!(n.tags, vec!["baro", "peer", "architecture"]);
         // wikilinks: deduped, self-link removed
-        assert_eq!(n.wikilinks, vec!["hitl-two-risk-classes", "raw-vs-serving-feature-store"]);
+        assert_eq!(
+            n.wikilinks,
+            vec!["hitl-two-risk-classes", "raw-vs-serving-feature-store"]
+        );
         // the long title is kept as an alias for resolution
-        assert!(n.aliases.iter().any(|a| a.contains("Amazon AI agent engineer")));
+        assert!(n
+            .aliases
+            .iter()
+            .any(|a| a.contains("Amazon AI agent engineer")));
     }
 
     #[test]
@@ -520,8 +560,14 @@ mod tests {
         assert_eq!(vault_norm("baro", "person", "Yi"), "yi");
         assert_eq!(vault_norm("profound", "person", "yi"), "yi");
         // references collide across vaults unless scoped
-        assert_eq!(vault_norm("baro", "reference", "Architecture"), "baro:architecture");
-        assert_eq!(vault_norm("profound", "reference", "architecture"), "profound:architecture");
+        assert_eq!(
+            vault_norm("baro", "reference", "Architecture"),
+            "baro:architecture"
+        );
+        assert_eq!(
+            vault_norm("profound", "reference", "architecture"),
+            "profound:architecture"
+        );
         assert_ne!(
             vault_norm("baro", "reference", "architecture"),
             vault_norm("profound", "reference", "architecture")
@@ -545,7 +591,11 @@ mod tests {
 
     #[test]
     fn no_frontmatter_is_doc() {
-        let n = parse_note("personal", "00-inbox/idea.md", "just a thought with [[a-link]]");
+        let n = parse_note(
+            "personal",
+            "00-inbox/idea.md",
+            "just a thought with [[a-link]]",
+        );
         assert_eq!(n.etype, "doc");
         assert_eq!(n.slug, "idea");
         assert_eq!(n.wikilinks, vec!["a-link"]);
@@ -584,7 +634,10 @@ mod tests {
     #[test]
     fn render_block_lists_captures_newest_first() {
         let block = render_managed_block(&[
-            ("2026-06-22".into(), "talked to Yi about feature stores".into()),
+            (
+                "2026-06-22".into(),
+                "talked to Yi about feature stores".into(),
+            ),
             ("2026-06-20".into(), "lunch".into()),
         ]);
         assert!(block.contains("- 2026-06-22 — talked to Yi about feature stores"));

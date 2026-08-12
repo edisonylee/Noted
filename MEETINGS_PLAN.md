@@ -1,5 +1,9 @@
 # Meetings: a local-first Granola inside Noted
 
+> **Product role:** Meetings are Noted's initial capture wedge, not the product
+> boundary. Product positioning and sequencing live in
+> [`PRODUCT_STRATEGY.md`](PRODUCT_STRATEGY.md) and [`ROADMAP.md`](ROADMAP.md).
+
 > **Status (2026-07-13):** Phases 0–3 are implemented (capture engine, live ASR,
 > summarization + templates, Coming Up strip, meeting page, detection + prompt
 > window, auto-stop, settings; transcript search, per-line copy + tap-to-seek
@@ -23,7 +27,7 @@ This plan is the synthesis of a research pass (2026-07-12) over Granola's docs/t
 
 ### Granola's actual mechanics (from official docs + its Info.plist on this machine)
 
-- **Capture:** no bot. Two separate local streams — mic + system audio — which is exactly why its speaker labels are a deterministic binary **"Me" (mic, green, right-aligned) vs "Them" (system audio, grey, left-aligned)**. Its Info.plist declares `NSAudioCaptureUsageDescription` (Core Audio process taps, macOS 14.2+) with `NSScreenCaptureUsageDescription` as the ≤14.1 fallback. Audio is never stored — a top user complaint (no way to verify hallucinated transcripts). **We fix that: keep the audio locally, toggleable.**
+- **Capture:** no bot. Two separate local streams — mic + system audio — which is exactly why its speaker labels are a deterministic binary **"Me" (mic, green, right-aligned) vs "Them" (system audio, grey, left-aligned)**. Its Info.plist declares `NSAudioCaptureUsageDescription` (Core Audio process taps, macOS 14.2+) with `NSScreenCaptureUsageDescription` as the ≤14.1 fallback. Audio is never stored — a top user complaint (no way to verify hallucinated transcripts). **We fix that with optional, per-meeting compressed retention; fresh production installs remain transcript-only by default.**
 - **ASR + LLM are 100% cloud** (Deepgram/AssemblyAI streamed over WSS; OpenAI/Anthropic for enhancement). Our local pipeline is the genuine differentiator, not a compromise.
 - **There is no true auto-record.** The flow is: a **custom popup window** (their own, top-right of screen — not a macOS notification) fires **1 minute before any calendar event with ≥2 attendees**. Clicking it does three things at once: opens the call URL + opens the note + starts transcribing. The *only* auto-start: if the meeting's note is already open when the scheduled start arrives. A global auto-record toggle is an explicitly declined feature (accidental-capture risk).
 - **Ad-hoc detection = mic-in-use watching.** Granola detects that *some app* opened the microphone, attributes it ("Huddle detected" for Slack, "Call detected" for FaceTime, "Meeting detected" for Zoom/Meet/Teams), and prompts. An ad-hoc call starting within **15 min after a scheduled event** adopts that event's identity. Calendar prompts get a solid colored left bar; mic-detection prompts a dashed one.
@@ -108,7 +112,9 @@ The meeting page is a normal Noted view (warm/Geist styling per `.impeccable.md`
 New "Meetings" block in `SettingsModal` backed by `meetings.json` in the app data dir (same pattern as `provider.json`/`gcal.json`, no secrets):
 
 - Detection prompts on/off; per-app toggles + editable ignore list (superwhisper pre-seeded).
-- Keep audio recordings: **on by default** (our fix for Granola's top complaint); "delete audio after N days" option.
+- Default audio policy: **transcript-only in production**, with a remembered
+  preference and per-meeting **Keep audio after meeting** override; retained
+  recordings are deletable without deleting notes or transcripts.
 - Default template picker; live-transcript-visible default.
 - Model status: whisper model in use, download button for `large-v3-turbo` (reuses the `download_voice_model` pattern).
 
@@ -139,7 +145,11 @@ meeting/
 
 New crates: `cidre` (process taps), `cpal ≥0.17` (native mic — capture must not depend on webview window lifetime), `whisper-rs` bumped to 0.16 (VAD + reusable state). `voice.rs` keeps serving quick voice captures; `asr.rs` reuses its resampling.
 
-Audio retention: 16 kHz mono 16-bit WAV per channel in `app_data/meetings/{id}/` (~115 MB/hr for both streams; fine locally, "delete after N days" in settings).
+Audio retention: when selected for a meeting, capture temporary 16 kHz mono WAV
+per channel, then verify and convert both streams to approximately 48 kbps AAC-LC
+M4A files (~40–45 MB/hr combined). Keep source WAVs on conversion failure; debug
+builds may retain them temporarily for attribution analysis. See
+[`docs/decisions/001-meeting-audio-retention.md`](docs/decisions/001-meeting-audio-retention.md).
 
 ### 3.2 DB (additive only, per convention)
 
@@ -219,6 +229,10 @@ Later / if ever published: notarization + entitlements review, macOS 14.4+ floor
 ## 5. Open decisions (defaults chosen, flag to revisit)
 
 1. **Live model = `large-v3-turbo`** (~1.6 GB download). If live latency annoys on long calls, drop live to `small.en` and re-transcribe with turbo at stop — Phase 4 makes this moot.
-2. **Audio retention default = on.** It's the fix for Granola's biggest trust complaint; disk is cheap locally.
+2. **Audio retention default = transcript-only in production.** A saved global
+   default plus a per-meeting override can retain compressed audio for evidence
+   playback and speaker repair. Development/debug builds keep audio during the
+   current attribution work. This supersedes the original default-on decision;
+   see [`docs/decisions/001-meeting-audio-retention.md`](docs/decisions/001-meeting-audio-retention.md).
 3. **Echo without headphones** (mic hears speakers → remote speech duplicated into "Me"): v1 accepts it + a near-duplicate-text suppressor across channels; proper fix is VoiceProcessingIO AEC on the mic path (screenpipe precedent) in Phase 4.
 4. **Meeting summaries file under a new `meetings` category** (created on first use, like `misc`) rather than a new top-level nav view — meetings stay reachable from Coming up/past list on `today`.

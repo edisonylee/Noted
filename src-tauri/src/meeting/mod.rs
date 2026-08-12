@@ -5,10 +5,12 @@
 // Lifecycle: Idle → Recording (start) → Summarizing (stop) → Done. One meeting
 // at a time; state lives here (managed by Tauri), rows live in db.rs tables.
 
+pub mod analytics;
 pub mod asr;
 pub mod capture;
 pub mod detect;
 pub mod diarize;
+pub mod fluid_diarize;
 pub mod pdf;
 pub mod store;
 pub mod summarize;
@@ -35,6 +37,8 @@ pub struct Active {
     pub me: Arc<ChannelBuf>,
     pub them: Arc<ChannelBuf>,
     audio_dir: Option<std::path::PathBuf>,
+    retain_audio: bool,
+    capture_mode: CaptureMode,
     /// Bundle id of the app whose mic use triggered this recording (mic-detect
     /// starts only) — auto-stop watches for it releasing the mic.
     pub source_bundle: Option<String>,
@@ -46,6 +50,29 @@ pub struct Active {
     /// a minute) so a prompt click can't start a second tap/mic session over
     /// one that is still tearing down.
     pub stopping: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureMode {
+    Online,
+    InPerson,
+}
+
+impl CaptureMode {
+    pub fn parse(value: Option<&str>) -> Result<Self> {
+        match value.unwrap_or("online") {
+            "online" => Ok(Self::Online),
+            "in_person" => Ok(Self::InPerson),
+            other => Err(anyhow!("unknown meeting capture mode: {other}")),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Online => "online",
+            Self::InPerson => "in_person",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -357,7 +384,14 @@ pub fn start(
     event_json: Option<Value>,
     retain_audio: bool,
     source_bundle: Option<String>,
+    filing_context: Option<String>,
+    capture_mode: CaptureMode,
 ) -> Result<i64> {
+    if capture_mode == CaptureMode::InPerson && !fluid_diarize::ready(app) {
+        return Err(anyhow!(
+            "Set up in-person speaker separation in Settings → Meetings before recording"
+        ));
+    }
     let engine = engine_spec(app)?; // fail fast before any DB writes
     let (asr_engine, asr_model) = engine.provenance();
     let state = app.state::<MeetingState>();
@@ -375,10 +409,11 @@ pub fn start(
     // terms. Names remembered from unrelated meetings must not bias Whisper.
     let (asr_hint, vocab, attendees) = {
         let c = cfg();
-        let names = event_json
-            .as_ref()
-            .map(summarize::external_attendees)
-            .unwrap_or_default();
+        let names = event_json.as_ref().map_or_else(Vec::new, |event| {
+            let db = app.state::<Db>();
+            let conn = db.0.lock().unwrap();
+            store::external_attendees_for_event(&conn, event)
+        });
         (asr::vocab_hint(&names, &c.vocabulary), c.vocabulary, names)
     };
 
@@ -386,18 +421,21 @@ pub fn start(
     let id = {
         let db = app.state::<Db>();
         let conn = db.0.lock().unwrap();
-        store::create_meeting_with_asr(
+        let event_json = event_json.map(|value| value.to_string());
+        store::create_meeting_with_asr_in_context_and_mode(
             &conn,
             &title,
             event_id.as_deref(),
-            event_json.map(|v| v.to_string()).as_deref(),
+            event_json.as_deref(),
             &asr_engine,
             &asr_model,
+            filing_context.as_deref(),
+            capture_mode.as_str(),
             &now,
         )?
     };
 
-    let audio_dir = if retain_audio {
+    let audio_dir = if retain_audio || capture_mode == CaptureMode::InPerson {
         let dir = app
             .path()
             .app_data_dir()
@@ -430,7 +468,9 @@ pub fn start(
             ready: ready_tx,
             audio_dir: audio_dir.clone(),
             started_epoch_ms,
-            speaker_model: if crate::release_profile::diarization() {
+            speaker_model: if capture_mode == CaptureMode::Online
+                && crate::release_profile::diarization()
+            {
                 diarize::model_path(app)
             } else {
                 None
@@ -468,25 +508,25 @@ pub fn start(
         }
     }
 
-    if capture::tap_supported() {
+    if capture_mode == CaptureMode::Online && capture::tap_supported() {
         let (b, s) = (them.clone(), stop.clone());
         let log = audio_dir.as_ref().map(|d| d.join("capture.log"));
         threads.push(std::thread::spawn(move || {
             capture::run_system_tap(b, s, log)
         }));
-    } else {
+    } else if capture_mode == CaptureMode::Online {
         eprintln!("[noted] system-audio tap needs macOS 14.4+; recording mic only");
     }
     {
         let (b, s) = (me.clone(), stop.clone());
-        let aec = cfg().mic_aec;
+        let aec = capture_mode == CaptureMode::Online && cfg().mic_aec;
         let log = audio_dir.as_ref().map(|d| d.join("capture.log"));
         threads.push(std::thread::spawn(move || capture::run_mic(b, s, aec, log)));
     }
     // Window video rides along when enabled (its own dir derivation — audio
     // retention off shouldn't disable video). Fire-and-forget: the worker
     // stamps video_path itself; stop() doesn't wait on it.
-    if cfg().record_video {
+    if capture_mode == CaptureMode::Online && cfg().record_video {
         if let Ok(base) = app.path().app_data_dir() {
             let video_dir = base.join("meetings").join(id.to_string());
             if !crate::release_profile::video_capture() {
@@ -523,6 +563,8 @@ pub fn start(
         me,
         them,
         audio_dir,
+        retain_audio,
+        capture_mode,
         source_bundle,
         event_end_min,
         event_date,
@@ -542,7 +584,7 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
     // Mark stopping but leave the slot occupied until the drain completes:
     // start() keeps refusing and detect keeps treating us as recording, so a
     // repeated prompt/join click can't spawn a second concurrent capture.
-    let (id, title, threads, audio_dir, stop_flag) = {
+    let (id, title, threads, audio_dir, retain_audio, capture_mode, stop_flag) = {
         let state = app.state::<MeetingState>();
         let mut guard = state.0.lock().unwrap();
         let Some(active) = guard.as_mut() else {
@@ -557,6 +599,8 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
             active.title.clone(),
             std::mem::take(&mut active.threads),
             active.audio_dir.clone(),
+            active.retain_audio,
+            active.capture_mode,
             active.stop.clone(),
         )
     };
@@ -570,10 +614,24 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
     })
     .await
     .map_err(|e| anyhow!("join: {e}"))?;
+    if capture_mode == CaptureMode::InPerson {
+        if let Some(wav) = audio_dir.as_ref().map(|dir| dir.join("me.wav")) {
+            let h = app.clone();
+            if let Err(error) = tauri::async_runtime::spawn_blocking(move || {
+                fluid_diarize::diarize_meeting(&h, id, &wav)
+            })
+            .await
+            .map_err(|error| anyhow!("speaker separation task failed: {error}"))
+            .and_then(|result| result)
+            {
+                eprintln!("[noted] in-person speaker separation failed for meeting {id}: {error}");
+            }
+        }
+    }
     {
         let state = app.state::<MeetingState>();
         let mut guard = state.0.lock().unwrap();
-        if guard.as_ref().map_or(false, |a| a.id == id) {
+        if guard.as_ref().map_or(false, |active| active.id == id) {
             *guard = None;
         }
     }
@@ -583,9 +641,18 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
         let db = app.state::<Db>();
         let conn = db.0.lock().unwrap();
         store::set_ended(&conn, id, &now, "summarizing")?;
+        if retain_audio {
+            if let Some(dir) = &audio_dir {
+                let p = |f: &str| dir.join(f).to_string_lossy().to_string();
+                store::set_audio_paths(&conn, id, Some(&p("me.wav")), Some(&p("them.wav")))?;
+            }
+        }
+    }
+    if capture_mode == CaptureMode::InPerson && !retain_audio {
         if let Some(dir) = &audio_dir {
-            let p = |f: &str| dir.join(f).to_string_lossy().to_string();
-            store::set_audio_paths(&conn, id, Some(&p("me.wav")), Some(&p("them.wav")))?;
+            if let Err(error) = std::fs::remove_dir_all(dir) {
+                eprintln!("[noted] temporary in-person audio cleanup failed: {error}");
+            }
         }
     }
     let _ = app.emit("meeting-stopped", json!({ "meetingId": id }));

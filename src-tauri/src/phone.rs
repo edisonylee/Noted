@@ -280,10 +280,21 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
             oarg(b, "source"),
             oarg(b, "imagePath"),
             oarg(b, "eventDate"),
+            oarg(b, "filingContext"),
         )
         .await
         .map(|id| json!(id)),
         "list_notes" => crate::list_notes(a).await,
+        "note_trash_list" => crate::note_trash_list(a).await,
+        "note_trash" => crate::note_trash(a, iarg(b, "noteId"))
+            .await
+            .map(|_| Value::Null),
+        "note_restore" => crate::note_restore(a, iarg(b, "noteId"))
+            .await
+            .map(|_| Value::Null),
+        "note_delete_forever" => crate::note_delete_forever(a, iarg(b, "noteId"))
+            .await
+            .map(|_| Value::Null),
         "update_note" => {
             crate::update_note(a, iarg(b, "noteId"), sarg(b, "title"), sarg(b, "rawText"))
                 .await
@@ -314,8 +325,11 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
             let folder_id = b.get("folderId").and_then(|v| v.as_i64());
             crate::file_note(a, iarg(b, "noteId"), folder_id)
                 .await
-                .map(|_| Value::Null)
+                .map(|receipt| json!(receipt))
         }
+        "undo_note_filing" => crate::undo_note_filing(a, iarg(b, "eventId"))
+            .await
+            .map(|receipt| json!(receipt)),
         "chat" => {
             let history: Vec<crate::ChatMsg> =
                 serde_json::from_value(varg(b, "history")).unwrap_or_default();
@@ -352,6 +366,23 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "meeting_model_status" => Ok(crate::meeting_model_status(a)),
         "meeting_state" => Ok(crate::meeting_state(a)),
         "meeting_list" => crate::meeting_list(a).await,
+        "meeting_filing_rules" => crate::meeting_filing_rules(a).await,
+        "meeting_filing_rule_set" => {
+            let priority = b.get("priority").and_then(Value::as_i64);
+            crate::meeting_filing_rule_set(a, sarg(b, "email"), iarg(b, "folderId"), priority).await
+        }
+        "meeting_filing_rule_delete" => crate::meeting_filing_rule_delete(a, sarg(b, "email"))
+            .await
+            .map(|deleted| json!(deleted)),
+        "meeting_filing_rules_reorder" => {
+            let emails: Vec<String> =
+                serde_json::from_value(varg(b, "emails")).map_err(|e| e.to_string())?;
+            crate::meeting_filing_rules_reorder(a, emails).await
+        }
+        "meeting_filing_backfill_preview" => crate::meeting_filing_backfill_preview(a).await,
+        "meeting_filing_backfill_apply" => {
+            crate::meeting_filing_backfill_apply(a, sarg(b, "token")).await
+        }
         "meeting_search_transcripts" => {
             let filters = b
                 .get("filters")
@@ -389,9 +420,14 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "meeting_delete_forever" => crate::meeting_delete_forever(a, iarg(b, "id"))
             .await
             .map(|_| Value::Null),
-        "meeting_set_notes" => crate::meeting_set_notes(a, iarg(b, "id"), sarg(b, "notes"))
-            .await
-            .map(|_| Value::Null),
+        "meeting_set_notes" => crate::meeting_set_notes(
+            a,
+            iarg(b, "id"),
+            sarg(b, "notes"),
+            oarg(b, "notesDocumentJson"),
+        )
+        .await
+        .map(|_| Value::Null),
         "meeting_set_title" => crate::meeting_set_title(a, iarg(b, "id"), sarg(b, "title"))
             .await
             .map(|_| Value::Null),
@@ -406,11 +442,17 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
                 .await
                 .map(|_| Value::Null)
         }
+        "meeting_rename_speakers" => {
+            let changes = serde_json::from_value(varg(b, "changes")).map_err(|e| e.to_string())?;
+            crate::meeting_rename_speakers(a, iarg(b, "id"), changes)
+                .await
+                .map(|result| json!(result))
+        }
         // Rediarize runs on the desktop's model but touches no capture
         // hardware — safe to trigger remotely, like re-summarize.
         "meeting_rediarize" => crate::meeting_rediarize(a, iarg(b, "id"))
             .await
-            .map(|n| json!(n)),
+            .map(|result| json!(result)),
         "meeting_video_delete" => crate::meeting_video_delete(a, iarg(b, "id"))
             .await
             .map(|_| Value::Null),
@@ -427,12 +469,21 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
             .await
             .map(|v| json!(v)),
         "meeting_start"
+        | "agent_access_status"
+        | "agent_access_set_enabled"
+        | "agent_client_create"
+        | "agent_client_revoke"
+        | "agent_context_pending"
+        | "agent_context_preview"
+        | "agent_context_resolve"
+        | "agent_context_receipts"
         | "meeting_template_save"
         | "meeting_video_request_permission"
         | "meeting_template_delete"
         | "meeting_capture_probe"
         | "download_meeting_model"
         | "download_speaker_model"
+        | "download_in_person_diarizer"
         | "download_parakeet_model"
         | "meeting_prompt_payload"
         | "meeting_dismiss_prompt"

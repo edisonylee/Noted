@@ -10,6 +10,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { listen } from "./events";
 import { api, type PromptPayload } from "./api";
 import { joinUrl } from "./joinUrl";
+import { readFilingContext } from "./filingContext";
 
 export function RecordPrompt() {
   const [p, setP] = useState<PromptPayload | null>(null);
@@ -41,6 +42,8 @@ export function RecordPrompt() {
         eventId: p.event?.id ?? undefined,
         eventJson: p.event ?? undefined,
         sourceBundle: p.bundleId ?? undefined,
+        filingContext: readFilingContext(),
+        captureMode: p.kind === "calendar" && !p.event?.meet_link ? "in_person" : "online",
       });
       // Backend closes this window on start.
     } catch (e) {

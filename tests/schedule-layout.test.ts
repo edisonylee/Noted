@@ -5,7 +5,10 @@ import {
   computeEventGeometry,
   isCurrentInterval,
   resolveEventEnd,
+  scheduleEndFromResizeDelta,
   scheduleGridBounds,
+  scheduleMinuteFromGridOffset,
+  scheduleStartFromResizeDelta,
   type ScheduleInterval,
 } from "../src/scheduleLayout";
 
@@ -67,14 +70,14 @@ describe("schedule grid geometry", () => {
       ],
       { pixelsPerHour: 40, minHeightPx: 34, gapPx: 2 },
     );
-    expect(grid.items[0]).toMatchObject({ topPx: 160, heightPx: 188, lane: 0, laneCount: 2 });
+    expect(grid.items[0]).toMatchObject({ topPx: 240, heightPx: 188, lane: 0, laneCount: 2 });
     expect(grid.items[1]).toMatchObject({ lane: 1, laneCount: 2 });
   });
 
   test("expands bounds for early, late, and overnight events", () => {
-    expect(scheduleGridBounds([{ index: 0, start: 450, end: 525 }])).toEqual({ start: 420, end: 1200 });
-    expect(scheduleGridBounds([{ index: 0, start: 1275, end: 1350 }])).toEqual({ start: 480, end: 1380 });
-    expect(scheduleGridBounds([{ index: 0, start: 1380, end: 1500 }])).toEqual({ start: 480, end: 1500 });
+    expect(scheduleGridBounds([{ index: 0, start: 450, end: 525 }])).toEqual({ start: 360, end: 1440 });
+    expect(scheduleGridBounds([{ index: 0, start: 1275, end: 1350 }])).toEqual({ start: 360, end: 1440 });
+    expect(scheduleGridBounds([{ index: 0, start: 1380, end: 1500 }])).toEqual({ start: 360, end: 1500 });
   });
 
   test("marks every active overlap as current with an exclusive end", () => {
@@ -83,5 +86,61 @@ describe("schedule grid geometry", () => {
     expect(isCurrentInterval(long, 810)).toBe(true);
     expect(isCurrentInterval(overlap, 810)).toBe(true);
     expect(isCurrentInterval(overlap, 825)).toBe(false);
+  });
+});
+
+describe("direct schedule manipulation", () => {
+  test("maps a grid click to the nearest 15-minute start", () => {
+    expect(
+      scheduleMinuteFromGridOffset(132, {
+        gridStart: 8 * 60,
+        pixelsPerHour: 44,
+      }),
+    ).toBe(11 * 60);
+    expect(
+      scheduleMinuteFromGridOffset(143, {
+        gridStart: 8 * 60,
+        pixelsPerHour: 44,
+      }),
+    ).toBe(11 * 60 + 15);
+  });
+
+  test("resizes in 15-minute steps and keeps a positive duration", () => {
+    expect(
+      scheduleEndFromResizeDelta(12 * 60, 13 * 60, 66, {
+        pixelsPerHour: 44,
+      }),
+    ).toBe(14 * 60 + 30);
+    expect(
+      scheduleEndFromResizeDelta(12 * 60, 13 * 60, -200, {
+        pixelsPerHour: 44,
+      }),
+    ).toBe(12 * 60 + 15);
+
+    expect(
+      scheduleStartFromResizeDelta(12 * 60, 13 * 60, -66, {
+        pixelsPerHour: 44,
+      }),
+    ).toBe(10 * 60 + 30);
+    expect(
+      scheduleStartFromResizeDelta(12 * 60, 13 * 60, 200, {
+        pixelsPerHour: 44,
+      }),
+    ).toBe(12 * 60 + 45);
+  });
+
+  test("does not resize past the visible grid boundary", () => {
+    expect(
+      scheduleEndFromResizeDelta(19 * 60, 20 * 60, 100, {
+        pixelsPerHour: 44,
+        maxEnd: 20 * 60,
+      }),
+    ).toBe(20 * 60);
+    expect(
+      scheduleStartFromResizeDelta(7 * 60, 8 * 60, -100, {
+        pixelsPerHour: 44,
+        minStart: 6 * 60,
+      }),
+    ).toBe(6 * 60);
   });
 });

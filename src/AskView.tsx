@@ -20,6 +20,7 @@ import {
   Paperclip,
   AudioLines,
   CalendarPlus,
+  Loader2,
   Palette,
   Square,
   X,
@@ -32,6 +33,7 @@ import { fileToImg, type Img } from "./image";
 import { DataView } from "./DataView";
 import { isThemeRequest, proposeTheme } from "./themeRequests";
 import { useTheme } from "./useTheme";
+import type { FilingContext } from "./filingContext";
 
 type Msg = {
   role: "user" | "assistant";
@@ -102,15 +104,20 @@ export function AskView({
   onMutated,
   onSaveNote,
   onOpenEntity,
+  filingContext,
+  onFilingContextChange,
 }: {
   onMutated?: () => void;
   onSaveNote?: (draft: { text: string; img: Img | null }) => Promise<void>;
   onOpenEntity?: (id: number) => void; // jump into the knowledge graph
+  filingContext?: FilingContext;
+  onFilingContextChange?: (context: FilingContext) => void;
 }) {
   const { themes, previewTheme, clearPreview, activateTheme } = useTheme();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [asking, setAsking] = useState(false);
+  const [confirming, setConfirming] = useState<number | null>(null);
   const [filing, setFiling] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
@@ -186,6 +193,8 @@ export function AskView({
   }
 
   async function confirm(i: number, p: ChatProposal) {
+    if (confirming !== null) return;
+    setConfirming(i);
     try {
       let done: string;
       if (p.action === "apply_theme") {
@@ -202,6 +211,8 @@ export function AskView({
       onMutated?.();
     } catch (e) {
       setMessages((ms) => [...ms, { role: "assistant", content: `Couldn't apply that — ${e}` }]);
+    } finally {
+      setConfirming(null);
     }
   }
 
@@ -325,6 +336,21 @@ export function AskView({
             e.target.value = "";
           }}
         />
+        {onSaveNote && filingContext && onFilingContextChange && (
+          <label className="ask-filing-context">
+            <span>File in</span>
+            <select
+              value={filingContext}
+              onChange={(event) =>
+                onFilingContextChange(event.target.value as FilingContext)
+              }
+              disabled={filing}
+            >
+              <option value="work">Work</option>
+              <option value="personal">Personal</option>
+            </select>
+          </label>
+        )}
         <span className="spacer" />
         <button
           className={"icon-btn ask-mic" + (recording ? " recording" : "")}
@@ -421,10 +447,13 @@ export function AskView({
             )}
             {m.proposal && !m.resolved && (
               <div className="proposal-actions">
-                <button className="primary" onClick={() => confirm(i, m.proposal!)}>
-                  <Check size={14} /> Confirm
+                <button className="primary" disabled={confirming !== null} onClick={() => confirm(i, m.proposal!)}>
+                  {confirming === i ? <Loader2 size={14} className="spin" /> : <Check size={14} />}
+                  {confirming === i
+                    ? m.proposal.action === "create_event" ? "Creating…" : "Applying…"
+                    : "Confirm"}
                 </button>
-                <button className="ghost" onClick={() => cancel(i)}>
+                <button className="ghost" disabled={confirming !== null} onClick={() => cancel(i)}>
                   Cancel
                 </button>
               </div>

@@ -24,10 +24,16 @@ async fn categorize_save_and_reuse() {
     // --- Note 1: empty catalog -> must be a brand new category ---
     let (catalog, names) = catalog_and_names(&conn);
     let note1 = "chest day. incline db press 70s 4x10 felt strong. flat bench 185 5,5,4. cable flys 3x15 burnout";
-    let p1 = pipeline::categorize(&catalog, &names, note1, "2026-06-02").await.unwrap();
+    let p1 = pipeline::categorize(&catalog, &names, note1, "2026-06-02")
+        .await
+        .unwrap();
 
     let e1 = &p1["entries"][0];
-    assert_eq!(e1["is_new_category"], json!(true), "first note creates a category");
+    assert_eq!(
+        e1["is_new_category"],
+        json!(true),
+        "first note creates a category"
+    );
     let cat1 = e1["category"].as_str().unwrap().to_string();
     assert!(!cat1.is_empty());
     assert!(e1["data"].is_object(), "data is an object");
@@ -52,10 +58,16 @@ async fn categorize_save_and_reuse() {
 
     // --- Note 2: same domain -> should REUSE cat1 (catalog-driven), is_new=false ---
     let (catalog2, names2) = catalog_and_names(&conn);
-    let note2 = "back day. pullups bodyweight 4x8. barbell row 135 3x10. lat pulldown 120 3x12 solid pump";
-    let p2 = pipeline::categorize(&catalog2, &names2, note2, "2026-06-02").await.unwrap();
+    let note2 =
+        "back day. pullups bodyweight 4x8. barbell row 135 3x10. lat pulldown 120 3x12 solid pump";
+    let p2 = pipeline::categorize(&catalog2, &names2, note2, "2026-06-02")
+        .await
+        .unwrap();
     let e2 = &p2["entries"][0];
-    println!("note2 -> category '{}', is_new {}", e2["category"], e2["is_new_category"]);
+    println!(
+        "note2 -> category '{}', is_new {}",
+        e2["category"], e2["is_new_category"]
+    );
 
     assert_eq!(
         e2["category"].as_str().unwrap(),
@@ -98,16 +110,27 @@ async fn one_note_with_headers_makes_many_entries() {
     let note = "Gym:\nsquat 245 5x5, felt strong\n\n\
                 Food:\nchipotle bowl — chicken, rice, guac\n\n\
                 Schedule:\n9-12 coded the parser, 2-4 class";
-    let env = pipeline::categorize("(none yet)", &[], note, "2026-06-02").await.unwrap();
+    let env = pipeline::categorize("(none yet)", &[], note, "2026-06-02")
+        .await
+        .unwrap();
 
     let entries = env["entries"].as_array().unwrap();
-    let cats: Vec<&str> = entries.iter().map(|e| e["category"].as_str().unwrap()).collect();
+    let cats: Vec<&str> = entries
+        .iter()
+        .map(|e| e["category"].as_str().unwrap())
+        .collect();
     println!("headered note -> {} entries: {cats:?}", entries.len());
 
-    assert!(entries.len() >= 3, "three headers -> at least three entries: {cats:?}");
+    assert!(
+        entries.len() >= 3,
+        "three headers -> at least three entries: {cats:?}"
+    );
     assert!(cats.contains(&"gym"), "gym header routed: {cats:?}");
     assert!(cats.contains(&"food"), "food header routed: {cats:?}");
-    assert!(cats.contains(&"schedule"), "schedule header routed: {cats:?}");
+    assert!(
+        cats.contains(&"schedule"),
+        "schedule header routed: {cats:?}"
+    );
     // header-routed entries are marked as such (category decided by code, not model)
     assert!(
         entries.iter().all(|e| e["routed_by"] == json!("header")),
@@ -131,6 +154,12 @@ async fn surfaces_entities_from_a_note() {
         .filter_map(|e| e["name"].as_str().map(|s| s.to_lowercase()))
         .collect();
     println!("entities -> {names:?}");
-    assert!(!ents.is_empty(), "an entity-rich note should surface entities");
-    assert!(names.iter().any(|n| n.contains("jake")), "Jake surfaced: {names:?}");
+    assert!(
+        !ents.is_empty(),
+        "an entity-rich note should surface entities"
+    );
+    assert!(
+        names.iter().any(|n| n.contains("jake")),
+        "Jake surfaced: {names:?}"
+    );
 }

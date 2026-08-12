@@ -12,7 +12,11 @@ fn save(conn: &mut rusqlite::Connection, cat: &str, desc: &str, data: serde_json
             source: "text".into(),
             image_path: None,
             event_date: ts[..10].to_string(), // YYYY-MM-DD from the timestamp
-            entries: vec![db::EntryInput { category: cat.into(), description: desc.into(), data, }],
+            entries: vec![db::EntryInput {
+                category: cat.into(),
+                description: desc.into(),
+                data,
+            }],
         },
         ts,
     )
@@ -65,7 +69,10 @@ fn vec_loads_and_schema_evolves() {
     let gym = cats.iter().find(|c| c.name == "gym").unwrap();
     assert_eq!(gym.entry_count, 2);
     let freq = gym.schema.get("field_freq").unwrap();
-    assert_eq!(freq.get("exercises.weight").and_then(|x| x.as_i64()), Some(2));
+    assert_eq!(
+        freq.get("exercises.weight").and_then(|x| x.as_i64()),
+        Some(2)
+    );
     assert_eq!(
         freq.get("exercises.rpe").and_then(|x| x.as_i64()),
         Some(1),
@@ -73,11 +80,17 @@ fn vec_loads_and_schema_evolves() {
     );
     // shape is the union of both entries
     let shape = gym.schema.get("shape").unwrap();
-    assert!(shape["exercises"][0].get("rpe").is_some(), "shape merged rpe");
+    assert!(
+        shape["exercises"][0].get("rpe").is_some(),
+        "shape merged rpe"
+    );
 
     let notes = db::list_notes(&conn).unwrap();
     assert_eq!(notes.len(), 3);
-    assert!(notes.iter().all(|n| n.event_date == "2026-06-02"), "every entry is dated");
+    assert!(
+        notes.iter().all(|n| n.event_date == "2026-06-02"),
+        "every entry is dated"
+    );
 
     let _ = std::fs::remove_file(&tmp);
 }
@@ -135,7 +148,16 @@ fn meeting_title_and_generated_notes_are_editable() {
     let mut conn = db::init(&tmp).unwrap();
     let meeting_id =
         store::create_meeting(&conn, "Original title", None, None, "2026-07-31T12:00:00Z").unwrap();
-    store::set_notes(&conn, meeting_id, "My verbatim note").unwrap();
+    let notes_document = json!({
+        "type": "doc",
+        "content": [{
+            "type": "paragraph",
+            "content": [{ "type": "text", "text": "My verbatim note" }]
+        }]
+    })
+    .to_string();
+    store::set_notes_document(&conn, meeting_id, "My verbatim note", Some(&notes_document))
+        .unwrap();
     save(
         &mut conn,
         "meetings",
@@ -177,6 +199,8 @@ fn meeting_title_and_generated_notes_are_editable() {
 
     let detail = store::get_meeting(&conn, meeting_id).unwrap();
     assert_eq!(detail["title"], "Weekly product review");
+    assert_eq!(detail["raw_notes"], "My verbatim note");
+    assert_eq!(detail["notes_document_json"], notes_document);
     assert_eq!(
         detail["summaries"][0]["content_md"],
         "## Summary\n\nEdited by me."
@@ -203,9 +227,14 @@ fn transcript_search_is_indexed_live_and_returns_each_matching_line() {
     ));
     let _ = std::fs::remove_file(&tmp);
     let conn = db::init(&tmp).unwrap();
-    let meeting_id =
-        store::create_meeting(&conn, "Fundraising review", None, None, "2026-07-31T14:00:00Z")
-            .unwrap();
+    let meeting_id = store::create_meeting(
+        &conn,
+        "Fundraising review",
+        None,
+        None,
+        "2026-07-31T14:00:00Z",
+    )
+    .unwrap();
     store::set_status(&conn, meeting_id, "done").unwrap();
     let first = store::insert_segment(
         &conn,
@@ -236,7 +265,11 @@ fn transcript_search_is_indexed_live_and_returns_each_matching_line() {
     .unwrap();
 
     let hits = store::search_transcripts(&conn, "invest", 200).unwrap();
-    assert_eq!(hits.len(), 2, "prefix search returns every matching transcript line");
+    assert_eq!(
+        hits.len(),
+        2,
+        "prefix search returns every matching transcript line"
+    );
     assert_eq!(hits[0].meeting_title, "Fundraising review");
     assert_eq!(hits[0].started_at.as_deref(), Some("2026-07-31T14:00:00Z"));
     assert_eq!(hits[0].speaker, "Me");
@@ -244,11 +277,17 @@ fn transcript_search_is_indexed_live_and_returns_each_matching_line() {
 
     store::delete_segment(&conn, first).unwrap();
     let after_delete = store::search_transcripts(&conn, "investor", 200).unwrap();
-    assert_eq!(after_delete.len(), 1, "the delete trigger removes stale FTS rows");
+    assert_eq!(
+        after_delete.len(),
+        1,
+        "the delete trigger removes stale FTS rows"
+    );
 
     store::trash_meeting(&conn, meeting_id, "2026-07-31T15:00:00Z").unwrap();
     assert!(
-        store::search_transcripts(&conn, "investor", 200).unwrap().is_empty(),
+        store::search_transcripts(&conn, "investor", 200)
+            .unwrap()
+            .is_empty(),
         "trashed meetings stay out of global transcript search"
     );
 
@@ -270,8 +309,7 @@ fn transcript_vocabulary_corrects_existing_and_future_lines_with_safe_undo() {
     let _ = std::fs::remove_file(&tmp);
     let mut conn = db::init(&tmp).unwrap();
     let meeting_id =
-        store::create_meeting(&conn, "Company review", None, None, "2026-08-03T14:00:00Z")
-            .unwrap();
+        store::create_meeting(&conn, "Company review", None, None, "2026-08-03T14:00:00Z").unwrap();
     store::set_status(&conn, meeting_id, "done").unwrap();
     let segment_id = store::insert_segment(
         &conn,
@@ -285,15 +323,14 @@ fn transcript_vocabulary_corrects_existing_and_future_lines_with_safe_undo() {
 
     let preview = store::preview_transcript_vocabulary(&conn, "borrow").unwrap();
     assert_eq!(preview.matching_segments, 1);
-    assert_eq!(preview.occurrences, 2, "whole-word matching excludes borrowed");
+    assert_eq!(
+        preview.occurrences, 2,
+        "whole-word matching excludes borrowed"
+    );
 
-    let applied = store::apply_transcript_vocabulary(
-        &mut conn,
-        "borrow",
-        "BARO",
-        "2026-08-03T14:05:00Z",
-    )
-    .unwrap();
+    let applied =
+        store::apply_transcript_vocabulary(&mut conn, "borrow", "BARO", "2026-08-03T14:05:00Z")
+            .unwrap();
     assert_eq!(applied.changed_segments, 1);
     assert_eq!(applied.changed_occurrences, 2);
     let corrected: String = conn
@@ -304,7 +341,10 @@ fn transcript_vocabulary_corrects_existing_and_future_lines_with_safe_undo() {
         )
         .unwrap();
     assert_eq!(corrected, "BARO said BARO, but we never borrowed the deck.");
-    assert_eq!(store::search_transcripts(&conn, "baro", 200).unwrap().len(), 1);
+    assert_eq!(
+        store::search_transcripts(&conn, "baro", 200).unwrap().len(),
+        1
+    );
 
     let undone = store::undo_transcript_vocabulary(
         &mut conn,
@@ -322,15 +362,13 @@ fn transcript_vocabulary_corrects_existing_and_future_lines_with_safe_undo() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(restored, "Borrow said BORROW, but we never borrowed the deck.");
+    assert_eq!(
+        restored,
+        "Borrow said BORROW, but we never borrowed the deck."
+    );
 
-    store::apply_transcript_vocabulary(
-        &mut conn,
-        "borrow",
-        "BARO",
-        "2026-08-03T14:07:00Z",
-    )
-    .unwrap();
+    store::apply_transcript_vocabulary(&mut conn, "borrow", "BARO", "2026-08-03T14:07:00Z")
+        .unwrap();
     let future = store::insert_segment(
         &conn,
         meeting_id,
@@ -354,7 +392,7 @@ fn transcript_vocabulary_corrects_existing_and_future_lines_with_safe_undo() {
 
 #[test]
 fn transcript_filters_are_dynamic_and_one_on_ones_use_the_attendee_name() {
-    use tauri_app_lib::meeting::{diarize, store};
+    use tauri_app_lib::meeting::store;
 
     let tmp = std::env::temp_dir().join(format!(
         "noted_transcript_facets_{}_{}.db",
@@ -449,7 +487,9 @@ fn transcript_filters_are_dynamic_and_one_on_ones_use_the_attendee_name() {
         "2026-08-03T16:05:00Z",
     );
     let standup_note: i64 = conn
-        .query_row("SELECT id FROM notes ORDER BY id DESC LIMIT 1", [], |row| row.get(0))
+        .query_row("SELECT id FROM notes ORDER BY id DESC LIMIT 1", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     conn.execute(
         "UPDATE notes SET raw_text = 'Daily standup meeting notes' WHERE id = ?1",
@@ -459,7 +499,7 @@ fn transcript_filters_are_dynamic_and_one_on_ones_use_the_attendee_name() {
     store::set_note_id(&conn, standup, standup_note).unwrap();
 
     conn.execute(
-        "DELETE FROM app_metadata WHERE key = 'meeting_one_on_one_speakers_v1'",
+        "DELETE FROM app_metadata WHERE key = 'meeting_one_on_one_speakers_identity_v2'",
         [],
     )
     .unwrap();
@@ -475,27 +515,32 @@ fn transcript_filters_are_dynamic_and_one_on_ones_use_the_attendee_name() {
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
     assert_eq!(labels, vec!["Brian"]);
-    let merged: (i64, Vec<f32>) = conn
+    let stale_speakers: i64 = conn
         .query_row(
-            "SELECT seg_count, centroid FROM meeting_speakers
-             WHERE meeting_id = ?1 AND label = 'Brian'",
+            "SELECT COUNT(*) FROM meeting_speakers WHERE meeting_id = ?1",
             [one_on_one],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    diarize::blob_to_emb(&row.get::<_, Vec<u8>>(1)?),
-                ))
-            },
+            |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(merged.0, 10);
-    assert!((merged.1[0] - 0.8).abs() < 1e-6);
+    assert_eq!(stale_speakers, 0);
 
     let facets = store::transcript_search_facets(&conn).unwrap();
-    assert!(facets.people.iter().any(|value| value.label == "Brian" && value.count == 2));
-    assert!(facets.people.iter().any(|value| value.label == "Max" && value.count == 1));
-    assert!(facets.meeting_types.iter().any(|value| value.value == "one_on_one"));
-    assert!(facets.meeting_types.iter().any(|value| value.value == "daily_standup"));
+    assert!(facets
+        .people
+        .iter()
+        .any(|value| value.label == "Brian" && value.count == 2));
+    assert!(facets
+        .people
+        .iter()
+        .any(|value| value.label == "Max" && value.count == 1));
+    assert!(facets
+        .meeting_types
+        .iter()
+        .any(|value| value.value == "one_on_one"));
+    assert!(facets
+        .meeting_types
+        .iter()
+        .any(|value| value.value == "daily_standup"));
     let baro = facets
         .folders
         .iter()
@@ -567,21 +612,46 @@ fn embedding_space_replacement_is_atomic_and_fingerprinted() {
     let tmp = std::env::temp_dir().join(format!("noted_embedding_swap_{}.db", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let mut conn = db::init(&tmp).unwrap();
-    save(&mut conn, "work", "", json!({"topic":"routing"}), "2026-06-02T00:00:00Z",);
-    let note_id: i64 = conn.query_row("SELECT id FROM notes LIMIT 1", [], |r| r.get(0)).unwrap();
+    save(
+        &mut conn,
+        "work",
+        "",
+        json!({"topic":"routing"}),
+        "2026-06-02T00:00:00Z",
+    );
+    let note_id: i64 = conn
+        .query_row("SELECT id FROM notes LIMIT 1", [], |r| r.get(0))
+        .unwrap();
 
-    db::replace_embedding_space(&mut conn, "openai|a|768", &[(note_id, vec![0.1; 768])], &[]).unwrap();
-    assert_eq!(db::embedding_fingerprint(&conn).unwrap().as_deref(), Some("openai|a|768"));
+    db::replace_embedding_space(&mut conn, "openai|a|768", &[(note_id, vec![0.1; 768])], &[])
+        .unwrap();
+    assert_eq!(
+        db::embedding_fingerprint(&conn).unwrap().as_deref(),
+        Some("openai|a|768")
+    );
     assert_eq!(db::embedding_count(&conn).unwrap(), 1);
 
     // sqlite-vec rejects the wrong dimension after DELETE has run inside the
     // transaction. The rollback must preserve both the old index and marker.
-    assert!(db::replace_embedding_space(&mut conn, "openai|bad|768", &[(note_id, vec![0.1; 767])], &[]).is_err());
-    assert_eq!(db::embedding_fingerprint(&conn).unwrap().as_deref(), Some("openai|a|768"));
+    assert!(db::replace_embedding_space(
+        &mut conn,
+        "openai|bad|768",
+        &[(note_id, vec![0.1; 767])],
+        &[]
+    )
+    .is_err());
+    assert_eq!(
+        db::embedding_fingerprint(&conn).unwrap().as_deref(),
+        Some("openai|a|768")
+    );
     assert_eq!(db::embedding_count(&conn).unwrap(), 1);
 
-    db::replace_embedding_space(&mut conn, "gemini|b|768", &[(note_id, vec![0.2; 768])], &[]).unwrap();
-    assert_eq!(db::embedding_fingerprint(&conn).unwrap().as_deref(), Some("gemini|b|768"));
+    db::replace_embedding_space(&mut conn, "gemini|b|768", &[(note_id, vec![0.2; 768])], &[])
+        .unwrap();
+    assert_eq!(
+        db::embedding_fingerprint(&conn).unwrap().as_deref(),
+        Some("gemini|b|768")
+    );
     let _ = std::fs::remove_file(&tmp);
 }
 
@@ -610,10 +680,21 @@ fn suggest_merges_finds_near_duplicates_and_respects_dismissals() {
     db::insert_entity_embedding(&conn, c, &vc).unwrap();
 
     let sugg = db::suggest_merges(&conn, 0.82, 20).unwrap();
-    assert_eq!(sugg.len(), 1, "only the near-identical same-type pair should surface");
-    let pair = (sugg[0].a_id.min(sugg[0].b_id), sugg[0].a_id.max(sugg[0].b_id),);
+    assert_eq!(
+        sugg.len(),
+        1,
+        "only the near-identical same-type pair should surface"
+    );
+    let pair = (
+        sugg[0].a_id.min(sugg[0].b_id),
+        sugg[0].a_id.max(sugg[0].b_id),
+    );
     assert_eq!(pair, (a.min(b), a.max(b)));
-    assert!(sugg[0].similarity > 0.9, "cosine should be ~0.98, got {}", sugg[0].similarity);
+    assert!(
+        sugg[0].similarity > 0.9,
+        "cosine should be ~0.98, got {}",
+        sugg[0].similarity
+    );
     assert_eq!(sugg[0].etype, "person");
 
     // Dismiss (ids deliberately reversed — pair key is order-normalized) → gone.
@@ -645,11 +726,24 @@ fn rename_speaker_onto_existing_label_merges_rows() {
     )
     .unwrap();
 
+    // Saving an unchanged draft must not route through the merge path and
+    // delete the speaker row by treating it as both source and destination.
+    store::rename_speaker(&conn, id, "Brian", "Brian").unwrap();
+    let unchanged = store::list_meeting_speakers(&conn, id).unwrap();
+    assert_eq!(unchanged.len(), 2);
+    assert!(unchanged
+        .iter()
+        .any(|row| row["label"] == "Brian" && row["seg_count"] == 10));
+
     // The bug: this used to UPDATE OR REPLACE, deleting Brian's real row.
     store::rename_speaker(&conn, id, "Speaker 2", "Brian").unwrap();
 
     let rows = store::list_meeting_speakers(&conn, id).unwrap();
-    assert_eq!(rows.len(), 1, "one merged row, not a vanished one: {rows:?}");
+    assert_eq!(
+        rows.len(),
+        1,
+        "one merged row, not a vanished one: {rows:?}"
+    );
     assert_eq!(rows[0]["label"], "Brian");
     assert_eq!(rows[0]["seg_count"], 15);
     // Weighted centroid: (1.0*10 + 0.0*5)/15, (0.0*10 + 1.0*5)/15
@@ -661,7 +755,10 @@ fn rename_speaker_onto_existing_label_merges_rows() {
         )
         .map(|b| diarize::blob_to_emb(&b))
         .unwrap();
-    assert!((cent[0] - 10.0 / 15.0).abs() < 1e-6 && (cent[1] - 5.0 / 15.0).abs() < 1e-6, "{cent:?}");
+    assert!(
+        (cent[0] - 10.0 / 15.0).abs() < 1e-6 && (cent[1] - 5.0 / 15.0).abs() < 1e-6,
+        "{cent:?}"
+    );
     // Both segments carry the merged name.
     let n: i64 = conn
         .query_row(
@@ -699,7 +796,10 @@ fn failed_calendar_meeting_does_not_block_retry() {
     )
     .unwrap();
     store::set_status(&conn, failed, "failed").unwrap();
-    assert_eq!(store::find_meeting_by_event(&conn, "calendar-event").unwrap(), None);
+    assert_eq!(
+        store::find_meeting_by_event(&conn, "calendar-event").unwrap(),
+        None
+    );
 
     let retry = store::create_meeting(
         &conn,
@@ -723,7 +823,8 @@ fn meeting_trash_is_reversible_and_required_before_delete() {
     let tmp = std::env::temp_dir().join(format!("noted_meeting_trash_{}.db", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let mut conn = db::init(&tmp).unwrap();
-    let id = store::create_meeting(&conn, "Important call", None, None, "2026-07-21T16:00:00Z").unwrap();
+    let id =
+        store::create_meeting(&conn, "Important call", None, None, "2026-07-21T16:00:00Z").unwrap();
     store::set_status(&conn, id, "done").unwrap();
     save(
         &mut conn,
@@ -732,20 +833,33 @@ fn meeting_trash_is_reversible_and_required_before_delete() {
         json!({"meeting_id": id}),
         "2026-07-21T16:30:00Z",
     );
-    let note_id: i64 = conn.query_row("SELECT id FROM notes ORDER BY id DESC LIMIT 1", [], |r| { r.get(0)
-        }).unwrap();
+    let note_id: i64 = conn
+        .query_row("SELECT id FROM notes ORDER BY id DESC LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
     store::set_note_id(&conn, id, note_id).unwrap();
     db::insert_embedding(&conn, note_id, &vec![0.1; 768]).unwrap();
     db::refresh_note_text(&conn, note_id, "# Important call\n\nCorrected notes").unwrap();
-    let refreshed: String = conn.query_row("SELECT raw_text FROM notes WHERE id = ?1", [note_id], |r| { r.get(0)
-        }).unwrap();
+    let refreshed: String = conn
+        .query_row("SELECT raw_text FROM notes WHERE id = ?1", [note_id], |r| {
+            r.get(0)
+        })
+        .unwrap();
     assert_eq!(refreshed, "# Important call\n\nCorrected notes");
-    assert_eq!(db::embedding_count(&conn).unwrap(), 0, "stale semantic index is removed");
+    assert_eq!(
+        db::embedding_count(&conn).unwrap(),
+        0,
+        "stale semantic index is removed"
+    );
     db::insert_embedding(&conn, note_id, &vec![0.2; 768]).unwrap();
 
     assert_eq!(store::list_meetings(&conn, 20).unwrap().len(), 1);
     assert!(store::list_trashed_meetings(&conn, 20).unwrap().is_empty());
-    assert!(!store::delete_meeting_forever(&mut conn, id).unwrap(), "visible meetings cannot be permanently deleted");
+    assert!(
+        !store::delete_meeting_forever(&mut conn, id).unwrap(),
+        "visible meetings cannot be permanently deleted"
+    );
 
     assert!(store::trash_meeting(&conn, id, "2026-07-21T17:00:00Z").unwrap());
     assert!(store::list_meetings(&conn, 20).unwrap().is_empty());
@@ -758,13 +872,24 @@ fn meeting_trash_is_reversible_and_required_before_delete() {
     assert!(store::delete_meeting_forever(&mut conn, id).unwrap());
     assert!(store::list_trashed_meetings(&conn, 20).unwrap().is_empty());
     let exists: bool = conn
-        .query_row("SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ?1)", [id], |r| r.get(0),)
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM meetings WHERE id = ?1)",
+            [id],
+            |r| r.get(0),
+        )
         .unwrap();
     assert!(!exists);
     let note_exists: bool = conn
-        .query_row("SELECT EXISTS(SELECT 1 FROM notes WHERE id = ?1)", [note_id], |r| r.get(0),)
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM notes WHERE id = ?1)",
+            [note_id],
+            |r| r.get(0),
+        )
         .unwrap();
-    assert!(!note_exists, "the generated note is deleted with its meeting");
+    assert!(
+        !note_exists,
+        "the generated note is deleted with its meeting"
+    );
     assert_eq!(db::embedding_count(&conn).unwrap(), 0);
 
     let _ = std::fs::remove_file(&tmp);

@@ -13,16 +13,26 @@ fn calendar_boundaries() {
     );
     assert_eq!(
         recent_completed_days(wed, 3),
-        vec!["2026-06-02".to_string(), "2026-06-01".to_string(), "2026-05-31".to_string()]
+        vec![
+            "2026-06-02".to_string(),
+            "2026-06-01".to_string(),
+            "2026-05-31".to_string()
+        ]
     );
 
     // On Monday, last completed week is the same prior Mon–Sun.
     let mon = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
-    assert_eq!(last_completed_week(mon), ("2026-05-25".to_string(), "2026-05-31".to_string()));
+    assert_eq!(
+        last_completed_week(mon),
+        ("2026-05-25".to_string(), "2026-05-31".to_string())
+    );
 
     // On Sunday, this week (Mon 6/1) isn't done yet → last week still 5/25–5/31.
     let sun = NaiveDate::from_ymd_opt(2026, 6, 7).unwrap();
-    assert_eq!(last_completed_week(sun), ("2026-05-25".to_string(), "2026-05-31".to_string()));
+    assert_eq!(
+        last_completed_week(sun),
+        ("2026-05-25".to_string(), "2026-05-31".to_string())
+    );
 }
 
 #[test]
@@ -32,10 +42,28 @@ fn recap_exists_and_idempotent() {
     let conn = db::init(&tmp).unwrap();
 
     assert!(!db::recap_exists(&conn, "day", "2026-06-02", "2026-06-02").unwrap());
-    db::upsert_recap(&conn, "day", "2026-06-02", "2026-06-02", "you trained", 1, "2026-06-03T00:00:00Z").unwrap();
+    db::upsert_recap(
+        &conn,
+        "day",
+        "2026-06-02",
+        "2026-06-02",
+        "you trained",
+        1,
+        "2026-06-03T00:00:00Z",
+    )
+    .unwrap();
     assert!(db::recap_exists(&conn, "day", "2026-06-02", "2026-06-02").unwrap());
     // upsert again replaces, so still exactly one
-    db::upsert_recap(&conn, "day", "2026-06-02", "2026-06-02", "updated", 1, "2026-06-03T01:00:00Z").unwrap();
+    db::upsert_recap(
+        &conn,
+        "day",
+        "2026-06-02",
+        "2026-06-02",
+        "updated",
+        1,
+        "2026-06-03T01:00:00Z",
+    )
+    .unwrap();
     let recaps = db::list_recaps(&conn, 10).unwrap();
     assert_eq!(recaps.iter().filter(|r| r.period == "day").count(), 1);
 

@@ -1,9 +1,12 @@
 pub mod analytics;
+pub mod approval_broker;
 pub mod brain;
+pub mod context_pass;
 pub mod db;
 pub mod entities;
 pub mod gcal;
 pub mod hosted;
+pub mod mcp;
 pub mod meeting;
 pub mod ollama;
 pub mod phone;
@@ -17,7 +20,7 @@ pub mod voice;
 use db::{Db, SaveInput};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
@@ -76,6 +79,125 @@ async fn system_settings_set(
 ) -> Result<system_settings::SystemSettings, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     system_settings::set_time_zone(&dir, &time_zone).map_err(|e| e.to_string())
+}
+
+fn agent_helper_command() -> Result<String, String> {
+    std::env::current_exe()
+        .map(|path| path.to_string_lossy().to_string())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn agent_access_status(app: tauri::AppHandle) -> Result<Value, String> {
+    let state = app.state::<approval_broker::AgentAccessState>();
+    serde_json::to_value(state.0.status(agent_helper_command()?)).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn agent_access_set_enabled(app: tauri::AppHandle, enabled: bool) -> Result<Value, String> {
+    let access = app.state::<approval_broker::AgentAccessState>();
+    let db = app.state::<Db>();
+    let conn = db.0.lock().unwrap();
+    access
+        .0
+        .set_enabled(&conn, enabled)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(access.0.status(agent_helper_command()?))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn agent_client_create(app: tauri::AppHandle, name: String) -> Result<Value, String> {
+    let access = app.state::<approval_broker::AgentAccessState>();
+    let setup = access
+        .0
+        .create_client(&name, &agent_helper_command()?)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(setup).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn agent_client_revoke(app: tauri::AppHandle, client_id: String) -> Result<Value, String> {
+    let access = app.state::<approval_broker::AgentAccessState>();
+    let db = app.state::<Db>();
+    let conn = db.0.lock().unwrap();
+    access
+        .0
+        .revoke_client(&conn, &client_id)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(access.0.status(agent_helper_command()?))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn agent_context_pending(app: tauri::AppHandle) -> Result<Value, String> {
+    let access = app.state::<approval_broker::AgentAccessState>();
+    let db = app.state::<Db>();
+    let conn = db.0.lock().unwrap();
+    serde_json::to_value(
+        access
+            .0
+            .pending_requests(&conn)
+            .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn agent_context_preview(
+    app: tauri::AppHandle,
+    request_id: String,
+    meeting_id: i64,
+    options: context_pass::ContextOptions,
+) -> Result<Value, String> {
+    let access = app.state::<approval_broker::AgentAccessState>();
+    let db = app.state::<Db>();
+    let conn = db.0.lock().unwrap();
+    serde_json::to_value(
+        access
+            .0
+            .preview(&conn, &request_id, meeting_id, options)
+            .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn agent_context_resolve(
+    app: tauri::AppHandle,
+    request_id: String,
+    decision: String,
+    meeting_id: Option<i64>,
+    options: Option<context_pass::ContextOptions>,
+    preview_hash: Option<String>,
+) -> Result<Value, String> {
+    let access = app.state::<approval_broker::AgentAccessState>();
+    let db = app.state::<Db>();
+    let conn = db.0.lock().unwrap();
+    serde_json::to_value(
+        access
+            .0
+            .resolve(
+                &conn,
+                &request_id,
+                &decision,
+                meeting_id,
+                options,
+                preview_hash.as_deref(),
+            )
+            .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn agent_context_receipts(app: tauri::AppHandle) -> Result<Value, String> {
+    let db = app.state::<Db>();
+    let conn = db.0.lock().unwrap();
+    serde_json::to_value(
+        context_pass::list_receipts(&conn, 100).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// User-imported theme packs. Built-ins ship with the frontend and are not
@@ -364,6 +486,14 @@ struct SaveArgs {
     entries: Vec<EntryArg>,
     #[serde(default)]
     entities: Vec<EntityArg>,
+    #[serde(default)]
+    filing_context: Option<String>,
+    #[serde(default)]
+    folder_id: Option<i64>,
+    #[serde(default)]
+    filing_source: Option<String>,
+    #[serde(default)]
+    filing_reason: Option<String>,
 }
 
 fn default_source() -> String {
@@ -418,20 +548,39 @@ async fn save_entry(app: tauri::AppHandle, args: SaveArgs) -> Result<i64, String
 
     // Keep a copy of the note text for entity-mention context (raw_text is moved).
     let raw = args.raw_text.clone();
+    let filing_context = args
+        .filing_context
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from);
+    if filing_context.is_none() && args.folder_id.is_some() {
+        return Err("a reviewed folder requires a Work or Personal context".into());
+    }
+    let requested_source = args.filing_source.as_deref().unwrap_or("manual");
+    let requested_reason = args.filing_reason.as_deref();
 
     let note_id = {
         let mut conn = state.0.lock().unwrap();
-        db::save_note(
-            &mut conn,
-            SaveInput {
-                raw_text: args.raw_text,
-                source: args.source,
-                image_path: args.image_path,
-                event_date: event_date.clone(),
-                entries,
-            },
-            &now,
-        )
+        let input = SaveInput {
+            raw_text: args.raw_text,
+            source: args.source,
+            image_path: args.image_path,
+            event_date: event_date.clone(),
+            entries,
+        };
+        match filing_context.as_deref() {
+            Some(context) => db::save_note_with_initial_filing_source(
+                &mut conn,
+                input,
+                context,
+                args.folder_id,
+                requested_source,
+                requested_reason,
+                &now,
+            ),
+            None => db::save_note(&mut conn, input, &now),
+        }
         .map_err(|e| e.to_string())?
     };
 
@@ -616,6 +765,10 @@ fact the reflection reveals about them, and the relationship when stated. [] if 
                 data: serde_json::json!({ "reflection": text }),
             }],
             entities,
+            filing_context: Some("personal".to_string()),
+            folder_id: None,
+            filing_source: None,
+            filing_reason: None,
         },
     )
     .await?;
@@ -740,6 +893,7 @@ async fn quick_capture(
     source: Option<String>,
     image_path: Option<String>,
     event_date: Option<String>,
+    filing_context: Option<String>,
 ) -> Result<i64, String> {
     let source = source.unwrap_or_else(default_source);
     if raw_text.trim().is_empty() && image_path.is_none() {
@@ -754,6 +908,7 @@ async fn quick_capture(
             &source,
             image_path.as_deref(),
             event_date.as_deref().filter(|s| !s.trim().is_empty()),
+            filing_context.as_deref(),
             &chrono::Utc::now().to_rfc3339(),
         )
         .map_err(|e| e.to_string())?
@@ -768,6 +923,84 @@ async fn list_notes(app: tauri::AppHandle) -> Result<Value, String> {
     let conn = state.0.lock().unwrap();
     let notes = db::list_notes(&conn).map_err(|e| e.to_string())?;
     serde_json::to_value(notes).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn note_trash_list(app: tauri::AppHandle) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let notes = db::list_trashed_notes(&conn).map_err(|e| e.to_string())?;
+    serde_json::to_value(notes).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn note_trash(app: tauri::AppHandle, note_id: i64) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    if db::trash_note(&conn, note_id, &chrono::Utc::now().to_rfc3339())
+        .map_err(|e| e.to_string())?
+    {
+        Ok(())
+    } else {
+        Err("Note is already in Trash".into())
+    }
+}
+
+#[tauri::command]
+async fn note_restore(app: tauri::AppHandle, note_id: i64) -> Result<(), String> {
+    let embed_text = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        if !db::restore_note(&conn, note_id).map_err(|e| e.to_string())? {
+            return Err("Note is not in Trash".into());
+        }
+        db::note_embed_text(&conn, note_id).map_err(|e| e.to_string())?
+    };
+
+    // A model-space rebuild intentionally skips Trash. Refresh the vector on
+    // restore so the note is semantically searchable immediately when the
+    // local embedding model is available; a later backfill remains the
+    // fallback if the model is offline right now.
+    if let Ok(vector) = ollama::embed(&embed_text).await {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        let _ = db::insert_embedding(&conn, note_id, &normalize(vector));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn note_delete_forever(app: tauri::AppHandle, note_id: i64) -> Result<(), String> {
+    let images_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("images");
+    let state = app.state::<Db>();
+    let mut conn = state.0.lock().unwrap();
+    let deleted = db::delete_note_forever(&mut conn, note_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Move the note to Trash before deleting it permanently".to_string())?;
+    drop(conn);
+
+    if let Some(image_path) = deleted.image_path {
+        let image_path = std::path::PathBuf::from(image_path);
+        if image_path.exists() {
+            match (images_dir.canonicalize(), image_path.canonicalize()) {
+                (Ok(images_dir), Ok(image_path)) if image_path.starts_with(&images_dir) => {
+                    if let Err(error) = std::fs::remove_file(&image_path) {
+                        eprintln!(
+                            "[noted] permanently deleted note {note_id}, but retained image cleanup failed: {error}"
+                        );
+                    }
+                }
+                _ => eprintln!(
+                    "[noted] permanently deleted note {note_id}, but retained an image outside the managed images directory"
+                ),
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -855,11 +1088,22 @@ async fn file_note(
     app: tauri::AppHandle,
     note_id: i64,
     folder_id: Option<i64>,
-) -> Result<(), String> {
+) -> Result<db::NoteFilingReceipt, String> {
     let state = app.state::<Db>();
     let now = chrono::Utc::now().to_rfc3339();
     let conn = state.0.lock().unwrap();
     db::file_note(&conn, note_id, folder_id, &now).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn undo_note_filing(
+    app: tauri::AppHandle,
+    event_id: i64,
+) -> Result<db::NoteFilingReceipt, String> {
+    let state = app.state::<Db>();
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = state.0.lock().unwrap();
+    db::undo_note_filing(&conn, event_id, &now).map_err(|e| e.to_string())
 }
 
 /// Generate (and store) a recap for "day" (today) or "week" (trailing 7 days),
@@ -1067,6 +1311,33 @@ async fn chat(
         return Err("empty question".into());
     }
 
+    // The common scheduling path is deliberately model-free. It must run
+    // before embeddings/retrieval so "create a meeting…" stays fast, works
+    // with an empty notebook, and doesn't depend on Ollama being warm.
+    if scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "all")
+        .is_none()
+        && entity_id.is_none()
+    {
+        if let Some(event) = pipeline::quick_event_request(&question, &today_local()) {
+            return Ok(json!({
+                "kind": "proposal",
+                "proposal": {
+                    "action": "create_event",
+                    "title": event.title,
+                    "date": event.date,
+                    "start": event.start,
+                    "end": event.end,
+                    "guests": event.guests,
+                    "meet": event.meet,
+                    "summary": event.summary,
+                }
+            }));
+        }
+    }
+
     // Item-scoped ask: pin the answer to ONE entity (project/person/decision) —
     // its curated brain note PLUS every capture that mentions it. No embedding
     // needed (mention-based), read-only.
@@ -1119,8 +1390,6 @@ async fn chat(
         return Ok(json!({ "kind": "answer", "answer": answer.trim(), "sources": sources }));
     }
 
-    let qv = normalize(ollama::embed(&question).await.map_err(|e| e.to_string())?);
-
     // Vault-scoped ask: restrict retrieval to ONE brain so answers about specific
     // work don't bleed across vaults. Read-only (no edit/create routing).
     if let Some(vault) = scope
@@ -1128,6 +1397,7 @@ async fn chat(
         .map(str::trim)
         .filter(|s| !s.is_empty() && *s != "all")
     {
+        let qv = normalize(ollama::embed(&question).await.map_err(|e| e.to_string())?);
         let origin = format!("brain:{vault}");
         let hits = {
             let conn = state.0.lock().unwrap();
@@ -1177,6 +1447,15 @@ async fn chat(
     // one date so the answer can't drift into other days — the date filter is
     // code, not the model. Broad questions keep the hybrid retrieval below.
     let day_scope = pipeline::day_scope(&question, &today_local());
+    // Exact-day retrieval is a direct indexed lookup. Only broad questions
+    // need an embedding for semantic and graph search.
+    let qv = if day_scope.is_none() {
+        Some(normalize(
+            ollama::embed(&question).await.map_err(|e| e.to_string())?,
+        ))
+    } else {
+        None
+    };
 
     // Label brain notes by their vault ("baro"/"profound") for clear
     // provenance; capture notes keep their category.
@@ -1208,9 +1487,10 @@ async fn chat(
             let sources: Vec<Value> = day_hits.iter().take(6).map(source_json).collect();
             (day_hits, sources, String::new(), Vec::new())
         } else {
+            let qv = qv.as_ref().expect("broad questions have an embedding");
             let recent = db::recent_entries(&conn, 15).map_err(|e| e.to_string())?;
-            let semantic = db::search_notes(&conn, &qv, 8).map_err(|e| e.to_string())?;
-            let (graph_digest, graph_entities, graph_hits) = graph_context(&conn, &question, &qv);
+            let semantic = db::search_notes(&conn, qv, 8).map_err(|e| e.to_string())?;
+            let (graph_digest, graph_entities, graph_hits) = graph_context(&conn, &question, qv);
             let mut src_seen = HashSet::new();
             let sources: Vec<Value> = semantic
                 .iter()
@@ -1243,8 +1523,13 @@ async fn chat(
         }));
     }
 
-    // Candidate entries (with row ids + current data) + known category names, for the router.
-    let (agent_ctx, valid_ids, cur_data, known) = {
+    // Ordinary questions go directly to grounded answer generation instead of
+    // paying for a second model turn just to classify them as "answer".
+    let may_mutate = pipeline::may_request_mutation(&question);
+
+    // Candidate entries (with row ids + current data) + known category names,
+    // only needed when the message could actually be a mutation.
+    let (agent_ctx, valid_ids, cur_data, known) = if may_mutate {
         let conn = state.0.lock().unwrap();
         let mut ctx = String::new();
         let mut ids = HashSet::new();
@@ -1262,29 +1547,36 @@ async fn chat(
             .map(|c| c.name)
             .collect();
         (ctx, ids, cur, known)
+    } else {
+        (String::new(), HashSet::new(), HashMap::new(), Vec::new())
     };
 
-    // 1) Route the message: answer | create_category | edit_entry.
-    let mut convo = String::new();
-    for m in &history {
-        let role = if m.role == "assistant" {
-            "assistant"
-        } else {
-            "user"
-        };
-        convo.push_str(&format!("{role}: {}\n", m.content));
-    }
-    convo.push_str(&format!("user: {question}"));
-    let route_user = format!("Candidate entries:\n{agent_ctx}\nConversation:\n{convo}");
-    let routed = ollama::chat_json(
-        &ollama::text_model(),
-        &pipeline::route_system(&today_local()),
-        &route_user,
-        None,
-        Some(pipeline::agent_router_schema()),
-    )
-    .await
-    .ok();
+    // 1) Route only possible mutations: answer | create_category | edit_entry
+    // | create_event. Plain Q&A skips this model call entirely.
+    let routed = if may_mutate {
+        let mut convo = String::new();
+        for m in &history {
+            let role = if m.role == "assistant" {
+                "assistant"
+            } else {
+                "user"
+            };
+            convo.push_str(&format!("{role}: {}\n", m.content));
+        }
+        convo.push_str(&format!("user: {question}"));
+        let route_user = format!("Candidate entries:\n{agent_ctx}\nConversation:\n{convo}");
+        ollama::chat_json(
+            &ollama::text_model(),
+            &pipeline::route_system(&today_local()),
+            &route_user,
+            None,
+            Some(pipeline::agent_router_schema()),
+        )
+        .await
+        .ok()
+    } else {
+        None
+    };
     let action = routed
         .as_ref()
         .and_then(|v| v.get("action"))
@@ -1960,6 +2252,8 @@ fn meeting_model_status(app: tauri::AppHandle) -> Value {
         "base": dir.join("ggml-base.en.bin").exists(),
         "speaker": release_profile::diarization()
             && dir.join(meeting::diarize::MODEL_FILE).exists(),
+        "in_person_supported": meeting::fluid_diarize::supported(),
+        "in_person_diarizer": meeting::fluid_diarize::ready(&app),
         "parakeet": meeting::parakeet_ready(&app),
         "hosted": release_profile::noted_hosted() && hosted::has_key(),
         "tap_supported": meeting::capture::tap_supported(),
@@ -2081,6 +2375,20 @@ async fn download_speaker_model(app: tauri::AppHandle) -> Result<bool, String> {
     Ok(true)
 }
 
+/// Download and compile FluidAudio's offline diarization models into Noted's
+/// app-data directory. This is explicit so stopping a meeting never surprises
+/// the user with a model download.
+#[tauri::command]
+async fn download_in_person_diarizer(app: tauri::AppHandle) -> Result<bool, String> {
+    let helper_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        meeting::fluid_diarize::prepare(&helper_app).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    Ok(meeting::fluid_diarize::ready(&app))
+}
+
 #[tauri::command]
 async fn meeting_start(
     app: tauri::AppHandle,
@@ -2089,10 +2397,14 @@ async fn meeting_start(
     event_json: Option<Value>,
     retain_audio: Option<bool>,
     source_bundle: Option<String>,
+    filing_context: Option<String>,
+    capture_mode: Option<String>,
 ) -> Result<i64, String> {
     let title = title
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| "Meeting".to_string());
+    let capture_mode =
+        meeting::CaptureMode::parse(capture_mode.as_deref()).map_err(|error| error.to_string())?;
     meeting::ensure_mic_permission()
         .await
         .map_err(|e| e.to_string())?;
@@ -2106,8 +2418,17 @@ async fn meeting_start(
         }
     }
     let retain = retain_audio.unwrap_or_else(|| meeting::cfg().retain_audio);
-    meeting::start(&app, title, event_id, event_json, retain, source_bundle)
-        .map_err(|e| e.to_string())
+    meeting::start(
+        &app,
+        title,
+        event_id,
+        event_json,
+        retain,
+        source_bundle,
+        filing_context,
+        capture_mode,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// What the record-prompt window should show (it fetches on mount — a fresh
@@ -2212,6 +2533,70 @@ async fn meeting_list(app: tauri::AppHandle) -> Result<Value, String> {
     let conn = state.0.lock().unwrap();
     let rows = meeting::store::list_meetings(&conn, 200).map_err(|e| e.to_string())?;
     Ok(json!(rows))
+}
+
+#[tauri::command]
+async fn meeting_filing_rules(app: tauri::AppHandle) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let rules = meeting::store::meeting_filing_rules(&conn).map_err(|e| e.to_string())?;
+    serde_json::to_value(rules).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn meeting_filing_rule_set(
+    app: tauri::AppHandle,
+    email: String,
+    folder_id: i64,
+    priority: Option<i64>,
+) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    let rule = meeting::store::set_meeting_filing_rule(&conn, &email, folder_id, priority, &now)
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(rule).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn meeting_filing_rule_delete(app: tauri::AppHandle, email: String) -> Result<bool, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    meeting::store::delete_meeting_filing_rule(&conn, &email).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn meeting_filing_rules_reorder(
+    app: tauri::AppHandle,
+    emails: Vec<String>,
+) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let rules =
+        meeting::store::reorder_meeting_filing_rules(&conn, &emails).map_err(|e| e.to_string())?;
+    serde_json::to_value(rules).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn meeting_filing_backfill_preview(app: tauri::AppHandle) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let preview =
+        meeting::store::meeting_filing_backfill_preview(&conn).map_err(|e| e.to_string())?;
+    serde_json::to_value(preview).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn meeting_filing_backfill_apply(
+    app: tauri::AppHandle,
+    token: String,
+) -> Result<Value, String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    let report = meeting::store::meeting_filing_backfill_apply(&conn, &token, &now)
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(report).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2374,10 +2759,16 @@ async fn meeting_get(app: tauri::AppHandle, id: i64) -> Result<Value, String> {
 }
 
 #[tauri::command]
-async fn meeting_set_notes(app: tauri::AppHandle, id: i64, notes: String) -> Result<(), String> {
+async fn meeting_set_notes(
+    app: tauri::AppHandle,
+    id: i64,
+    notes: String,
+    notes_document_json: Option<String>,
+) -> Result<(), String> {
     let state = app.state::<Db>();
     let conn = state.0.lock().unwrap();
-    meeting::store::set_notes(&conn, id, &notes).map_err(|e| e.to_string())
+    meeting::store::set_notes_document(&conn, id, &notes, notes_document_json.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2431,7 +2822,90 @@ async fn meeting_set_summary(
     Ok(())
 }
 
-/// Rename a diarized voice ("Speaker 2" → "Mayan") for this meeting only.
+#[derive(Debug, Deserialize)]
+struct SpeakerRename {
+    from: String,
+    to: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MeetingSpeakerUpdateResult {
+    speakers_updated: usize,
+    summaries_refreshed: usize,
+    summary_refresh_error: Option<String>,
+}
+
+async fn refresh_notes_after_speaker_change(
+    app: &tauri::AppHandle,
+    id: i64,
+) -> (usize, Option<String>) {
+    let templates: Vec<String> = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        match meeting::store::list_summaries(&conn, id) {
+            Ok(summaries) => summaries
+                .into_iter()
+                .filter_map(|summary| summary["template"].as_str().map(str::to_string))
+                .collect(),
+            Err(error) => return (0, Some(error.to_string())),
+        }
+    };
+
+    let mut refreshed = 0;
+    let mut errors = Vec::new();
+    for template in templates {
+        match meeting::summarize::run(app, id, Some(template.clone())).await {
+            Ok(_) => refreshed += 1,
+            Err(error) => {
+                eprintln!(
+                    "[noted] speaker labels updated, but '{template}' notes refresh failed: {error}"
+                );
+                errors.push(format!("{template}: {error}"));
+            }
+        }
+    }
+    (refreshed, (!errors.is_empty()).then(|| errors.join("; ")))
+}
+
+/// Rename several diarized voices, then refresh every generated notes tab once.
+#[tauri::command]
+async fn meeting_rename_speakers(
+    app: tauri::AppHandle,
+    id: i64,
+    changes: Vec<SpeakerRename>,
+) -> Result<MeetingSpeakerUpdateResult, String> {
+    if !release_profile::diarization() {
+        return Err(release_profile::disabled("speaker diarization"));
+    }
+    let speakers_updated = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let mut updated = 0;
+        for change in changes {
+            if change.from == change.to {
+                continue;
+            }
+            meeting::store::rename_speaker(&tx, id, &change.from, &change.to)
+                .map_err(|e| e.to_string())?;
+            updated += 1;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        updated
+    };
+    let (summaries_refreshed, summary_refresh_error) = if speakers_updated > 0 {
+        refresh_notes_after_speaker_change(&app, id).await
+    } else {
+        (0, None)
+    };
+    Ok(MeetingSpeakerUpdateResult {
+        speakers_updated,
+        summaries_refreshed,
+        summary_refresh_error,
+    })
+}
+
+/// Rename one diarized voice ("Speaker 2" → "Mayan") for this meeting only.
 #[tauri::command]
 async fn meeting_rename_speaker(
     app: tauri::AppHandle,
@@ -2439,12 +2913,9 @@ async fn meeting_rename_speaker(
     from: String,
     to: String,
 ) -> Result<(), String> {
-    if !release_profile::diarization() {
-        return Err(release_profile::disabled("speaker diarization"));
-    }
-    let state = app.state::<Db>();
-    let conn = state.0.lock().unwrap();
-    meeting::store::rename_speaker(&conn, id, &from, &to).map_err(|e| e.to_string())
+    meeting_rename_speakers(app, id, vec![SpeakerRename { from, to }])
+        .await
+        .map(|_| ())
 }
 
 /// Live Assist A0 (LIVE_ASSIST_PLAN.md): answer a question against ONE
@@ -2462,11 +2933,14 @@ async fn meeting_assist(app: tauri::AppHandle, id: i64, question: String) -> Res
         let meeting = meeting::store::get_meeting(&conn, id).map_err(|e| e.to_string())?;
         let title = meeting["title"].as_str().unwrap_or("Meeting").to_string();
         let notes = meeting["raw_notes"].as_str().unwrap_or("").to_string();
+        let in_person = meeting["capture_mode"].as_str() == Some("in_person");
         let mut lines: Vec<String> = Vec::new();
         if let Some(segs) = meeting["segments"].as_array() {
             for s in segs {
                 let t0 = s["t0_ms"].as_i64().unwrap_or(0);
-                let who = if s["channel"].as_str() == Some("me") {
+                let who = if in_person {
+                    s["speaker"].as_str().unwrap_or("Speaker").to_string()
+                } else if s["channel"].as_str() == Some("me") {
                     "Me".to_string()
                 } else {
                     s["speaker"].as_str().unwrap_or("Them").to_string()
@@ -2548,9 +3022,12 @@ async fn meeting_video_delete(app: tauri::AppHandle, id: i64) -> Result<(), Stri
 
 /// Rebuild a meeting's speaker labels from its retained audio — heals
 /// meetings recorded before diarization existed or interrupted by a crash.
-/// Returns the voice count (0 = nothing could be recovered).
+/// Returns the detected voice count plus the generated-notes refresh result.
 #[tauri::command]
-async fn meeting_rediarize(app: tauri::AppHandle, id: i64) -> Result<usize, String> {
+async fn meeting_rediarize(
+    app: tauri::AppHandle,
+    id: i64,
+) -> Result<MeetingSpeakerUpdateResult, String> {
     if !release_profile::diarization() {
         return Err(release_profile::disabled("speaker diarization"));
     }
@@ -2572,26 +3049,18 @@ async fn meeting_rediarize(app: tauri::AppHandle, id: i64) -> Result<usize, Stri
     .await
     .map_err(|e| e.to_string())??;
 
-    // Speaker names are embedded in summaries and the generated note. When a
-    // user explicitly repairs diarization, rebuild every existing tab so the
-    // stale name does not survive outside the transcript.
-    if count > 0 {
-        let templates: Vec<String> = {
-            let state = app.state::<Db>();
-            let conn = state.0.lock().unwrap();
-            meeting::store::list_summaries(&conn, id)
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .filter_map(|s| s["template"].as_str().map(str::to_string))
-                .collect()
-        };
-        for template in templates {
-            if let Err(e) = meeting::summarize::run(&app, id, Some(template)).await {
-                eprintln!("[noted] speaker labels repaired, but summary refresh failed: {e}");
-            }
-        }
-    }
-    Ok(count)
+    // Speaker names are embedded in summaries and the generated searchable
+    // note. Refresh every existing tab after the final labels are committed.
+    let (summaries_refreshed, summary_refresh_error) = if count > 0 {
+        refresh_notes_after_speaker_change(&app, id).await
+    } else {
+        (0, None)
+    };
+    Ok(MeetingSpeakerUpdateResult {
+        speakers_updated: count,
+        summaries_refreshed,
+        summary_refresh_error,
+    })
 }
 
 /// Where a meeting export lands: ~/Documents/Notes/Meeting/<title>/<date title>.<ext>,
@@ -2660,16 +3129,40 @@ async fn meeting_export_md(app: tauri::AppHandle, id: i64) -> Result<String, Str
     Ok(path.to_string_lossy().to_string())
 }
 
-/// Render a polished, self-contained meeting PDF under ~/Documents/Notes/Meeting.
+/// Render either a minimal meeting-notes document or a compact full transcript
+/// PDF under ~/Documents/Notes/Meeting.
 #[tauri::command]
-async fn meeting_export_pdf(app: tauri::AppHandle, id: i64) -> Result<String, String> {
+async fn meeting_export_pdf(
+    app: tauri::AppHandle,
+    id: i64,
+    kind: Option<String>,
+    summary_id: Option<i64>,
+) -> Result<String, String> {
     let meeting = {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
         meeting::store::get_meeting(&conn, id).map_err(|e| e.to_string())?
     };
-    let path = meeting_export_path(&app, &meeting, "pdf")?;
-    meeting::pdf::export(&meeting, &path).map_err(|e| e.to_string())?;
+    let export_kind = if kind.as_deref() == Some("transcript") {
+        meeting::pdf::ExportKind::Transcript
+    } else {
+        meeting::pdf::ExportKind::Brief
+    };
+    let extension = if export_kind == meeting::pdf::ExportKind::Transcript {
+        "transcript.pdf"
+    } else {
+        "pdf"
+    };
+    let path = meeting_export_path(&app, &meeting, extension)?;
+    meeting::pdf::export(
+        &meeting,
+        &path,
+        meeting::pdf::ExportOptions {
+            kind: export_kind,
+            summary_id,
+        },
+    )
+    .map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -3862,6 +4355,14 @@ async fn test_byok_settings(
 }
 
 // ── Google Calendar sync (one-way push to a dedicated "noted" calendar) ──────
+fn repair_meeting_owner_identities(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    meeting::store::repair_one_on_one_speakers(&conn)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn gcal_auth_status() -> Value {
     gcal::auth_status()
@@ -3882,13 +4383,25 @@ fn gcal_set_client(
 #[tauri::command]
 async fn gcal_begin_auth(app: tauri::AppHandle) -> Result<Value, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    gcal::begin_auth(&dir).await.map_err(|e| e.to_string())
+    let status = gcal::begin_auth(&dir).await.map_err(|e| e.to_string())?;
+    repair_meeting_owner_identities(&app)?;
+    Ok(status)
 }
 
 #[tauri::command]
 fn gcal_disconnect(app: tauri::AppHandle) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let removed_emails = gcal::configured_account_emails();
+    {
+        // Remove rules first so a DB failure cannot leave an invisible rule
+        // after its account disappears from Settings.
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        meeting::store::delete_meeting_filing_rules(&conn, &removed_emails)
+            .map_err(|e| e.to_string())?;
+    }
     gcal::disconnect(&dir);
+    repair_meeting_owner_identities(&app)?;
     Ok(())
 }
 
@@ -3946,7 +4459,18 @@ async fn gcal_list_events(
 #[tauri::command]
 fn gcal_remove_account(app: tauri::AppHandle, email: String) -> Result<Value, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    gcal::remove_account(&dir, email.trim()).map_err(|e| e.to_string())
+    let email = email.trim().to_lowercase();
+    {
+        // Keep the account visible if removing its rule fails; otherwise the
+        // orphaned rule would still route meetings with no Settings control.
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        meeting::store::delete_meeting_filing_rules(&conn, &[email.clone()])
+            .map_err(|e| e.to_string())?;
+    }
+    let status = gcal::remove_account(&dir, &email).map_err(|e| e.to_string())?;
+    repair_meeting_owner_identities(&app)?;
+    Ok(status)
 }
 
 /// Show/hide one calendar in the Calendar view. Returns the new auth status.
@@ -4180,6 +4704,7 @@ async fn process_pending_inner(app: &tauri::AppHandle) -> Result<(), String> {
                     "event_date": event_date,
                     "entries": env.get("entries").cloned().unwrap_or_else(|| json!([])),
                     "entities": env.get("entities").cloned().unwrap_or_else(|| json!([])),
+                    "filing_context": p.filing_context,
                 });
                 match serde_json::from_value::<SaveArgs>(save_json) {
                     Ok(args) => match save_entry(app.clone(), args).await {
@@ -4256,8 +4781,34 @@ pub fn run() {
             // Provider mode must be known before the DB seeds the legacy
             // embedding-space marker.
             provider::init(&dir);
+            // Owner identities must be available while DB migrations repair
+            // historical one-on-ones; calendar secrets still remain in the
+            // Keychain and only the normalized account emails are consulted.
+            gcal::init(&dir);
             let conn = db::init(&dir.join("noted.db"))?;
             app.manage(Db(Mutex::new(conn)));
+            // Vendor-neutral local agent access. The broker remains bound to a
+            // user-only Unix socket so Settings can enable it without restarting;
+            // policy still fails closed while Agent Access is disabled.
+            let agent_access = Arc::new(context_pass::AgentAccess::init(&dir)?);
+            app.manage(approval_broker::AgentAccessState(agent_access.clone()));
+            if let Err(error) = approval_broker::spawn(app.handle().clone(), agent_access.clone()) {
+                eprintln!("[noted] agent broker unavailable: {error}");
+            }
+            // Approved Context Pass bytes live only in RAM. Sweep independently
+            // of broker traffic so their TTL is enforced even when an agent
+            // abandons a partially delivered pass.
+            let cleanup_app = app.handle().clone();
+            std::thread::Builder::new()
+                .name("noted-context-pass-cleanup".into())
+                .spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                    let state = cleanup_app.state::<Db>();
+                    let conn = state.0.lock().unwrap();
+                    if let Err(error) = agent_access.cleanup_expired(&conn) {
+                        eprintln!("[noted] Context Pass cleanup failed: {error}");
+                    }
+                })?;
             // Meeting recorder: one-at-a-time session state + builtin templates
             // + detection (mic-in-use watcher, calendar T-60s prompt, auto-stop).
             app.manage(meeting::MeetingState(Mutex::new(None)));
@@ -4283,9 +4834,6 @@ pub fn run() {
 
             // Model-provider config was loaded before DB initialization so the
             // embedding-space marker can be migrated safely.
-            // Load Google Calendar config (client id + calendar id from disk,
-            // client secret + refresh token from Keychain).
-            gcal::init(&dir);
             brain::init_auto(&dir); // load the auto-propagation preference
 
             // Brain vaults: auto-register the default ~/Brain/* vaults (idempotent),
@@ -4421,6 +4969,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            agent_access_status,
+            agent_access_set_enabled,
+            agent_client_create,
+            agent_client_revoke,
+            agent_context_pending,
+            agent_context_preview,
+            agent_context_resolve,
+            agent_context_receipts,
             theme_state,
             system_settings_get,
             system_settings_set,
@@ -4440,6 +4996,10 @@ pub fn run() {
             save_entry,
             quick_capture,
             list_notes,
+            note_trash_list,
+            note_trash,
+            note_restore,
+            note_delete_forever,
             update_note,
             list_categories,
             list_note_folders,
@@ -4448,6 +5008,7 @@ pub fn run() {
             move_note_folder,
             delete_note_folder,
             file_note,
+            undo_note_filing,
             chat,
             create_category,
             update_entry,
@@ -4468,8 +5029,10 @@ pub fn run() {
             meeting_model_status,
             download_meeting_model,
             download_speaker_model,
+            download_in_person_diarizer,
             download_parakeet_model,
             meeting_rename_speaker,
+            meeting_rename_speakers,
             meeting_rediarize,
             meeting_video_delete,
             meeting_video_request_permission,
@@ -4480,6 +5043,12 @@ pub fn run() {
             meeting_stop,
             meeting_state,
             meeting_list,
+            meeting_filing_rules,
+            meeting_filing_rule_set,
+            meeting_filing_rule_delete,
+            meeting_filing_rules_reorder,
+            meeting_filing_backfill_preview,
+            meeting_filing_backfill_apply,
             meeting_search_transcripts,
             meeting_search_facets,
             meeting_transcript_vocabulary_list,

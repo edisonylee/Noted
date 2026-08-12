@@ -5,11 +5,18 @@
 use tauri_app_lib::provider::{self, ByokConfig, CapabilityChoice, ProviderId};
 
 fn choice(provider: ProviderId, model: &str, base_url: &str) -> CapabilityChoice {
-    CapabilityChoice { provider, model: model.into(), base_url: base_url.into() }
+    CapabilityChoice {
+        provider,
+        model: model.into(),
+        base_url: base_url.into(),
+    }
 }
 
 fn passed(results: &serde_json::Value, capability: &str) {
-    let status = results.get(capability).and_then(|v| v.as_str()).unwrap_or("missing");
+    let status = results
+        .get(capability)
+        .and_then(|v| v.as_str())
+        .unwrap_or("missing");
     assert!(status.starts_with("passed"), "{capability}: {status}");
 }
 
@@ -17,8 +24,12 @@ fn passed(results: &serde_json::Value, capability: &str) {
 #[ignore = "requires OPENAI_API_KEY and consumes quota"]
 async fn openai_live() {
     let key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY");
-    let results = provider::test_byok_candidate(ByokConfig::default(), Some(key), None, None, None, None).await;
-    for capability in ["intelligence", "vision", "embeddings", "transcription"] { passed(&results, capability); }
+    let results =
+        provider::test_byok_candidate(ByokConfig::default(), Some(key), None, None, None, None)
+            .await;
+    for capability in ["intelligence", "vision", "embeddings", "transcription"] {
+        passed(&results, capability);
+    }
 }
 
 #[tokio::test]
@@ -31,7 +42,9 @@ async fn gemini_live() {
     config.embeddings = choice(ProviderId::Gemini, "gemini-embedding-2", "");
     config.transcription = config.intelligence.clone();
     let results = provider::test_byok_candidate(config, None, Some(key), None, None, None).await;
-    for capability in ["intelligence", "vision", "embeddings", "transcription"] { passed(&results, capability); }
+    for capability in ["intelligence", "vision", "embeddings", "transcription"] {
+        passed(&results, capability);
+    }
 }
 
 #[tokio::test]
@@ -42,7 +55,9 @@ async fn anthropic_live() {
     let mut config = ByokConfig::default();
     config.intelligence = choice(ProviderId::Anthropic, "claude-sonnet-4-5", "");
     config.vision = config.intelligence.clone();
-    let results = provider::test_byok_candidate(config, Some(openai), None, Some(anthropic), None, None).await;
+    let results =
+        provider::test_byok_candidate(config, Some(openai), None, Some(anthropic), None, None)
+            .await;
     passed(&results, "intelligence");
     passed(&results, "vision");
 }
@@ -54,7 +69,8 @@ async fn groq_transcription_live() {
     let openai = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY");
     let mut config = ByokConfig::default();
     config.transcription = choice(ProviderId::Groq, "whisper-large-v3-turbo", "");
-    let results = provider::test_byok_candidate(config, Some(openai), None, None, Some(groq), None).await;
+    let results =
+        provider::test_byok_candidate(config, Some(openai), None, None, Some(groq), None).await;
     passed(&results, "transcription");
 }
 
@@ -72,5 +88,7 @@ async fn openai_compatible_live() {
     config.embeddings = choice(ProviderId::OpenaiCompatible, &embedding, &base);
     config.transcription = choice(ProviderId::OpenaiCompatible, &transcription, &base);
     let results = provider::test_byok_candidate(config, None, None, None, None, Some(key)).await;
-    for capability in ["intelligence", "vision", "embeddings", "transcription"] { passed(&results, capability); }
+    for capability in ["intelligence", "vision", "embeddings", "transcription"] {
+        passed(&results, capability);
+    }
 }

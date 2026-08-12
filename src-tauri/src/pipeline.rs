@@ -47,7 +47,14 @@ pub fn day_scope(question: &str, today: &str) -> Option<(String, &'static str)> 
     let today_d = NaiveDate::parse_from_str(today, "%Y-%m-%d").ok()?;
     let mut q = question.to_lowercase();
     // Cumulative idioms mention "today" without asking about the day itself.
-    for idiom in ["as of today", "up to today", "until today", "through today", "so far today", "before today"] {
+    for idiom in [
+        "as of today",
+        "up to today",
+        "until today",
+        "through today",
+        "so far today",
+        "before today",
+    ] {
         q = q.replace(idiom, " ");
     }
     let has = |words: &[&str]| {
@@ -60,7 +67,13 @@ pub fn day_scope(question: &str, today: &str) -> Option<(String, &'static str)> 
             })
         })
     };
-    let today_hit = has(&["today", "tonight", "this morning", "this afternoon", "this evening"]);
+    let today_hit = has(&[
+        "today",
+        "tonight",
+        "this morning",
+        "this afternoon",
+        "this evening",
+    ]);
     let tomorrow_hit = has(&["tomorrow", "tmrw"]);
     let yesterday_hit = has(&["yesterday"]);
     match (today_hit, tomorrow_hit, yesterday_hit) {
@@ -71,11 +84,411 @@ pub fn day_scope(question: &str, today: &str) -> Option<(String, &'static str)> 
     }
 }
 
+/// A common calendar command parsed entirely in-process. Assistant actions used
+/// to wait for embeddings, retrieval, and a model routing turn before they were
+/// recognized. Keeping the high-confidence scheduling grammar deterministic
+/// makes the everyday path effectively immediate while ambiguous requests can
+/// still fall through to the model router.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuickEventRequest {
+    pub title: String,
+    pub date: String,
+    pub start: Option<String>,
+    pub end: Option<String>,
+    pub guests: Vec<String>,
+    pub meet: bool,
+    pub summary: String,
+}
+
+fn event_intent(text: &str) -> bool {
+    let q = text.to_lowercase();
+    let mut imperative = q.trim().trim_start_matches(['.', ',', '!', '?']).trim();
+    // Strip conversational lead-ins, then require schedule/book to be the
+    // actual verb. This keeps "what's my schedule today?" read-only.
+    for prefix in [
+        "hey ",
+        "hey, ",
+        "please ",
+        "can you ",
+        "could you ",
+        "would you ",
+        "i want to ",
+        "i'd like to ",
+        "i would like to ",
+        "i need to ",
+        "let's ",
+    ] {
+        if let Some(rest) = imperative.strip_prefix(prefix) {
+            imperative = rest.trim();
+        }
+    }
+    imperative.starts_with("schedule ")
+        || imperative.starts_with("book ")
+        || regex::Regex::new(
+            r"\b(create|add|make|put|set\s+up)\b[^.!?]{0,50}\b(event|meeting|appointment|calendar)\b",
+        )
+        .unwrap()
+        .is_match(&q)
+}
+
+/// Avoid a second model generation for ordinary Q&A. Only language that could
+/// mutate user data needs the action router; the router remains the conservative
+/// fallback for edits and less-regular action phrasing.
+pub fn may_request_mutation(text: &str) -> bool {
+    if event_intent(text) {
+        return true;
+    }
+    let q = text.to_lowercase();
+    regex::Regex::new(
+        r"\b(create|add|make)\b[^.!?]{0,40}\b(category|section)\b|\b(edit|change|update|correct|fix)\b[^.!?]{0,60}\b(entry|note|log|value|field|reps?|weight|date)\b",
+    )
+    .unwrap()
+    .is_match(&q)
+}
+
+fn event_date(text: &str, today: NaiveDate) -> (NaiveDate, bool) {
+    let q = text.to_lowercase();
+    if q.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| w == "tomorrow" || w == "tmrw")
+    {
+        return (today + chrono::Duration::days(1), true);
+    }
+    if q.split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| w == "today" || w == "tonight")
+    {
+        return (today, true);
+    }
+    if let Some(c) = regex::Regex::new(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+        .unwrap()
+        .captures(&q)
+    {
+        if let Ok(date) = NaiveDate::parse_from_str(c.get(0).unwrap().as_str(), "%Y-%m-%d") {
+            return (date, true);
+        }
+    }
+    if let Some(c) = regex::Regex::new(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b")
+        .unwrap()
+        .captures(&q)
+    {
+        let month = c[1].parse::<u32>().ok();
+        let day = c[2].parse::<u32>().ok();
+        let explicit_year = c.get(3).and_then(|m| m.as_str().parse::<i32>().ok());
+        if let (Some(month), Some(day)) = (month, day) {
+            let year = explicit_year
+                .map(|y| if y < 100 { 2000 + y } else { y })
+                .unwrap_or(today.year());
+            if let Some(mut date) = NaiveDate::from_ymd_opt(year, month, day) {
+                if explicit_year.is_none() && date < today {
+                    if let Some(next) = NaiveDate::from_ymd_opt(year + 1, month, day) {
+                        date = next;
+                    }
+                }
+                return (date, true);
+            }
+        }
+    }
+    if let Some(c) = regex::Regex::new(r"\bin\s+(\d{1,3})\s+days?\b")
+        .unwrap()
+        .captures(&q)
+    {
+        if let Ok(days) = c[1].parse::<i64>() {
+            return (today + chrono::Duration::days(days), true);
+        }
+    }
+
+    let weekdays = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ];
+    for (target, name) in weekdays.iter().enumerate() {
+        let re = regex::Regex::new(&format!(r"\b(next\s+|this\s+)?{name}\b")).unwrap();
+        if let Some(c) = re.captures(&q) {
+            let current = today.weekday().num_days_from_monday() as i64;
+            let mut ahead = (target as i64 - current).rem_euclid(7);
+            if c.get(1).map(|m| m.as_str().trim()) == Some("next") && ahead == 0 {
+                ahead = 7;
+            }
+            return (today + chrono::Duration::days(ahead), true);
+        }
+    }
+
+    let months = [
+        (1, "jan(?:uary)?"),
+        (2, "feb(?:ruary)?"),
+        (3, "mar(?:ch)?"),
+        (4, "apr(?:il)?"),
+        (5, "may"),
+        (6, "jun(?:e)?"),
+        (7, "jul(?:y)?"),
+        (8, "aug(?:ust)?"),
+        (9, "sep(?:t(?:ember)?)?"),
+        (10, "oct(?:ober)?"),
+        (11, "nov(?:ember)?"),
+        (12, "dec(?:ember)?"),
+    ];
+    for (month, name) in months {
+        let re = regex::Regex::new(&format!(
+            r"\b{name}\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s+(\d{{4}}))?\b"
+        ))
+        .unwrap();
+        if let Some(c) = re.captures(&q) {
+            let day = c[1].parse::<u32>().ok();
+            let explicit_year = c.get(2).and_then(|m| m.as_str().parse::<i32>().ok());
+            if let Some(day) = day {
+                let year = explicit_year.unwrap_or(today.year());
+                if let Some(mut date) = NaiveDate::from_ymd_opt(year, month, day) {
+                    if explicit_year.is_none() && date < today {
+                        if let Some(next) = NaiveDate::from_ymd_opt(year + 1, month, day) {
+                            date = next;
+                        }
+                    }
+                    return (date, true);
+                }
+            }
+        }
+    }
+    (today, false)
+}
+
+fn meridiem(raw: Option<&str>) -> Option<bool> {
+    raw.map(|s| s.to_ascii_lowercase().starts_with('p'))
+}
+
+fn clock_minutes(hour: u32, minute: u32, pm: Option<bool>) -> Option<u32> {
+    if minute > 59 {
+        return None;
+    }
+    match pm {
+        Some(is_pm) if (1..=12).contains(&hour) => {
+            Some((if is_pm { hour % 12 + 12 } else { hour % 12 }) * 60 + minute)
+        }
+        Some(_) => None,
+        None if hour <= 23 => Some(hour * 60 + minute),
+        None => None,
+    }
+}
+
+fn hhmm(minutes: u32) -> String {
+    format!("{:02}:{:02}", (minutes / 60) % 24, minutes % 60)
+}
+
+fn event_times(text: &str) -> (Option<String>, Option<String>) {
+    let range_re = regex::Regex::new(
+        r"(?i)\b(?:from\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\s*(?:-|–|—|to|until|through)\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?",
+    )
+    .unwrap();
+    let at_re =
+        regex::Regex::new(r"(?i)\b(?:at|around)\s+(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?")
+            .unwrap();
+    let anchor = at_re.captures(text);
+    let anchor_pm = anchor
+        .as_ref()
+        .and_then(|c| meridiem(c.get(3).map(|m| m.as_str())));
+
+    let range = range_re.captures_iter(text).find(|c| {
+        // The tail of an ISO date (2026-08-10) is a date, not an 8–10am
+        // range. Keep looking for a real range later in the request.
+        !c.get(0).is_some_and(|m| {
+            let prefix = &text[..m.start()];
+            regex::Regex::new(r"\d{4}-$").unwrap().is_match(prefix)
+        })
+    });
+    if let Some(c) = range {
+        let sh = c[1].parse::<u32>().ok();
+        let sm = c.get(2).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
+        let eh = c[4].parse::<u32>().ok();
+        let em = c.get(5).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
+        if let (Some(sh), Some(eh)) = (sh, eh) {
+            let start_explicit = meridiem(c.get(3).map(|m| m.as_str()));
+            let end_explicit = meridiem(c.get(6).map(|m| m.as_str()));
+            // "3 to 4:30" is normally an afternoon meeting; "9 to 10"
+            // defaults to morning. An explicit period anywhere wins.
+            let inferred = start_explicit.or(end_explicit).or(anchor_pm).or_else(|| {
+                if (1..=6).contains(&sh) {
+                    Some(true)
+                } else if sh <= 12 {
+                    Some(false)
+                } else {
+                    None
+                }
+            });
+            let start = clock_minutes(sh, sm, start_explicit.or(inferred));
+            let mut end = clock_minutes(eh, em, end_explicit.or(inferred));
+            if let (Some(start), Some(end_min)) = (start, end.as_mut()) {
+                // "11 to 1" means 11am–1pm, not a fourteen-hour overnight
+                // event. Late-evening ranges still intentionally cross midnight.
+                if end_explicit.is_none()
+                    && *end_min <= start
+                    && start < 12 * 60
+                    && *end_min + 12 * 60 > start
+                {
+                    *end_min += 12 * 60;
+                }
+                return (Some(hhmm(start)), Some(hhmm(*end_min)));
+            }
+        }
+    }
+
+    if let Some(c) = anchor {
+        let hour = c[1].parse::<u32>().ok();
+        let minute = c.get(2).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
+        if let Some(hour) = hour {
+            let inferred = anchor_pm.or_else(|| {
+                if (1..=6).contains(&hour) {
+                    Some(true)
+                } else if hour <= 12 {
+                    Some(false)
+                } else {
+                    None
+                }
+            });
+            if let Some(start) = clock_minutes(hour, minute, inferred) {
+                return (Some(hhmm(start)), None);
+            }
+        }
+    }
+    (None, None)
+}
+
+fn event_guests(text: &str) -> Vec<String> {
+    let normalized = text.to_lowercase().replace(" dot ", ".");
+    let named_guest = regex::Regex::new(r"\bwith\s+([a-z][a-z'-]*)\b")
+        .unwrap()
+        .captures(&normalized)
+        .map(|c| c[1].to_string());
+    let mut guests = Vec::new();
+    let mut push = |email: String| {
+        let email = email
+            .trim_matches(|c: char| ",.;:()[]{}<>\"'".contains(c))
+            .to_string();
+        if email.contains('@') && !guests.contains(&email) {
+            guests.push(email);
+        }
+    };
+    for c in regex::Regex::new(r"\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b")
+        .unwrap()
+        .find_iter(&normalized)
+    {
+        push(c.as_str().to_string());
+    }
+    // Voice dictation often renders "brian at example dot com".
+    for c in regex::Regex::new(r"\b([a-z0-9._%+-]+)\s+at\s+([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b")
+        .unwrap()
+        .captures_iter(&normalized)
+    {
+        // A three-label RHS such as brian.heyborrow.com is handled by the
+        // missing-@ recovery below, rather than becoming brian@brian.heyborrow.com.
+        if c[2].split('.').count() == 2 {
+            push(format!("{}@{}", &c[1], &c[2]));
+        }
+    }
+    // A frequent dictation typo drops the @ into a dot: brian.example.com.
+    for c in regex::Regex::new(r"\b([a-z0-9][a-z0-9_+-]*)\.([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b")
+        .unwrap()
+        .captures_iter(&normalized)
+    {
+        // Don't turn arbitrary three-label URLs (meet.google.com) into
+        // attendees. This recovery is only high-confidence when the local
+        // part matches the person named after "with".
+        if named_guest.as_deref() == Some(&c[1]) {
+            push(format!("{}@{}", &c[1], &c[2]));
+        }
+    }
+    guests
+}
+
+fn capitalize_name(raw: &str) -> String {
+    let mut chars = raw.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn event_title(text: &str, guests: &[String]) -> String {
+    if let Some(c) = regex::Regex::new(
+        r#"(?i)\b(?:called|named|titled)\s+[\"“]?([a-z0-9][a-z0-9 '&-]{0,60}?)(?:[\"”]|\s+(?:on|at|from|with|tomorrow|today)\b|[,.;]|$)"#,
+    )
+    .unwrap()
+    .captures(text)
+    {
+        return c[1].trim().to_string();
+    }
+    if let Some(c) = regex::Regex::new(
+        r"(?i)\b(?:schedule|book)\s+(?:a\s+|an\s+|the\s+)?([a-z][a-z0-9 '&-]{0,60}?)(?:\s+(?:with|on|at|from|tomorrow|today|tonight)\b|[,.;]|$)",
+    )
+    .unwrap()
+    .captures(text)
+    {
+        let title = c[1].trim();
+        if !matches!(title.to_lowercase().as_str(), "event" | "meeting" | "appointment") {
+            return capitalize_name(title);
+        }
+    }
+    if let Some(c) = regex::Regex::new(r"(?i)\bwith\s+([a-z][a-z'-]*)\b")
+        .unwrap()
+        .captures(text)
+    {
+        let name = c[1].trim();
+        if !matches!(name.to_lowercase().as_str(), "a" | "an" | "the" | "google") {
+            return format!("Meeting with {}", capitalize_name(name));
+        }
+    }
+    if let Some(local) = guests.first().and_then(|g| g.split('@').next()) {
+        return format!("Meeting with {}", capitalize_name(local));
+    }
+    "Meeting".to_string()
+}
+
+pub fn quick_event_request(text: &str, today: &str) -> Option<QuickEventRequest> {
+    if !event_intent(text) {
+        return None;
+    }
+    let today = NaiveDate::parse_from_str(today, "%Y-%m-%d").ok()?;
+    let (date, date_was_explicit) = event_date(text, today);
+    let (start, end) = event_times(text);
+    // "Schedule something" without any date or time is still ambiguous; let
+    // the model ask a follow-up. A stated time with no day intentionally means
+    // today, which makes the common voice-command path one shot.
+    if start.is_none() && !date_was_explicit {
+        return None;
+    }
+    let guests = event_guests(text);
+    let title = event_title(text, &guests);
+    let meet = regex::Regex::new(r"(?i)\b(google\s+meet|meet\s+link|video[- ]call|video\s+link)\b")
+        .unwrap()
+        .is_match(text);
+    let date = date.to_string();
+    let summary = match (&start, &end) {
+        (Some(start), Some(end)) => format!("{title} on {date} from {start} to {end}"),
+        (Some(start), None) => format!("{title} on {date} at {start}"),
+        _ => format!("{title} on {date}"),
+    };
+    Some(QuickEventRequest {
+        title,
+        date,
+        start,
+        end,
+        guests,
+        meet,
+        summary,
+    })
+}
+
 /// Format retrieved entries into a compact, dated context block for the LLM.
 pub fn qa_context(hits: &[SearchHit]) -> String {
     let mut s = String::new();
     for h in hits {
-        let data = h.data.as_ref().map(|d| format!(" | {d}")).unwrap_or_default();
+        let data = h
+            .data
+            .as_ref()
+            .map(|d| format!(" | {d}"))
+            .unwrap_or_default();
         // Cap each note's text so a long imported brain note can't crowd the
         // context window; captures are short so this rarely touches them.
         let mut text = h.raw_text.replace('\n', " ");
@@ -190,7 +603,10 @@ pub fn agent_context(entries: &[crate::db::EntryRow]) -> String {
 pub fn extract_date_from_text(text: &str, today: &str) -> Option<String> {
     let today_d = NaiveDate::parse_from_str(today, "%Y-%m-%d").ok()?;
 
-    if let Some(m) = regex::Regex::new(r"\b(\d{4})-(\d{2})-(\d{2})\b").unwrap().find(text) {
+    if let Some(m) = regex::Regex::new(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+        .unwrap()
+        .find(text)
+    {
         if let Ok(d) = NaiveDate::parse_from_str(m.as_str(), "%Y-%m-%d") {
             return Some(d.to_string());
         }
@@ -236,7 +652,10 @@ pub fn snap_category(raw: &str, known: &[String]) -> String {
         return head;
     }
     // tolerate a trailing plural 's' (gyms -> gym, meals -> meal mismatch is fine)
-    if let Some(k) = known.iter().find(|k| format!("{k}s") == head || **k == format!("{head}s")) {
+    if let Some(k) = known
+        .iter()
+        .find(|k| format!("{k}s") == head || **k == format!("{head}s"))
+    {
         return k.clone();
     }
     head
@@ -296,7 +715,11 @@ fn parse_entities(v: &Value) -> Vec<Value> {
             arr.iter()
                 .filter_map(|e| {
                     let name = e.get("name").and_then(|n| n.as_str())?.trim();
-                    let etype = e.get("type").and_then(|t| t.as_str())?.trim().to_lowercase();
+                    let etype = e
+                        .get("type")
+                        .and_then(|t| t.as_str())?
+                        .trim()
+                        .to_lowercase();
                     if name.is_empty() || etype.is_empty() {
                         return None;
                     }
@@ -308,7 +731,11 @@ fn parse_entities(v: &Value) -> Vec<Value> {
                             out["fact"] = json!(fact);
                         }
                     }
-                    if let Some(rel) = e.get("relationship").and_then(|r| r.as_str()).map(str::trim) {
+                    if let Some(rel) = e
+                        .get("relationship")
+                        .and_then(|r| r.as_str())
+                        .map(str::trim)
+                    {
                         if !rel.is_empty() {
                             out["relationship"] = json!(rel);
                         }
@@ -334,7 +761,17 @@ pub struct Segment {
 /// Labels that look like headers but never route a category (avoid false
 /// positives like "Note:" / "TODO:").
 const HEADER_STOPLIST: &[&str] = &[
-    "note", "notes", "todo", "ps", "today", "tomorrow", "yesterday", "am", "pm", "re", "update",
+    "note",
+    "notes",
+    "todo",
+    "ps",
+    "today",
+    "tomorrow",
+    "yesterday",
+    "am",
+    "pm",
+    "re",
+    "update",
 ];
 
 /// Below these, an untagged block is treated as ONE topic and extracted whole
@@ -365,7 +802,10 @@ pub fn is_multi_topic_candidate(body: &str) -> bool {
 pub fn split_sections(text: &str) -> Vec<Segment> {
     fn flush(hint: Option<String>, body: &str, out: &mut Vec<Segment>) {
         if !body.trim().is_empty() {
-            out.push(Segment { hint, body: body.trim().to_string() });
+            out.push(Segment {
+                hint,
+                body: body.trim().to_string(),
+            });
         }
     }
 
@@ -390,7 +830,10 @@ pub fn split_sections(text: &str) -> Vec<Segment> {
     flush(hint.take(), &body, &mut segments);
 
     if segments.is_empty() {
-        segments.push(Segment { hint: None, body: text.trim().to_string() });
+        segments.push(Segment {
+            hint: None,
+            body: text.trim().to_string(),
+        });
     }
     segments
 }
@@ -473,18 +916,35 @@ async fn extract_segment(
                  event_date (YYYY-MM-DD or null), data (object). JSON only.)"
             )
         };
-        match ollama::chat_json(&ollama::text_model(), &system, &user, None, Some(routing_schema())).await {
+        match ollama::chat_json(
+            &ollama::text_model(),
+            &system,
+            &user,
+            None,
+            Some(routing_schema()),
+        )
+        .await
+        {
             Ok(v) => {
-                let raw_date = v.get("event_date").and_then(|d| d.as_str()).map(String::from);
+                let raw_date = v
+                    .get("event_date")
+                    .and_then(|d| d.as_str())
+                    .map(String::from);
                 let ents = parse_entities(&v);
                 match validate_proposal(v) {
                     Ok(mut proposal) => {
                         let cat = match forced {
                             Some(f) => snap_category(f, known),
-                            None => snap_category(proposal["category"].as_str().unwrap_or(""), known),
+                            None => {
+                                snap_category(proposal["category"].as_str().unwrap_or(""), known)
+                            }
                         };
                         proposal["is_new_category"] = json!(!known.contains(&cat));
-                        proposal["routed_by"] = json!(if forced.is_some() { "header" } else { "classifier" });
+                        proposal["routed_by"] = json!(if forced.is_some() {
+                            "header"
+                        } else {
+                            "classifier"
+                        });
                         proposal["category"] = json!(cat);
                         return Ok((proposal, raw_date, ents));
                     }
@@ -567,7 +1027,14 @@ async fn segment_note(
     today: &str,
 ) -> Result<Vec<Segment>> {
     let system = build_segment_prompt(catalog, today);
-    let v = ollama::chat_json(&ollama::text_model(), &system, text, None, Some(segment_schema())).await?;
+    let v = ollama::chat_json(
+        &ollama::text_model(),
+        &system,
+        text,
+        None,
+        Some(segment_schema()),
+    )
+    .await?;
     let items = v
         .get("items")
         .and_then(|i| i.as_array())
@@ -575,12 +1042,26 @@ async fn segment_note(
 
     let mut segs = Vec::new();
     for it in items {
-        let body = it.get("text").and_then(|t| t.as_str()).unwrap_or("").trim().to_string();
+        let body = it
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if body.is_empty() {
             continue;
         }
-        let cat = it.get("category").and_then(|c| c.as_str()).unwrap_or("").trim().to_lowercase();
-        let hint = if cat.is_empty() { None } else { Some(snap_category(&cat, known)) };
+        let cat = it
+            .get("category")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        let hint = if cat.is_empty() {
+            None
+        } else {
+            Some(snap_category(&cat, known))
+        };
         segs.push(Segment { hint, body });
     }
     if segs.is_empty() {
@@ -599,10 +1080,9 @@ async fn segment_note(
 /// into a task instead of having their times extracted. The original note is
 /// still stored as raw_text.
 fn strip_line_markers(text: &str) -> String {
-    let re = regex::Regex::new(
-        r"(?m)^[ \t]*(?:[-*•·▪●□☐▢◻◽◾■☑☒✅✓✔✗✘]|\[[ xX]?\]|\([ xX]?\))[ \t]+",
-    )
-    .unwrap();
+    let re =
+        regex::Regex::new(r"(?m)^[ \t]*(?:[-*•·▪●□☐▢◻◽◾■☑☒✅✓✔✗✘]|\[[ xX]?\]|\([ xX]?\))[ \t]+")
+            .unwrap();
     re.replace_all(text, "").into_owned()
 }
 
@@ -737,7 +1217,11 @@ pub async fn transcribe_photo(image_b64: &str) -> Result<String> {
         Some(schema),
     )
     .await?;
-    Ok(v.get("raw_text").and_then(|t| t.as_str()).unwrap_or("").trim().to_string())
+    Ok(v.get("raw_text")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string())
 }
 
 /// Typed-note path: split into sections, route + extract each, return the
@@ -835,7 +1319,10 @@ pub fn validate_proposal(v: Value) -> std::result::Result<Value, String> {
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
         .ok_or("missing 'category'")?;
-    let is_new = v.get("is_new_category").and_then(|b| b.as_bool()).unwrap_or(false);
+    let is_new = v
+        .get("is_new_category")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
     let description = v
         .get("description")
         .and_then(|d| d.as_str())

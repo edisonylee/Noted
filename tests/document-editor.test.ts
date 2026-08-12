@@ -5,6 +5,8 @@ import {
   documentPlainText,
   extractDocumentTasks,
   normalizeTaskDocument,
+  plainTextToDocument,
+  storedDocumentOrPlainText,
   todosToTaskDocument,
   type StructuredDocument,
 } from "../src/editor/document";
@@ -161,5 +163,34 @@ describe("structured task documents", () => {
 
     expect(documentPlainText(document)).toBe("- [ ] [Image: receipt.jpg]");
     expect(extractDocumentTasks(document)).toEqual([]);
+  });
+});
+
+describe("shared document storage", () => {
+  test("lifts legacy meeting notes without losing line breaks", () => {
+    const document = plainTextToDocument("Decision: ship Tuesday\n\nOwner: Maya");
+
+    expect(document.content).toHaveLength(3);
+    expect(documentPlainText(document)).toBe("Decision: ship Tuesday\nOwner: Maya");
+  });
+
+  test("prefers a valid stored rich document", () => {
+    const stored = JSON.stringify({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [{ type: "text", text: "Bold decision", marks: [{ type: "bold" }] }],
+        },
+      ],
+    });
+
+    const document = storedDocumentOrPlainText(stored, "Legacy fallback");
+    expect(document.content?.[0]?.content?.[0]?.marks).toEqual([{ type: "bold" }]);
+    expect(documentPlainText(document)).toBe("Bold decision");
+  });
+
+  test("falls back to preserved text when rich JSON is damaged", () => {
+    expect(documentPlainText(storedDocumentOrPlainText("{broken", "Still here"))).toBe("Still here");
   });
 });

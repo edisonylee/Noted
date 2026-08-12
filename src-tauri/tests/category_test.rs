@@ -2,7 +2,8 @@
 // route to sensible categories, gym is still reused, and feelings get captured.
 use tauri_app_lib::pipeline;
 
-const CATALOG: &str = "- gym: workout logs. shape: {\"exercises\":[{\"name\":\"squat\",\"weight\":245}]}\n\
+const CATALOG: &str =
+    "- gym: workout logs. shape: {\"exercises\":[{\"name\":\"squat\",\"weight\":245}]}\n\
 - schedule: daily time blocks. shape: {\"blocks\":[{\"task\":\"coding\",\"hours\":3}]}";
 
 fn known() -> Vec<String> {
@@ -64,5 +65,8 @@ async fn feeling_note_is_not_gym_or_schedule() {
     println!("feeling -> {cat} | data {}", e["data"]);
     assert_ne!(cat, "gym");
     assert_ne!(cat, "schedule");
-    assert!(blob.contains("mood") || blob.contains("anx") || blob.contains("feel"), "mood captured: {blob}");
+    assert!(
+        blob.contains("mood") || blob.contains("anx") || blob.contains("feel"),
+        "mood captured: {blob}"
+    );
 }

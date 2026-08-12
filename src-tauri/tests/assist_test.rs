@@ -41,7 +41,11 @@ async fn assist(conn: &rusqlite::Connection, id: i64, question: &str) -> String 
         tail.push(l);
     }
     tail.reverse();
-    let transcript = tail.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
+    let transcript = tail
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     let system = "You are the user's live meeting copilot. You see the transcript of the \
 meeting so far — 'Me' is the user; named speakers or 'Them' are the other participants — plus \
 the user's own typed notes. Answer the question from that context only. Be concise and \
@@ -52,8 +56,9 @@ asks how to respond. If the transcript doesn't contain the answer, say so plainl
     } else {
         format!("\nMy notes:\n{notes}\n")
     };
-    let user =
-        format!("Meeting: {title}\nTranscript so far:\n{transcript}\n{notes_block}\nQuestion: {question}");
+    let user = format!(
+        "Meeting: {title}\nTranscript so far:\n{transcript}\n{notes_block}\nQuestion: {question}"
+    );
     ollama::chat_messages(
         &ollama::text_model(),
         vec![
@@ -71,12 +76,28 @@ async fn answers_from_the_transcript() {
     let tmp = std::env::temp_dir().join(format!("noted_assist_{}.db", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let conn = tauri_app_lib::db::init(&tmp).unwrap();
-    let id = store::create_meeting(&conn, "Roadmap sync", None, None, "2026-07-17T16:00:00Z").unwrap();
+    let id =
+        store::create_meeting(&conn, "Roadmap sync", None, None, "2026-07-17T16:00:00Z").unwrap();
     for (ch, t0, text, speaker) in [
-        ("me", 1_000, "Morning! Where did we land on the launch date?", None),
-        ("them", 6_000, "We're moving the launch to September 3rd because QA needs two more weeks.", Some("Brian")),
+        (
+            "me",
+            1_000,
+            "Morning! Where did we land on the launch date?",
+            None,
+        ),
+        (
+            "them",
+            6_000,
+            "We're moving the launch to September 3rd because QA needs two more weeks.",
+            Some("Brian"),
+        ),
         ("me", 14_000, "Okay. And the pricing page?", None),
-        ("them", 19_000, "Jasmine owns the pricing page copy, due Friday.", Some("Brian")),
+        (
+            "them",
+            19_000,
+            "Jasmine owns the pricing page copy, due Friday.",
+            Some("Brian"),
+        ),
     ] {
         let sid = store::insert_segment(&conn, id, ch, t0, t0 + 4_000, text).unwrap();
         if let Some(name) = speaker {
@@ -86,8 +107,14 @@ async fn answers_from_the_transcript() {
     let a = assist(&conn, id, "when is the launch now and why?").await;
     println!("assist -> {a}");
     let al = a.to_lowercase();
-    assert!(al.contains("september") || a.contains("3"), "should cite the new date: {a}");
-    assert!(al.contains("qa") || al.contains("two more weeks"), "should cite the reason: {a}");
+    assert!(
+        al.contains("september") || a.contains("3"),
+        "should cite the new date: {a}"
+    );
+    assert!(
+        al.contains("qa") || al.contains("two more weeks"),
+        "should cite the reason: {a}"
+    );
     let _ = std::fs::remove_file(&tmp);
 }
 
@@ -95,7 +122,10 @@ async fn answers_from_the_transcript() {
 #[ignore]
 async fn real_meeting() {
     let db = std::env::var("NOTED_DB").expect("NOTED_DB");
-    let id: i64 = std::env::var("MEETING_ID").expect("MEETING_ID").parse().unwrap();
+    let id: i64 = std::env::var("MEETING_ID")
+        .expect("MEETING_ID")
+        .parse()
+        .unwrap();
     let q = std::env::var("QUESTION").unwrap_or_else(|_| "what was this meeting about?".into());
     let conn = rusqlite::Connection::open(&db).expect("db");
     let a = assist(&conn, id, &q).await;

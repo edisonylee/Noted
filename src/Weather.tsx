@@ -1,11 +1,15 @@
 import {
   useEffect,
+  useId,
+  useRef,
   useState,
   type ComponentType,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
 import {
+  ChevronDown,
   Cloud,
   CloudDrizzle,
   CloudFog,
@@ -17,8 +21,12 @@ import {
   MapPin,
   Moon,
   RefreshCw,
+  Search,
   Sun,
+  X,
 } from "lucide-react";
+import { api } from "./api";
+import { configureAppTimeZone } from "./day";
 
 type WeatherLocation = {
   name: string;
@@ -28,8 +36,7 @@ type WeatherLocation = {
   timezone: string;
 };
 
-// Kept as a single value so Settings can replace it later without changing the
-// card, request, or cache shape.
+// First-run fallback. A city chosen from the weather bar replaces it locally.
 const ATLANTA_WEATHER_LOCATION: WeatherLocation = {
   name: "Atlanta",
   region: "Georgia",
@@ -37,6 +44,102 @@ const ATLANTA_WEATHER_LOCATION: WeatherLocation = {
   longitude: -84.38798,
   timezone: "America/New_York",
 };
+
+const LOCATION_KEY = "noted-weather-location-v1";
+const GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search";
+
+type GeocodingResult = {
+  name?: string;
+  latitude?: number;
+  longitude?: number;
+  timezone?: string;
+  feature_code?: string;
+  admin1?: string;
+  country?: string;
+};
+
+function validTimezone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isWeatherLocation(value: unknown): value is WeatherLocation {
+  if (!value || typeof value !== "object") return false;
+  const location = value as Partial<WeatherLocation>;
+  return (
+    typeof location.name === "string" &&
+    location.name.trim().length > 0 &&
+    typeof location.region === "string" &&
+    typeof location.latitude === "number" &&
+    Number.isFinite(location.latitude) &&
+    typeof location.longitude === "number" &&
+    Number.isFinite(location.longitude) &&
+    typeof location.timezone === "string" &&
+    validTimezone(location.timezone)
+  );
+}
+
+function readSavedLocation(): WeatherLocation {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LOCATION_KEY) ?? "null");
+    if (isWeatherLocation(saved)) return saved;
+  } catch {
+    // A blocked or malformed local preference should never break the homepage.
+  }
+  return ATLANTA_WEATHER_LOCATION;
+}
+
+function saveLocation(location: WeatherLocation) {
+  try {
+    localStorage.setItem(LOCATION_KEY, JSON.stringify(location));
+  } catch {
+    // The selection still works for this session when storage is unavailable.
+  }
+}
+
+async function searchLocations(query: string, signal: AbortSignal): Promise<WeatherLocation[]> {
+  const params = new URLSearchParams({
+    name: query,
+    count: "10",
+    language: "en",
+    format: "json",
+  });
+  const response = await fetch(`${GEOCODING_URL}?${params}`, { signal });
+  if (!response.ok) throw new Error(`Location search returned ${response.status}`);
+  const body = (await response.json()) as { results?: GeocodingResult[] };
+  const seen = new Set<string>();
+
+  return (body.results ?? []).flatMap((result) => {
+    if (
+      typeof result.name !== "string" ||
+      typeof result.latitude !== "number" ||
+      typeof result.longitude !== "number" ||
+      typeof result.timezone !== "string" ||
+      (typeof result.feature_code === "string" && !result.feature_code.startsWith("PPL")) ||
+      !validTimezone(result.timezone)
+    ) {
+      return [];
+    }
+    const regionParts = [result.admin1, result.country].filter(
+      (part, index, parts): part is string => !!part && parts.indexOf(part) === index,
+    );
+    const location: WeatherLocation = {
+      name: result.name,
+      region: regionParts.join(", "),
+      latitude: result.latitude,
+      longitude: result.longitude,
+      timezone: result.timezone,
+    };
+    const key = keyFor(location);
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [location];
+  }).slice(0, 6);
+}
 
 type WeatherKind = "clear" | "cloudy" | "fog" | "drizzle" | "rain" | "snow" | "storm";
 
@@ -436,16 +539,242 @@ function WeatherAtmosphere({
   );
 }
 
+function WeatherLocationPicker({
+  location,
+  align,
+  onChange,
+}: {
+  location: WeatherLocation;
+  align: "start" | "end";
+  onChange: (location: WeatherLocation) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<WeatherLocation[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [updateError, setUpdateError] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listId = useId();
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => inputRef.current?.focus());
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        requestAnimationFrame(() => rootRef.current?.querySelector<HTMLButtonElement>("button")?.focus());
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const trimmed = query.trim();
+    if (trimmed.length < 2) {
+      setResults([]);
+      setSearching(false);
+      setSearchError(false);
+      setActiveIndex(0);
+      return;
+    }
+
+    const controller = new AbortController();
+    setResults([]);
+    setSearching(true);
+    setSearchError(false);
+    const timeout = window.setTimeout(async () => {
+      try {
+        const next = await searchLocations(trimmed, controller.signal);
+        setResults(next);
+        setActiveIndex(0);
+      } catch (error) {
+        if ((error as Error).name !== "AbortError") {
+          setResults([]);
+          setSearchError(true);
+        }
+      } finally {
+        if (!controller.signal.aborted) setSearching(false);
+      }
+    }, 250);
+
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [open, query]);
+
+  function close() {
+    setOpen(false);
+    setQuery("");
+    setResults([]);
+    setSearchError(false);
+    requestAnimationFrame(() => rootRef.current?.querySelector<HTMLButtonElement>("button")?.focus());
+  }
+
+  async function choose(next: WeatherLocation) {
+    if (updating) return;
+    setUpdating(true);
+    setUpdateError(false);
+    try {
+      await onChange(next);
+      close();
+    } catch {
+      setUpdateError(true);
+    } finally {
+      setUpdating(false);
+    }
+  }
+
+  function onSearchKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (updating || !results.length) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveIndex((index) => (index + 1) % results.length);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveIndex((index) => (index - 1 + results.length) % results.length);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      void choose(results[activeIndex]);
+    }
+  }
+
+  return (
+    <div className={`weather-location-control weather-location-${align}`} ref={rootRef}>
+      <button
+        className="weather-bar-place weather-location-trigger"
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        title="Change weather city"
+      >
+        <MapPin size={13} />
+        <span>{location.name}</span>
+        <ChevronDown size={12} className={open ? "open" : ""} />
+      </button>
+      {open && (
+        <div className="weather-location-popover" role="dialog" aria-label="Change weather city">
+          <div className="weather-location-search">
+            <Search size={15} aria-hidden="true" />
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setUpdateError(false);
+              }}
+              onKeyDown={onSearchKeyDown}
+              placeholder="Search city or postal code"
+              aria-label="Search city or postal code"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded="true"
+              aria-controls={listId}
+              aria-activedescendant={results.length ? `${listId}-${activeIndex}` : undefined}
+              autoComplete="off"
+              spellCheck={false}
+              disabled={updating}
+            />
+            <button type="button" onClick={close} aria-label="Close city search" disabled={updating}>
+              <X size={14} />
+            </button>
+          </div>
+          {(updating || updateError) && (
+            <p className={`weather-location-update${updateError ? " error" : ""}`} role="status">
+              {updating
+                ? "Updating city and time zone…"
+                : "Couldn’t update the city and time zone. Try again."}
+            </p>
+          )}
+          <div
+            className="weather-location-results"
+            id={listId}
+            role={results.length ? "listbox" : "status"}
+            aria-live="polite"
+          >
+            {query.trim().length < 2 ? (
+              <p>Type at least two characters.</p>
+            ) : searching ? (
+              <p>Finding places…</p>
+            ) : searchError ? (
+              <p>City search is unavailable. Try again.</p>
+            ) : results.length === 0 ? (
+              <p>No matching cities.</p>
+            ) : (
+              results.map((result, index) => (
+                <button
+                  key={keyFor(result)}
+                  id={`${listId}-${index}`}
+                  type="button"
+                  role="option"
+                  aria-selected={index === activeIndex}
+                  className={index === activeIndex ? "active" : ""}
+                  onMouseEnter={() => setActiveIndex(index)}
+                  onFocus={() => setActiveIndex(index)}
+                  onClick={() => void choose(result)}
+                  disabled={updating}
+                >
+                  <strong>{result.name}</strong>
+                  <span>{result.region || result.timezone}</span>
+                </button>
+              ))
+            )}
+          </div>
+          <a
+            className="weather-location-credit"
+            href="https://open-meteo.com/en/docs/geocoding-api"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Locations by Open-Meteo
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function WeatherHome({
-  location = ATLANTA_WEATHER_LOCATION,
+  location: initialLocation,
+  onTimeZoneChange,
   children,
 }: {
   location?: WeatherLocation;
+  onTimeZoneChange?: (timeZone: string) => void;
   children: ReactNode;
 }) {
+  const [location, setLocation] = useState<WeatherLocation>(() => initialLocation ?? readSavedLocation());
   const [snapshot, setSnapshot] = useState<WeatherSnapshot | null>(() => readCache(location));
   const [loading, setLoading] = useState(() => !readCache(location));
   const [unavailable, setUnavailable] = useState(false);
+  const locationKey = keyFor(location);
+
+  async function changeLocation(next: WeatherLocation) {
+    const settings = await api.systemSettingsSet(next.timezone);
+    configureAppTimeZone(settings.resolvedTimeZone);
+    saveLocation(next);
+    const cached = readCache(next);
+    setSnapshot(cached);
+    setLoading(!cached);
+    setUnavailable(false);
+    setLocation(next);
+    onTimeZoneChange?.(settings.resolvedTimeZone);
+  }
 
   async function load(force = false) {
     setLoading(true);
@@ -486,7 +815,7 @@ export function WeatherHome({
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [location]);
+  }, [locationKey]);
 
   if (!snapshot) {
     return (
@@ -499,9 +828,7 @@ export function WeatherHome({
           precipitation={0}
         />
         <header className="weather-bar" aria-live="polite">
-          <span className="weather-bar-place">
-            <MapPin size={14} /> {location.name}
-          </span>
+          <WeatherLocationPicker location={location} align="start" onChange={changeLocation} />
           <span className="weather-bar-status">
             <Cloud size={18} /> {loading ? "Checking weather…" : "Weather unavailable"}
           </span>
@@ -549,9 +876,7 @@ export function WeatherHome({
         <span className="weather-bar-range">
           <b>H</b> {rounded(snapshot.today.high)}° <b>L</b> {rounded(snapshot.today.low)}°
         </span>
-        <span className="weather-bar-place">
-          <MapPin size={13} /> {location.name}
-        </span>
+        <WeatherLocationPicker location={location} align="end" onChange={changeLocation} />
         <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">
           Weather by Open-Meteo
         </a>

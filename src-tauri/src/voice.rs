@@ -26,10 +26,14 @@ pub fn resample_to_16k(samples: &[f32], from_rate: u32) -> Vec<f32> {
 }
 
 pub fn transcribe(model_path: &Path, samples: &[f32], hint: Option<&str>) -> Result<String> {
-    let path = model_path.to_str().ok_or_else(|| anyhow!("bad model path"))?;
+    let path = model_path
+        .to_str()
+        .ok_or_else(|| anyhow!("bad model path"))?;
     let ctx = WhisperContext::new_with_params(path, WhisperContextParameters::default())
         .map_err(|e| anyhow!("whisper load failed: {e:?}"))?;
-    let mut state = ctx.create_state().map_err(|e| anyhow!("whisper state: {e:?}"))?;
+    let mut state = ctx
+        .create_state()
+        .map_err(|e| anyhow!("whisper state: {e:?}"))?;
 
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     params.set_language(Some("en"));

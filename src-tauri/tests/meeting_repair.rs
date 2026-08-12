@@ -15,23 +15,31 @@
 //! them to force a re-transcribe.
 
 use std::path::Path;
-use tauri_app_lib::meeting::asr::{is_echo, Chunker, ChunkerCfg, EngineSpec, Transcriber, is_junk};
+use tauri_app_lib::meeting::asr::{is_echo, is_junk, Chunker, ChunkerCfg, EngineSpec, Transcriber};
 use tauri_app_lib::meeting::diarize::{blob_to_emb, cluster, Embedder, SegEmb};
 
 fn read_wav(path: &str) -> Vec<f32> {
     let mut r = hound::WavReader::open(path).expect("wav");
-    r.samples::<i16>().map(|s| s.unwrap() as f32 / 32768.0).collect()
+    r.samples::<i16>()
+        .map(|s| s.unwrap() as f32 / 32768.0)
+        .collect()
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na * nb) }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na * nb)
+    }
 }
 
 fn rms(w: &[f32]) -> f32 {
-    if w.is_empty() { return 0.0; }
+    if w.is_empty() {
+        return 0.0;
+    }
     (w.iter().map(|s| s * s).sum::<f32>() / w.len() as f32).sqrt()
 }
 
@@ -56,8 +64,13 @@ fn transcribe_wav(wav: &[f32], whisper: &str, cache: &str) -> Vec<Row> {
             })
             .collect();
     }
-    let mut t = Transcriber::new(&EngineSpec::Whisper { model: whisper.into() }, None)
-        .expect("whisper");
+    let mut t = Transcriber::new(
+        &EngineSpec::Whisper {
+            model: whisper.into(),
+        },
+        None,
+    )
+    .expect("whisper");
     let mut chunker = Chunker::new(ChunkerCfg::default());
     let mut segs = Vec::new();
     for block in wav.chunks(16_000 * 10) {
@@ -67,13 +80,19 @@ fn transcribe_wav(wav: &[f32], whisper: &str, cache: &str) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut out = String::new();
     for s in &segs {
-        let Ok(text) = t.transcribe(&s.samples) else { continue };
+        let Ok(text) = t.transcribe(&s.samples) else {
+            continue;
+        };
         if is_junk(&text) {
             continue;
         }
         let text = text.replace(['\t', '\n'], " ");
         out.push_str(&format!("{}\t{}\t{}\n", s.t0_ms, s.t1_ms, text));
-        rows.push(Row { t0: s.t0_ms, t1: s.t1_ms, text });
+        rows.push(Row {
+            t0: s.t0_ms,
+            t1: s.t1_ms,
+            text,
+        });
     }
     std::fs::write(cache, out).expect("cache write");
     rows
@@ -105,16 +124,23 @@ fn speakers() {
     let db = std::env::var("NOTED_DB").expect("NOTED_DB");
     let dir = std::env::var("MEET_DIR").expect("MEET_DIR");
     let out = std::env::var("OUT").expect("OUT");
-    let meeting_id: i64 = std::env::var("MEETING_ID").expect("MEETING_ID").parse().unwrap();
-    let shift: i64 = std::env::var("SHIFT_MS").expect("SHIFT_MS").parse().unwrap();
-    let ref_id: i64 = std::env::var("REF_MEETING_ID").expect("REF_MEETING_ID").parse().unwrap();
+    let meeting_id: i64 = std::env::var("MEETING_ID")
+        .expect("MEETING_ID")
+        .parse()
+        .unwrap();
+    let shift: i64 = std::env::var("SHIFT_MS")
+        .expect("SHIFT_MS")
+        .parse()
+        .unwrap();
+    let ref_id: i64 = std::env::var("REF_MEETING_ID")
+        .expect("REF_MEETING_ID")
+        .parse()
+        .unwrap();
     let ref_dir = std::env::var("REF_MEET_DIR").expect("REF_MEET_DIR");
 
-    let conn = rusqlite::Connection::open_with_flags(
-        &db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .expect("db");
+    let conn =
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("db");
     let mut embedder = Embedder::new(Path::new(&speaker_model)).expect("model");
 
     let them_rows = |id: i64| -> Vec<(i64, i64, String)> {
@@ -170,7 +196,11 @@ fn speakers() {
         let s0 = (((t0 - shift).max(0) * 16) as usize).min(wav.len());
         let s1 = (((t1 - shift).max(0) * 16) as usize).min(wav.len());
         if let Some(e) = embedder.embed(&wav[s0..s1]) {
-            segs.push(SegEmb { seg_id: i as i64, dur_ms: t1 - t0, emb: e });
+            segs.push(SegEmb {
+                seg_id: i as i64,
+                dur_ms: t1 - t0,
+                emb: e,
+            });
         }
     }
     let clusters = cluster(&segs);
@@ -195,7 +225,11 @@ fn speakers() {
         );
         for &i in c.seg_ids.iter().take(5) {
             let (t0, _, text) = &rows[i as usize];
-            println!("   {:>4}s {}", t0 / 1000, text.chars().take(85).collect::<String>());
+            println!(
+                "   {:>4}s {}",
+                t0 / 1000,
+                text.chars().take(85).collect::<String>()
+            );
         }
         map.push_str(&format!(
             "{ci}\t{}\t{}\n",
@@ -204,7 +238,11 @@ fn speakers() {
                 .map(|&i| rows[i as usize].0.to_string())
                 .collect::<Vec<_>>()
                 .join(","),
-            c.centroid.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+            c.centroid
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         ));
     }
     println!("\npairwise cluster sims:");
@@ -217,8 +255,12 @@ fn speakers() {
         }
     }
     std::fs::write(format!("{out}/cluster_rows.tsv"), map).unwrap();
-    let strong_line =
-        strong.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",") + "\n";
+    let strong_line = strong
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+        + "\n";
     std::fs::write(format!("{out}/strong_ref.tsv"), strong_line).unwrap();
 }
 
@@ -236,14 +278,18 @@ fn dump_embs() {
     let db = std::env::var("NOTED_DB").expect("NOTED_DB");
     let dir = std::env::var("MEET_DIR").expect("MEET_DIR");
     let out = std::env::var("OUT").expect("OUT");
-    let meeting_id: i64 = std::env::var("MEETING_ID").expect("MEETING_ID").parse().unwrap();
-    let shift: i64 = std::env::var("SHIFT_MS").expect("SHIFT_MS").parse().unwrap();
+    let meeting_id: i64 = std::env::var("MEETING_ID")
+        .expect("MEETING_ID")
+        .parse()
+        .unwrap();
+    let shift: i64 = std::env::var("SHIFT_MS")
+        .expect("SHIFT_MS")
+        .parse()
+        .unwrap();
 
-    let conn = rusqlite::Connection::open_with_flags(
-        &db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .expect("db");
+    let conn =
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("db");
     let mut embedder = Embedder::new(Path::new(&speaker_model)).expect("model");
     let wav = read_wav(&format!("{dir}/them.wav"));
     let rows: Vec<(i64, i64)> = conn
@@ -263,7 +309,10 @@ fn dump_embs() {
         if let Some(e) = embedder.embed(&wav[s0..s1]) {
             tsv.push_str(&format!(
                 "{t0}\t{t1}\t{}\n",
-                e.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+                e.iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             ));
         }
     }
@@ -281,11 +330,18 @@ fn dump_embs() {
         let e = blob_to_emb(blob);
         profs.push_str(&format!(
             "{name}\t{}\n",
-            e.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+            e.iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         ));
     }
     std::fs::write(format!("{out}/profiles.tsv"), profs).unwrap();
-    println!("dumped {} row embeddings, {} profiles", rows.len(), named.len());
+    println!(
+        "dumped {} row embeddings, {} profiles",
+        rows.len(),
+        named.len()
+    );
 }
 
 #[test]
@@ -296,7 +352,10 @@ fn plan() {
     let db = std::env::var("NOTED_DB").expect("NOTED_DB");
     let dir = std::env::var("MEET_DIR").expect("MEET_DIR");
     let out = std::env::var("OUT").expect("OUT");
-    let meeting_id: i64 = std::env::var("MEETING_ID").expect("MEETING_ID").parse().unwrap();
+    let meeting_id: i64 = std::env::var("MEETING_ID")
+        .expect("MEETING_ID")
+        .parse()
+        .unwrap();
 
     let me_wav = read_wav(&format!("{dir}/me.wav"));
     let them_wav = read_wav(&format!("{dir}/them.wav"));
@@ -308,16 +367,18 @@ fn plan() {
 
     let me_rows = transcribe_wav(&me_wav, &whisper, &format!("{out}/me_raw.tsv"));
     let them_raw = transcribe_wav(&them_wav, &whisper, &format!("{out}/them_raw.tsv"));
-    println!("rebuilt: me {} rows, them {} rows (wav time)", me_rows.len(), them_raw.len());
+    println!(
+        "rebuilt: me {} rows, them {} rows (wav time)",
+        me_rows.len(),
+        them_raw.len()
+    );
 
     // ---- shift: them.wav starts late (tap gap, wav unpadded). Anchor on the
     // surviving DB them-rows: for each, find a rebuilt row whose text contains
     // it and take the median t0 delta.
-    let conn = rusqlite::Connection::open_with_flags(
-        &db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .expect("db");
+    let conn =
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("db");
     let mut stmt = conn
         .prepare(
             "SELECT t0_ms, text FROM meeting_segments
@@ -351,13 +412,25 @@ fn plan() {
         }
     }
     deltas.sort();
-    assert!(!deltas.is_empty(), "no text anchors matched — cannot derive shift");
+    assert!(
+        !deltas.is_empty(),
+        "no text anchors matched — cannot derive shift"
+    );
     let shift = deltas[deltas.len() / 2];
-    println!("them shift: {}ms from {} anchors (spread {:?}..{:?})",
-        shift, deltas.len(), deltas.first(), deltas.last());
+    println!(
+        "them shift: {}ms from {} anchors (spread {:?}..{:?})",
+        shift,
+        deltas.len(),
+        deltas.first(),
+        deltas.last()
+    );
     let them_rows: Vec<Row> = them_raw
         .iter()
-        .map(|r| Row { t0: r.t0 + shift, t1: r.t1 + shift, text: r.text.clone() })
+        .map(|r| Row {
+            t0: r.t0 + shift,
+            t1: r.t1 + shift,
+            text: r.text.clone(),
+        })
         .collect();
 
     // ---- profiles
@@ -402,7 +475,12 @@ fn plan() {
         kept_embs.push(embedder.embed(&them_wav[w0..w1]));
         kept.push(r.clone());
     }
-    println!("them: {} kept, {} dropped as user's echo ({}s)", kept.len(), own_n, own_ms / 1000);
+    println!(
+        "them: {} kept, {} dropped as user's echo ({}s)",
+        kept.len(),
+        own_n,
+        own_ms / 1000
+    );
 
     // ---- cluster the kept them rows into speakers.
     let segs: Vec<SegEmb> = kept_embs
@@ -490,7 +568,11 @@ fn plan() {
     for (label, centroid, n) in &speaker_rows {
         spk.push_str(&format!(
             "{label}\t{n}\t{}\n",
-            centroid.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",")
+            centroid
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         ));
     }
     std::fs::write(format!("{out}/speakers.tsv"), spk).unwrap();
@@ -508,7 +590,10 @@ fn rediarize() {
     let model = std::env::var("SPEAKER_MODEL").expect("SPEAKER_MODEL");
     let db = std::env::var("NOTED_DB").expect("NOTED_DB");
     let dir = std::env::var("MEET_DIR").expect("MEET_DIR");
-    let id: i64 = std::env::var("MEETING_ID").expect("MEETING_ID").parse().unwrap();
+    let id: i64 = std::env::var("MEETING_ID")
+        .expect("MEETING_ID")
+        .parse()
+        .unwrap();
     let conn = rusqlite::Connection::open(&db).expect("db");
     let n = tauri_app_lib::meeting::asr::rediarize_from_wav(
         &conn,

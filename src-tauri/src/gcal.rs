@@ -134,6 +134,25 @@ pub fn get() -> GcalConfig {
     cell().read().unwrap().clone()
 }
 
+fn configured_account_emails_from(config: &GcalConfig) -> Vec<String> {
+    let mut emails = config
+        .accounts
+        .iter()
+        .map(|account| account.email.trim().to_lowercase())
+        .filter(|email| !email.is_empty())
+        .collect::<Vec<_>>();
+    emails.sort();
+    emails.dedup();
+    emails
+}
+
+/// Exact identities remembered in Google Calendar config. An expired session
+/// does not make a participant external; removing the account is the explicit
+/// boundary for forgetting that identity.
+pub fn configured_account_emails() -> Vec<String> {
+    configured_account_emails_from(&cell().read().unwrap())
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -144,7 +163,14 @@ fn now_unix() -> i64 {
 // ── Keychain (via the macOS `security` CLI) ─────────────────────────────────
 fn keychain_read(account: &str) -> Option<String> {
     let out = Command::new("security")
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            account,
+            "-w",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -160,7 +186,16 @@ fn keychain_read(account: &str) -> Option<String> {
 
 fn keychain_write(account: &str, value: &str) -> Result<()> {
     let status = Command::new("security")
-        .args(["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", account, "-w", value])
+        .args([
+            "add-generic-password",
+            "-U",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            account,
+            "-w",
+            value,
+        ])
         .status()?;
     if status.success() {
         Ok(())
@@ -171,7 +206,13 @@ fn keychain_write(account: &str, value: &str) -> Result<()> {
 
 fn keychain_delete(account: &str) {
     let _ = Command::new("security")
-        .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account])
+        .args([
+            "delete-generic-password",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            account,
+        ])
         .status();
 }
 
@@ -208,7 +249,10 @@ pub fn init(dir: &Path) {
                 .unwrap_or_else(|| "google-account".to_string());
             if keychain_write(&refresh_key(&email), &tok).is_ok() {
                 keychain_delete(ACCT_REFRESH);
-                c.accounts.push(GcalAccount { email, ..Default::default() });
+                c.accounts.push(GcalAccount {
+                    email,
+                    ..Default::default()
+                });
                 migrated = true;
             }
         }
@@ -266,10 +310,12 @@ fn clear_account_session(dir: &Path, email: &str) {
 /// Remove an account entirely: token out of the Keychain, entry out of the
 /// config. The OAuth client (id + secret) stays so re-adding is one click.
 pub fn remove_account(dir: &Path, email: &str) -> Result<Value> {
-    keychain_delete(&refresh_key(email));
+    let email = email.trim().to_lowercase();
+    keychain_delete(&refresh_key(&email));
     {
         let mut c = cell().write().unwrap();
-        c.accounts.retain(|a| a.email != email);
+        c.accounts
+            .retain(|a| a.email.trim().to_lowercase() != email);
         c.account_email = c.accounts.first().map(|a| a.email.clone());
     }
     write_config_file(dir);
@@ -279,7 +325,12 @@ pub fn remove_account(dir: &Path, email: &str) -> Result<Value> {
 /// Connection status for Settings + the Calendar view — no network calls.
 pub fn auth_status() -> Value {
     let c = get();
-    let connected = |a: &GcalAccount| a.refresh_token.as_deref().map(|r| !r.is_empty()).unwrap_or(false);
+    let connected = |a: &GcalAccount| {
+        a.refresh_token
+            .as_deref()
+            .map(|r| !r.is_empty())
+            .unwrap_or(false)
+    };
     json!({
         "connected": c.accounts.iter().any(connected),
         "has_client": !c.client_id.is_empty()
@@ -347,7 +398,9 @@ pub async fn clear_day(dir: &Path, event_date: &str) -> Result<u32> {
 
 // ── OAuth (installed-app loopback + PKCE S256) ──────────────────────────────
 fn http_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder().timeout(Duration::from_secs(20)).build()?)
+    Ok(reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()?)
 }
 
 fn b64url(b: &[u8]) -> String {
@@ -355,7 +408,11 @@ fn b64url(b: &[u8]) -> String {
 }
 
 fn rand_token() -> String {
-    format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>())
+    format!(
+        "{:016x}{:016x}",
+        rand::random::<u64>(),
+        rand::random::<u64>()
+    )
 }
 
 /// Percent-encode a query value (everything outside the unreserved set).
@@ -363,7 +420,9 @@ fn enc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -442,7 +501,8 @@ fn open_browser(url: &str) {
 
 fn html_resp(body: &'static str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     let header =
-        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]).unwrap();
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+            .unwrap();
     tiny_http::Response::from_string(body).with_header(header)
 }
 
@@ -483,7 +543,10 @@ fn wait_for_code(server: tiny_http::Server, want_state: &str) -> Result<String> 
             let _ = req.respond(html_resp(PAGE_ERR));
             return Err(anyhow!("authorization denied ({err})"));
         }
-        let state_ok = params.get("state").map(|s| s == want_state).unwrap_or(false);
+        let state_ok = params
+            .get("state")
+            .map(|s| s == want_state)
+            .unwrap_or(false);
         match (state_ok, params.get("code")) {
             (true, Some(code)) => {
                 let _ = req.respond(html_resp(PAGE_OK));
@@ -573,7 +636,9 @@ pub async fn begin_auth(dir: &Path) -> Result<Value> {
 
     open_browser(&build_auth_url(&client_id, &redirect, &challenge, &state));
 
-    let code = rx.await.map_err(|_| anyhow!("auth listener stopped unexpectedly"))??;
+    let code = rx
+        .await
+        .map_err(|_| anyhow!("auth listener stopped unexpectedly"))??;
     let tokens = exchange_code(&client_id, &client_secret, &code, &verifier, &redirect).await?;
     let refresh = tokens.refresh_token.ok_or_else(|| {
         anyhow!("Google didn't return a refresh token — revoke noted's access in your Google account, then reconnect")
@@ -685,7 +750,10 @@ async fn refresh_access(dir: &Path, email: &str) -> Result<String> {
         (
             c.client_id.clone(),
             c.client_secret.clone().unwrap_or_default(),
-            c.accounts.iter().find(|a| a.email == email).and_then(|a| a.refresh_token.clone()),
+            c.accounts
+                .iter()
+                .find(|a| a.email == email)
+                .and_then(|a| a.refresh_token.clone()),
         )
     };
     let refresh_token = refresh_token
@@ -710,7 +778,9 @@ async fn refresh_access(dir: &Path, email: &str) -> Result<String> {
                 "{email} disconnected — please reconnect it (the authorization expired)."
             ));
         }
-        return Err(anyhow!("token refresh failed for {email} ({status}): {text}"));
+        return Err(anyhow!(
+            "token refresh failed for {email} ({status}): {text}"
+        ));
     }
     let t: TokenResponse = resp.json().await?;
     let access = t.access_token.clone();
@@ -777,8 +847,11 @@ async fn fetch_calendars(client: &reqwest::Client, token: &str) -> Result<Vec<Gc
 /// Refresh a calendar list from Google while keeping the user's hide choices:
 /// names/colors/membership come from `fresh`, `enabled=false` carries over by id.
 fn merge_calendars(old: Vec<GcalCalendar>, fresh: Vec<GcalCalendar>) -> Vec<GcalCalendar> {
-    let hidden: HashSet<String> =
-        old.iter().filter(|c| !c.enabled).map(|c| c.id.clone()).collect();
+    let hidden: HashSet<String> = old
+        .iter()
+        .filter(|c| !c.enabled)
+        .map(|c| c.id.clone())
+        .collect();
     fresh
         .into_iter()
         .map(|mut c| {
@@ -822,7 +895,12 @@ async fn ensure_calendars(dir: &Path, email: &str) -> Result<Vec<GcalCalendar>> 
 }
 
 /// Show/hide one calendar in the Calendar view. Persisted, survives refreshes.
-pub fn set_calendar_enabled(dir: &Path, email: &str, calendar_id: &str, enabled: bool) -> Result<Value> {
+pub fn set_calendar_enabled(
+    dir: &Path,
+    email: &str,
+    calendar_id: &str,
+    enabled: bool,
+) -> Result<Value> {
     {
         let mut c = cell().write().unwrap();
         let a = c
@@ -853,8 +931,12 @@ pub async fn refresh_calendars(dir: &Path) -> Result<Value> {
         .collect();
     let client = http_client()?;
     for email in emails {
-        let Ok(token) = access_token_for(dir, &email).await else { continue };
-        let Ok(fresh) = fetch_calendars(&client, &token).await else { continue };
+        let Ok(token) = access_token_for(dir, &email).await else {
+            continue;
+        };
+        let Ok(fresh) = fetch_calendars(&client, &token).await else {
+            continue;
+        };
         let mut c = cell().write().unwrap();
         if let Some(a) = c.accounts.iter_mut().find(|a| a.email == email) {
             a.calendars = merge_calendars(std::mem::take(&mut a.calendars), fresh);
@@ -926,7 +1008,9 @@ async fn ensure_calendar(dir: &Path) -> Result<String> {
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("couldn't create the noted calendar ({status}): {text}"));
+        return Err(anyhow!(
+            "couldn't create the noted calendar ({status}): {text}"
+        ));
     }
     let v: Value = resp.json().await?;
     let id = v
@@ -1028,7 +1112,13 @@ fn block_end_minutes(smin: i64, block: &Value) -> Result<i64> {
 
 /// One schedule block → a Google Calendar event body with our deterministic id
 /// and the `notedDate` tag used for per-day stale cleanup.
-fn build_event(event_date: &str, task: &str, start: &str, block: &Value, id: &str) -> Result<Value> {
+fn build_event(
+    event_date: &str,
+    task: &str,
+    start: &str,
+    block: &Value,
+    id: &str,
+) -> Result<Value> {
     let smin = parse_hhmm(start)?;
     let emin = block_end_minutes(smin, block)?;
     // No `source` field: Google requires source.url to be a valid URL and
@@ -1062,7 +1152,11 @@ async fn upsert_event(
     }
     if resp.status().as_u16() == 409 {
         let resp = client
-            .put(format!("{CAL_BASE}/calendars/{}/events/{}", enc(cal), enc(id)))
+            .put(format!(
+                "{CAL_BASE}/calendars/{}/events/{}",
+                enc(cal),
+                enc(id)
+            ))
             .bearer_auth(token)
             .json(body)
             .send()
@@ -1115,7 +1209,11 @@ async fn list_day_event_ids(
 
 async fn delete_event(client: &reqwest::Client, token: &str, cal: &str, id: &str) -> Result<()> {
     let resp = client
-        .delete(format!("{CAL_BASE}/calendars/{}/events/{}", enc(cal), enc(id)))
+        .delete(format!(
+            "{CAL_BASE}/calendars/{}/events/{}",
+            enc(cal),
+            enc(id)
+        ))
         .bearer_auth(token)
         .send()
         .await?;
@@ -1161,7 +1259,11 @@ pub async fn sync(dir: &Path, event_date: &str, blocks: Vec<Value>) -> Result<Sy
 
     let mut fresh_ids: Vec<String> = Vec::new();
     for block in blocks.iter() {
-        let task = block.get("task").and_then(|t| t.as_str()).unwrap_or("").trim();
+        let task = block
+            .get("task")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .trim();
         let start = block.get("start").and_then(|s| s.as_str());
         match (task.is_empty(), start) {
             (false, Some(start)) => {
@@ -1217,13 +1319,15 @@ pub async fn sync(dir: &Path, event_date: &str, blocks: Vec<Value>) -> Result<Sy
 // ── Range read (Calendar view) ──────────────────────────────────────────────
 /// Domains that mean "this URL joins a meeting" when found in an event's
 /// location or description (where Zoom/Teams invites usually land).
-const MEET_DOMAINS: [&str; 6] = [
+const MEET_DOMAINS: [&str; 8] = [
     "zoom.us",
     "meet.google.com",
     "teams.microsoft.com",
     "webex.com",
     "whereby.com",
     "meet.jit.si",
+    "discord.com",
+    "discord.gg",
 ];
 
 /// First conferencing URL inside free text (which may be HTML — Google event
@@ -1238,7 +1342,15 @@ fn find_meeting_url(text: &str) -> Option<String> {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             continue;
         }
-        if MEET_DOMAINS.iter().any(|d| url.contains(d)) {
+        let recognized_host = reqwest::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_lowercase))
+            .is_some_and(|host| {
+                MEET_DOMAINS
+                    .iter()
+                    .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+            });
+        if recognized_host {
             return Some(url.to_string());
         }
     }
@@ -1271,7 +1383,11 @@ fn conference_link(it: &Value) -> Option<String> {
         }
     }
     for field in ["location", "description"] {
-        if let Some(found) = it.get(field).and_then(|s| s.as_str()).and_then(find_meeting_url) {
+        if let Some(found) = it
+            .get(field)
+            .and_then(|s| s.as_str())
+            .and_then(find_meeting_url)
+        {
             return Some(found);
         }
     }
@@ -1293,11 +1409,52 @@ fn map_event(it: &Value, cal: &GcalCalendar, account: &str) -> Option<Value> {
         .filter(|s| !s.is_empty())
         .unwrap_or("(untitled)");
     // Guests, minus rooms/resources: display name (or email) + RSVP status.
-    // Capped for IPC — attendee_count keeps the real total.
+    // The visible list stays capped for IPC, but routing gets a separate,
+    // uncapped identity list so the thirteenth attendee cannot change where a
+    // meeting is filed.
+    let attendee_emails: Vec<String> = it
+        .get("attendees")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|a| !a.get("resource").and_then(|r| r.as_bool()).unwrap_or(false))
+                .filter_map(|a| a.get("email").and_then(|e| e.as_str()))
+                .map(|email| email.trim().to_lowercase())
+                .filter(|email| !email.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let organizer_email = it
+        .get("organizer")
+        .and_then(|o| o.get("email"))
+        .and_then(|e| e.as_str())
+        .map(|email| email.trim().to_lowercase())
+        .filter(|email| !email.is_empty());
+    let creator_email = it
+        .get("creator")
+        .and_then(|o| o.get("email"))
+        .and_then(|e| e.as_str())
+        .map(|email| email.trim().to_lowercase())
+        .filter(|email| !email.is_empty());
+    let mut associated_emails = Vec::new();
+    let mut seen_emails = HashSet::new();
+    for email in std::iter::once(account.trim().to_lowercase())
+        .chain(organizer_email.iter().cloned())
+        .chain(creator_email.iter().cloned())
+        .chain(attendee_emails.iter().cloned())
+    {
+        if !email.is_empty() && seen_emails.insert(email.clone()) {
+            associated_emails.push(email);
+        }
+    }
     let attendee_count = it
         .get("attendees")
         .and_then(|a| a.as_array())
-        .map(|a| a.iter().filter(|x| !x.get("resource").and_then(|r| r.as_bool()).unwrap_or(false)).count())
+        .map(|a| {
+            a.iter()
+                .filter(|x| !x.get("resource").and_then(|r| r.as_bool()).unwrap_or(false))
+                .count()
+        })
         .unwrap_or(0);
     let attendees: Vec<Value> = it
         .get("attendees")
@@ -1343,10 +1500,19 @@ fn map_event(it: &Value, cal: &GcalCalendar, account: &str) -> Option<Value> {
         "organizer": it.get("organizer").and_then(|o| {
             o.get("displayName").or_else(|| o.get("email")).and_then(|s| s.as_str())
         }),
+        "organizer_email": organizer_email,
+        "creator_email": creator_email,
+        "attendee_emails": attendee_emails,
+        "associated_emails": associated_emails,
+        "ical_uid": it.get("iCalUID").and_then(|s| s.as_str()),
         "attendees": attendees,
         "attendee_count": attendee_count,
     });
-    match it.get("start").and_then(|s| s.get("dateTime")).and_then(|s| s.as_str()) {
+    match it
+        .get("start")
+        .and_then(|s| s.get("dateTime"))
+        .and_then(|s| s.as_str())
+    {
         Some(sdt) => {
             let time_zone = crate::system_settings::time_zone();
             let s = chrono::DateTime::parse_from_rfc3339(sdt)
@@ -1373,7 +1539,10 @@ fn map_event(it: &Value, cal: &GcalCalendar, account: &str) -> Option<Value> {
             ev["all_day"] = json!(false);
         }
         None => {
-            let date = it.get("start").and_then(|s| s.get("date")).and_then(|s| s.as_str())?;
+            let date = it
+                .get("start")
+                .and_then(|s| s.get("date"))
+                .and_then(|s| s.as_str())?;
             let end_date = it
                 .get("end")
                 .and_then(|e| e.get("date"))
@@ -1405,12 +1574,20 @@ async fn fetch_calendar_events(
     );
     let resp = client.get(url).bearer_auth(token).send().await?;
     if !resp.status().is_success() {
-        return Err(anyhow!("events for {} failed ({})", cal.name, resp.status()));
+        return Err(anyhow!(
+            "events for {} failed ({})",
+            cal.name,
+            resp.status()
+        ));
     }
     let v: Value = resp.json().await?;
     Ok(v.get("items")
         .and_then(|i| i.as_array())
-        .map(|arr| arr.iter().filter_map(|it| map_event(it, cal, account)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|it| map_event(it, cal, account))
+                .collect()
+        })
         .unwrap_or_default())
 }
 
@@ -1442,7 +1619,9 @@ pub async fn events_range(dir: &Path, start_date: &str, end_date: &str) -> Resul
     let mut set = tokio::task::JoinSet::new();
     for email in emails {
         // Tokens refresh serially (once per account); event reads fan out.
-        let Ok(token) = access_token_for(dir, &email).await else { continue };
+        let Ok(token) = access_token_for(dir, &email).await else {
+            continue;
+        };
         let cals = ensure_calendars(dir, &email).await.unwrap_or_default();
         for cal in cals.into_iter().filter(|c| c.enabled) {
             let (client, token, email) = (client.clone(), token.clone(), email.clone());
@@ -1463,7 +1642,10 @@ pub async fn events_range(dir: &Path, start_date: &str, end_date: &str) -> Resul
     events.sort_by(|a, b| {
         let key = |v: &Value| {
             (
-                v.get("date").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                v.get("date")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 v.get("start_min").and_then(|m| m.as_i64()).unwrap_or(-1),
             )
         };
@@ -1481,12 +1663,16 @@ fn harvest_contacts(dir: &Path, events: &[Value]) {
     {
         let mut c = cell().write().unwrap();
         for ev in events {
-            let Some(atts) = ev.get("attendees").and_then(|a| a.as_array()) else { continue };
+            let Some(atts) = ev.get("attendees").and_then(|a| a.as_array()) else {
+                continue;
+            };
             for a in atts {
                 if a.get("self").and_then(|s| s.as_bool()).unwrap_or(false) {
                     continue; // no point autocompleting yourself
                 }
-                let Some(email) = a.get("email").and_then(|e| e.as_str()) else { continue };
+                let Some(email) = a.get("email").and_then(|e| e.as_str()) else {
+                    continue;
+                };
                 let email = email.trim().to_lowercase();
                 if email.is_empty() || !email.contains('@') {
                     continue;
@@ -1634,12 +1820,27 @@ pub async fn create_event(
 ) -> Result<Value> {
     let token = access_token_for(dir, account).await?;
     let meet = if add_meet { Some(true) } else { None };
-    let mut body =
-        user_event_body(title, date, start, end, end_date, location, description, meet, false)?;
-    let guests: Vec<&str> =
-        guests.iter().map(|g| g.trim()).filter(|g| g.contains('@')).collect();
+    let mut body = user_event_body(
+        title,
+        date,
+        start,
+        end,
+        end_date,
+        location,
+        description,
+        meet,
+        false,
+    )?;
+    let guests: Vec<&str> = guests
+        .iter()
+        .map(|g| g.trim())
+        .filter(|g| g.contains('@'))
+        .collect();
     if !guests.is_empty() {
-        body["attendees"] = json!(guests.iter().map(|g| json!({ "email": g })).collect::<Vec<_>>());
+        body["attendees"] = json!(guests
+            .iter()
+            .map(|g| json!({ "email": g }))
+            .collect::<Vec<_>>());
     }
     // conferenceDataVersion=1 is required for Meet creation (harmless without);
     // sendUpdates emails the invite only when there are guests to invite.
@@ -1656,7 +1857,10 @@ pub async fn create_event(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("create failed ({status}): {}", api_error_detail(&text)));
+        return Err(anyhow!(
+            "create failed ({status}): {}",
+            api_error_detail(&text)
+        ));
     }
     let v: Value = resp.json().await?;
     Ok(json!({ "id": v.get("id").cloned().unwrap_or(Value::Null) }))
@@ -1699,11 +1903,24 @@ pub async fn update_event(
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("move failed ({status}): {}", api_error_detail(&text)));
+            return Err(anyhow!(
+                "move failed ({status}): {}",
+                api_error_detail(&text)
+            ));
         }
         cal = dest.to_string();
     }
-    let body = user_event_body(title, date, start, end, end_date, location, description, meet, true)?;
+    let body = user_event_body(
+        title,
+        date,
+        start,
+        end,
+        end_date,
+        location,
+        description,
+        meet,
+        true,
+    )?;
     let resp = client
         .patch(format!(
             "{CAL_BASE}/calendars/{}/events/{}?conferenceDataVersion=1",
@@ -1717,13 +1934,21 @@ pub async fn update_event(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(anyhow!("update failed ({status}): {}", api_error_detail(&text)));
+        return Err(anyhow!(
+            "update failed ({status}): {}",
+            api_error_detail(&text)
+        ));
     }
     Ok(())
 }
 
 /// Delete an event from any connected account's calendar (already-gone is fine).
-pub async fn remove_event(dir: &Path, account: &str, calendar_id: &str, event_id: &str) -> Result<()> {
+pub async fn remove_event(
+    dir: &Path,
+    account: &str,
+    calendar_id: &str,
+    event_id: &str,
+) -> Result<()> {
     let token = access_token_for(dir, account).await?;
     delete_event(&http_client()?, &token, calendar_id, event_id).await
 }
@@ -1754,7 +1979,8 @@ fn is_declined(it: &Value) -> bool {
 /// connected account's enabled calendars, hides events the user declined, and
 /// skips noted's own pushed calendar. All-day events come back with
 /// `start: null, all_day: true`.
-/// Each item: `{ task, start: "HH:MM"|null, end: "HH:MM"|null, all_day, calendar }`.
+/// Each item also carries stable event/account identity and its join link so
+/// Today can resolve a schedule row without persisting stale URL metadata.
 pub async fn list_events(dir: &Path, event_date: &str) -> Result<Vec<Value>> {
     // Day window in the configured wall clock — matches stored/displayed blocks.
     let time_min = rfc3339_from_minutes(event_date, 0)?;
@@ -1792,7 +2018,11 @@ pub async fn list_events(dir: &Path, event_date: &str) -> Result<Vec<Value>> {
             let resp = client.get(url).bearer_auth(&token).send().await?;
             // Skip calendars we can't read rather than failing the whole pull.
             if !resp.status().is_success() {
-                eprintln!("[noted] gcal events for {} failed ({})", cal.name, resp.status());
+                eprintln!(
+                    "[noted] gcal events for {} failed ({})",
+                    cal.name,
+                    resp.status()
+                );
                 continue;
             }
             let v: Value = resp.json().await?;
@@ -1803,7 +2033,11 @@ pub async fn list_events(dir: &Path, event_date: &str) -> Result<Vec<Value>> {
                 if is_declined(it) {
                     continue;
                 }
-                let task = it.get("summary").and_then(|s| s.as_str()).unwrap_or("(busy)").trim();
+                let task = it
+                    .get("summary")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("(busy)")
+                    .trim();
                 // Timed events carry start.dateTime; all-day events carry start.date.
                 let (start_hhmm, all_day) = match it
                     .get("start")
@@ -1819,11 +2053,16 @@ pub async fn list_events(dir: &Path, event_date: &str) -> Result<Vec<Value>> {
                     .and_then(|s| s.as_str())
                     .and_then(hhmm_from_rfc3339);
                 events.push(json!({
+                    "id": it.get("id").and_then(|v| v.as_str()).unwrap_or_default(),
                     "task": task,
                     "start": start_hhmm,
                     "end": end_hhmm,
                     "all_day": all_day,
                     "calendar": cal.name,
+                    "calendar_id": cal.id,
+                    "account": email,
+                    "meet_link": conference_link(it),
+                    "html_link": it.get("htmlLink").and_then(|v| v.as_str()),
                 }));
             }
         }
@@ -1842,6 +2081,30 @@ pub async fn list_events(dir: &Path, event_date: &str) -> Result<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_accounts_remain_owner_identities_without_live_tokens() {
+        let account = |email: &str, refresh_token: Option<&str>| GcalAccount {
+            email: email.into(),
+            calendars: Vec::new(),
+            refresh_token: refresh_token.map(str::to_string),
+            access_token: None,
+            access_expires_at: None,
+        };
+        let config = GcalConfig {
+            accounts: vec![
+                account(" Edison@HeyBorrow.com ", None),
+                account("personal@gmail.com", Some("token")),
+                account("edison@heyborrow.com", Some("new-token")),
+            ],
+            ..GcalConfig::default()
+        };
+
+        assert_eq!(
+            configured_account_emails_from(&config),
+            vec!["edison@heyborrow.com", "personal@gmail.com"]
+        );
+    }
 
     #[test]
     fn event_id_is_deterministic_and_valid() {
@@ -1892,17 +2155,32 @@ mod tests {
     fn build_event_defaults_end_to_one_hour() {
         let block = json!({ "task": "gym", "start": "09:00" });
         let ev = build_event("2026-06-04", "gym", "09:00", &block, "notedabc").unwrap();
-        assert!(ev["start"]["dateTime"].as_str().unwrap().starts_with("2026-06-04T09:00:00"));
-        assert!(ev["end"]["dateTime"].as_str().unwrap().starts_with("2026-06-04T10:00:00"));
-        assert_eq!(ev["extendedProperties"]["private"]["notedDate"], "2026-06-04");
+        assert!(ev["start"]["dateTime"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026-06-04T09:00:00"));
+        assert!(ev["end"]["dateTime"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026-06-04T10:00:00"));
+        assert_eq!(
+            ev["extendedProperties"]["private"]["notedDate"],
+            "2026-06-04"
+        );
     }
 
     #[test]
     fn build_event_crosses_midnight_when_end_before_start() {
         let block = json!({ "task": "sleep", "start": "23:00", "end": "06:00" });
         let ev = build_event("2026-06-04", "sleep", "23:00", &block, "notedxyz").unwrap();
-        assert!(ev["start"]["dateTime"].as_str().unwrap().starts_with("2026-06-04T23:00:00"));
-        assert!(ev["end"]["dateTime"].as_str().unwrap().starts_with("2026-06-05T06:00:00"));
+        assert!(ev["start"]["dateTime"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026-06-04T23:00:00"));
+        assert!(ev["end"]["dateTime"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026-06-05T06:00:00"));
     }
 
     #[test]
@@ -1932,9 +2210,15 @@ mod tests {
     #[test]
     fn hhmm_from_rfc3339_converts_to_eastern() {
         // 13:30 UTC in June → 09:30 EDT
-        assert_eq!(hhmm_from_rfc3339("2026-06-05T13:30:00Z").as_deref(), Some("09:30"));
-        // Already Eastern → passes through unchanged.
-        assert_eq!(hhmm_from_rfc3339("2026-06-05T09:30:00-04:00").as_deref(), Some("09:30"));
+        assert_eq!(
+            hhmm_from_rfc3339("2026-06-05T13:30:00Z").as_deref(),
+            Some("09:30")
+        );
+        // Already in the configured zone → passes through unchanged in the default test setup.
+        assert_eq!(
+            hhmm_from_rfc3339("2026-06-05T09:30:00-04:00").as_deref(),
+            Some("09:30")
+        );
         assert_eq!(hhmm_from_rfc3339("garbage"), None);
     }
 
@@ -1957,7 +2241,10 @@ mod tests {
         // Fresh list: "gone" was deleted upstream, "new" appeared, colors refresh.
         let merged = merge_calendars(old, vec![cal("work"), cal("home"), cal("new")]);
         let by_id = |id: &str| merged.iter().find(|c| c.id == id);
-        assert!(!by_id("work").unwrap().enabled, "hide choice must survive refresh");
+        assert!(
+            !by_id("work").unwrap().enabled,
+            "hide choice must survive refresh"
+        );
         assert!(by_id("home").unwrap().enabled);
         assert!(by_id("new").unwrap().enabled, "new calendars start visible");
         assert!(by_id("gone").is_none(), "deleted calendars drop out");
@@ -2011,15 +2298,30 @@ mod tests {
     #[test]
     fn resolve_sync_account_prefers_choice_then_first() {
         let accounts = vec![
-            GcalAccount { email: "a@x.com".into(), ..Default::default() },
-            GcalAccount { email: "b@y.com".into(), ..Default::default() },
+            GcalAccount {
+                email: "a@x.com".into(),
+                ..Default::default()
+            },
+            GcalAccount {
+                email: "b@y.com".into(),
+                ..Default::default()
+            },
         ];
         // No preference → first account.
-        assert_eq!(resolve_sync_account(&accounts, None).as_deref(), Some("a@x.com"));
+        assert_eq!(
+            resolve_sync_account(&accounts, None).as_deref(),
+            Some("a@x.com")
+        );
         // Explicit choice wins.
-        assert_eq!(resolve_sync_account(&accounts, Some("b@y.com")).as_deref(), Some("b@y.com"));
+        assert_eq!(
+            resolve_sync_account(&accounts, Some("b@y.com")).as_deref(),
+            Some("b@y.com")
+        );
         // A removed account's stale preference falls back to first.
-        assert_eq!(resolve_sync_account(&accounts, Some("gone@z.com")).as_deref(), Some("a@x.com"));
+        assert_eq!(
+            resolve_sync_account(&accounts, Some("gone@z.com")).as_deref(),
+            Some("a@x.com")
+        );
         assert_eq!(resolve_sync_account(&[], None), None);
     }
 
@@ -2027,19 +2329,42 @@ mod tests {
     fn conference_link_prefers_hangout_then_conference_then_text() {
         // hangoutLink wins outright.
         let ev = json!({ "hangoutLink": "https://meet.google.com/abc-defg-hij" });
-        assert_eq!(conference_link(&ev).as_deref(), Some("https://meet.google.com/abc-defg-hij"));
+        assert_eq!(
+            conference_link(&ev).as_deref(),
+            Some("https://meet.google.com/abc-defg-hij")
+        );
         // conferenceData video entry point.
         let ev = json!({ "conferenceData": { "entryPoints": [
             { "entryPointType": "phone", "uri": "tel:+1-555-0100" },
             { "entryPointType": "video", "uri": "https://meet.google.com/xyz" },
         ]}});
-        assert_eq!(conference_link(&ev).as_deref(), Some("https://meet.google.com/xyz"));
+        assert_eq!(
+            conference_link(&ev).as_deref(),
+            Some("https://meet.google.com/xyz")
+        );
         // Zoom link parked in the location.
         let ev = json!({ "location": "https://company.zoom.us/j/123?pwd=x" });
-        assert_eq!(conference_link(&ev).as_deref(), Some("https://company.zoom.us/j/123?pwd=x"));
+        assert_eq!(
+            conference_link(&ev).as_deref(),
+            Some("https://company.zoom.us/j/123?pwd=x")
+        );
         // Zoom link inside an HTML description href.
         let ev = json!({ "description": "Agenda…<a href=\"https://zoom.us/j/9\">Join</a>" });
         assert_eq!(conference_link(&ev).as_deref(), Some("https://zoom.us/j/9"));
+        // Discord calls are meetings too, whether the invite uses the full or short host.
+        let ev = json!({ "location": "https://discord.com/channels/123/456" });
+        assert_eq!(
+            conference_link(&ev).as_deref(),
+            Some("https://discord.com/channels/123/456")
+        );
+        let ev = json!({ "description": "Join at https://discord.gg/noted" });
+        assert_eq!(
+            conference_link(&ev).as_deref(),
+            Some("https://discord.gg/noted")
+        );
+        // A trusted host appearing only in a query string must not pass.
+        let ev = json!({ "description": "https://evil.example/?next=discord.gg/noted" });
+        assert_eq!(conference_link(&ev), None);
         // Ordinary URLs don't count as meetings.
         let ev = json!({ "description": "notes at https://example.com/doc" });
         assert_eq!(conference_link(&ev), None);
@@ -2054,6 +2379,8 @@ mod tests {
             "hangoutLink": "https://meet.google.com/abc",
             "htmlLink": "https://calendar.google.com/event?eid=123",
             "organizer": { "email": "khai@x.com", "displayName": "Khai" },
+            "creator": { "email": "assistant@x.com", "displayName": "Assistant" },
+            "iCalUID": "event-123@google.com",
             "attendees": [
                 { "email": "khai@x.com", "displayName": "Khai", "responseStatus": "accepted" },
                 { "email": "me@x.com", "self": true, "responseStatus": "needsAction" },
@@ -2064,6 +2391,13 @@ mod tests {
         assert_eq!(ev["meet_link"], "https://meet.google.com/abc");
         assert_eq!(ev["html_link"], "https://calendar.google.com/event?eid=123");
         assert_eq!(ev["organizer"], "Khai");
+        assert_eq!(ev["organizer_email"], "khai@x.com");
+        assert_eq!(ev["creator_email"], "assistant@x.com");
+        assert_eq!(ev["ical_uid"], "event-123@google.com");
+        assert_eq!(
+            ev["associated_emails"],
+            json!(["me@x.com", "khai@x.com", "assistant@x.com"])
+        );
         // The meeting room resource is filtered out of both list and count.
         assert_eq!(ev["attendee_count"], 2);
         assert_eq!(ev["attendees"].as_array().unwrap().len(), 2);
@@ -2072,38 +2406,116 @@ mod tests {
     }
 
     #[test]
+    fn map_event_keeps_uncapped_identity_emails_for_routing() {
+        let attendees: Vec<Value> = (0..15)
+            .map(|index| json!({ "email": format!("person{index}@example.com") }))
+            .collect();
+        let it = json!({
+            "summary": "Large meeting",
+            "start": { "dateTime": "2026-06-05T13:30:00Z" },
+            "end": { "dateTime": "2026-06-05T14:00:00Z" },
+            "attendees": attendees,
+        });
+        let ev = map_event(&it, &cal("work"), "owner@example.com").unwrap();
+        assert_eq!(ev["attendees"].as_array().unwrap().len(), 12);
+        assert_eq!(ev["attendee_emails"].as_array().unwrap().len(), 15);
+        assert_eq!(ev["associated_emails"].as_array().unwrap().len(), 16);
+        assert!(ev["associated_emails"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|email| email == "person14@example.com"));
+    }
+
+    #[test]
     fn map_event_skips_cancelled_and_titles_untitled() {
         let gone = json!({ "status": "cancelled", "start": { "date": "2026-06-05" } });
         assert!(map_event(&gone, &cal("c"), "a").is_none());
-        let untitled = json!({ "start": { "date": "2026-06-05" }, "end": { "date": "2026-06-06" } });
-        assert_eq!(map_event(&untitled, &cal("c"), "a").unwrap()["title"], "(untitled)");
+        let untitled =
+            json!({ "start": { "date": "2026-06-05" }, "end": { "date": "2026-06-06" } });
+        assert_eq!(
+            map_event(&untitled, &cal("c"), "a").unwrap()["title"],
+            "(untitled)"
+        );
     }
 
     #[test]
     fn user_event_body_timed_and_all_day() {
-        let b = user_event_body("lunch", "2026-06-05", Some("12:00"), Some("13:00"), None, None, None, None, false)
-            .unwrap();
-        assert!(b["start"]["dateTime"].as_str().unwrap().starts_with("2026-06-05T12:00:00"));
-        assert!(b["end"]["dateTime"].as_str().unwrap().starts_with("2026-06-05T13:00:00"));
-        assert!(b["start"].get("date").is_none(), "no null padding on create");
+        let b = user_event_body(
+            "lunch",
+            "2026-06-05",
+            Some("12:00"),
+            Some("13:00"),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(b["start"]["dateTime"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026-06-05T12:00:00"));
+        assert!(b["end"]["dateTime"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026-06-05T13:00:00"));
+        assert!(
+            b["start"].get("date").is_none(),
+            "no null padding on create"
+        );
 
         // All-day: inclusive last day → Google's exclusive end.
-        let b = user_event_body("offsite", "2026-06-05", None, None, Some("2026-06-06"), None, None, None, false)
-            .unwrap();
+        let b = user_event_body(
+            "offsite",
+            "2026-06-05",
+            None,
+            None,
+            Some("2026-06-06"),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(b["start"]["date"], "2026-06-05");
         assert_eq!(b["end"]["date"], "2026-06-07");
     }
 
     #[test]
     fn user_event_body_patch_nulls_the_other_shape() {
-        let b = user_event_body("x", "2026-06-05", Some("09:00"), None, None, None, None, None, true).unwrap();
-        assert_eq!(b["start"]["date"], Value::Null, "patch must clear the all-day shape");
+        let b = user_event_body(
+            "x",
+            "2026-06-05",
+            Some("09:00"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            b["start"]["date"],
+            Value::Null,
+            "patch must clear the all-day shape"
+        );
         assert!(b["start"]["dateTime"].is_string());
         // Default end: one hour.
-        assert!(b["end"]["dateTime"].as_str().unwrap().starts_with("2026-06-05T10:00:00"));
+        assert!(b["end"]["dateTime"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026-06-05T10:00:00"));
 
-        let b = user_event_body("x", "2026-06-05", None, None, None, None, None, None, true).unwrap();
-        assert_eq!(b["start"]["dateTime"], Value::Null, "patch must clear the timed shape");
+        let b =
+            user_event_body("x", "2026-06-05", None, None, None, None, None, None, true).unwrap();
+        assert_eq!(
+            b["start"]["dateTime"],
+            Value::Null,
+            "patch must clear the timed shape"
+        );
         assert_eq!(b["end"]["date"], "2026-06-06");
     }
 
@@ -2119,29 +2531,89 @@ mod tests {
     #[test]
     fn user_event_body_meet_tristate() {
         // Some(true): ask Google to mint a Meet conference.
-        let b = user_event_body("sync", "2026-06-05", Some("09:00"), None, None, None, None, Some(true), false)
-            .unwrap();
-        assert_eq!(b["conferenceData"]["createRequest"]["conferenceSolutionKey"]["type"], "hangoutsMeet");
+        let b = user_event_body(
+            "sync",
+            "2026-06-05",
+            Some("09:00"),
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            b["conferenceData"]["createRequest"]["conferenceSolutionKey"]["type"],
+            "hangoutsMeet"
+        );
         assert!(
-            !b["conferenceData"]["createRequest"]["requestId"].as_str().unwrap().is_empty(),
+            !b["conferenceData"]["createRequest"]["requestId"]
+                .as_str()
+                .unwrap()
+                .is_empty(),
             "createRequest needs a client-generated requestId"
         );
         // Some(false): strip the existing conference on PATCH.
-        let b = user_event_body("sync", "2026-06-05", Some("09:00"), None, None, None, None, Some(false), true)
-            .unwrap();
+        let b = user_event_body(
+            "sync",
+            "2026-06-05",
+            Some("09:00"),
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            true,
+        )
+        .unwrap();
         assert_eq!(b["conferenceData"], Value::Null);
         // None: conference data untouched.
-        let b = user_event_body("sync", "2026-06-05", Some("09:00"), None, None, None, None, None, false)
-            .unwrap();
+        let b = user_event_body(
+            "sync",
+            "2026-06-05",
+            Some("09:00"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
         assert!(b.get("conferenceData").is_none());
     }
 
     #[test]
     fn user_event_body_rolls_end_past_midnight_and_rejects_empty_title() {
-        let b = user_event_body("late", "2026-06-05", Some("23:00"), Some("01:00"), None, None, None, None, false)
-            .unwrap();
-        assert!(b["end"]["dateTime"].as_str().unwrap().starts_with("2026-06-06T01:00:00"));
-        assert!(user_event_body("  ", "2026-06-05", None, None, None, None, None, None, false).is_err());
+        let b = user_event_body(
+            "late",
+            "2026-06-05",
+            Some("23:00"),
+            Some("01:00"),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(b["end"]["dateTime"]
+            .as_str()
+            .unwrap()
+            .starts_with("2026-06-06T01:00:00"));
+        assert!(user_event_body(
+            "  ",
+            "2026-06-05",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false
+        )
+        .is_err());
     }
 
     #[test]

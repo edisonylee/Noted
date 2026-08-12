@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { X, Check, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, CalendarDays, Download, Mic, AudioLines, Plus, RefreshCw, Trash2, FolderPlus, FolderOpen, Laptop, Gauge, Cloud, KeyRound, Palette, Boxes, BookType, MessageCircle } from "lucide-react";
-import { api, isDesktop, type BrainVaultStatus, type ByokConfig, type CloudProvider, type GcalStatus, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type ProviderId, type ProviderMode, type ProviderSettings } from "./api";
+import { X, Check, ChevronDown, ChevronUp, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, CalendarDays, Download, Mic, AudioLines, Plus, RefreshCw, Trash2, FolderPlus, FolderOpen, Laptop, Gauge, Cloud, KeyRound, Palette, Boxes, BookType, MessageCircle, Bot, Copy, ShieldCheck } from "lucide-react";
+import { api, isDesktop, type AgentAccessStatus, type AgentClientSetup, type AgentContextReceipt, type BrainVaultStatus, type ByokConfig, type CloudProvider, type GcalStatus, type MeetingFilingBackfillPreview, type MeetingFilingRule, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type NoteFolderInfo, type ProviderId, type ProviderMode, type ProviderSettings } from "./api";
 import { ThemesSettings } from "./ThemesSettings";
 import { TranscriptVocabularySettings } from "./TranscriptVocabularySettings";
 import { releaseProfile } from "./releaseProfile";
@@ -16,7 +16,21 @@ type Conn =
   | { state: "ok"; msg: string }
   | { state: "err"; msg: string };
 
-type SettingsSection = "models" | "assistant" | "themes" | "calendar" | "vaults" | "meetings" | "vocabulary";
+function meetingRouteViaLabel(via: string) {
+  if (via === "source_account") return "calendar account";
+  if (via === "organizer") return "organizer";
+  if (via === "creator") return "creator";
+  if (via === "attendee") return "attendee";
+  if (via === "no_event") return "no calendar event";
+  if (via === "no_matching_rule") return "no identity matched";
+  return via.replace(/_/g, " ");
+}
+
+function meetingTemplateLabel(name: string) {
+  return name === "Meeting" ? "General" : name;
+}
+
+type SettingsSection = "models" | "assistant" | "agents" | "themes" | "calendar" | "vaults" | "meetings" | "vocabulary";
 
 // Model-provider settings. noted runs 100% local by default; the internally
 // named "balanced" mode sends only new captures to a cloud extract/OCR model.
@@ -60,6 +74,13 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   const [clientSecret, setClientSecret] = useState("");
   const [gcalBusy, setGcalBusy] = useState<"" | "saving" | "connecting">("");
   const [gcalMsg, setGcalMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const [noteFolders, setNoteFolders] = useState<NoteFolderInfo[]>([]);
+  const [meetingFilingRules, setMeetingFilingRules] = useState<MeetingFilingRule[]>([]);
+  const [meetingFilingLoaded, setMeetingFilingLoaded] = useState(false);
+  const [meetingFilingLoadError, setMeetingFilingLoadError] = useState<string | null>(null);
+  const [meetingFilingBusy, setMeetingFilingBusy] = useState("");
+  const [meetingFilingMsg, setMeetingFilingMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const [meetingFilingPreview, setMeetingFilingPreview] = useState<MeetingFilingBackfillPreview | null>(null);
 
   // Brain vaults (Obsidian ↔ noted sync).
   const [vaults, setVaults] = useState<BrainVaultStatus[]>([]);
@@ -81,12 +102,23 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   const [vocabText, setVocabText] = useState("");
   const [mDownloading, setMDownloading] = useState(false);
   const [sDownloading, setSDownloading] = useState(false);
+  const [inPersonDownloading, setInPersonDownloading] = useState(false);
+  const [inPersonSetupMessage, setInPersonSetupMessage] = useState<string | null>(null);
   const [pDownloading, setPDownloading] = useState(false);
   const [probeMsg, setProbeMsg] = useState<string | null>(null);
   const [probing, setProbing] = useState(false);
   const [videoPermissionBusy, setVideoPermissionBusy] = useState(false);
   const [videoPermissionMsg, setVideoPermissionMsg] = useState<string | null>(null);
   const [recordingsFolderError, setRecordingsFolderError] = useState<string | null>(null);
+
+  // Vendor-neutral MCP clients. Secrets stay in Keychain; the UI receives only
+  // the client id and a launch configuration it can safely copy.
+  const [agentAccess, setAgentAccess] = useState<AgentAccessStatus | null>(null);
+  const [agentReceipts, setAgentReceipts] = useState<AgentContextReceipt[]>([]);
+  const [agentName, setAgentName] = useState("");
+  const [agentSetup, setAgentSetup] = useState<AgentClientSetup | null>(null);
+  const [agentBusy, setAgentBusy] = useState("");
+  const [agentMsg, setAgentMsg] = useState<string | null>(null);
 
   async function runCaptureProbe() {
     setProbing(true);
@@ -209,6 +241,20 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
     }
   }
 
+  async function downloadInPersonDiarizer() {
+    setInPersonDownloading(true);
+    setInPersonSetupMessage(null);
+    try {
+      await api.downloadInPersonDiarizer();
+      setMModel(await api.meetingModelStatus());
+      setInPersonSetupMessage("In-person speaker separation is ready.");
+    } catch (error) {
+      setInPersonSetupMessage(String(error));
+    } finally {
+      setInPersonDownloading(false);
+    }
+  }
+
   async function downloadParakeet() {
     setPDownloading(true);
     try {
@@ -269,6 +315,17 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
       );
     }).catch(() => {});
     api.gcalAuthStatus().then(setGcal);
+    Promise.all([api.listNoteFolders(), api.meetingFilingRules()])
+      .then(([folders, rules]) => {
+        setNoteFolders(folders);
+        setMeetingFilingRules(rules);
+        setMeetingFilingLoaded(true);
+        setMeetingFilingLoadError(null);
+      })
+      .catch((error) => {
+        setMeetingFilingLoaded(false);
+        setMeetingFilingLoadError(String(error));
+      });
     api.brainListVaults().then(setVaults).catch(() => {});
     api.brainGetAuto().then(setAutoProp).catch(() => {});
     api
@@ -281,8 +338,70 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
       .catch(() => {});
     api.meetingModelStatus().then(setMModel).catch(() => {});
     api.meetingTemplates().then(setMTemplates).catch(() => {});
+    if (isDesktop) {
+      api.agentAccessStatus().then(setAgentAccess).catch(() => {});
+      api.agentContextReceipts().then(setAgentReceipts).catch(() => {});
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function toggleAgentAccess(enabled: boolean) {
+    setAgentBusy("toggle");
+    setAgentMsg(null);
+    try {
+      setAgentAccess(await api.agentAccessSetEnabled(enabled));
+      setAgentSetup(null);
+      setAgentMsg(
+        enabled
+          ? "Agent Access is ready. Add a separate connection for each AI client you trust."
+          : "Agent Access is off. Pending requests and undelivered passes were closed."
+      );
+    } catch (error) {
+      setAgentMsg(String(error));
+    } finally {
+      setAgentBusy("");
+    }
+  }
+
+  async function createAgentClient() {
+    if (!agentName.trim()) return;
+    setAgentBusy("create");
+    setAgentMsg(null);
+    try {
+      const setup = await api.agentClientCreate(agentName.trim());
+      setAgentSetup(setup);
+      setAgentName("");
+      setAgentAccess(await api.agentAccessStatus());
+    } catch (error) {
+      setAgentMsg(String(error));
+    } finally {
+      setAgentBusy("");
+    }
+  }
+
+  async function revokeAgentClient(clientId: string, name: string) {
+    if (!window.confirm(`Revoke ${name}? New requests and unfinished Context Passes from this connection will stop immediately.`)) return;
+    setAgentBusy(`revoke:${clientId}`);
+    setAgentMsg(null);
+    try {
+      setAgentAccess(await api.agentClientRevoke(clientId));
+      if (agentSetup?.client.id === clientId) setAgentSetup(null);
+      setAgentReceipts(await api.agentContextReceipts());
+    } catch (error) {
+      setAgentMsg(String(error));
+    } finally {
+      setAgentBusy("");
+    }
+  }
+
+  async function copyAgentConfig(value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      setAgentMsg("MCP configuration copied.");
+    } catch (error) {
+      setAgentMsg(`Could not copy automatically: ${String(error)}`);
+    }
+  }
 
   async function toggleAutoProp(on: boolean) {
     setAutoProp(on);
@@ -375,11 +494,19 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   }
 
   async function removeGcalAccount(email: string) {
+    setMeetingFilingBusy(`account:${normalizeEmail(email)}`);
+    setMeetingFilingMsg(null);
+    setMeetingFilingPreview(null);
     try {
-      setGcal(await api.gcalRemoveAccount(email));
+      const status = await api.gcalRemoveAccount(email);
+      setGcal(status);
+      setMeetingFilingPreview(null);
+      setMeetingFilingRules(await api.meetingFilingRules());
       setGcalMsg(null);
     } catch (e) {
       setGcalMsg({ kind: "err", text: String(e) });
+    } finally {
+      setMeetingFilingBusy("");
     }
   }
 
@@ -389,6 +516,99 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
       setGcalMsg(null);
     } catch (e) {
       setGcalMsg({ kind: "err", text: String(e) });
+    }
+  }
+
+  const normalizeEmail = (email: string) => email.trim().toLowerCase();
+
+  function filingRuleFor(email: string) {
+    const normalized = normalizeEmail(email);
+    return meetingFilingRules.find((rule) => normalizeEmail(rule.email) === normalized);
+  }
+
+  function noteFolderPath(folder: NoteFolderInfo) {
+    const names = [folder.name];
+    const visited = new Set<number>([folder.id]);
+    let parentId = folder.parent_id;
+    while (parentId != null && !visited.has(parentId)) {
+      const parent = noteFolders.find((candidate) => candidate.id === parentId);
+      if (!parent) break;
+      names.unshift(parent.name);
+      visited.add(parent.id);
+      parentId = parent.parent_id;
+    }
+    return names.join(" / ");
+  }
+
+  async function setMeetingFilingDestination(email: string, rawFolderId: string) {
+    const busyKey = `rule:${normalizeEmail(email)}`;
+    setMeetingFilingBusy(busyKey);
+    setMeetingFilingMsg(null);
+    setMeetingFilingPreview(null);
+    try {
+      const current = filingRuleFor(email);
+      if (!rawFolderId) {
+        await api.deleteMeetingFilingRule(email);
+      } else {
+        await api.setMeetingFilingRule(email, Number(rawFolderId), current?.priority ?? null);
+      }
+      setMeetingFilingRules(await api.meetingFilingRules());
+    } catch (e) {
+      setMeetingFilingMsg({ kind: "err", text: String(e) });
+    } finally {
+      setMeetingFilingBusy("");
+    }
+  }
+
+  async function moveMeetingFilingRule(email: string, direction: -1 | 1) {
+    const ordered = [...meetingFilingRules].sort((a, b) => a.priority - b.priority);
+    const index = ordered.findIndex((rule) => normalizeEmail(rule.email) === normalizeEmail(email));
+    const destination = index + direction;
+    if (index < 0 || destination < 0 || destination >= ordered.length) return;
+    [ordered[index], ordered[destination]] = [ordered[destination], ordered[index]];
+    setMeetingFilingBusy("order");
+    setMeetingFilingMsg(null);
+    setMeetingFilingPreview(null);
+    try {
+      setMeetingFilingRules(await api.reorderMeetingFilingRules(ordered.map((rule) => rule.email)));
+    } catch (e) {
+      setMeetingFilingMsg({ kind: "err", text: String(e) });
+    } finally {
+      setMeetingFilingBusy("");
+    }
+  }
+
+  async function previewMeetingFiling() {
+    setMeetingFilingBusy("preview");
+    setMeetingFilingMsg(null);
+    setMeetingFilingPreview(null);
+    try {
+      setMeetingFilingPreview(await api.meetingFilingBackfillPreview());
+    } catch (e) {
+      setMeetingFilingMsg({ kind: "err", text: String(e) });
+    } finally {
+      setMeetingFilingBusy("");
+    }
+  }
+
+  async function applyMeetingFilingBackfill() {
+    if (!meetingFilingPreview) return;
+    setMeetingFilingBusy("apply");
+    setMeetingFilingMsg(null);
+    try {
+      const result = await api.meetingFilingBackfillApply(meetingFilingPreview.token);
+      setMeetingFilingPreview(null);
+      setMeetingFilingMsg({
+        kind: "ok",
+        text: `Filed ${result.filed} meeting${result.filed === 1 ? "" : "s"}. ${result.needs_filing} still need${result.needs_filing === 1 ? "s" : ""} a destination.`,
+      });
+    } catch (e) {
+      // Tokens are one-shot even when their snapshot became stale. Clear the
+      // old review so the next action must preview the exact current batch.
+      setMeetingFilingPreview(null);
+      setMeetingFilingMsg({ kind: "err", text: String(e) });
+    } finally {
+      setMeetingFilingBusy("");
     }
   }
 
@@ -548,6 +768,15 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   const isVisionModel = (name: string) => /vl(?=[:_.-]|$)|vision|llava|bakllava|moondream/i.test(name);
   const localTextModels = [...new Set([localTextModel, ...installedModels.filter((name) => !isEmbeddingModel(name) && !isVisionModel(name))])].filter(Boolean);
   const localVisionModels = [...new Set([localVisionModel, ...installedModels.filter((name) => !isEmbeddingModel(name) && isVisionModel(name))])].filter(Boolean);
+  const orderedMeetingFilingRules = [...meetingFilingRules].sort((a, b) => a.priority - b.priority);
+  const meetingFilingOrder = new Map(
+    orderedMeetingFilingRules.map((rule, index) => [normalizeEmail(rule.email), index])
+  );
+  const orderedGcalAccounts = [...(gcal?.accounts ?? [])].sort((a, b) => {
+    const aOrder = meetingFilingOrder.get(normalizeEmail(a.email)) ?? Number.MAX_SAFE_INTEGER;
+    const bOrder = meetingFilingOrder.get(normalizeEmail(b.email)) ?? Number.MAX_SAFE_INTEGER;
+    return aOrder - bOrder;
+  });
 
   const speechEngineField = (label: string) => (
     <label className="field">
@@ -585,8 +814,9 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
     { id: "system", label: "System", description: "Time zone and regional behavior", icon: CalendarDays },
     { id: "models", label: "Models", description: "Intelligence and providers", icon: Laptop },
     { id: "assistant", label: "Assistant", description: "Chat and keyboard shortcut", icon: MessageCircle },
+    ...(isDesktop ? [{ id: "agents" as const, label: "Agent Access", description: "Permissioned MCP connections", icon: Bot }] : []),
     { id: "themes", label: "Appearance", description: "Theme and color mode", icon: Palette },
-    { id: "calendar", label: "Calendar", description: "Accounts and schedule sync", icon: CalendarDays },
+    { id: "calendar", label: "Calendar", description: "Accounts and meeting filing", icon: CalendarDays },
     { id: "vaults", label: "Vaults", description: "Obsidian connections", icon: Boxes },
     { id: "meetings", label: "Meetings", description: "Recording and meeting notes", icon: AudioLines },
     { id: "vocabulary", label: "Vocabulary", description: "Recognition and corrections", icon: BookType },
@@ -1043,6 +1273,149 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           </>
         )}
 
+        {section === "agents" && isDesktop && (
+          <>
+        <h3>Agent Access</h3>
+        <p className="settings-sub">
+          Let any compatible local AI client request one bounded meeting Context Pass at a time. Noted always shows the exact content before anything leaves the app.
+        </p>
+
+        <div className="settings-fields agent-settings">
+          <section className="settings-group agent-access-overview">
+            <div className="agent-access-state">
+              <span className={agentAccess?.enabled ? "agent-state-icon on" : "agent-state-icon"}>
+                <ShieldCheck size={17} />
+              </span>
+              <span>
+                <strong>{agentAccess?.enabled ? "Agent Access is on" : "Agent Access is off"}</strong>
+                <small>
+                  {agentAccess?.enabled
+                    ? "Read-only, local, and approval-gated for every request."
+                    : "No local agent can request or read Noted context."}
+                </small>
+              </span>
+              <button
+                type="button"
+                className={agentAccess?.enabled ? "ghost-btn" : "primary"}
+                onClick={() => void toggleAgentAccess(!agentAccess?.enabled)}
+                disabled={!agentAccess || agentBusy === "toggle"}
+              >
+                {agentBusy === "toggle" ? "Updating…" : agentAccess?.enabled ? "Turn off" : "Enable"}
+              </button>
+            </div>
+            <p className="agent-privacy-note">
+              Client names are claimed, not cryptographically verified. A connected client may send approved bytes to a model provider that Noted cannot identify or erase later.
+            </p>
+          </section>
+
+          {agentAccess?.enabled && (
+            <>
+              <section className="settings-group">
+                <header className="settings-group-head">
+                  <h4>Connected AI clients</h4>
+                  <p>Register Claude, Codex, Cursor, or any other stdio MCP client separately so each can be revoked.</p>
+                </header>
+                <div className="agent-client-list">
+                  {agentAccess.clients.filter((client) => !client.revoked_at).length === 0 ? (
+                    <p className="field-hint">No clients connected yet.</p>
+                  ) : (
+                    agentAccess.clients.filter((client) => !client.revoked_at).map((client) => (
+                      <div className="agent-client-row" key={client.id}>
+                        <span className="agent-client-mark"><Bot size={15} /></span>
+                        <span>
+                          <strong>{client.name}</strong>
+                          <small>
+                            Claimed identity · {client.last_seen_at ? `last used ${new Date(client.last_seen_at).toLocaleString()}` : "not used yet"}
+                          </small>
+                        </span>
+                        <button
+                          type="button"
+                          className="ghost-btn danger"
+                          disabled={agentBusy === `revoke:${client.id}`}
+                          onClick={() => void revokeAgentClient(client.id, client.name)}
+                        >
+                          {agentBusy === `revoke:${client.id}` ? "Revoking…" : "Revoke"}
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="agent-add-row">
+                  <label className="field">
+                    <span className="field-label">New client name</span>
+                    <input
+                      value={agentName}
+                      onChange={(event) => setAgentName(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") void createAgentClient();
+                      }}
+                      placeholder="e.g. Claude Code, Codex, Cursor"
+                      maxLength={80}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="primary"
+                    onClick={() => void createAgentClient()}
+                    disabled={!agentName.trim() || agentBusy === "create"}
+                  >
+                    {agentBusy === "create" ? "Creating…" : "Add connection"}
+                  </button>
+                </div>
+              </section>
+
+              {agentSetup && (
+                <section className="settings-group agent-setup-card">
+                  <header className="settings-group-head">
+                    <h4>Connect {agentSetup.client.name}</h4>
+                    <p>The credential is already in macOS Keychain. The configuration contains no secret.</p>
+                  </header>
+                  <p>
+                    Add this stdio server to that client’s MCP configuration, then restart or reload its MCP connections.
+                  </p>
+                  <div className="agent-config-head">
+                    <span>Generic MCP configuration</span>
+                    <button type="button" onClick={() => void copyAgentConfig(agentSetup.config_json)}>
+                      <Copy size={12} /> Copy
+                    </button>
+                  </div>
+                  <pre className="agent-config-code">{agentSetup.config_json}</pre>
+                  <details>
+                    <summary>Raw launch command</summary>
+                    <code>{agentSetup.command}</code>
+                  </details>
+                </section>
+              )}
+
+              <section className="settings-group">
+                <header className="settings-group-head">
+                  <h4>Disclosure receipts</h4>
+                  <p>Metadata and hashes only. Transcript and note text are never retained here.</p>
+                </header>
+                <div className="agent-receipts">
+                  {agentReceipts.length === 0 ? (
+                    <p className="field-hint">No meeting context has been disclosed.</p>
+                  ) : (
+                    agentReceipts.slice(0, 20).map((receipt) => (
+                      <div className="agent-receipt" key={receipt.id}>
+                        <span>
+                          <strong>{receipt.resource_title || "Context request"}</strong>
+                          <small>{receipt.client_name} · {new Date(receipt.requested_at).toLocaleString()}</small>
+                        </span>
+                        <span className={`agent-receipt-status ${receipt.status}`}>{receipt.status}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </section>
+            </>
+          )}
+          {agentMsg && <p className="agent-settings-message" role="status">{agentMsg}</p>}
+        </div>
+          </>
+        )}
+
         {section === "calendar" && (
           <>
         <h3>Google Calendar</h3>
@@ -1058,40 +1431,204 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
 
           {(gcal?.accounts ?? []).length > 0 && (
             <div className="gcal-accounts">
-              {gcal!.accounts.map((a) => (
-                <div className="gcal-account" key={a.email}>
-                  {a.connected ? (
-                    <CalendarCheck size={14} className="gcal-acct-ok" />
-                  ) : (
-                    <CalendarX size={14} className="gcal-acct-bad" />
-                  )}
-                  <span className="gcal-acct-email">{a.email}</span>
-                  {!a.connected && <span className="gcal-acct-warn">reconnect needed</span>}
-                  {a.email === gcal!.sync_account ? (
-                    <span className="gcal-acct-sync" title="Your daily schedule pushes into the 'noted' calendar in this account">
-                      schedule syncs here
-                    </span>
-                  ) : (
-                    a.connected && (
-                      <button
-                        className="gcal-acct-synchere"
-                        onClick={() => setGcalSyncAccount(a.email)}
-                        title="Push the daily schedule into this account instead"
-                      >
-                        sync here
-                      </button>
+              <div className="gcal-routing-intro">
+                <strong>Meeting filing</strong>
+                <span>
+                  Rules run top to bottom. The first exact email match wins, and manual filing always stays put.
+                </span>
+              </div>
+              {!meetingFilingLoaded && !meetingFilingLoadError && (
+                <span className="field-hint">Loading meeting destinations…</span>
+              )}
+              {meetingFilingLoadError && (
+                <div className="conn-detail" role="status">
+                  Meeting filing settings are unavailable. Reopen Settings to try again.
+                </div>
+              )}
+              {orderedGcalAccounts.map((a) => {
+                const rule = filingRuleFor(a.email);
+                const ruleIndex = rule
+                  ? orderedMeetingFilingRules.findIndex(
+                      (candidate) => normalizeEmail(candidate.email) === normalizeEmail(rule.email)
                     )
-                  )}
+                  : -1;
+                const ruleBusy = meetingFilingBusy === `rule:${normalizeEmail(a.email)}`;
+                return (
+                  <div className="gcal-account" key={a.email}>
+                    <div className="gcal-account-head">
+                      {a.connected ? (
+                        <CalendarCheck size={14} className="gcal-acct-ok" />
+                      ) : (
+                        <CalendarX size={14} className="gcal-acct-bad" />
+                      )}
+                      <span className="gcal-acct-email">{a.email}</span>
+                      {!a.connected && <span className="gcal-acct-warn">reconnect needed</span>}
+                      {a.email === gcal!.sync_account ? (
+                        <span className="gcal-acct-sync" title="Your daily schedule pushes into the 'noted' calendar in this account">
+                          schedule syncs here
+                        </span>
+                      ) : (
+                        a.connected && (
+                          <button
+                            className="gcal-acct-synchere"
+                            onClick={() => setGcalSyncAccount(a.email)}
+                            title="Push the daily schedule into this account instead"
+                          >
+                            sync here
+                          </button>
+                        )
+                      )}
+                      <button
+                        className="gcal-acct-x"
+                        onClick={() => removeGcalAccount(a.email)}
+                        disabled={meetingFilingBusy !== ""}
+                        title={`Remove ${a.email}`}
+                        aria-label={`Remove ${a.email}`}
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
+                    <div className="gcal-route-row">
+                      <label className="gcal-route-field">
+                        <span>Meeting notes go to</span>
+                        <select
+                          value={rule?.folder_id ?? ""}
+                          onChange={(event) => setMeetingFilingDestination(a.email, event.target.value)}
+                          disabled={!meetingFilingLoaded || meetingFilingBusy !== "" || noteFolders.length === 0}
+                          aria-label={`Meeting notes for ${a.email} go to`}
+                        >
+                          <option value="">
+                            {!meetingFilingLoaded
+                              ? meetingFilingLoadError
+                                ? "Filing unavailable"
+                                : "Loading destinations…"
+                              : rule && !rule.enabled
+                                ? "Destination missing"
+                                : "Needs filing"}
+                          </option>
+                          {noteFolders.map((folder) => (
+                            <option key={folder.id} value={folder.id}>
+                              {noteFolderPath(folder)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {ruleBusy ? (
+                        <Loader2 size={13} className="spin gcal-route-busy" aria-label="Saving meeting filing rule" />
+                      ) : rule && !rule.enabled ? (
+                        <button
+                          type="button"
+                          className="gcal-route-clear"
+                          onClick={() => setMeetingFilingDestination(a.email, "")}
+                          disabled={meetingFilingBusy !== ""}
+                        >
+                          Clear rule
+                        </button>
+                      ) : (
+                        <div className="gcal-rule-order" role="group" aria-label={`Priority for ${a.email}`}>
+                          <button
+                            type="button"
+                            onClick={() => moveMeetingFilingRule(a.email, -1)}
+                            disabled={!rule || ruleIndex <= 0 || meetingFilingBusy !== ""}
+                            title="Run this rule earlier"
+                            aria-label={`Run ${a.email} rule earlier`}
+                          >
+                            <ChevronUp size={14} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => moveMeetingFilingRule(a.email, 1)}
+                            disabled={!rule || ruleIndex < 0 || ruleIndex >= orderedMeetingFilingRules.length - 1 || meetingFilingBusy !== ""}
+                            title="Run this rule later"
+                            aria-label={`Run ${a.email} rule later`}
+                          >
+                            <ChevronDown size={14} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    {rule?.folder_id != null && (
+                      <span className="gcal-route-explanation">
+                        Exact match on {a.email} files to {rule.folder_path || rule.folder_name || "this destination"}.
+                      </span>
+                    )}
+                    {rule && !rule.enabled && (
+                      <span className="gcal-route-explanation">
+                        The previous destination was deleted. Choose another folder or clear this rule.
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+              {meetingFilingMsg && (
+                <div
+                  className={meetingFilingMsg.kind === "err" ? "conn-detail" : "field-hint gcal-filing-ok"}
+                  role="status"
+                >
+                  {meetingFilingMsg.text}
+                </div>
+              )}
+              {meetingFilingLoaded && meetingFilingRules.length > 0 && (
+                <div className="gcal-backfill">
+                  <div>
+                    <strong>Existing meetings</strong>
+                    <span>Preview unfiled calendar meetings before applying these rules.</span>
+                  </div>
                   <button
-                    className="gcal-acct-x"
-                    onClick={() => removeGcalAccount(a.email)}
-                    title={`Remove ${a.email}`}
-                    aria-label={`Remove ${a.email}`}
+                    type="button"
+                    className="ghost-btn"
+                    onClick={previewMeetingFiling}
+                    disabled={meetingFilingBusy !== ""}
                   >
-                    <X size={13} />
+                    {meetingFilingBusy === "preview" && <Loader2 size={13} className="spin" />}
+                    Preview filing
                   </button>
                 </div>
-              ))}
+              )}
+              {meetingFilingPreview && (
+                <div className="gcal-backfill-result">
+                  <span role="status" aria-live="polite">
+                    {meetingFilingPreview.would_file} will be filed. {meetingFilingPreview.needs_filing} {meetingFilingPreview.needs_filing === 1 ? "needs" : "need"} filing. {meetingFilingPreview.manual} manual placement{meetingFilingPreview.manual === 1 ? " is" : "s are"} protected. {meetingFilingPreview.already_filed} already-filed meeting{meetingFilingPreview.already_filed === 1 ? "" : "s"} will stay where {meetingFilingPreview.already_filed === 1 ? "it is" : "they are"}.
+                  </span>
+                  {meetingFilingPreview.would_file > 0 && (
+                    <button
+                      type="button"
+                      className="ghost-btn"
+                      onClick={applyMeetingFilingBackfill}
+                      disabled={meetingFilingBusy !== ""}
+                    >
+                      {meetingFilingBusy === "apply" && <Loader2 size={13} className="spin" />}
+                      Apply to {meetingFilingPreview.would_file}
+                    </button>
+                  )}
+                  {meetingFilingPreview.items.length > 0 && (
+                    <details className="gcal-backfill-items">
+                      <summary>
+                        Review {meetingFilingPreview.items.length} meeting{meetingFilingPreview.items.length === 1 ? "" : "s"}
+                      </summary>
+                      <div className="gcal-backfill-list">
+                        {meetingFilingPreview.items.map((item) => (
+                          <div key={item.meeting_id} className="gcal-backfill-item">
+                            <span>{item.title}</span>
+                            <span className="gcal-backfill-destination">
+                              <strong>
+                                {item.status === "matched"
+                                  ? item.folder_path || item.folder_name || "Selected destination"
+                                  : "Needs filing"}
+                              </strong>
+                              <small>
+                                {item.email
+                                  ? `${item.email} · ${meetingRouteViaLabel(item.via)}`
+                                  : meetingRouteViaLabel(item.via)}
+                              </small>
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              )}
               <span className="field-hint">
                 The daily schedule pushes one-way into a calendar named “noted” inside the account
                 marked above — never into your real calendars. Choose which calendars show up from
@@ -1422,7 +1959,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               {(mTemplates.length ? mTemplates : [{ name: "Meeting", prompt: "", builtin: true }]).map(
                 (t) => (
                   <option key={t.name} value={t.name}>
-                    {t.name}
+                    {meetingTemplateLabel(t.name)}
                   </option>
                 )
               )}
@@ -1445,7 +1982,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
                       }
                     }}
                   >
-                    {t.name}
+                    {meetingTemplateLabel(t.name)}
                     {t.builtin && <em>built-in</em>}
                   </button>
                   {editTpl === t.name && tplDraft && (
@@ -1467,7 +2004,10 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
                               className="ghost-btn"
                               onClick={() => {
                                 setEditTpl(null);
-                                setTplDraft({ name: `${t.name} (mine)`, prompt: t.prompt });
+                                setTplDraft({
+                                  name: `${meetingTemplateLabel(t.name)} (mine)`,
+                                  prompt: t.prompt,
+                                });
                               }}
                             >
                               Duplicate & edit
@@ -1591,7 +2131,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           {releaseProfile.diarization && <div className="field-row">
             {mModel?.speaker ? (
               <span className="field-hint">
-                <Check size={13} /> Speaker separation ready — rename speakers in each transcript
+                <Check size={13} /> Online-call speaker separation ready
               </span>
             ) : (
               <button
@@ -1605,6 +2145,28 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               </button>
             )}
           </div>}
+          <div className="field-row">
+            {mModel?.in_person_diarizer ? (
+              <span className="field-hint">
+                <Check size={13} /> In-person speaker separation ready — powered locally by FluidAudio
+              </span>
+            ) : (
+              <button
+                className="ghost-btn test-btn"
+                onClick={downloadInPersonDiarizer}
+                disabled={inPersonDownloading || mModel?.in_person_supported === false}
+                title="Separates voices recorded by the room microphone after the meeting ends"
+              >
+                {inPersonDownloading ? <Loader2 size={14} className="spin" /> : <Download size={14} />}
+                {inPersonDownloading
+                  ? "Downloading and preparing FluidAudio…"
+                  : mModel?.in_person_supported === false
+                    ? "In-person separation requires macOS 14+"
+                    : "Set up in-person speaker separation"}
+              </button>
+            )}
+          </div>
+          {inPersonSetupMessage && <div className="field-hint">{inPersonSetupMessage}</div>}
           {speechEngineField("Transcription engine")}
           <div className="field-row">
             {mModel?.parakeet ? (

@@ -28,5 +28,8 @@ async fn schedule_captures_time_periods() {
     assert!(blob.contains("start"), "blocks should carry start: {blob}");
     assert!(blob.contains("end"), "blocks should carry end: {blob}");
     // 2-4pm must be stored in 24-hour form
-    assert!(blob.contains("14:00") || blob.contains("16:00"), "afternoon should be 24h: {blob}");
+    assert!(
+        blob.contains("14:00") || blob.contains("16:00"),
+        "afternoon should be 24h: {blob}"
+    );
 }

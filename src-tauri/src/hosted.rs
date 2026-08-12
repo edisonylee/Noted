@@ -13,7 +13,14 @@ const KEYCHAIN_ACCOUNT: &str = "hosted_api_key";
 
 pub fn key() -> Option<String> {
     let out = Command::new("security")
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            KEYCHAIN_ACCOUNT,
+            "-w",
+        ])
         .output()
         .ok()?;
     if !out.status.success() {
@@ -30,16 +37,32 @@ pub fn has_key() -> bool {
 pub fn write_key(value: &str) -> Result<()> {
     let status = Command::new("security")
         .args([
-            "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT,
-            "-w", value,
+            "add-generic-password",
+            "-U",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            KEYCHAIN_ACCOUNT,
+            "-w",
+            value,
         ])
         .status()?;
-    if status.success() { Ok(()) } else { Err(anyhow!("failed to store hosted API key")) }
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!("failed to store hosted API key"))
+    }
 }
 
 pub fn delete_key() {
     let _ = Command::new("security")
-        .args(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT])
+        .args([
+            "delete-generic-password",
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-a",
+            KEYCHAIN_ACCOUNT,
+        ])
         .status();
 }
 
@@ -65,10 +88,15 @@ pub fn wav_bytes(samples: &[f32]) -> Vec<u8> {
 }
 
 fn mime_for_image(b64: &str) -> &'static str {
-    if b64.starts_with("iVBOR") { "image/png" }
-    else if b64.starts_with("R0lGOD") { "image/gif" }
-    else if b64.starts_with("UklGR") { "image/webp" }
-    else { "image/jpeg" }
+    if b64.starts_with("iVBOR") {
+        "image/png"
+    } else if b64.starts_with("R0lGOD") {
+        "image/gif"
+    } else if b64.starts_with("UklGR") {
+        "image/webp"
+    } else {
+        "image/jpeg"
+    }
 }
 
 fn parse_json_content(content: &str) -> Result<Value> {
@@ -83,7 +111,9 @@ fn parse_json_content(content: &str) -> Result<Value> {
 }
 
 fn async_client(timeout_secs: u64) -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder().timeout(Duration::from_secs(timeout_secs)).build()?)
+    Ok(reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()?)
 }
 
 fn decode_response(status: reqwest::StatusCode, bytes: &[u8], operation: &str) -> Result<Value> {
@@ -96,13 +126,19 @@ fn decode_response(status: reqwest::StatusCode, bytes: &[u8], operation: &str) -
 
 pub async fn models() -> Result<Value> {
     let key = key().ok_or_else(|| anyhow!("hosted API key is not configured"))?;
-    let response = async_client(30)?.get(format!("{BASE_URL}/v1/models"))
-        .bearer_auth(key).send().await?;
+    let response = async_client(30)?
+        .get(format!("{BASE_URL}/v1/models"))
+        .bearer_auth(key)
+        .send()
+        .await?;
     let status = response.status();
     let bytes = response.bytes().await?;
     let body = decode_response(status, &bytes, "hosted models")?;
     if !status.is_success() {
-        return Err(anyhow!("hosted models failed ({status}): {}", error_message(&body)));
+        return Err(anyhow!(
+            "hosted models failed ({status}): {}",
+            error_message(&body)
+        ));
     }
     Ok(body)
 }
@@ -127,7 +163,9 @@ pub async fn chat_json(
         _ => Value::String(user.to_string()),
     };
     let response_format = match format {
-        Some(schema) => serde_json::json!({"type":"json_schema", "json_schema":{"name":"noted_result", "schema":schema}}),
+        Some(schema) => {
+            serde_json::json!({"type":"json_schema", "json_schema":{"name":"noted_result", "schema":schema}})
+        }
         None => serde_json::json!({"type":"json_object"}),
     };
     let body = serde_json::json!({
@@ -144,58 +182,99 @@ pub async fn chat_text(system: &str, user: &str) -> Result<String> {
         "model":TEXT_MODEL, "temperature":0.2,
         "messages":[{"role":"system","content":system},{"role":"user","content":user}]
     });
-    parse_chat_response(send_chat(body, 300).await?, false)?.as_str()
-        .map(str::to_string).ok_or_else(|| anyhow!("hosted chat returned no content"))
+    parse_chat_response(send_chat(body, 300).await?, false)?
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("hosted chat returned no content"))
 }
 
 pub async fn chat_messages(messages: Vec<Value>, temperature: f32) -> Result<String> {
-    let body = serde_json::json!({"model":TEXT_MODEL,"temperature":temperature,"messages":messages});
-    parse_chat_response(send_chat(body, 300).await?, false)?.as_str()
-        .map(str::to_string).ok_or_else(|| anyhow!("hosted chat returned no content"))
+    let body =
+        serde_json::json!({"model":TEXT_MODEL,"temperature":temperature,"messages":messages});
+    parse_chat_response(send_chat(body, 300).await?, false)?
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("hosted chat returned no content"))
 }
 
 async fn send_chat(body: Value, timeout_secs: u64) -> Result<Value> {
     let key = key().ok_or_else(|| anyhow!("hosted API key is not configured"))?;
-    let response = async_client(timeout_secs)?.post(format!("{BASE_URL}/v1/chat/completions"))
-        .bearer_auth(key).json(&body).send().await?;
+    let response = async_client(timeout_secs)?
+        .post(format!("{BASE_URL}/v1/chat/completions"))
+        .bearer_auth(key)
+        .json(&body)
+        .send()
+        .await?;
     let status = response.status();
     let bytes = response.bytes().await?;
     let body = decode_response(status, &bytes, "hosted chat")?;
     if !status.is_success() {
-        return Err(anyhow!("hosted chat failed ({status}): {}", error_message(&body)));
+        return Err(anyhow!(
+            "hosted chat failed ({status}): {}",
+            error_message(&body)
+        ));
     }
     Ok(body)
 }
 
 fn parse_chat_response(body: Value, json_mode: bool) -> Result<Value> {
-    let content = body.pointer("/choices/0/message/content").and_then(Value::as_str)
+    let content = body
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("hosted chat response missing content"))?;
-    if json_mode { parse_json_content(content) } else { Ok(Value::String(content.to_string())) }
+    if json_mode {
+        parse_json_content(content)
+    } else {
+        Ok(Value::String(content.to_string()))
+    }
 }
 
 pub async fn embed(input: &str) -> Result<Vec<f32>> {
     let key = key().ok_or_else(|| anyhow!("hosted API key is not configured"))?;
-    let response = async_client(60)?.post(format!("{BASE_URL}/v1/embeddings"))
-        .bearer_auth(key).json(&serde_json::json!({"model":EMBED_MODEL,"input":input})).send().await?;
+    let response = async_client(60)?
+        .post(format!("{BASE_URL}/v1/embeddings"))
+        .bearer_auth(key)
+        .json(&serde_json::json!({"model":EMBED_MODEL,"input":input}))
+        .send()
+        .await?;
     let status = response.status();
     let bytes = response.bytes().await?;
     let body = decode_response(status, &bytes, "hosted embedding")?;
     if !status.is_success() {
-        return Err(anyhow!("hosted embedding failed ({status}): {}", error_message(&body)));
+        return Err(anyhow!(
+            "hosted embedding failed ({status}): {}",
+            error_message(&body)
+        ));
     }
-    let values = body.pointer("/data/0/embedding").and_then(Value::as_array)
+    let values = body
+        .pointer("/data/0/embedding")
+        .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("hosted embedding response missing vector"))?;
-    let vector: Vec<f32> = values.iter().filter_map(|v| v.as_f64().map(|n| n as f32)).collect();
-    if vector.len() != 768 { return Err(anyhow!("hosted embedding dimension was {}, expected 768", vector.len())); }
+    let vector: Vec<f32> = values
+        .iter()
+        .filter_map(|v| v.as_f64().map(|n| n as f32))
+        .collect();
+    if vector.len() != 768 {
+        return Err(anyhow!(
+            "hosted embedding dimension was {}, expected 768",
+            vector.len()
+        ));
+    }
     Ok(vector)
 }
 
 pub async fn test_connection() -> Result<String> {
     let catalog = models().await?;
-    let ids: Vec<&str> = catalog["data"].as_array().into_iter().flatten()
-        .filter_map(|m| m["id"].as_str()).collect();
+    let ids: Vec<&str> = catalog["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
     for required in [TEXT_MODEL, VISION_MODEL, EMBED_MODEL] {
-        if !ids.contains(&required) { return Err(anyhow!("hosted API is missing required model {required}")); }
+        if !ids.contains(&required) {
+            return Err(anyhow!("hosted API is missing required model {required}"));
+        }
     }
     Ok("Connected to Noted Hosted (chat, vision, embeddings, and transcription).".into())
 }
@@ -205,7 +284,9 @@ pub async fn transcribe_batch(samples: &[f32], vocabulary: &[String]) -> Result<
     let file = reqwest::multipart::Part::bytes(wav_bytes(samples))
         .file_name("speech.wav")
         .mime_str("audio/wav")?;
-    let mut form = reqwest::multipart::Form::new().part("file", file).text("language", "en");
+    let mut form = reqwest::multipart::Form::new()
+        .part("file", file)
+        .text("language", "en");
     if !vocabulary.is_empty() {
         form = form.text("vocabulary", vocabulary.join(","));
     }
@@ -221,13 +302,21 @@ pub async fn transcribe_batch(samples: &[f32], vocabulary: &[String]) -> Result<
     let bytes = response.bytes().await?;
     let body = decode_response(status, &bytes, "hosted transcription")?;
     if !status.is_success() {
-        return Err(anyhow!("hosted transcription failed ({status}): {}", error_message(&body)));
+        return Err(anyhow!(
+            "hosted transcription failed ({status}): {}",
+            error_message(&body)
+        ));
     }
-    body["text"].as_str().map(str::to_string).ok_or_else(|| anyhow!("hosted transcription returned no text"))
+    body["text"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("hosted transcription returned no text"))
 }
 
 fn error_message(body: &Value) -> &str {
-    body.pointer("/error/message").and_then(Value::as_str).unwrap_or("unknown error")
+    body.pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown error")
 }
 
 pub struct Session {
@@ -241,17 +330,33 @@ pub struct Session {
 impl Session {
     pub fn open(vocabulary: Vec<String>) -> Result<Self> {
         let key = key().ok_or_else(|| anyhow!("hosted API key is not configured"))?;
-        let client = reqwest::blocking::Client::builder().timeout(Duration::from_secs(60)).build()?;
-        let response = client.post(format!("{BASE_URL}/v1/noted/transcribe/sessions"))
-            .bearer_auth(&key).send()?;
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()?;
+        let response = client
+            .post(format!("{BASE_URL}/v1/noted/transcribe/sessions"))
+            .bearer_auth(&key)
+            .send()?;
         let status = response.status();
         let bytes = response.bytes()?;
         let body = decode_response(status, &bytes, "hosted transcription session")?;
         if !status.is_success() {
-            return Err(anyhow!("could not open hosted transcription session ({status}): {}", error_message(&body)));
+            return Err(anyhow!(
+                "could not open hosted transcription session ({status}): {}",
+                error_message(&body)
+            ));
         }
-        let id = body["session_id"].as_str().ok_or_else(|| anyhow!("session response missing id"))?.to_string();
-        Ok(Self { client, key, id, next_seq: 0, vocabulary })
+        let id = body["session_id"]
+            .as_str()
+            .ok_or_else(|| anyhow!("session response missing id"))?
+            .to_string();
+        Ok(Self {
+            client,
+            key,
+            id,
+            next_seq: 0,
+            vocabulary,
+        })
     }
 
     pub fn transcribe(&mut self, samples: &[f32]) -> Result<String> {
@@ -259,16 +364,28 @@ impl Session {
         let bytes = wav_bytes(samples);
         let mut last = None;
         for delay in [0, 2, 4, 8] {
-            if delay > 0 { std::thread::sleep(Duration::from_secs(delay)); }
+            if delay > 0 {
+                std::thread::sleep(Duration::from_secs(delay));
+            }
             let file = reqwest::blocking::multipart::Part::bytes(bytes.clone())
-                .file_name(format!("chunk-{seq}.wav")).mime_str("audio/wav")?;
+                .file_name(format!("chunk-{seq}.wav"))
+                .mime_str("audio/wav")?;
             let mut form = reqwest::blocking::multipart::Form::new()
-                .part("file", file).text("seq", seq.to_string());
+                .part("file", file)
+                .text("seq", seq.to_string());
             if !self.vocabulary.is_empty() {
                 form = form.text("vocabulary", self.vocabulary.join(","));
             }
-            match self.client.post(format!("{BASE_URL}/v1/noted/transcribe/sessions/{}/chunks", self.id))
-                .bearer_auth(&self.key).multipart(form).send() {
+            match self
+                .client
+                .post(format!(
+                    "{BASE_URL}/v1/noted/transcribe/sessions/{}/chunks",
+                    self.id
+                ))
+                .bearer_auth(&self.key)
+                .multipart(form)
+                .send()
+            {
                 Ok(response) => {
                     let status = response.status();
                     let retryable = status.as_u16() == 429 || status.as_u16() == 503;
@@ -278,8 +395,13 @@ impl Session {
                         self.next_seq += 1;
                         return Ok(body["text"].as_str().unwrap_or("").to_string());
                     }
-                    last = Some(anyhow!("hosted chunk failed ({status}): {}", error_message(&body)));
-                    if !retryable { break; }
+                    last = Some(anyhow!(
+                        "hosted chunk failed ({status}): {}",
+                        error_message(&body)
+                    ));
+                    if !retryable {
+                        break;
+                    }
                 }
                 Err(e) => last = Some(e.into()),
             }
@@ -288,8 +410,14 @@ impl Session {
     }
 
     pub fn finalize(&self) {
-        let _ = self.client.post(format!("{BASE_URL}/v1/noted/transcribe/sessions/{}/finalize", self.id))
-            .bearer_auth(&self.key).send();
+        let _ = self
+            .client
+            .post(format!(
+                "{BASE_URL}/v1/noted/transcribe/sessions/{}/finalize",
+                self.id
+            ))
+            .bearer_auth(&self.key)
+            .send();
     }
 }
 

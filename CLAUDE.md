@@ -8,6 +8,14 @@ A local-first personal-knowledge app (Tauri 2 + React 19). You capture a note by
 
 See `README.md` for the user-facing overview, `PROTOCOL.md` for the note-extraction contract, and `.impeccable.md` for the active design direction (note: `DESIGN.md` describes an older "Crisp Data Canvas" theme that has been superseded by the warm/Geist direction in `.impeccable.md` — the latter is authoritative, confirmed by `@fontsource-variable/geist` in `package.json`).
 
+## Agent context architecture (planned)
+
+The consumer-production contracts for stable context records, source authority,
+retrieval evaluation, privacy boundaries, migrations, and local agent access are
+indexed in `docs/agent-context/README.md`. They are specifications until their
+phase gate is accepted; do not treat the documented future schema or Context Pass
+surface as implemented runtime behavior.
+
 ## Commands
 
 The package manager is **bun** (`bun.lock` is committed; `tauri.conf.json` invokes `bun run`). npm also works.

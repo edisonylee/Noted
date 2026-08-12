@@ -1,8 +1,16 @@
 # noted
 
-A local-first personal knowledge app that turns messy capture into structured, searchable knowledge — privately, on your own machine.
+A local-first personal context system that turns messy capture into structured,
+source-backed memory — privately, on your own machine.
 
-You jot, speak, or photograph a note; a local model categorizes it, extracts the structured bits, and files it. Over time noted builds a personal knowledge base you can search semantically, a daily schedule, recaps and trends, and a lightweight knowledge graph of the people and things in your life.
+You jot, speak, photograph a note, or capture a meeting; Noted turns the source
+into context you can search, verify, and use later. Over time it builds a personal
+knowledge base, daily schedule, history of decisions and commitments, recaps and
+trends, and a lightweight knowledge graph of the people and things in your life.
+
+Meetings are the first high-value wedge, not the boundary of the product. See the
+accepted [`PRODUCT_STRATEGY.md`](PRODUCT_STRATEGY.md) and outcome-gated
+[`ROADMAP.md`](ROADMAP.md).
 
 Noted supports three complete inference profiles: **Noted Hosted** requires no model downloads, **Use my API keys** routes each capability to providers you choose, and **Local** keeps inference on your Mac through [Ollama](https://ollama.com). The legacy "Balanced" mode remains available for cloud-assisted extraction.
 
@@ -63,6 +71,18 @@ bun run tauri build
 
 Frontend-only scripts (`vite`) are also available via `bun run dev` / `bun run build`, but the app needs the Tauri backend to do anything useful.
 
+### Development and release targets
+
+“Alpha” has two related but distinct meanings in this repository:
+
+| Target | Identity and data | Intended use |
+| --- | --- | --- |
+| Standard Noted | `/Applications/noted.app`, `com.noted.app`, normal local database | Everyday development, testing, and real notes. Rebuild and install it with `bun run app:update`. |
+| Local Noted Alpha | `Noted Alpha.app`, `com.noted.desktop.alpha`, separate sandbox database | Short-lived release-readiness checks only. Build it with `bun run tauri:alpha` when that validation is explicitly needed. |
+| Public prerelease | `Noted`, `com.noted.app`, built by CI with the `alpha` feature profile and `tauri.beta.conf.json` | The consumer-facing prerelease artifact. It is not the local `Noted Alpha.app` sandbox. |
+
+Use standard Noted as the canonical local app. Do not run it alongside `tauri dev` or Noted Alpha: the processes can compete for app-level behavior and duplicate meeting prompts. App variants do not prevent Git conflicts because every build still reads source from the checkout. Parallel coding sessions should use separate Git worktrees or explicitly divided file ownership, then integrate through deliberate commits.
+
 ## Optional setup
 
 - **Balanced mode (Gemini):** open Settings, switch to *Balanced*, and paste a Gemini API key. Only OCR/extract calls go to Gemini; chat and embeddings stay local. The connection badge confirms the key is live.
@@ -101,4 +121,7 @@ src-tauri/      Rust backend
 
 ## Privacy
 
-noted is local-first by design: in the default (local) mode, your notes, photos, audio, embeddings, and search all stay on your machine. Cloud calls happen only if you explicitly enable Balanced mode or Google Calendar sync, and even then are limited to the specific feature you turned on.
+noted is local-first by design: in Local mode, your notes, photos, retained audio,
+embeddings, and search stay on your machine. Cloud calls happen only when you
+explicitly choose Hosted, BYOK, Balanced, or a connected integration, and are
+limited to the capabilities and destinations you enabled.

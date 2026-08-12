@@ -95,8 +95,18 @@ pub async fn embed_entity(name: &str, etype: &str) -> Result<Vec<f32>> {
 /// Field keys whose values name a person. Deliberately conservative — a generic
 /// `name` key labels exercises/foods/tasks, so it's excluded.
 const PERSON_KEYS: &[&str] = &[
-    "with", "who", "people", "person", "attendees", "attendee",
-    "friend", "friends", "coworker", "coworkers", "colleague", "colleagues",
+    "with",
+    "who",
+    "people",
+    "person",
+    "attendees",
+    "attendee",
+    "friend",
+    "friends",
+    "coworker",
+    "coworkers",
+    "colleague",
+    "colleagues",
 ];
 
 /// Values that are never a real person (the narrator, groups, pronouns).
@@ -185,7 +195,8 @@ mod tests {
     #[test]
     fn promotes_person_from_with_field() {
         // The exact shape from the user's note that went missing.
-        let data = json!({"conversations": [{"topic": ["plans to go to New York"], "with": "Khai"}]});
+        let data =
+            json!({"conversations": [{"topic": ["plans to go to New York"], "with": "Khai"}]});
         assert_eq!(person_names_from_data(&data), vec!["Khai".to_string()]);
     }
 

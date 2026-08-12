@@ -32,7 +32,8 @@ fn backup_copy_is_consistent() {
     .unwrap();
 
     // export: flush WAL into the main file, then copy it.
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
     std::fs::copy(&src, &dst).unwrap();
 
     // the backup opens independently and has the data.

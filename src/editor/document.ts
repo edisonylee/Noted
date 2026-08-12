@@ -186,3 +186,37 @@ export function documentFingerprint(document: StructuredDocument): string {
 export function emptyDocument(): StructuredDocument {
   return { type: "doc", content: [EMPTY_PARAGRAPH] };
 }
+
+/**
+ * Lift legacy plain-text notes into the shared document shape without
+ * interpreting their contents as Markdown. One source line becomes one
+ * paragraph, so existing meeting notes keep their exact wording and spacing
+ * the first time they are opened in the rich editor.
+ */
+export function plainTextToDocument(text: string): StructuredDocument {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  if (!normalized) return emptyDocument();
+  return {
+    type: "doc",
+    content: normalized.split("\n").map((line) => ({
+      type: "paragraph",
+      content: textNode(line),
+    })),
+  };
+}
+
+export function storedDocumentOrPlainText(
+  stored: string | null | undefined,
+  fallbackText: string
+): StructuredDocument {
+  if (stored) {
+    try {
+      const parsed: unknown = JSON.parse(stored);
+      if (isStructuredDocument(parsed)) return parsed;
+    } catch {
+      // A damaged optional rich representation must never hide the preserved
+      // plain-text notes. Fall through to the authoritative fallback.
+    }
+  }
+  return plainTextToDocument(fallbackText);
+}

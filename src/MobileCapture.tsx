@@ -3,6 +3,12 @@ import { ArrowUp, Camera, Check, Mic, Square } from "lucide-react";
 import { api } from "./api";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg } from "./image";
+import {
+  onFilingContextChange,
+  readFilingContext,
+  writeFilingContext,
+  type FilingContext,
+} from "./filingContext";
 
 // The phone's default screen: a fast, no-wait capture. Text/voice/photo go
 // straight to the Mac via quickCapture; the Mac categorizes + files in the
@@ -16,12 +22,14 @@ export function MobileCapture({ onCaptured }: { onCaptured?: () => void }) {
   const [dlModel, setDlModel] = useState(false);
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [filingContext, setFilingContext] = useState<FilingContext>(readFilingContext);
   const recorderRef = useRef<Recorder | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     api.voiceStatus().then((s) => setVoiceReady(s.ready)).catch(() => setVoiceReady(false));
   }, []);
+  useEffect(() => onFilingContextChange(setFilingContext), []);
 
   function flashSaved() {
     setSaved(true);
@@ -34,7 +42,7 @@ export function MobileCapture({ onCaptured }: { onCaptured?: () => void }) {
     setBusy(true);
     setErr(null);
     try {
-      await api.quickCapture(t);
+      await api.quickCapture(t, undefined, undefined, undefined, filingContext);
       setText("");
       flashSaved();
       onCaptured?.();
@@ -52,7 +60,7 @@ export function MobileCapture({ onCaptured }: { onCaptured?: () => void }) {
     try {
       const img = await fileToImg(file);
       const path = await api.saveImage(img.base64, img.ext);
-      await api.quickCapture("", "photo", path);
+      await api.quickCapture("", "photo", path, undefined, filingContext);
       flashSaved();
       onCaptured?.();
     } catch (e) {
@@ -127,6 +135,21 @@ export function MobileCapture({ onCaptured }: { onCaptured?: () => void }) {
       />
 
       <div className="mc-actions">
+        <label className="mc-context">
+          <span>File in</span>
+          <select
+            value={filingContext}
+            onChange={(event) => {
+              const context = event.target.value as FilingContext;
+              setFilingContext(context);
+              writeFilingContext(context);
+            }}
+            disabled={busy}
+          >
+            <option value="work">Work</option>
+            <option value="personal">Personal</option>
+          </select>
+        </label>
         <button className="ghost" onClick={() => fileInput.current?.click()} disabled={busy}>
           <Camera size={18} /> Photo
         </button>

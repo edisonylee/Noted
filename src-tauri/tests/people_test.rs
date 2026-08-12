@@ -4,7 +4,8 @@
 use tauri_app_lib::entities::normalize;
 use tauri_app_lib::pipeline;
 
-const CATALOG: &str = "- gym: workout logs. shape: {\"exercises\":[{\"name\":\"squat\",\"weight\":245}]}";
+const CATALOG: &str =
+    "- gym: workout logs. shape: {\"exercises\":[{\"name\":\"squat\",\"weight\":245}]}";
 
 fn known() -> Vec<String> {
     vec!["gym".into()]
@@ -13,7 +14,12 @@ fn known() -> Vec<String> {
 fn persons(p: &serde_json::Value) -> Vec<serde_json::Value> {
     p["entities"]
         .as_array()
-        .map(|a| a.iter().filter(|e| e["type"] == serde_json::json!("person")).cloned().collect())
+        .map(|a| {
+            a.iter()
+                .filter(|e| e["type"] == serde_json::json!("person"))
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -36,7 +42,10 @@ async fn cross_cutting_person_with_fact() {
         .find(|e| normalize(e["name"].as_str().unwrap_or("")) == "mike")
         .expect("Mike extracted as a person");
     let blob = mike.to_string().to_lowercase();
-    assert!(blob.contains("engag"), "Mike's fact should mention the engagement: {blob}");
+    assert!(
+        blob.contains("engag"),
+        "Mike's fact should mention the engagement: {blob}"
+    );
 }
 
 #[tokio::test]
@@ -52,7 +61,10 @@ async fn author_not_extracted_as_person() {
     println!("entities -> {}", p["entities"]);
     for e in persons(&p) {
         let n = normalize(e["name"].as_str().unwrap_or(""));
-        assert!(!["i", "me", "myself"].contains(&n.as_str()), "author must not be a person: {n}");
+        assert!(
+            !["i", "me", "myself"].contains(&n.as_str()),
+            "author must not be a person: {n}"
+        );
     }
 }
 
@@ -72,5 +84,8 @@ async fn relationship_captured() {
         .find(|e| normalize(e["name"].as_str().unwrap_or("")).contains("tom"))
         .expect("Tom extracted as a person");
     let blob = tom.to_string().to_lowercase();
-    assert!(blob.contains("brother"), "relationship should be captured: {blob}");
+    assert!(
+        blob.contains("brother"),
+        "relationship should be captured: {blob}"
+    );
 }

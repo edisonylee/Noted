@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, Check, MessageCircle, Mic, Palette, Square, Volume2, VolumeX, X } from "lucide-react";
+import { ArrowUp, Check, Loader2, MessageCircle, Mic, Palette, Square, Volume2, VolumeX, X } from "lucide-react";
 import { api, isDesktop, type AskEntity, type AskSource, type BrainVaultStatus, type ChatProposal } from "./api";
 import { colorForType } from "./entityColors";
 import { applyProposal, proposalText } from "./chatActions";
@@ -34,6 +34,7 @@ export function FloatingChat({
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [asking, setAsking] = useState(false);
+  const [confirming, setConfirming] = useState<number | null>(null);
   const [muted, setMuted] = useState(false);
   const [recording, setRecording] = useState(false);
   const [voiceReady, setVoiceReady] = useState(false);
@@ -93,7 +94,9 @@ export function FloatingChat({
     const q = text.trim();
     if (!q || asking) return;
     setInput("");
-    const history = messages.map((m) => ({ role: m.role, content: m.content }));
+    const history = messages
+      .filter((message) => !message.proposal)
+      .map((m) => ({ role: m.role, content: m.content }));
     setMessages((p) => [...p, { role: "user", content: q }]);
     setAsking(true);
     try {
@@ -129,6 +132,8 @@ export function FloatingChat({
   }
 
   async function confirmProposal(i: number, p: ChatProposal) {
+    if (confirming !== null) return;
+    setConfirming(i);
     try {
       let done: string;
       if (p.action === "apply_theme") {
@@ -145,6 +150,8 @@ export function FloatingChat({
       onMutated?.();
     } catch (e) {
       setMessages((ms) => [...ms, { role: "assistant", content: `Couldn’t apply that — ${e}` }]);
+    } finally {
+      setConfirming(null);
     }
   }
 
@@ -229,8 +236,8 @@ export function FloatingChat({
       <div className="chat-thread" ref={threadRef}>
         {messages.length === 0 && !asking && (
           <div className="chat-empty">
-            <strong>Your memory is ready.</strong>
-            <span>Ask about a meeting, person, decision, plan, or anything you&rsquo;ve saved.</span>
+            <strong>What can I do for you?</strong>
+            <span>Ask about your notes, or schedule a meeting in one sentence.</span>
           </div>
         )}
         {messages.map((m, i) => (
@@ -268,10 +275,13 @@ export function FloatingChat({
             )}
             {m.proposal && !m.resolved && (
               <div className="proposal-actions">
-                <button className="primary" onClick={() => confirmProposal(i, m.proposal!)}>
-                  <Check size={14} /> Confirm
+                <button className="primary" disabled={confirming !== null} onClick={() => confirmProposal(i, m.proposal!)}>
+                  {confirming === i ? <Loader2 size={14} className="spin" /> : <Check size={14} />}
+                  {confirming === i
+                    ? m.proposal.action === "create_event" ? "Creating…" : "Applying…"
+                    : "Confirm"}
                 </button>
-                <button className="ghost" onClick={() => cancelProposal(i)}>
+                <button className="ghost" disabled={confirming !== null} onClick={() => cancelProposal(i)}>
                   Cancel
                 </button>
               </div>
@@ -299,7 +309,7 @@ export function FloatingChat({
         <input
           ref={inputRef}
           value={input}
-          placeholder="Ask your memory…"
+          placeholder="Ask or schedule something…"
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") send(input);

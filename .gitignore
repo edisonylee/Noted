@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+.swift-build/
+src-tauri/resources/noted-fluid-diarizer
 
 # Editor directories and files
 .vscode/*

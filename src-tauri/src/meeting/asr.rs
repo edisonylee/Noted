@@ -54,6 +54,9 @@ impl Default for ChunkerCfg {
 pub struct PendingSegment {
     pub t0_ms: i64,
     pub t1_ms: i64,
+    /// Frames above the closing speech threshold. Unlike the enclosing span,
+    /// this excludes pre-roll and the quiet hang used to keep words intact.
+    pub voiced_ms: i64,
     pub samples: Vec<f32>,
 }
 
@@ -61,6 +64,8 @@ pub struct PendingSegment {
 pub struct RetainedSegment {
     pub t0_ms: i64,
     pub t1_ms: i64,
+    #[serde(default)]
+    pub voiced_ms: Option<i64>,
     pub text: String,
 }
 
@@ -155,9 +160,16 @@ impl Chunker {
         let seg_ms = (self.seg.len() / (SR / 1000)) as u64;
         if seg_ms >= self.cfg.min_segment_ms {
             let t0_ms = (self.seg_start_frame * FRAME_MS) as i64;
+            let voiced_ms = self
+                .seg
+                .chunks(FRAME)
+                .filter(|frame| rms(frame) >= self.cfg.close_rms)
+                .count() as i64
+                * FRAME_MS as i64;
             out.push(PendingSegment {
                 t0_ms,
                 t1_ms: t0_ms + seg_ms as i64,
+                voiced_ms,
                 samples: std::mem::take(&mut self.seg),
             });
         } else {
@@ -488,6 +500,7 @@ pub fn transcribe_retained_wav(
             out.push(RetainedSegment {
                 t0_ms: seg.t0_ms,
                 t1_ms: seg.t1_ms,
+                voiced_ms: Some(seg.voiced_ms),
                 text,
             });
         }
@@ -923,12 +936,13 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                 let seg_id = {
                     let state = app.state::<Db>();
                     let conn = state.0.lock().unwrap();
-                    store::insert_segment(
+                    store::insert_segment_with_voice_time(
                         &conn,
                         args.meeting_id,
                         pipe.name,
                         seg.t0_ms,
                         seg.t1_ms,
+                        Some(seg.voiced_ms),
                         &text,
                     )
                 };
@@ -942,6 +956,7 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
                         "channel": pipe.name,
                         "t0_ms": seg.t0_ms,
                         "t1_ms": seg.t1_ms,
+                        "voiced_ms": seg.voiced_ms,
                         "text": text,
                     }),
                 );
@@ -1033,8 +1048,8 @@ pub fn run_worker(app: tauri::AppHandle, args: WorkerArgs) {
     }
 
     // Full-context speaker clustering; lands before stop() emits
-    // meeting-stopped, so the reloaded transcript and the summary see names.
-    // Known voiceprints resolve to real names; the rest become "Speaker N".
+    // meeting-stopped, so the reloaded transcript and summary see stable,
+    // neutral groups. Real names remain manual except for calendar-grounded 1:1s.
     {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
@@ -1307,7 +1322,7 @@ pub fn rediarize_from_wav(
     }
     let attendees = store::get_meeting(conn, meeting_id)
         .ok()
-        .map(|meeting| super::summarize::external_attendees(&meeting["event_json"]))
+        .map(|meeting| store::external_attendees_for_event(conn, &meeting["event_json"]))
         .unwrap_or_default();
     Ok(finalize_speakers(
         conn,

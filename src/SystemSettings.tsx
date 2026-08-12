@@ -84,7 +84,10 @@ export function SystemSettingsPanel() {
         <section className="settings-group">
           <header className="settings-group-head">
             <h4>Time zone</h4>
-            <p>Following this Mac uses the time zone selected in macOS each time Noted opens.</p>
+            <p>
+              Changing the weather city sets this automatically. Choose “Use this Mac’s time zone”
+              to follow macOS again.
+            </p>
           </header>
           <label className="field">
             <span className="field-label">Calendar and schedule time zone</span>

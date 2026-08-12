@@ -10,7 +10,11 @@ fn note(conn: &mut rusqlite::Connection, cat: &str, date: &str) -> i64 {
             source: "text".into(),
             image_path: None,
             event_date: date.into(),
-            entries: vec![EntryInput { category: cat.into(), description: String::new(), data: json!({}) }],
+            entries: vec![EntryInput {
+                category: cat.into(),
+                description: String::new(),
+                data: json!({}),
+            }],
         },
         &format!("{date}T00:00:00Z"),
     )
@@ -26,9 +30,36 @@ fn graph_nodes_and_edges() {
     let n1 = note(&mut conn, "gym", "2026-06-01");
     let n2 = note(&mut conn, "meals", "2026-06-02");
 
-    let gym = db::create_entity(&conn, "Planet Fitness", "planet fitness", "place", "[]", "2026-06-01", "now").unwrap();
-    let squat = db::create_entity(&conn, "squat", "squat", "activity", "[]", "2026-06-01", "now").unwrap();
-    let burrito = db::create_entity(&conn, "burrito", "burrito", "food", "[]", "2026-06-02", "now").unwrap();
+    let gym = db::create_entity(
+        &conn,
+        "Planet Fitness",
+        "planet fitness",
+        "place",
+        "[]",
+        "2026-06-01",
+        "now",
+    )
+    .unwrap();
+    let squat = db::create_entity(
+        &conn,
+        "squat",
+        "squat",
+        "activity",
+        "[]",
+        "2026-06-01",
+        "now",
+    )
+    .unwrap();
+    let burrito = db::create_entity(
+        &conn,
+        "burrito",
+        "burrito",
+        "food",
+        "[]",
+        "2026-06-02",
+        "now",
+    )
+    .unwrap();
 
     // gym + squat co-occur in note 1; burrito is alone in note 2.
     db::add_mention(&conn, gym, n1, None, "ctx", "2026-06-01", "now").unwrap();
@@ -47,7 +78,9 @@ fn graph_nodes_and_edges() {
     );
     assert_eq!(e.weight, 1);
     assert!(
-        !edges.iter().any(|x| x.source == burrito || x.target == burrito),
+        !edges
+            .iter()
+            .any(|x| x.source == burrito || x.target == burrito),
         "burrito has no co-mention edges"
     );
 

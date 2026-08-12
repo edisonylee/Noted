@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  AlignLeft,
   CalendarDays,
   Check,
   ChevronLeft,
@@ -165,7 +166,7 @@ function layoutAllDay(events: RangeEvent[], daysArr: string[]): { chips: Chip[];
 }
 
 // ── create/edit form ─────────────────────────────────────────────────────────
-type FormState = {
+export type CalendarEventFormState = {
   title: string;
   date: string;
   allDay: boolean;
@@ -173,6 +174,7 @@ type FormState = {
   end: string;
   endDate: string; // all-day: inclusive last day
   location: string;
+  description: string;
   calKey: string; // `${account}|${calendarId}`
   // Google Meet intent: none = no conference, add = attach one, keep = leave
   // the existing one, remove = strip the existing one.
@@ -180,11 +182,20 @@ type FormState = {
   guests: string; // create only: comma/space-separated emails
 };
 
-const calKey = (account: string, calendarId: string) => `${account}|${calendarId}`;
-const splitKey = (key: string): [string, string] => {
+export const calendarEventKey = (account: string, calendarId: string) => `${account}|${calendarId}`;
+export const splitCalendarEventKey = (key: string): [string, string] => {
   const i = key.indexOf("|");
   return [key.slice(0, i), key.slice(i + 1)];
 };
+
+export function parseCalendarGuests(value: string): { guests: string[]; invalid: string[] } {
+  const emailPattern = /^[^\s@]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
+  const guests = value
+    .split(/[,\s]+/)
+    .map((guest) => guest.trim())
+    .filter(Boolean);
+  return { guests, invalid: guests.filter((guest) => !emailPattern.test(guest)) };
+}
 
 // Calendars the user can actually write to, grouped for the <select>. An empty
 // access role means the list was cached before roles existed — include it and
@@ -201,13 +212,29 @@ function writableCals(status: GcalStatus | null, lockAccount?: string) {
     .filter((a) => a.cals.length > 0);
 }
 
-function EventForm({
+export function defaultCalendarEventKey(status: GcalStatus | null): string {
+  const groups = writableCals(status);
+  const all = groups.flatMap((group) =>
+    group.cals.map((calendar) => calendarEventKey(group.email, calendar.id))
+  );
+  const last = localStorage.getItem("cal.lastCal");
+  if (last && all.includes(last)) return last;
+  for (const group of groups) {
+    const primary = group.cals.find((calendar) => calendar.primary);
+    if (primary) return calendarEventKey(group.email, primary.id);
+  }
+  return all[0] ?? "";
+}
+
+export function CalendarEventForm({
   heading,
   mode,
   init,
   status,
   contacts,
   lockAccount,
+  lockDate = false,
+  allowAllDay = true,
   busy,
   error,
   onSave,
@@ -215,19 +242,25 @@ function EventForm({
 }: {
   heading: string;
   mode: "create" | "edit";
-  init: FormState;
+  init: CalendarEventFormState;
   status: GcalStatus | null;
   contacts: GcalContact[]; // guest autocomplete pool
   lockAccount?: string; // edit: Google can't move events across accounts
+  lockDate?: boolean;
+  allowAllDay?: boolean;
   busy: boolean;
   error: string | null;
-  onSave: (f: FormState) => void;
+  onSave: (f: CalendarEventFormState) => void;
   onCancel: () => void;
 }) {
-  const [f, setF] = useState<FormState>(init);
+  const [f, setF] = useState<CalendarEventFormState>(init);
   const groups = writableCals(status, lockAccount);
-  const set = (patch: Partial<FormState>) => setF((prev) => ({ ...prev, ...patch }));
-  const canSave = !!f.title.trim() && !!f.date && !!f.calKey && (f.allDay || !!f.start);
+  const set = (patch: Partial<CalendarEventFormState>) => setF((prev) => ({ ...prev, ...patch }));
+  const canSave =
+    !!f.title.trim() &&
+    !!f.date &&
+    !!f.calKey &&
+    (f.allDay || (!!f.start && !!f.end));
 
   // Guest autocomplete: match the token being typed after the last comma
   // against people harvested from your calendars (name or email).
@@ -250,7 +283,7 @@ function EventForm({
 
   return (
     <div className="cal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onCancel()}>
-      <div className="cal-form" role="dialog" aria-label={heading}>
+      <div className="cal-form" role="dialog" aria-modal="true" aria-label={heading}>
         <div className="cal-form-head">
           <span>{heading}</span>
           <button className="cal-pop-x" onClick={onCancel} aria-label="Close">
@@ -273,7 +306,7 @@ function EventForm({
           <input
             type="date"
             value={f.date}
-            disabled={busy}
+            disabled={busy || lockDate}
             onChange={(e) => set({ date: e.target.value })}
             aria-label="Date"
           />
@@ -310,15 +343,17 @@ function EventForm({
             </>
           )}
         </div>
-        <label className="cal-form-allday">
-          <input
-            type="checkbox"
-            checked={f.allDay}
-            disabled={busy}
-            onChange={(e) => set({ allDay: e.target.checked })}
-          />
-          All day
-        </label>
+        {allowAllDay && (
+          <label className="cal-form-allday">
+            <input
+              type="checkbox"
+              checked={f.allDay}
+              disabled={busy}
+              onChange={(e) => set({ allDay: e.target.checked })}
+            />
+            All day
+          </label>
+        )}
         <div className="cal-form-row">
           <Video size={14} className="cal-form-ic" />
           {f.meet === "none" ? (
@@ -353,7 +388,7 @@ function EventForm({
             <div className="cal-form-guestwrap">
               <input
                 value={f.guests}
-                placeholder="Add guests — emails, comma-separated (they'll be invited)"
+                placeholder="Add guests by email"
                 disabled={busy}
                 onChange={(e) => set({ guests: e.target.value })}
                 onKeyDown={(e) => {
@@ -394,6 +429,17 @@ function EventForm({
             onChange={(e) => set({ location: e.target.value })}
           />
         </div>
+        <div className="cal-form-row cal-form-description-row">
+          <AlignLeft size={14} className="cal-form-ic" />
+          <textarea
+            className="cal-form-grow cal-form-description"
+            value={f.description}
+            placeholder="Add description or agenda"
+            disabled={busy}
+            onChange={(e) => set({ description: e.target.value })}
+            aria-label="Description"
+          />
+        </div>
         <div className="cal-form-row">
           <CalendarDays size={14} className="cal-form-ic" />
           <select
@@ -406,7 +452,7 @@ function EventForm({
             {groups.map((g) => (
               <optgroup key={g.email} label={g.email}>
                 {g.cals.map((c) => (
-                  <option key={c.id} value={calKey(g.email, c.id)}>
+                  <option key={c.id} value={calendarEventKey(g.email, c.id)}>
                     {/* Carry the account in the label: the collapsed select
                         only shows the picked option, and "work" and "personal"
                         calendars can share names across accounts. */}
@@ -419,7 +465,7 @@ function EventForm({
         </div>
         {error && <div className="cal-form-err">{error}</div>}
         <div className="cal-form-actions">
-          <button className="cal-btn" onClick={onCancel} disabled={busy}>
+          <button className="cal-btn cal-btn-text" onClick={onCancel} disabled={busy}>
             Cancel
           </button>
           <button className="cal-btn primary" onClick={() => onSave(f)} disabled={busy || !canSave}>
@@ -457,7 +503,11 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
   // Selected event popover (anchored near the click), create/edit form, filter.
   const [sel, setSel] = useState<{ ev: RangeEvent; x: number; y: number } | null>(null);
   const [delArmed, setDelArmed] = useState(false);
-  const [form, setForm] = useState<{ mode: "create" | "edit"; init: FormState; ev?: RangeEvent } | null>(null);
+  const [form, setForm] = useState<{
+    mode: "create" | "edit";
+    init: CalendarEventFormState;
+    ev?: RangeEvent;
+  } | null>(null);
   const [formBusy, setFormBusy] = useState(false);
   const [formErr, setFormErr] = useState<string | null>(null);
   const [filterOpen, setFilterOpen] = useState(false);
@@ -575,15 +625,7 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
   // Default calendar for new events: whatever you used last (so creating from
   // the work account sticks), else the first account's primary.
   const defaultCalKey = () => {
-    const groups = writableCals(status);
-    const all = groups.flatMap((g) => g.cals.map((c) => calKey(g.email, c.id)));
-    const last = localStorage.getItem("cal.lastCal");
-    if (last && all.includes(last)) return last;
-    for (const g of groups) {
-      const primary = g.cals.find((c) => c.primary);
-      if (primary) return calKey(g.email, primary.id);
-    }
-    return all[0] ?? "";
+    return defaultCalendarEventKey(status);
   };
 
   function openCreate(date: string, startMin: number | null) {
@@ -599,6 +641,7 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
         end: minToHHMM(Math.min(s + 60, DAY_MIN - 1)),
         endDate: date,
         location: "",
+        description: "",
         calKey: defaultCalKey(),
         meet: "none",
         guests: "",
@@ -620,18 +663,19 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
         end: ev.end_min != null ? minToHHMM(ev.end_min) : "10:00",
         endDate: ev.end_date ? addDays(ev.end_date, -1) : ev.date,
         location: ev.location ?? "",
-        calKey: calKey(ev.account, ev.calendar_id),
+        description: ev.description ?? "",
+        calKey: calendarEventKey(ev.account, ev.calendar_id),
         meet: ev.google_meet ? "keep" : "none",
         guests: "",
       },
     });
   }
 
-  async function saveForm(f: FormState) {
+  async function saveForm(f: CalendarEventFormState) {
     if (!form) return;
     setFormBusy(true);
     setFormErr(null);
-    const [account, calendarId] = splitKey(f.calKey);
+    const [account, calendarId] = splitCalendarEventKey(f.calKey);
     const input: EventInput = {
       account,
       calendarId,
@@ -639,20 +683,16 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
       date: f.date,
       ...(f.allDay ? { endDate: f.endDate || f.date } : { start: f.start, end: f.end }),
       location: f.location.trim(),
+      description: f.description.trim(),
     };
     try {
       if (form.mode === "create") {
         // One malformed address makes Google 400 the whole event — catch it
         // here with a readable message instead.
-        const EMAIL_RE = /^[^\s@]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/;
-        const guests = f.guests
-          .split(/[,\s]+/)
-          .map((g) => g.trim())
-          .filter(Boolean);
-        const bad = guests.filter((g) => !EMAIL_RE.test(g));
-        if (bad.length) {
+        const { guests, invalid } = parseCalendarGuests(f.guests);
+        if (invalid.length) {
           setFormErr(
-            `That doesn't look like a valid email: ${bad.join(", ")} — check for typos (e.g. a double dot).`
+            `That doesn't look like a valid email: ${invalid.join(", ")} — check for typos (e.g. a double dot).`
           );
           setFormBusy(false);
           return;
@@ -1066,7 +1106,7 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
       )}
 
       {form && (
-        <EventForm
+        <CalendarEventForm
           heading={form.mode === "create" ? "New event" : "Edit event"}
           mode={form.mode}
           init={form.init}

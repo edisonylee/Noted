@@ -62,6 +62,15 @@ describe("schedule overlap lanes", () => {
 });
 
 describe("schedule grid geometry", () => {
+  test("keeps an empty day as a full interactive canvas", () => {
+    const grid = buildScheduleGrid([]);
+    expect(grid.start).toBe(6 * 60);
+    expect(grid.end).toBe(24 * 60);
+    expect(grid.hourMarks[0]).toBe(6 * 60);
+    expect(grid.hourMarks.at(-1)).toBe(24 * 60);
+    expect(grid.items).toEqual([]);
+  });
+
   test("renders the full duration of a long event", () => {
     const grid = buildScheduleGrid(
       [

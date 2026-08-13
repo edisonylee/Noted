@@ -347,6 +347,40 @@ export function calendarEventsToScheduleBlocks(events: CalEvent[]): Block[] {
     }));
 }
 
+// Calendar events are part of the day by default. Reconcile any existing rows
+// first (including schedules saved before local-time calendar values), then add
+// only genuinely missing timed events. Manual schedule rows remain untouched.
+export function mergeScheduleWithCalendar(blocks: Block[], events: CalEvent[]): Block[] {
+  const merged = reconcileScheduleBlocks(blocks, events);
+  let added = false;
+  for (const calendarBlock of calendarEventsToScheduleBlocks(events)) {
+    const alreadyPresent = merged.some(
+      (block) =>
+        block.task.trim() === calendarBlock.task.trim() &&
+        (block.start ?? "") === (calendarBlock.start ?? "") &&
+        (!block.end || !calendarBlock.end || block.end === calendarBlock.end),
+    );
+    if (!alreadyPresent) {
+      merged.push(calendarBlock);
+      added = true;
+    }
+  }
+  // Avoid rewriting an existing hand-authored order merely because Calendar
+  // loaded. New events use the schedule's normal chronological write order.
+  return added ? sortBlocks(merged) : merged;
+}
+
+function scheduleBlocksKey(blocks: Block[]): string {
+  return JSON.stringify(
+    blocks.map((block) => [
+      block.task.trim(),
+      block.start ?? "",
+      block.end ?? "",
+      block.duration_min ?? null,
+    ]),
+  );
+}
+
 // Inline editing manipulates one explicit day, so order timed blocks by clock
 // (untimed kept last, in their existing order). This is plain chronological
 // sort — the next-day rollover in layoutRows is a heuristic for ambiguous typed
@@ -727,6 +761,15 @@ export function TodayView({
     day: "numeric",
     ...(selectedDay.slice(0, 4) === currentDay.slice(0, 4) ? {} : { year: "numeric" }),
   });
+  const compactDateLine = formatDay(selectedDay, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    ...(selectedDay.slice(0, 4) === currentDay.slice(0, 4) ? {} : { year: "numeric" }),
+  });
+  const selectedDayNavLabel = isToday
+    ? "Today"
+    : formatDay(selectedDay, { weekday: "short" });
 
   // notes are newest-first (db.rs orders by event_date, id DESC), so the first
   // match is the selected day's latest schedule — re-captures naturally win,
@@ -833,9 +876,13 @@ export function TodayView({
   // The selected day's events pulled back from Google Calendar — used for the empty-state
   // starting point, calendar peek, and direct join links on matching rows.
   const [calEvents, setCalEvents] = useState<CalEvent[] | null>(null);
+  const [calEventsDay, setCalEventsDay] = useState<string | null>(null);
   const [calLoading, setCalLoading] = useState(false);
   const [calOpen, setCalOpen] = useState(false); // peek popover open?
   const [addOpen, setAddOpen] = useState(false);
+  const [calendarAutoState, setCalendarAutoState] = useState<"idle" | "saving" | "error">("idle");
+  const [calendarAutoRetry, setCalendarAutoRetry] = useState(0);
+  const calendarAutoAttemptRef = useRef<string | null>(null);
   const [sync, setSync] = useState<{
     state: "idle" | "syncing" | "clearing" | "ok" | "err";
     msg: string;
@@ -843,6 +890,13 @@ export function TodayView({
     state: "idle",
     msg: "",
   });
+
+  const automaticScheduleBlocks = mergeScheduleWithCalendar(blocks, calEvents ?? []);
+  const storedBlocksKey = scheduleBlocksKey(blocks);
+  const automaticBlocksKey = scheduleBlocksKey(automaticScheduleBlocks);
+  const calendarNeedsUpdate = storedBlocksKey !== automaticBlocksKey;
+  taskBlocksRef.current = automaticScheduleBlocks;
+
   useEffect(() => {
     api
       .gcalAuthStatus()
@@ -857,7 +911,7 @@ export function TodayView({
   }, []);
 
   // Only timed blocks can become calendar events; untimed rows are skipped.
-  const hasTimed = blocks.some((b) => toMinutes(b.start) != null);
+  const hasTimed = automaticScheduleBlocks.some((b) => toMinutes(b.start) != null);
 
   useLayoutEffect(() => {
     if (!todoOpen || !agendaRef.current) return;
@@ -906,6 +960,8 @@ export function TodayView({
     setGridResize(null);
     setGridDetailsOpen(false);
     setGridDetailsError(null);
+    calendarAutoAttemptRef.current = null;
+    setCalendarAutoState("idle");
   }, [selectedDay, entry?.id, incomingTaskDocument, incomingTaskFingerprint]);
 
   // Pull in a newly loaded or externally updated document only while there are
@@ -964,13 +1020,21 @@ export function TodayView({
   // Pull the selected day's real Google Calendar events. Errors fall back to an empty list
   // so schedule editing remains fully useful when Calendar is unavailable.
   async function loadCalEvents() {
+    const requestedDay = selectedDay;
     setCalLoading(true);
     try {
-      setCalEvents(await api.gcalListEvents(selectedDay));
+      const events = await api.gcalListEvents(requestedDay);
+      if (taskDayRef.current === requestedDay) {
+        setCalEvents(events);
+        setCalEventsDay(requestedDay);
+      }
     } catch {
-      setCalEvents([]);
+      if (taskDayRef.current === requestedDay) {
+        setCalEvents([]);
+        setCalEventsDay(requestedDay);
+      }
     } finally {
-      setCalLoading(false);
+      if (taskDayRef.current === requestedDay) setCalLoading(false);
     }
   }
 
@@ -978,6 +1042,8 @@ export function TodayView({
   // stale calendar response.
   useEffect(() => {
     setCalEvents(null);
+    setCalEventsDay(null);
+    setCalLoading(false);
     setCalOpen(false);
     setAddOpen(false);
   }, [selectedDay]);
@@ -1097,7 +1163,7 @@ export function TodayView({
     // editor opens with explicit 12-hour times.
     photoRequestRef.current += 1;
     photoTextRef.current = "";
-    setDraft(scheduleEditorSeed(blocks));
+    setDraft(scheduleEditorSeed(automaticScheduleBlocks));
     setPhoto(null);
     setPhotoReading(false);
     setEditError(null);
@@ -1113,44 +1179,6 @@ export function TodayView({
     setEditing(true);
   }
 
-  // Seed the editor from timed calendar events. All-day events remain visible
-  // in Calendar, but no longer become hidden untimed rows now that the agenda
-  // has no "Anytime" section.
-  function buildFromEvents(events: CalEvent[]) {
-    const seeded = calendarEventsToScheduleBlocks(events);
-    photoRequestRef.current += 1;
-    photoTextRef.current = "";
-    setDraft(blocksToText(seeded));
-    setPhoto(null);
-    setEditError(null);
-    setGridDraft(null);
-    setSelectedIdx(null);
-    setGridResize(null);
-    setGridDetailsOpen(false);
-    setGridDetailsError(null);
-    closeTodoDrawer(false);
-    setEditing(true);
-  }
-
-  // Already on this day's schedule? Matched by task + start so re-adds are no-ops.
-  const onSchedule = (e: CalEvent) => {
-    const exact = blocks.some(
-      (b) => b.task.trim() === e.task.trim() && (b.start ?? "") === (e.start ?? "")
-    );
-    if (exact) return true;
-    const sameTitleEvents = (calEvents ?? []).filter(
-      (candidate) => !candidate.all_day && candidate.task.trim() === e.task.trim()
-    );
-    return sameTitleEvents.length === 1 && blocks.some((b) => b.task.trim() === e.task.trim());
-  };
-
-  // Append calendar events to the existing schedule (peek popover). Skips any
-  // already present, then persists in place via the normal inline-edit path.
-  async function addCalEvents(events: CalEvent[]) {
-    const add = calendarEventsToScheduleBlocks(events.filter((event) => !onSchedule(event)));
-    if (add.length) await persistBlocks([...blocks, ...add]);
-  }
-
   async function attachPhoto(file: File | undefined) {
     if (!file) return;
     const requestId = ++photoRequestRef.current;
@@ -1160,7 +1188,7 @@ export function TodayView({
       // Photo capture is a first-class way into the schedule builder. Opening
       // the editor here means the visible photo card works without an Edit step.
       if (!editing) {
-        setDraft(scheduleEditorSeed(blocks));
+        setDraft(scheduleEditorSeed(automaticScheduleBlocks));
         setSync({ state: "idle", msg: "" });
         closeTodoDrawer(false);
         setEditing(true);
@@ -1203,7 +1231,7 @@ export function TodayView({
     } catch (e) {
       if (requestId !== photoRequestRef.current) return;
       if (!editing) {
-        setDraft(scheduleEditorSeed(blocks));
+        setDraft(scheduleEditorSeed(automaticScheduleBlocks));
         setEditing(true);
       }
       setEditError(String(e));
@@ -1491,6 +1519,52 @@ export function TodayView({
     gridDetailsOpen ||
     gridDetailsBusy;
 
+  // Once the selected day's live calendar has loaded, make its timed events
+  // part of the saved schedule without asking the user to assemble them. The
+  // attempted-content key prevents retry loops when persistence fails; the
+  // explicit retry below is reserved for that exceptional state.
+  useEffect(() => {
+    if (
+      !gcalConnected ||
+      calEvents == null ||
+      calEventsDay !== selectedDay ||
+      !calendarNeedsUpdate ||
+      dayNavigationDisabled ||
+      taskSaveInFlightRef.current
+    ) {
+      return;
+    }
+
+    const attemptKey = `${selectedDay}:${automaticBlocksKey}`;
+    if (calendarAutoAttemptRef.current === attemptKey) return;
+    calendarAutoAttemptRef.current = attemptKey;
+    setCalendarAutoState("saving");
+    const targetDay = selectedDay;
+
+    void persistBlocks(automaticScheduleBlocks).then((saved) => {
+      if (taskDayRef.current !== targetDay) return;
+      setCalendarAutoState(saved ? "idle" : "error");
+    });
+    // The block arrays are represented by stable content keys above; depending
+    // on the freshly parsed arrays themselves would rerun this effect forever.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    gcalConnected,
+    calEvents,
+    calEventsDay,
+    selectedDay,
+    calendarNeedsUpdate,
+    dayNavigationDisabled,
+    automaticBlocksKey,
+    calendarAutoRetry,
+  ]);
+
+  function retryAutomaticCalendar() {
+    calendarAutoAttemptRef.current = null;
+    setCalendarAutoState("idle");
+    setCalendarAutoRetry((revision) => revision + 1);
+  }
+
   async function navigateToDay(nextDay: string) {
     if (nextDay === selectedDay || dayNavigationDisabled) return;
     setDayNavigating(true);
@@ -1581,9 +1655,8 @@ export function TodayView({
     <header className="today-head">
       <div className="today-headrow">
         <div className="today-date-block">
-          <div className="today-eyebrow">Daily schedule</div>
-          <div className="today-date-row">
-            <h1 className="today-date"><time dateTime={selectedDay}>{dateLine}</time></h1>
+          <div className="today-date-topline">
+            <div className="today-eyebrow">Daily schedule</div>
             <nav className="today-day-nav" aria-label="Browse schedule days">
               <button
                 type="button"
@@ -1594,20 +1667,13 @@ export function TodayView({
               >
                 <ChevronLeft size={16} />
               </button>
-              <button
-                type="button"
-                className={"today-day-nav-return" + (isToday ? " is-placeholder" : "")}
-                onClick={() => void navigateToDay(currentDay)}
-                disabled={dayNavigationDisabled || isToday}
-                aria-hidden={isToday || undefined}
-                tabIndex={isToday ? -1 : undefined}
-              >
-                Today
-              </button>
+              <span className="today-day-nav-label" aria-current="date">
+                {selectedDayNavLabel}
+              </span>
               <button
                 type="button"
                 onClick={() => void navigateToDay(shiftDay(selectedDay, 1))}
-                disabled={dayNavigationDisabled || isToday}
+                disabled={dayNavigationDisabled}
                 aria-label="Next day"
                 title="Next day"
               >
@@ -1615,6 +1681,12 @@ export function TodayView({
               </button>
             </nav>
           </div>
+          <h1 className="today-date" aria-label={dateLine}>
+            <time dateTime={selectedDay}>
+              <span className="today-date-full" aria-hidden="true">{dateLine}</span>
+              <span className="today-date-compact" aria-hidden="true">{compactDateLine}</span>
+            </time>
+          </h1>
         </div>
         {withEdit && (
           <div className="today-headbtns">
@@ -1656,60 +1728,38 @@ export function TodayView({
                       {isToday ? "Nothing on your calendar today." : "Nothing on your calendar for this day."}
                     </div>
                   ) : (
-                    <>
-                      <ul className="today-calpop-list">
-                        {calEvents.map((e, i) => {
-                          const addable = !e.all_day && Boolean(e.start);
-                          const added = addable && onSchedule(e);
-                          const meetingUrl = e.meet_link ? joinUrl(e.meet_link, e.account) : null;
-                          return (
-                            <li
-                              key={e.id || i}
-                              className={"today-calpop-row" + (meetingUrl ? " joinable" : "")}
-                            >
-                              {meetingUrl && (
-                                <a
-                                  className="today-cal-event-hit"
-                                  href={meetingUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  aria-label={`Join ${e.task}`}
-                                />
-                              )}
-                              <span className="today-cal-time">
-                                {e.all_day ? "All day" : fmtTime(e.start ?? undefined)}
-                              </span>
-                              <span className="today-cal-task">{e.task}</span>
-                              {meetingUrl && <Video size={13} className="today-cal-join-icon" aria-hidden="true" />}
-                              <button
-                                className="today-calpop-add"
-                                disabled={!addable || added || rowBusy}
-                                onClick={() => addCalEvents([e])}
-                                title={!addable ? "All-day events stay in Calendar" : added ? "Already on schedule" : "Add to schedule"}
-                                aria-label={!addable ? "All-day event" : added ? "Already on schedule" : "Add to schedule"}
-                              >
-                                {added ? <Check size={14} /> : addable ? <Plus size={14} /> : null}
-                              </button>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                      {calEvents.some((e) => e.start && !onSchedule(e)) && (
-                        <button
-                          className="today-make today-calpop-all"
-                          disabled={rowBusy}
-                          onClick={() => addCalEvents(calEvents)}
-                        >
-                          <Plus size={16} /> Add all to schedule
-                        </button>
-                      )}
-                    </>
+                    <ul className="today-calpop-list">
+                      {calEvents.map((e, i) => {
+                        const meetingUrl = e.meet_link ? joinUrl(e.meet_link, e.account) : null;
+                        return (
+                          <li
+                            key={e.id || i}
+                            className={"today-calpop-row" + (meetingUrl ? " joinable" : "")}
+                          >
+                            {meetingUrl && (
+                              <a
+                                className="today-cal-event-hit"
+                                href={meetingUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                aria-label={`Join ${e.task}`}
+                              />
+                            )}
+                            <span className="today-cal-time">
+                              {e.all_day ? "All day" : fmtTime(e.start ?? undefined)}
+                            </span>
+                            <span className="today-cal-task">{e.task}</span>
+                            {meetingUrl && <Video size={13} className="today-cal-join-icon" aria-hidden="true" />}
+                          </li>
+                        );
+                      })}
+                    </ul>
                   )}
                   <button
                     type="button"
                     className="today-calpop-sync"
                     onClick={() => void syncToGcal()}
-                    disabled={sync.state === "syncing" || sync.state === "clearing" || !hasTimed}
+                    disabled={sync.state === "syncing" || sync.state === "clearing" || rowBusy || !hasTimed}
                   >
                     {sync.state === "syncing" ? <Loader size={14} className="spin" /> : <CalendarCheck size={14} />}
                     {isToday ? "Sync today’s schedule" : "Sync this day’s schedule"}
@@ -1744,6 +1794,15 @@ export function TodayView({
               </button>
               {addOpen && (
                 <div className="today-addpop" role="menu" aria-label="Schedule options">
+                  {!isToday && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => void navigateToDay(currentDay)}
+                    >
+                      <CalendarDays size={14} /> Go to today
+                    </button>
+                  )}
                   <button type="button" role="menuitem" onClick={beginAdd}>
                     <Plus size={14} /> Add an event
                   </button>
@@ -1897,70 +1956,16 @@ export function TodayView({
     );
   }
 
-  // ---- Empty state ----
-  if (!blocks.length) {
-    const showCal = gcalConnected && calEvents && calEvents.length > 0;
-    const timedCalEvents = calEvents?.filter((event) => event.start) ?? [];
-    return renderScheduleShell(
-      <>
-        {showCal && (
-          <div className="today-empty">
-            <div className="today-cal">
-              <div className="today-cal-head">
-                <CalendarDays size={15} /> From your calendar
-              </div>
-              <ul className="today-cal-list">
-                {calEvents!.map((event, i) => {
-                  const meetingUrl = event.meet_link ? joinUrl(event.meet_link, event.account) : null;
-                  return (
-                    <li key={event.id || i} className={"today-cal-row" + (meetingUrl ? " joinable" : "")}>
-                      {meetingUrl && (
-                        <a
-                          className="today-cal-event-hit"
-                          href={meetingUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          aria-label={`Join ${event.task}`}
-                        />
-                      )}
-                      <span className="today-cal-time">
-                        {event.all_day ? "All day" : fmtTime(event.start ?? undefined)}
-                      </span>
-                      <span className="today-cal-task">{event.task}</span>
-                      {meetingUrl && <Video size={13} className="today-cal-join-icon" aria-hidden="true" />}
-                      <span className="today-cal-tag">{event.calendar}</span>
-                    </li>
-                  );
-                })}
-              </ul>
-              <button
-                className="today-make today-cal-build"
-                onClick={() => (timedCalEvents.length ? buildFromEvents(timedCalEvents) : openEditor())}
-              >
-                <Plus size={16} /> {timedCalEvents.length ? "Build schedule from these" : "Create schedule"}
-              </button>
-            </div>
-          </div>
-        )}
-        {!showCal && (
-          <div className="today-empty today-empty-schedule">
-            <CalendarDays size={24} className="today-empty-icon" />
-            <h2 className="today-empty-title">
-              {isToday ? "Build today’s schedule" : "No schedule for this day"}
-            </h2>
-            <p className="today-empty-sub">
-              {isToday
-                ? "Type your day in plain language, then adjust individual items whenever you need to."
-                : "This day does not have any scheduled items. Its tasks and notes are still available in Tasks."}
-            </p>
-            <button className="today-make" onClick={openEditor}>
-              <Plus size={16} /> Create schedule
-            </button>
-          </div>
-        )}
-      </>
-    );
-  }
+  // An empty day uses the same schedule canvas as a populated day. Calendar
+  // context can sit above it, but it must never replace the creation surface.
+  const calendarPending =
+    !blocks.length &&
+    (gcalConnected == null ||
+      (gcalConnected && (calLoading || calEvents == null || calEventsDay !== selectedDay)));
+  const showEmptyCalendar = Boolean(
+    !blocks.length && !calendarPending && gcalConnected && calEvents && calEvents.length > 0,
+  );
+  const hasTimedCalendarEvents = calendarEventsToScheduleBlocks(calEvents ?? []).length > 0;
 
   // ---- Agenda ----
   const nowMin = easternMinutes(now);
@@ -2278,6 +2283,57 @@ export function TodayView({
 
   return renderScheduleShell(
     <>
+      {!blocks.length && calendarPending && (
+        <div className="today-empty-context today-empty-loading" role="status" aria-live="polite">
+          <Loader size={14} className="spin" /> Checking calendar…
+        </div>
+      )}
+      {showEmptyCalendar && (
+        <div className="today-empty-context">
+          <div className="today-cal">
+            <div className="today-cal-head">
+              <CalendarDays size={15} /> From your calendar
+            </div>
+            <ul className="today-cal-list">
+              {calEvents!.map((event, i) => {
+                const meetingUrl = event.meet_link ? joinUrl(event.meet_link, event.account) : null;
+                return (
+                  <li key={event.id || i} className={"today-cal-row" + (meetingUrl ? " joinable" : "")}>
+                    {meetingUrl && (
+                      <a
+                        className="today-cal-event-hit"
+                        href={meetingUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label={`Join ${event.task}`}
+                      />
+                    )}
+                    <span className="today-cal-time">
+                      {event.all_day ? "All day" : fmtTime(event.start ?? undefined)}
+                    </span>
+                    <span className="today-cal-task">{event.task}</span>
+                    {meetingUrl && <Video size={13} className="today-cal-join-icon" aria-hidden="true" />}
+                  </li>
+                );
+              })}
+            </ul>
+            {hasTimedCalendarEvents ? (
+              calendarAutoState === "error" ? (
+                <div className="today-cal-auto is-error" role="alert">
+                  <span>Couldn’t update the schedule.</span>
+                  <button type="button" onClick={retryAutomaticCalendar}>Try again</button>
+                </div>
+              ) : (
+                <div className="today-cal-auto" role="status" aria-live="polite">
+                  <Loader size={14} className="spin" /> Updating schedule…
+                </div>
+              )
+            ) : (
+              <div className="today-cal-auto">No timed events</div>
+            )}
+          </div>
+        </div>
+      )}
       <div className="today-agenda" ref={agendaRef}>
         {adding && (
           <ScheduleRowForm
@@ -2315,6 +2371,11 @@ export function TodayView({
             onPointerLeave={() => !gridResize && setGridCursorMinute(null)}
             onKeyDown={handleGridKeyDown}
           >
+            {!grid.items.length && !gridDraft && (
+              <div className="today-grid-empty" role="status">
+                Click any time to add an event
+              </div>
+            )}
             {gridCursorMinute != null && !gridDraft && (
               <div
                 className="today-grid-cursor"

@@ -831,12 +831,20 @@ textarea.json.bad { border-color: var(--bad); }
 .today-syncmsg.ok { color: var(--accent); }
 .today-syncmsg.err { color: var(--error-ink); }
 .today-date-block { flex: 1; min-width: 0; }
+.today-date-topline {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: 30px; margin-bottom: 2px;
+}
 .today-eyebrow {
   font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.09em;
-  color: var(--accent); margin-bottom: 4px;
+  color: var(--accent);
 }
-.today-date-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; }
-.today-date { min-width: 0; font-size: clamp(29px, 3vw, 38px); font-weight: 600; letter-spacing: -0.035em; color: var(--ink); margin: 0; }
+.today-date {
+  min-width: 0; margin: 0; overflow: hidden;
+  color: var(--ink); font-size: clamp(29px, 3vw, 38px); font-weight: 600; line-height: 1.08; letter-spacing: -0.035em;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.today-date-compact { display: none; }
 .today-day-nav { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 108px; }
 .today-day-nav button {
   display: inline-grid; place-items: center; min-width: 30px; height: 30px; padding: 0;
@@ -847,8 +855,10 @@ textarea.json.bad { border-color: var(--bad); }
 .today-day-nav button:hover:not(:disabled) { color: var(--ink); background: var(--hover-soft); }
 .today-day-nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .today-day-nav button:disabled { color: var(--line-strong); cursor: default; }
-.today-day-nav .today-day-nav-return { width: 48px; padding: 0; color: var(--ink-soft); font-weight: 570; }
-.today-day-nav .today-day-nav-return.is-placeholder { visibility: hidden; pointer-events: none; }
+.today-day-nav-label {
+  display: inline-grid; place-items: center; width: 48px; height: 30px;
+  color: var(--ink-soft); font-size: 12px; font-weight: 570;
+}
 
 .today-photo-entry {
   width: 100%; display: flex; align-items: center; gap: 12px; margin: -4px 0 20px; padding: 11px 13px;
@@ -895,6 +905,10 @@ textarea.json.bad { border-color: var(--bad); }
 .today-grid-events:focus-visible {
   border-radius: var(--r-sm);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 58%, transparent);
+}
+.today-grid-empty {
+  position: absolute; top: 29px; right: 0; left: 0;
+  color: var(--muted); font-size: 12.5px; text-align: center; pointer-events: none;
 }
 .today-grid-cursor {
   position: absolute; z-index: 0; right: 0; left: 0; height: 1px;
@@ -1299,6 +1313,12 @@ textarea.json.bad { border-color: var(--bad); }
 .today-empty-icon { color: var(--faint); margin-bottom: 8px; }
 .today-empty-title { font-size: 17px; font-weight: 560; color: var(--ink); margin: 0; }
 .today-empty-sub { font-size: 13.5px; color: var(--muted); max-width: 36ch; line-height: 1.5; margin: 0 0 10px; }
+.today-empty-schedule .today-empty-sub { margin-bottom: 0; }
+.today-empty-context { display: flex; justify-content: center; padding: 8px 0 26px; }
+.today-empty-loading {
+  align-items: center; gap: 7px; justify-content: flex-start;
+  color: var(--muted); font-size: 12.5px;
+}
 .today-make {
   display: inline-flex; align-items: center; gap: 7px; padding: 10px 18px;
   background: var(--ink); color: var(--on-ink); border: none; border-radius: 99px;
@@ -1333,15 +1353,20 @@ textarea.json.bad { border-color: var(--bad); }
 .today-cal-event-hit:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .today-cal-row.joinable > :not(.today-cal-event-hit),
 .today-calpop-row.joinable > :not(.today-cal-event-hit) { position: relative; z-index: 2; pointer-events: none; }
-.today-calpop-row.joinable > .today-calpop-add { z-index: 3; pointer-events: auto; }
 .today-cal-join-icon { flex: none; color: var(--accent); }
 .today-cal-time { flex: 0 0 64px; color: var(--ink-soft); font-variant-numeric: tabular-nums; font-size: 13px; }
 .today-cal-task { flex: 1 1 auto; color: var(--ink); min-width: 0; overflow-wrap: anywhere; }
-.today-cal-tag {
-  flex: 0 0 auto; max-width: 38%; color: var(--muted); font-size: 11.5px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+.today-cal-auto {
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  min-height: 38px; margin-top: 2px; padding-top: 10px;
+  border-top: var(--border-width, 1px) solid var(--line);
+  color: var(--muted); font-size: 12.5px;
 }
-.today-cal-build { align-self: stretch; justify-content: center; margin-top: 2px; }
+.today-cal-auto.is-error { justify-content: space-between; color: var(--error-ink); }
+.today-cal-auto button {
+  background: none; border: 0; padding: 3px 0; color: inherit;
+  font: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 2px;
+}
 .today-or { color: var(--faint); font-size: 12px; margin: 4px 0; }
 .today-empty-link {
   background: none; border: none; padding: 4px; color: var(--muted);
@@ -1382,14 +1407,6 @@ textarea.json.bad { border-color: var(--bad); }
   border-top: var(--border-width, 1px) solid var(--line); font-size: 14px;
 }
 .today-calpop-row:first-child { border-top: none; }
-.today-calpop-add {
-  flex: 0 0 auto; align-self: center; display: inline-flex; padding: 4px;
-  background: none; border: var(--border-width, 1px) solid var(--line-strong); border-radius: var(--r-sm);
-  color: var(--ink-soft); transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
-}
-.today-calpop-add:hover:not(:disabled) { background: var(--surface-2); color: var(--ink); }
-.today-calpop-add:disabled { color: var(--accent); border-color: transparent; opacity: 0.9; }
-.today-calpop-all { align-self: stretch; justify-content: center; padding: 8px 14px; font-size: 13px; }
 .today-calpop-sync {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
   width: 100%; min-height: 36px; padding: 8px 12px; margin-top: 2px;
@@ -1518,15 +1535,18 @@ textarea.json.bad { border-color: var(--bad); }
   .today-shell.tasks-open .noted-document-content { padding-top: 22px; font-size: 16px; }
 }
 
+@media (max-width: 839px) {
+  .today-headrow { align-items: flex-start; flex-direction: column; gap: 14px; }
+  .today-date-block { width: 100%; }
+  .today-headbtns { justify-content: flex-start; width: 100%; }
+}
+
 @media (max-width: 700px) {
   .today-time-grid { display: none; }
   .today-ledger {
     display: flex; flex-direction: column;
     border-top: var(--border-width, 1px) solid var(--line);
   }
-  .today-headrow { align-items: flex-start; flex-direction: column; }
-  .today-date-block { width: 100%; }
-  .today-headbtns { justify-content: flex-start; width: 100%; }
   .today-block { grid-template-columns: 82px minmax(0, 1fr); gap: 0; padding-left: 4px; padding-right: 4px; }
   .today-time { padding-right: 12px; }
   .today-ledger .today-time { align-items: flex-end; flex-direction: column; justify-content: center; gap: 2px; }
@@ -1556,6 +1576,8 @@ textarea.json.bad { border-color: var(--bad); }
 
 @media (max-width: 460px) {
   .today-date { font-size: 29px; }
+  .today-date-full { display: none; }
+  .today-date-compact { display: inline; }
   .today-edit { min-height: 38px; }
   .today-block { grid-template-columns: 76px minmax(0, 1fr); min-height: 60px; gap: 0; }
   .today-time { padding-right: 12px; font-size: 11.5px; }

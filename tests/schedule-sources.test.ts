@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   calendarEventsToScheduleBlocks,
+  mergeScheduleWithCalendar,
   parseBlocks,
   reconcileScheduleBlocks,
   scheduleEditorSeed,
@@ -23,7 +24,7 @@ function calendarEvent(overrides: Partial<CalEvent> = {}): CalEvent {
   };
 }
 
-describe("schedule builder sources", () => {
+describe("automatic schedule sources", () => {
   test("does not seed a schedule from a task-only daily entry", () => {
     const taskOnlyEntry = {
       raw_text: "[ ] Send the proposal\n[ ] Review the budget",
@@ -76,6 +77,66 @@ describe("schedule builder sources", () => {
 
     expect(blocks.map((block) => block.task)).toEqual(["Customer call"]);
     expect(blocks.some((block) => openTasks.some((task) => task.text === block.task))).toBe(false);
+  });
+
+  test("automatically turns timed calendar events into the day's schedule", () => {
+    expect(
+      mergeScheduleWithCalendar([], [
+        calendarEvent({ id: "later", task: "Customer call", start: "13:00", end: "13:30" }),
+        calendarEvent({ id: "earlier", task: "Daily stand-up", start: "08:30", end: "08:45" }),
+      ]),
+    ).toEqual([
+      { task: "Daily stand-up", start: "08:30", end: "08:45" },
+      { task: "Customer call", start: "13:00", end: "13:30" },
+    ]);
+  });
+
+  test("preserves manual schedule items while adding only missing calendar events", () => {
+    const blocks = [
+      { task: "Write launch brief", start: "10:00", end: "11:00" },
+      { task: "Calendar planning", start: "09:00", end: "10:00" },
+    ];
+
+    expect(
+      mergeScheduleWithCalendar(blocks, [
+        calendarEvent(),
+        calendarEvent({ id: "review", task: "Launch review", start: "14:00", end: "15:00" }),
+      ]),
+    ).toEqual([
+      { task: "Calendar planning", start: "09:00", end: "10:00" },
+      { task: "Write launch brief", start: "10:00", end: "11:00" },
+      { task: "Launch review", start: "14:00", end: "15:00" },
+    ]);
+  });
+
+  test("reconciles a unique moved event without creating a duplicate", () => {
+    expect(
+      mergeScheduleWithCalendar(
+        [{ task: "Calendar planning", start: "12:00", end: "13:00" }],
+        [calendarEvent()],
+      ),
+    ).toEqual([{ task: "Calendar planning", start: "09:00", end: "10:00" }]);
+  });
+
+  test("does not reorder a hand-authored schedule when Calendar has nothing to add", () => {
+    const blocks = [
+      { task: "Late writing", start: "22:00", end: "23:00" },
+      { task: "Sleep", start: "00:00", end: "07:00" },
+    ];
+
+    expect(mergeScheduleWithCalendar(blocks, [])).toEqual(blocks);
+  });
+
+  test("keeps distinct same-title calendar events", () => {
+    expect(
+      mergeScheduleWithCalendar([], [
+        calendarEvent({ id: "morning", task: "Focus time", start: "09:00", end: "10:00" }),
+        calendarEvent({ id: "afternoon", task: "Focus time", start: "14:00", end: "15:00" }),
+      ]),
+    ).toEqual([
+      { task: "Focus time", start: "09:00", end: "10:00" },
+      { task: "Focus time", start: "14:00", end: "15:00" },
+    ]);
   });
 
   test("reconciles legacy Eastern clock strings from a unique live calendar event", () => {

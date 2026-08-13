@@ -920,11 +920,11 @@ export default function App() {
           >
             <ListTodo size={16} /> Schedule
           </button>
-          <button className={view === "notes" ? "on" : ""} onClick={() => setView("notes")}>
-            <StickyNote size={16} /> Notes
-          </button>
           <button className={view === "calendar" ? "on" : ""} onClick={() => setView("calendar")}>
             <CalendarDays size={16} /> Calendar
+          </button>
+          <button className={view === "notes" ? "on" : ""} onClick={() => setView("notes")}>
+            <StickyNote size={16} /> Notes
           </button>
           {SHOW_JOURNAL && (
             <button className={view === "journal" ? "on" : ""} onClick={() => setView("journal")}>

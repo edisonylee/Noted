@@ -4,8 +4,9 @@ Status: native shell and first local Notes slice verified on physical hardware
 
 Date checked: 2026-08-16
 
-Related direction: [Decision 006](decisions/006-iphone-companion-direction.md)
-and [the mobile implementation plan](MOBILE_COMPANION_IMPLEMENTATION_PLAN.md).
+Related direction: [Decision 006](decisions/006-iphone-companion-direction.md),
+[Decision 007](decisions/007-mobile-sync-sequencing-and-provider-gate.md), and
+[the mobile implementation plan](MOBILE_COMPANION_IMPLEMENTATION_PLAN.md).
 
 ## Outcome
 

@@ -28,10 +28,13 @@ Noted supports three complete inference profiles: **Noted Hosted** requires no m
 - **Recaps & trends** — auto-generated day/week recaps and per-category trends.
 - **Chat** — ask questions over your own knowledge base with a local model.
 - **Themes** — search 50 bundled visual systems, import a `DESIGN.md`, or ask the local assistant for a style. Imports are validated data-only packs; no paid MCP or cloud model is required.
-- **iPhone companion (in development)** — the target is a native, offline-capable
-  iPhone app with encrypted sync while the Mac retains model processing. The old
-  LAN/PWA remote view is disabled and is not a shipped phone product. See the
-  [implementation plan](docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md).
+- **iPhone companion (in development)** — a signed native build with isolated
+  local-only Notes now runs on iPhone; cross-device sync has not shipped. The
+  target is an offline-capable app with encrypted Mac sync while the Mac retains
+  model processing. The old LAN/PWA remote view is disabled and is not a shipped
+  phone product. See the [verified preflight](docs/IPHONE_FEASIBILITY_PREFLIGHT.md),
+  [implementation plan](docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md), and
+  [capability map](docs/mobile/capability-ledger.yaml).
 
 ## Tech stack
 
@@ -92,8 +95,9 @@ Use standard Noted as the canonical local app. Do not run it alongside `tauri de
 - **Balanced mode (Gemini):** open Settings, switch to *Balanced*, and paste a Gemini API key. Only OCR/extract calls go to Gemini; chat and embeddings stay local. The connection badge confirms the key is live.
 - **Use my API keys:** open Settings → Models, select each provider and model, review the routing summary, then save. Credentials go to macOS Keychain. Anthropic must be paired with another embedding and transcription provider. Changing the embedding provider asks before rebuilding semantic search from your preserved notes.
 - **Google Calendar:** in Settings, connect your Google account (OAuth with PKCE). Today can then push the day's schedule one-way into a dedicated "noted" calendar.
-- **iPhone companion:** not yet shipped. The legacy QR/LAN remote view remains
-  disabled; implementation follows the
+- **iPhone companion:** the local-only Notes prototype is installable on a
+  development iPhone, but pairing and sync are not shipped. The legacy QR/LAN
+  remote view remains disabled; implementation follows the
   [mobile companion plan](docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md).
 - **Themes:** open Settings → Themes to search 50 bundled presets. You can also paste or upload a `DESIGN.md`; the local text model creates a safe preview before you apply it. See [`THEMES.md`](THEMES.md) for the pack contract.
 

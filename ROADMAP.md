@@ -119,9 +119,12 @@ can participate in one trustworthy system rather than parallel feature silos.
 - No query or source type requires a model or network for exact/lexical access.
 - Corrections measurably improve a repeated extraction or retrieval task.
 
-### Current technical reference
+### Current technical references
 
 - [`docs/AGENT_CONTEXT_IMPLEMENTATION_PLAN.md`](docs/AGENT_CONTEXT_IMPLEMENTATION_PLAN.md)
+- [`docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md`](docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md)
+  — mobile milestones M3–M5 consume the portable identity and local-replica
+  contracts from this phase
 
 ## Phase 3 — The daily context loop
 
@@ -200,9 +203,11 @@ local-first product.
   commodity storage.
 - Local-only users retain capture, search, export, and deletion functionality.
 
-### Current architectural reference
+### Current architectural references
 
 - [`docs/decisions/002-context-cloud-boundaries.md`](docs/decisions/002-context-cloud-boundaries.md)
+- [`docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md`](docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md)
+- [`docs/decisions/007-mobile-sync-sequencing-and-provider-gate.md`](docs/decisions/007-mobile-sync-sequencing-and-provider-gate.md)
 
 ## Phase 6 — Focused action and collaboration
 
@@ -284,6 +289,7 @@ These do not create separate product phases; they make every phase shippable.
 | Agent interface | Permissioned local read-only surface first | Phase 4 threat-model review |
 | Outbound context delivery | Email first; native macOS draft before optional direct provider send; exact preview, approval, and receipt required | Phase 6 entry after identity and context-packet contracts exist |
 | Hosted inference | Optional; local and BYOK remain supported | Before paid cloud beta |
+| Mobile continuity | Paired direct Mac sync first; provider-neutral encrypted relay later; no provider spend before the direct Notes gate | After mobile M4 and before M7 provisioning |
 | Self-hosted models | Only after measured fully loaded cost and quality win | At sustained paid utilization |
 | Teams | After personal retention and explicit team pull | Phase 6 entry |
 

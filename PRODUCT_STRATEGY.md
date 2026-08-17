@@ -295,6 +295,12 @@ If it does none of these, it is outside the current strategy.
   — accepted meeting audio policy
 - [`docs/decisions/002-context-cloud-boundaries.md`](docs/decisions/002-context-cloud-boundaries.md)
   — accepted local/cloud/agent boundary
+- [`docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md`](docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md)
+  — complete iPhone product, data, sync, security, and rollout plan
+- [`docs/decisions/006-iphone-companion-direction.md`](docs/decisions/006-iphone-companion-direction.md)
+  and [`docs/decisions/007-mobile-sync-sequencing-and-provider-gate.md`](docs/decisions/007-mobile-sync-sequencing-and-provider-gate.md)
+  — accepted mobile product direction, direct-first sequence, and hosted-provider
+  spending gate
 - [`MEETINGS_PLAN.md`](MEETINGS_PLAN.md) — meeting implementation history and
   remaining technical work
 - [`docs/BYOK_PROVIDER_PLAN.md`](docs/BYOK_PROVIDER_PLAN.md) — provider-neutral

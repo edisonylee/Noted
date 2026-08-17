@@ -1,12 +1,18 @@
 # Noted mobile companion implementation plan
 
-Status: accepted product direction; implementation started at M1/M2
+Status: M0 direction accepted; M1 checkpoint complete; M2 native shell and
+local-only Notes proven on physical hardware; M3 portability is next; no sync
+has shipped
 
 Date: 2026-08-14
+
+Last updated: 2026-08-16
 
 Scope: iPhone first, while preserving macOS as the primary capture and intelligence platform
 
 Accepted direction: [Decision 006](decisions/006-iphone-companion-direction.md)
+
+Sync and provider sequence: [Decision 007](decisions/007-mobile-sync-sequencing-and-provider-gate.md)
 
 This document defines how Noted becomes a real mobile product. It is intentionally
 not a plan to turn the dormant LAN web view back on. The target is an offline-capable
@@ -21,6 +27,7 @@ It builds on:
 - [Decision 003: record authority and portability](decisions/003-context-record-authority-and-portability.md)
 - [Decision 004: database concurrency](decisions/004-database-concurrency-and-index-generations.md)
 - [Decision 005: Context Pass and client identity](decisions/005-context-pass-and-client-identity.md)
+- [Mobile capability ledger](mobile/capability-ledger.yaml)
 - [ContextRecordV1](agent-context/context-record-v1.md)
 - [Operational contracts](agent-context/operational-contracts.md)
 - [Phase 0 gate](agent-context/phase-0-gate.md)
@@ -48,6 +55,9 @@ The operating model is:
   It stores encrypted records and blobs, not readable personal context.
 - A direct paired Mac transport is implemented first to prove convergence and
   enable private dogfooding before cloud operations are introduced.
+- No hosted sync provider is selected, provisioned, or paid for until the direct
+  Notes gate passes. Paid managed infrastructure is acceptable later at M7 when
+  off-LAN continuity, recovery, or a tester cohort creates a concrete need.
 - Internal TestFlight is the default private native distribution channel during
   development. Ad Hoc remains the strict off-store fallback. An unlisted App
   Store release is the durable long-term native channel if desired.
@@ -95,6 +105,7 @@ not every macOS-only hardware or administration control.
 | Meetings | List/search/filter, detail, transcript search/copy/play-from-time, generated and edited summary, participants, rich user notes, speaker corrections, citations, export/share, media deletion, lifecycle, and retained-media playback | All text local; selected media cached or streamed | Mac captures system audio and produces transcript/summary |
 | Knowledge / People | Search/filter, evidence navigation, related meetings/notes, rename, merge, and accept/dismiss suggestions | Approved records and versioned evidence projection local | Mac computes mentions, embeddings, merge suggestions, and refreshed projections |
 | Recaps / Trends | Show existing generated recaps and deterministic analytics that are part of the product | Last generated artifact remains available | Mac generates new AI recaps; deterministic aggregates may run on either device |
+| Weather | Compact current conditions and forecast in Today, with location, freshness, refresh, and stale state | Last cached snapshot remains visible with its age | iPhone fetches directly; no Mac or sync dependency |
 | Search | Exact and local FTS across synced text | Fully available | Semantic search may remain Mac-only initially |
 | Settings | Sync, paired devices, storage, calendar accounts/reminders, time zone, appearance, meeting-note preferences, privacy, export request, and about | Local settings always available | Provider, model, Mac recording, vault-source, and system permissions remain desktop-only |
 
@@ -120,6 +131,13 @@ canonical editable overlay/replacement with its own revision. Regeneration never
 silently overwrites that user-authored content.
 
 ### Required parity ledger
+
+The initial machine-readable ledger is maintained in
+[mobile/capability-ledger.yaml](mobile/capability-ledger.yaml). It records the
+current local Notes prototype, every planned standard-profile action, revived
+scope, and every intentional exclusion with a stable contract-test identifier.
+The ledger changes with implementation evidence; this section defines the fields
+and completeness rule.
 
 Before each surface is called complete, maintain a machine-readable ledger with:
 
@@ -244,55 +262,50 @@ screen implementation for:
 
 ## Current repository findings
 
-### Phone access exists in code but is deliberately off
+### The native iPhone shell and first local slice exist
 
-- src/releaseProfile.ts disables phoneLan for every frontend profile.
-- src-tauri/src/release_profile.rs disables phone_lan for every backend profile.
-- src/App.tsx only chooses the mobile shell when the flag is enabled and the
-  viewport is narrow.
-- src-tauri/src/lib.rs does not start the LAN server while that flag is false.
+The repository now has an isolated iOS frontend, Tauri configuration, capability
+manifest, Rust entry point, command registry, and SQLite store. A signed build has
+been installed and launched on an iPhone 15 Pro. The native Notes prototype can:
 
-This was a sound product decision: the existing implementation is a remote view,
-not a companion.
+- list and open local notes;
+- create and edit a title and plain-text body;
+- search local title/body text;
+- tombstone a note; and
+- preserve its file-backed WAL database across process restart.
 
-The current mobile shell exposes Today, quick capture, Ask, and Settings. That is
-nearly the inverse of the requested scope: Ask should disappear, while Notes,
-Calendar, Meetings, and Knowledge need to arrive.
+The iOS command registry contains mobile health plus only the local Notes
+commands. Desktop recorder, model, agent, provider, vault, reminder-worker,
+sqlite-vec, and legacy phone-server dependencies are target-gated out of the iOS
+build. The exact verified environment and commands are recorded in
+[the iPhone feasibility preflight](IPHONE_FEASIBILITY_PREFLIGHT.md).
 
-### The web client is not offline or synchronized
+### The native slice is deliberately not syncable yet
 
-The current browser transport posts commands directly to the Mac. There is:
+The prototype `mobile_notes` table uses local integer IDs and has no library,
+device, portable revision, accepted head, branch, outbox, inbox, cursor, conflict,
+or media state. Its search is bounded substring matching rather than the planned
+local FTS contract. It has no pairing, navigation shell, folders, Trash/restore
+UI, bootstrap, background transport, or recovery.
 
-- no service worker;
-- no IndexedDB corpus;
-- no local change journal;
-- no sync cursor;
-- no push/event transport;
-- no offline search;
-- no local media cache; and
-- no background sync implementation.
+M3 must migrate any retained prototype notes into UUID-backed portable local
+records before pairing. Their integer IDs must never be mapped to Mac row IDs.
+Until that migration, the iPhone and Mac databases are intentionally separate
+sources of local data and the product must not imply that a note is synchronized.
 
-Browser-side app events are a no-op, and only connection health is polled. Meeting
-updates therefore become stale. src/api.ts also makes localFileUrl desktop-only,
-so retained meeting media cannot play on the phone.
+### The dormant browser bridge is quarantined, not a foundation
 
-### Command coverage is broad but not behavioral parity
+The historical LAN/PWA path remains in source for a possible developer diagnostic
+surface, but release profiles keep it off, application startup cannot activate
+it, the frontend browser transport is removed, retained request bodies are
+bounded, managed image reads are root-confined, its public manifest carries no
+credential, and its command gate permits health only.
 
-The phone dispatcher currently mirrors all registered command names, but many
-commands intentionally return “desktop only.” Existing bridge coverage includes
-latent note, meeting, knowledge, and calendar operations, yet the mobile UI does
-not route to them and several reused screens would call desktop-only actions.
-
-There is no automated contract test that keeps:
-
-1. Tauri command definitions,
-2. the generate_handler registry, and
-3. the phone/API dispatcher
-
-in behavioral sync.
-
-The mobile architecture should stop extending this broad remote-command surface.
-It should use a narrow versioned sync protocol and local repositories instead.
+The old narrow-layout UI included Today, quick capture, Ask, and Settings and
+sent actions directly to the Mac. It has no offline corpus or sync journal and is
+not the native product contract. The new sync listener must be separate from
+`phone.rs`, expose no arbitrary command dispatcher, and never revive URL/local
+storage bearer credentials.
 
 ### Current schema cannot support independent writers
 
@@ -317,38 +330,18 @@ entities, and other user-visible canonical records need a portable identity.
 The database also stores image, audio, and video as absolute Mac paths. A path is
 not a portable attachment reference and must never cross the sync boundary.
 
-### Existing LAN bridge security blockers
+### Remaining native security and lifecycle probes
 
-The dormant bridge must remain disabled until it is removed or hardened. The
-repository audit found:
+The physical build proves installation and local persistence, not the production
+security boundary. M2 remains open for tested iOS Keychain/Secure Enclave use,
+Data Protection across SQLite/WAL/FTS/media, locked-device behavior, App Group
+share-inbox isolation, reinstall cleanup, backup exclusion, background encrypted
+inbox behavior, VoiceOver/Dynamic Type, and suspend/resume/upgrade lifecycle.
 
-1. The PWA manifest is publicly readable and embeds the live bearer token in its
-   start URL.
-2. The same persistent 64-bit token appears in URLs, localStorage, and a logged
-   connection URL.
-3. The token has no expiration, rotation, device identity, revocation, or command
-   scope.
-4. Static routes are unauthenticated.
-5. API and upload bodies are read without a route-level maximum.
-6. There is no Origin validation, DNS-rebinding/CSRF defense, rate limiting, or
-   security audit trail.
-7. A phone-exposed read_inbox_image path can read an arbitrary Mac path instead
-   of constraining access to the managed inbox.
-8. A single token can reach destructive and administrative command families.
-9. The self-signed certificate can regenerate when the LAN address changes,
-   contradicting the “one time only” trust experience.
-
-Do not port-forward or publicly tunnel this server. Tailscale Serve can be a
-useful private development transport only after the application-level issues are
-fixed; Tailscale network membership does not repair an overbroad application
-credential.
-
-### Documentation needs reconciliation
-
-README currently describes phone access as a shipped full app even though release
-profiles disable it. The implementation phase must update README, PhonePanel copy,
-release documentation, and source comments together so “available,” “preview,”
-and “planned” remain accurate.
+If the legacy diagnostic listener is ever reintroduced, it separately requires
+Host/Origin validation, rate limits, scoped revocable sessions, request timeouts,
+and HTTP-level security tests. Tailscale membership or a private tunnel is not a
+substitute for application authentication and authorization.
 
 ## Architecture alternatives
 
@@ -439,18 +432,20 @@ flowchart LR
         AI <--> MM
     end
 
-    PO <--> LOG
-    MO <--> LOG
-    PK <--> AUTH
-    MO <--> AUTH
-    PM <--> BLOB
-    MM <--> BLOB
+    PO <-->|"M4 direct authenticated sync"| MO
+    PO <-.->|"M7 hosted encrypted sync"| LOG
+    MO <-.->|"M7 hosted encrypted sync"| LOG
+    PK <-.-> AUTH
+    MO <-.-> AUTH
+    PM <-.-> BLOB
+    MM <-.-> BLOB
     PUSH -. "refresh hint" .-> PO
 ~~~
 
-The direct paired-Mac phase substitutes a local authenticated transport for the
-relay. The mutation envelope, encryption, cursors, retry rules, and local storage
-do not change when the cloud relay arrives.
+The solid path is built first: the paired Mac is the direct sequencing authority.
+The dotted hosted paths arrive at M7 through the explicit authority-generation
+cutover in Decision 007. The mutation envelope, encryption, cursors, retry rules,
+and local storage do not change when the relay arrives.
 
 ### Responsibilities by layer
 
@@ -647,12 +642,13 @@ Exact names may change during the schema ADR, but the responsibilities must exis
 
 | Responsibility | Minimum data |
 |---|---|
-| libraries | library ID, current key epoch, creation and enrollment state |
+| libraries | library ID, authority generation/owner, purge generation, current key epoch, creation and enrollment state |
 | devices | device ID, public keys, capabilities, enrollment and revocation state |
 | record_snapshots | immutable serialization of authoritative domain rows for a record/version; not a second canonical table |
-| change_log | local sequence, mutation/version ID, record base/proposed revision, accepted receipt, device, transaction, time |
+| change_log | local sequence, mutation/version ID, base revision/version ID, proposed revision, accepted receipt/commit sequence, device, transaction, time |
 | sync_outbox | encrypted mutation, attempts, retry time, acknowledgement state |
-| sync_cursors | peer/relay identity, last applied change sequence, snapshot generation |
+| sync_inbox | bounded downloaded ciphertext, source sequence, integrity state, and locked/unapplied status |
+| sync_cursors | peer/relay identity, downloaded sequence, applied sequence, checkpoint and snapshot generation |
 | conflicts | record, accepted head, pending/rejected branches, preserved variants, resolution |
 | media_objects | media ID, hashes, sizes, kind, codec, duration, lifecycle, availability |
 | media_refs | owner record, media object, semantic role |
@@ -681,10 +677,13 @@ transaction_member_count
 transaction_manifest_digest
 transaction_commit_marker
 device_id
-device_counter
+device_transaction_counter
+authority_generation
+purge_generation
 record_id
 record_kind
 base_head_revision
+base_head_version_id
 proposed_revision
 version_id
 key_epoch
@@ -696,16 +695,19 @@ signature
 mutation_id is globally unique and makes network retries idempotent.
 version_id distinguishes two offline branches that both propose revision n+1.
 transaction_id groups related changes such as a note, its entries, folder
-placement, and media references. The signed transaction manifest commits the
-member count, ordered member digests, byte total, and expiry. A missing/expired
-transaction is aborted without partial visibility. Reuse of a mutation_id or
-transaction_id with different signed bytes is a hard security error.
+placement, and media references. One signed transaction manifest commits the
+device_transaction_counter, member count, ordered member digests, byte total,
+and expiry. A missing/expired transaction is aborted without partial visibility.
+Reuse of a mutation_id, transaction_id, or device counter with different signed
+bytes is a hard security error.
 
-device_counter is reserved durably in the same transaction that creates the
-outbox item. It is per signed mutation, allows ordered concurrent uploads, and is
-never reset under an existing device identity. Restoring or reinstalling creates
-a new device identity unless a platform-backed anti-rollback counter can be
-proved.
+device_transaction_counter is reserved durably in the same SQLite transaction
+that creates the logical transaction and its outbox members. Uploads from one
+device are serialized by this counter. Acceptance, conflict rejection, and other
+terminal protocol outcomes consume it and return a replayable signed receipt;
+retrying the identical transaction returns that receipt. The counter is never
+reset under an existing device identity. Restoring or reinstalling creates a new
+device identity unless a platform-backed anti-rollback counter can be proved.
 
 The server sequence is not a content conflict policy. It orders accepted opaque
 changes and provides a cursor.
@@ -719,7 +721,8 @@ base revision plus version_id/mutation state until accepted or merged.
 
 For each record, a replica stores:
 
-- accepted head: revision, version_id, content hash, and acceptance checkpoint;
+- accepted head: revision, version_id, content hash, authority generation, and
+  acceptance checkpoint;
 - local working state based on that head;
 - pending branches awaiting acknowledgement;
 - rejected/conflict branches that remain user-recoverable; and
@@ -743,9 +746,11 @@ authority role never changes merely because an endpoint URL changes.
 3. Deduplicate mutation_id only when its signed envelope digest matches exactly.
 4. Assemble and verify the complete transaction manifest within count, byte, and
    expiry ceilings.
-5. Compare base_head_revision with the current accepted-head metadata.
+5. Compare base_head_revision, base_head_version_id, authority generation, and
+   purge generation with the current accepted-head metadata.
 6. Accept the complete transaction or reject it as a conflict.
-7. Assign a monotonic library change_seq and signed acceptance receipt.
+7. Assign a monotonic library commit_seq/change_seq and signed acceptance
+   receipt.
 8. Store the current encrypted envelope and bounded change-log entry.
 9. Return accepted revisions, receipts, and the high-water cursor.
 
@@ -755,9 +760,12 @@ revision preconditions.
 
 ### Pull and bootstrap
 
-- Normal pull asks for changes after a durable cursor.
-- Apply changes in a transaction, validate signatures/hashes, and advance the
-  cursor only after commit.
+- Normal pull asks for changes after a durable downloaded cursor. It may place
+  bounded authenticated ciphertext in the protected inbox while the device is
+  locked without claiming that plaintext state is current.
+- After unlock, validate the receipt chain, signatures, ciphertext hash, AEAD,
+  schema, and canonical hash; apply domain changes and advance the separate
+  applied cursor in the same SQLite transaction.
 - A new or very stale device downloads a consistent encrypted snapshot plus its
   high-water cursor, then applies later changes.
 - Old mutation logs may be compacted only after an independently restorable
@@ -889,6 +897,15 @@ choose and test:
 - uninstall/reinstall cleanup and the rule that reinstall creates a new device
   identity; and
 - the user's device-passcode assumption and optional Face ID unlock policy.
+
+Recommended default for the M2 probe: keep vault/content keys in Keychain with
+`WhenUnlockedThisDeviceOnly`; protect plaintext SQLite, WAL/SHM, FTS, thumbnails,
+and decoded media with complete file protection; and permit only already-encrypted
+transport envelopes/chunks plus separately scoped transport authentication under
+an `AfterFirstUnlockThisDeviceOnly` boundary if locked background transfer proves
+necessary. SQLCipher or equivalent remains a measured decision after physical
+extraction, performance, migration, and backup tests; OS Data Protection is not
+allowed to remain unspecified while that decision is open.
 
 Foreground-readable canonical plaintext and background-transfer state are
 separated. While locked, the system may upload/download already encrypted
@@ -1260,8 +1277,9 @@ Deliverables:
 - Confirm all Noted text is local, the proposed calendar cache window, and the
   media eviction order.
 - Confirm owner/team Internal TestFlight versus an External TestFlight cohort.
-- Write a mobile sync ADR that chooses the custom E2EE relay and records why
-  CloudKit is a fallback.
+- Maintain [Decision 007](decisions/007-mobile-sync-sequencing-and-provider-gate.md),
+  which records direct-first sync, the provider-neutral relay seam, the M4
+  evaluation gate, M7 spending boundary, and why CloudKit remains a fallback.
 - Revisit Decision 003's portable-canonical-layer gate before a second primary
   platform and explicitly retain per-device SQLite replicas or approve a change.
 - Accept pairing, recovery, local-at-rest, metadata-leakage, purge-generation,
@@ -1371,6 +1389,9 @@ Deliverables:
 - Introduce schema versioning plus reader and writer compatibility floors.
 - Backfill library ID and UUIDv7 public IDs for Notes and the category/folder
   records required to organize them.
+- Migrate any retained `mobile_notes` prototype rows into new UUID-backed local
+  Notes as new creates; preserve their text and timestamps, never interpret their
+  integer IDs as Mac identities, and provide a verified export/reset fallback.
 - Add accepted-head revision state, local branch IDs, timestamps, canonical
   hashes, lifecycle/tombstones, provenance, and device attribution.
 - Define Brain/imported-note authority and make imported mirrors read-only or
@@ -1380,6 +1401,9 @@ Deliverables:
 - Introduce the local change journal/outbox in shadow mode.
 - Make every in-scope canonical Notes write emit a deterministic mutation in the
   same SQLite transaction through the single writer.
+- Gate current permanent-delete paths for portable families behind the later
+  purge-generation contract; direct sync may trash/restore and retain tombstones,
+  but it may not promise permanent erasure.
 - Prove Notes export, verified restore, trash, and rebuildable FTS.
 
 Gate:
@@ -1426,6 +1450,8 @@ Gate:
 - Direct discovery spoofing, credential-in-URL, arbitrary command/path access,
   and unbounded bodies are impossible.
 - The Notes experience remains usable in airplane mode.
+- No hosted sync provider is selected, provisioned, or paid for before this gate.
+  Passing M4 opens provider evaluation; it does not itself authorize M7 spend.
 
 Rollback:
 
@@ -1524,6 +1550,9 @@ continuity before advanced calendar/media work.
 
 Deliverables:
 
+- Run the provider gate in Decision 007 against measured direct-sync behavior;
+  record vendor, region, privacy terms, cost model, restore proof, and exit plan
+  in a selection ADR before provisioning durable infrastructure.
 - Account and device registry.
 - Opaque Postgres-compatible mutation log/current-state index.
 - Minimal S3-compatible encrypted object storage for capture blobs.
@@ -1822,15 +1851,20 @@ lower bounds for a custom E2EE protocol and broad schema conversion. Formal
 re-estimation gates follow M2's physical-device spike and M4's first complete
 sync slice.
 
-## Owner choices before implementation
+## Accepted decisions and deferred gates
 
-The plan recommends these defaults:
+Decision 006 accepts the product defaults below. Decision 007 accepts the
+direct-first sync sequence and hosted-provider spending gate. Protocol details
+that have their own named ADR gates remain deferred rather than silently
+accepted.
 
 1. **Client:** native Tauri iOS, not a permanent PWA.
 2. **Beta delivery:** Internal TestFlight, not a public listing.
 3. **Strict off-store fallback:** paid Ad Hoc, accepting manual installs and
    expiring provisioning.
-4. **Sync:** direct paired Mac first, then custom application-layer E2EE relay.
+4. **Sync:** direct paired Mac first, then custom application-layer E2EE relay;
+   no provider selection or spend before M4 passes, and hosted provisioning
+   belongs to M7 when off-LAN continuity, recovery, or testers justify it.
 5. **Cloud privacy:** content is server-unreadable while documented routing,
    revision, size, timing and access metadata remain visible; hosted intelligence
    is a separate future opt-in mode.
@@ -1863,7 +1897,10 @@ Blocking points are milestone-specific:
   decisions.
 
 Infrastructure vendor, object-store provider, exact pricing, video quota, hosted
-AI, Android, and public/unlisted release do not block foundational implementation.
+AI, Android, and public/unlisted release do not block foundational
+implementation. Paying for managed infrastructure later is acceptable, but the
+provider must pass Decision 007's evidence gate and must not redefine the sync
+or encryption contract.
 
 ## Definition of done
 

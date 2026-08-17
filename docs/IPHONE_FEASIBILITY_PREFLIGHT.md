@@ -1,23 +1,22 @@
 # iPhone feasibility preflight
 
-Status: blocked on full Xcode installation; source isolation work not started
+Status: simulator feasibility shell built and launched; physical-device signing pending
 
-Date checked: 2026-08-14
+Date checked: 2026-08-16
 
 Related direction: [Decision 006](decisions/006-iphone-companion-direction.md)
 and [the mobile implementation plan](MOBILE_COMPANION_IMPLEMENTATION_PLAN.md).
 
 ## Outcome
 
-The repository has the basic Tauri mobile entry shape, and this Apple Silicon
-Mac has ample disk space and current Rust, Swift, Bun, and Tauri tooling. It
-cannot generate, compile, sign, or install an iPhone shell yet because only the
-standalone Command Line Tools are installed. There is no iPhoneOS SDK, iOS Rust
-target, CocoaPods installation, signing identity, or provisioning profile.
+The native feasibility shell now compiles, installs, launches, and completes its
+Rust-to-webview startup health check in an iPhone 17 simulator. The iOS build has
+its own frontend entry, Tauri config, capability manifest, Rust entry point, and
+command registry. macOS-only services and native dependencies are excluded at
+compile time instead of being hidden at runtime.
 
-Do not run `tauri ios init` until full Xcode is installed and opened once. The
-generated project would not be verifiable, and the current shared Rust startup
-still includes macOS-only services.
+Physical-device installation remains pending because Xcode does not yet expose
+a valid Apple Development signing identity or development team on this Mac.
 
 ## Verified environment
 
@@ -29,11 +28,12 @@ still includes macOS-only services.
 | Bun | 1.3.14 |
 | Tauri CLI / crate | 2.11.2 |
 | Free disk | about 1.4 TiB |
-| Active developer directory | `/Library/Developer/CommandLineTools` |
-| Full Xcode / iPhoneOS SDK | missing |
-| Installed Rust targets | `aarch64-apple-darwin` only |
-| CocoaPods | missing |
+| Active developer directory | `/Applications/Xcode.app/Contents/Developer` |
+| Full Xcode / iPhoneOS SDK | Xcode 26.6 / iOS 26.5 |
+| Installed Rust targets | macOS, iOS device, Apple Silicon simulator, Intel simulator |
+| CocoaPods | 1.17.0 |
 | Valid code-signing identities | none |
+| Simulator proof | iPhone 17: build, install, launch, and `mobile_health` passed |
 
 Evidence commands:
 
@@ -56,11 +56,11 @@ security find-identity -v -p codesigning
 - The Vite configuration already honors `TAURI_DEV_HOST`.
 - Existing icon source assets are sufficient for the first shell spike.
 
-## Source blockers to isolate before the first iOS build
+## Source isolation proven by the first iOS build
 
-The first iPhone shell must have a separate config and a deliberately small
-command registry. Reusing the macOS startup verbatim would pull in unsupported or
-inappropriate behavior:
+The first iPhone shell now has a separate config and a deliberately small
+command registry. The following desktop behavior is excluded from the iOS
+compile and bundle:
 
 - global-shortcut imports, plugin construction, and registration;
 - the Unix agent broker and its desktop peer-credential assumptions;
@@ -74,21 +74,19 @@ inappropriate behavior:
 - the dormant LAN phone server and its broad historical dispatcher;
 - the legacy mobile shell, which is gated by `phoneLan` and includes Ask.
 
-The mobile shell should initially expose only startup diagnostics, mobile-local
-database migration/smoke commands, Keychain/Data Protection probes, and the
-first Notes vertical-slice commands. Desktop-only modules should be target-gated
-or moved behind a desktop entry builder rather than stubbed at runtime.
+The current mobile shell exposes only `mobile_health`. Mobile-local database
+migration/smoke commands, Keychain/Data Protection probes, and the first Notes
+vertical-slice commands remain intentionally unimplemented.
 
 ## Owner prerequisite
 
-1. Install the full Xcode application from Apple.
-2. Launch Xcode once, accept its license, let it install platform components,
-   and sign in with the Apple ID that will own development signing.
-3. Select the development team when Xcode offers one. A paid Apple Developer
+1. In Xcode Settings, sign in with the Apple ID that will own development signing.
+2. Create or download an Apple Development certificate and select the team for
+   the `com.noted.iphone` bundle identifier. A paid Apple Developer
    Program membership is required later for TestFlight; a local device spike can
    begin with an available personal team, subject to Apple's signing limits.
 
-After Xcode exists at `/Applications/Xcode.app`, run:
+The completed toolchain setup was:
 
 ```sh
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
@@ -97,19 +95,16 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
 brew install cocoapods
 ```
 
-Re-run all evidence commands above. The preflight gate is open only when both
-`iphoneos` and `iphonesimulator` SDKs resolve and Xcode can see an eligible
-development team.
+The simulator gate is open. The physical-device gate opens when Xcode can see an
+eligible development team and a connected iPhone.
 
-## First command after the gate opens
-
-Once the separate iOS config, dependency guards, and minimal entry registry are
-in place:
+## Reproducing the simulator proof
 
 ```sh
-bun run tauri ios init --ci --skip-targets-install
+bun run ios:check
+bun run tauri ios init --config src-tauri/tauri.ios.conf.json --ci --skip-targets-install
+bun run tauri ios build --debug --target aarch64-sim --no-sign --ci \
+  --config src-tauri/tauri.ios.conf.json
 ```
 
-Then compile the minimal shell for the simulator before attaching a physical
-iPhone. No synchronized schema migration or real library data should be included
-in this spike.
+No synchronized schema migration or real library data is included in this spike.

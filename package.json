@@ -6,12 +6,17 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:ios": "tsc && vite build --config vite.mobile.config.ts",
+    "dev:ios": "vite --config vite.mobile.config.ts",
+    "ios:check": "bun run build:ios && node --test tests/ios-shell.test.mjs",
     "build:diarizer": "bash scripts/build-fluidaudio-helper.sh",
     "build:desktop": "bun run build && bun run build:diarizer",
     "build:alpha": "VITE_NOTED_PROFILE=alpha bun run build",
     "alpha:check": "bun run build:alpha && node --test tests/alpha-build.test.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:ios:build": "tauri ios build --config src-tauri/tauri.ios.conf.json",
+    "tauri:ios:dev": "tauri ios dev --config src-tauri/tauri.ios.conf.json",
     "tauri:alpha": "NOTED_RELEASE_PROFILE=alpha VITE_NOTED_PROFILE=alpha tauri build --config src-tauri/tauri.alpha.conf.json",
     "app:update": "bash scripts/install-app.sh",
     "app:update:if-needed": "bash scripts/update-app-if-needed.sh"

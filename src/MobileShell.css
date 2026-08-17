@@ -1,0 +1,138 @@
+:root {
+  font-family: "Geist Variable", system-ui, sans-serif;
+  color: #2b2824;
+  background: #f3efe7;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 82% 8%, rgba(203, 114, 72, 0.16), transparent 34%),
+    #f3efe7;
+}
+
+.mobile-shell {
+  min-height: 100dvh;
+  padding: max(28px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
+  display: grid;
+  align-items: center;
+}
+
+.mobile-shell__card {
+  width: min(100%, 440px);
+  margin: 0 auto;
+  padding: 28px;
+  border: 1px solid rgba(59, 48, 38, 0.12);
+  border-radius: 28px;
+  background: rgba(255, 253, 248, 0.86);
+  box-shadow: 0 24px 70px rgba(66, 50, 35, 0.11);
+}
+
+.mobile-shell__eyebrow {
+  margin: 0 0 12px;
+  color: #a64f2b;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.mobile-shell h1 {
+  max-width: 12ch;
+  margin: 0;
+  font-size: clamp(2.15rem, 10vw, 3.3rem);
+  line-height: 0.98;
+  letter-spacing: -0.055em;
+}
+
+.mobile-shell__intro {
+  margin: 20px 0 26px;
+  color: #6a6259;
+  font-size: 1rem;
+  line-height: 1.55;
+}
+
+.mobile-shell__status {
+  margin: 0;
+  border-top: 1px solid rgba(59, 48, 38, 0.1);
+}
+
+.mobile-shell__status div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 15px 0;
+  border-bottom: 1px solid rgba(59, 48, 38, 0.1);
+}
+
+.mobile-shell__status dt {
+  color: #716961;
+}
+
+.mobile-shell__status dd {
+  margin: 0;
+  font-weight: 650;
+  text-align: right;
+}
+
+.mobile-shell__status dd[data-ready="true"] {
+  color: #39714f;
+}
+
+.mobile-shell__error {
+  color: #a33f2c;
+  font-size: 0.86rem;
+}
+
+.mobile-shell__footnote {
+  margin: 22px 0 0;
+  color: #8a8177;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root,
+  body {
+    color: #f4eee5;
+    background: #171512;
+  }
+
+  body {
+    background:
+      radial-gradient(circle at 82% 8%, rgba(203, 114, 72, 0.18), transparent 34%),
+      #171512;
+  }
+
+  .mobile-shell__card {
+    border-color: rgba(255, 255, 255, 0.09);
+    background: rgba(36, 32, 27, 0.9);
+    box-shadow: none;
+  }
+
+  .mobile-shell__intro,
+  .mobile-shell__status dt {
+    color: #bcb2a7;
+  }
+
+  .mobile-shell__status,
+  .mobile-shell__status div {
+    border-color: rgba(255, 255, 255, 0.09);
+  }
+
+  .mobile-shell__status dd[data-ready="true"] {
+    color: #8ec7a0;
+  }
+
+  .mobile-shell__footnote {
+    color: #948a80;
+  }
+}

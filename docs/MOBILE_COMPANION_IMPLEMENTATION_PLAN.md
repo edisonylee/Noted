@@ -1319,10 +1319,11 @@ Rollback:
 
 **Purpose:** retire unknowns before building screens.
 
-Status: environment and source preflight completed. Shell generation is blocked
-on installing full Xcode/iPhone SDKs, iOS Rust targets, CocoaPods, and a signing
-team. See [the dated preflight](IPHONE_FEASIBILITY_PREFLIGHT.md). No generated
-iOS project has been added yet.
+Status: the isolated shell is generated and verified in an iPhone simulator.
+Full Xcode/iPhone SDKs, iOS Rust targets, CocoaPods, target-gated dependencies,
+the mobile-only frontend, and the minimal command registry are in place. A
+signing identity/team and the physical-device probes remain pending. See
+[the dated preflight](IPHONE_FEASIBILITY_PREFLIGHT.md).
 
 Deliverables:
 

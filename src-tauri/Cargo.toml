@@ -29,6 +29,10 @@ tauri = { version = "2", features = ["macos-private-api", "protocol-asset"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
+rand = "0.8"
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 tauri-plugin-opener = "2"
@@ -48,17 +52,14 @@ base64 = "0.22"
 # event fetch fans out one task per calendar on tauri's runtime)
 tokio = { version = "1", features = ["sync", "rt"] }
 anyhow = "1"
-chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10"
 regex = "1"
-# PKCE S256 challenge + deterministic Google Calendar event ids.
-sha2 = "0.10"
+# PKCE S256 challenge + deterministic Google Calendar event ids use the shared
+# SHA-256 dependency above; mobile portable-record hashing uses the same crate.
 
 # Phone capture + full web client: tiny LAN server, now over TLS so mobile
 # browsers grant mic/camera access (a secure context is required for getUserMedia).
 tiny_http = { version = "0.12", features = ["ssl-rustls"] }
 local-ip-address = "0.6"
-rand = "0.8"
 libc = "0.2"
 # Self-signed cert for the LAN HTTPS server (pure-Rust, no OpenSSL system dep).
 rcgen = "0.13"

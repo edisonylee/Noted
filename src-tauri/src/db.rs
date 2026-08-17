@@ -8,7 +8,6 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::Result;
-use rand::{rngs::OsRng, RngCore};
 use rusqlite::{ffi::sqlite3_auto_extension, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -17,6 +16,20 @@ use sqlite_vec::sqlite3_vec_init;
 /// Managed Tauri state. rusqlite's `Connection` is `Send` but not `Sync`,
 /// so we wrap it in a `Mutex` to make the state `Send + Sync`.
 pub struct Db(pub Mutex<Connection>);
+
+const BASELINE_SCHEMA_VERSION: u32 = 1;
+const BASELINE_MIGRATION: crate::migrations::MigrationDescriptor<'static> =
+    crate::migrations::MigrationDescriptor::new(
+        BASELINE_SCHEMA_VERSION,
+        "legacy-additive-baseline",
+        "92aed657051490183fd931d523bc2146522f0e6094d176da9479b0be91d61659",
+    );
+const DESKTOP_SCHEMA_CAPABILITIES: crate::migrations::ClientCapabilities =
+    crate::migrations::ClientCapabilities::new(
+        BASELINE_SCHEMA_VERSION,
+        BASELINE_SCHEMA_VERSION,
+        BASELINE_SCHEMA_VERSION,
+    );
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS categories (
@@ -372,25 +385,10 @@ CREATE INDEX IF NOT EXISTS idx_agent_context_receipts_created
   ON agent_context_receipts(requested_at DESC);
 "#;
 
-/// Generate a UUIDv7-compatible public identifier without exposing a SQLite
-/// row id. The 48-bit timestamp keeps creation order while 74 random bits make
-/// identifiers unguessable for the local-agent boundary.
+/// Backward-compatible desktop entry point for the shared portable identifier
+/// generator. New cross-platform code should call `portable::new_uuid_v7`.
 pub fn new_public_id() -> String {
-    let timestamp_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    let mut bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut bytes);
-    let timestamp = timestamp_ms.to_be_bytes();
-    bytes[..6].copy_from_slice(&timestamp[2..]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x70;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
-    )
+    crate::portable::new_uuid_v7()
 }
 
 /// Register sqlite-vec as an auto extension (process-wide, must happen before
@@ -400,7 +398,42 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     unsafe {
         sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
     }
-    let conn = Connection::open(db_path)?;
+    let mut conn = Connection::open(db_path)?;
+    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+    let schema_state = crate::migrations::inspect_database(&conn)?;
+    if let crate::migrations::DatabaseSchemaState::Stamped(stamp) = schema_state {
+        match crate::migrations::negotiate_schema(stamp, DESKTOP_SCHEMA_CAPABILITIES) {
+            crate::migrations::SchemaAccess::ReadWrite => {}
+            crate::migrations::SchemaAccess::ReadOnly => {
+                return Err(anyhow::anyhow!(
+                    "database schema {} requires writer protocol {}, but this app provides {}",
+                    stamp.schema_version,
+                    stamp.min_writer_version,
+                    DESKTOP_SCHEMA_CAPABILITIES.writer_version
+                ));
+            }
+            crate::migrations::SchemaAccess::Reject => {
+                return Err(anyhow::anyhow!(
+                    "database schema {} is not readable by this app",
+                    stamp.schema_version
+                ));
+            }
+        }
+        crate::migrations::verify_known_migrations(&conn, &[BASELINE_MIGRATION])?;
+    }
+
+    let recovery_path = if matches!(
+        schema_state,
+        crate::migrations::DatabaseSchemaState::Unversioned
+    ) && database_has_user_schema(&conn)?
+    {
+        let recovery_path = pre_migration_recovery_path(db_path, BASELINE_SCHEMA_VERSION)?;
+        crate::backup::create_pre_migration_snapshot(&conn, &recovery_path)?;
+        Some(recovery_path)
+    } else {
+        None
+    };
+
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
     conn.execute_batch(SCHEMA)?;
     // Migrations for DBs created before a column existed (additive only).
@@ -499,10 +532,115 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     initialize_semantic_folder_rules(&conn)?;
     crate::meeting::store::initialize_one_on_one_speakers(&conn)?;
     initialize_embedding_fingerprint(&conn, &crate::provider::active_embedding_fingerprint())?;
+    verify_converged_baseline(&conn)?;
+    if matches!(
+        schema_state,
+        crate::migrations::DatabaseSchemaState::Unversioned
+    ) {
+        crate::migrations::stamp_converged_schema(
+            &mut conn,
+            BASELINE_MIGRATION,
+            crate::migrations::DatabaseStamp::new(
+                BASELINE_SCHEMA_VERSION,
+                BASELINE_SCHEMA_VERSION,
+                BASELINE_SCHEMA_VERSION,
+            ),
+            env!("CARGO_PKG_VERSION"),
+        )?;
+        if let Some(path) = recovery_path {
+            conn.execute(
+                "INSERT INTO app_metadata(key, value)
+                 VALUES ('last_pre_migration_recovery_path', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [path.to_string_lossy().as_ref()],
+            )?;
+        }
+    }
     // Note: the reserved catch-all "misc" is not pre-seeded — the classifier is
     // told about it by name in the prompt, and it's created on first real use
     // (so an unused misc never clutters the catalog/UI).
     Ok(conn)
+}
+
+fn database_has_user_schema(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sqlite_schema
+           WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'
+         )",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+fn pre_migration_recovery_path(db_path: &Path, target_version: u32) -> Result<std::path::PathBuf> {
+    let parent = db_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("database path has no recovery directory"))?;
+    let recovery_dir = parent.join("migration-recovery");
+    std::fs::create_dir_all(&recovery_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&recovery_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let source_name = db_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("noted");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    Ok(recovery_dir.join(format!(
+        "{source_name}-pre-schema-v{target_version}-{}-{nonce}.db",
+        std::process::id()
+    )))
+}
+
+fn verify_converged_baseline(conn: &Connection) -> Result<()> {
+    let quick_check = conn
+        .prepare("PRAGMA quick_check")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if quick_check.as_slice() != ["ok"] {
+        return Err(anyhow::anyhow!(
+            "database quick_check failed after schema convergence: {}",
+            quick_check.join("; ")
+        ));
+    }
+    if conn
+        .prepare("PRAGMA foreign_key_check")?
+        .query([])?
+        .next()?
+        .is_some()
+    {
+        return Err(anyhow::anyhow!(
+            "database foreign_key_check failed after schema convergence"
+        ));
+    }
+    for (table, column) in [
+        ("notes", "trashed_at"),
+        ("entries", "event_date"),
+        ("note_folders", "kind"),
+        ("meetings", "public_id"),
+        ("app_metadata", "value"),
+    ] {
+        let present: bool = conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2
+             )",
+            rusqlite::params![table, column],
+            |row| row.get(0),
+        )?;
+        if !present {
+            return Err(anyhow::anyhow!(
+                "required schema column is missing after convergence: {table}.{column}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn backfill_meeting_public_ids(conn: &Connection) -> Result<()> {

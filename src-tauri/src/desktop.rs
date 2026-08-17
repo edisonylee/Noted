@@ -12,6 +12,7 @@ pub mod hosted;
 mod managed_files;
 pub mod mcp;
 pub mod meeting;
+pub mod migrations;
 pub mod ollama;
 pub mod phone;
 pub mod pipeline;

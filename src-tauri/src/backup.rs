@@ -47,16 +47,17 @@ const INVENTORY_TABLES: &[&str] = &[
     "speaker_profiles",
     "meeting_templates",
     "agent_context_receipts",
+    "schema_migrations",
 ];
 
 struct StagingFile {
     path: PathBuf,
-    renamed: bool,
+    published: bool,
 }
 
 impl Drop for StagingFile {
     fn drop(&mut self) {
-        if !self.renamed {
+        if !self.published {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -68,8 +69,24 @@ impl Drop for StagingFile {
 /// destination and staging file must not already exist. `VACUUM INTO` creates a
 /// standalone SQLite file from one source snapshot, after which an independent
 /// read-only connection validates integrity, foreign keys, and canonical counts.
-/// Only a validated and fsynced staging file is atomically renamed into place.
+/// Only a validated and fsynced staging inode is atomically published.
 pub fn create_database_snapshot(source: &Connection, destination: &Path) -> Result<()> {
+    create_snapshot_with_inventory(source, destination, current_noted_inventory(source)?)
+}
+
+/// Create the recovery point used before an unversioned or older database is
+/// changed. Unlike the user-facing export, this inventories the schema that is
+/// actually present so it is safe to call before legacy convergence adds the
+/// current table set.
+pub fn create_pre_migration_snapshot(source: &Connection, destination: &Path) -> Result<()> {
+    create_snapshot_with_inventory(source, destination, existing_schema_inventory(source)?)
+}
+
+fn create_snapshot_with_inventory(
+    source: &Connection,
+    destination: &Path,
+    source_inventory: BTreeMap<String, i64>,
+) -> Result<()> {
     if destination.exists() {
         bail!(
             "backup destination already exists: {}",
@@ -87,11 +104,10 @@ pub fn create_database_snapshot(source: &Connection, destination: &Path) -> Resu
         );
     }
 
-    let source_inventory = canonical_inventory(source)?;
     let staging_path = unique_staging_path(destination)?;
     let mut staging = StagingFile {
         path: staging_path,
-        renamed: false,
+        published: false,
     };
     let staging_text = staging
         .path
@@ -119,8 +135,8 @@ pub fn create_database_snapshot(source: &Connection, destination: &Path) -> Resu
     // overwrite on Unix after a check/use race.
     std::fs::hard_link(&staging.path, destination).context("publish validated snapshot")?;
     std::fs::remove_file(&staging.path).context("remove published staging link")?;
-    staging.renamed = true;
-    sync_directory(parent).context("fsync snapshot directory after rename")?;
+    staging.published = true;
+    sync_directory(parent).context("fsync snapshot directory after publication")?;
     Ok(())
 }
 
@@ -144,7 +160,8 @@ fn validate_snapshot(path: &Path, expected_inventory: &BTreeMap<String, i64>) ->
         bail!("snapshot foreign_key_check failed");
     }
 
-    let actual_inventory = canonical_inventory(&snapshot)?;
+    let actual_inventory =
+        inventory_for_tables(&snapshot, expected_inventory.keys().map(String::as_str))?;
     if &actual_inventory != expected_inventory {
         bail!(
             "snapshot canonical inventory mismatch: expected {expected_inventory:?}, got {actual_inventory:?}"
@@ -153,9 +170,28 @@ fn validate_snapshot(path: &Path, expected_inventory: &BTreeMap<String, i64>) ->
     Ok(())
 }
 
-fn canonical_inventory(connection: &Connection) -> Result<BTreeMap<String, i64>> {
+fn current_noted_inventory(connection: &Connection) -> Result<BTreeMap<String, i64>> {
+    inventory_for_tables(connection, INVENTORY_TABLES.iter().copied())
+}
+
+fn existing_schema_inventory(connection: &Connection) -> Result<BTreeMap<String, i64>> {
+    let mut statement = connection.prepare(
+        "SELECT name FROM sqlite_schema
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+         ORDER BY name",
+    )?;
+    let tables = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    inventory_for_tables(connection, tables.iter().map(String::as_str))
+}
+
+fn inventory_for_tables<'a>(
+    connection: &Connection,
+    tables: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeMap<String, i64>> {
     let mut inventory = BTreeMap::new();
-    for table in INVENTORY_TABLES {
+    for table in tables {
         let exists: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1)",
             [table],
@@ -169,7 +205,7 @@ fn canonical_inventory(connection: &Connection) -> Result<BTreeMap<String, i64>>
             connection.query_row(&format!("SELECT COUNT(*) FROM \"{table}\""), [], |row| {
                 row.get::<_, i64>(0)
             })?;
-        inventory.insert((*table).to_string(), count);
+        inventory.insert(table.to_string(), count);
     }
     Ok(inventory)
 }

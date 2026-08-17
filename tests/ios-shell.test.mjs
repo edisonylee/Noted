@@ -43,6 +43,13 @@ test("generated iOS app requests no desktop recorder permissions", async () => {
   assert.equal(info.includes("NSAudioCaptureUsageDescription"), false);
 });
 
+test("iOS signing configuration is reproducible", async () => {
+  const config = JSON.parse(await read("src-tauri/tauri.ios.conf.json"));
+
+  assert.equal(config.identifier, "com.noted.iphone");
+  assert.equal(config.bundle.iOS.developmentTeam, "MYGAYC672C");
+});
+
 test("mobile frontend bundle excludes desktop command surfaces", async () => {
   const index = await read("dist-ios/index.html");
   assert.match(index, /assets\/index-[^\"]+\.js/);

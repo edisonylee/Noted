@@ -249,7 +249,7 @@
 			);
 			sourceTree = "<group>";
 		};
-		"TEMP_BEBF3B5F-B75B-4904-BF4C-0A469FE39691" /* x86_64 */ = {
+		"TEMP_2B378976-6B8D-4253-A12F-EBD6AE04259E" /* x86_64 */ = {
 			isa = PBXGroup;
 			children = (
 			);
@@ -387,6 +387,7 @@
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALID_ARCHS = arm64;
+				DEVELOPMENT_TEAM = "MYGAYC672C";
 			};
 			name = debug;
 		};
@@ -537,6 +538,7 @@
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALID_ARCHS = arm64;
+				DEVELOPMENT_TEAM = "MYGAYC672C";
 			};
 			name = release;
 		};

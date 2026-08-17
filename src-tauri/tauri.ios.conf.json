@@ -13,6 +13,9 @@
     }
   },
   "bundle": {
+    "iOS": {
+      "developmentTeam": "MYGAYC672C"
+    },
     "resources": [],
     "icon": [
       "icons/32x32.png",

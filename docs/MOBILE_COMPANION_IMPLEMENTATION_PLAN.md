@@ -1319,11 +1319,13 @@ Rollback:
 
 **Purpose:** retire unknowns before building screens.
 
-Status: the isolated shell is generated and verified in an iPhone simulator.
-Full Xcode/iPhone SDKs, iOS Rust targets, CocoaPods, target-gated dependencies,
-the mobile-only frontend, and the minimal command registry are in place. A
-signing identity/team and the physical-device probes remain pending. See
-[the dated preflight](IPHONE_FEASIBILITY_PREFLIGHT.md).
+Status: the isolated shell is generated and verified in an iPhone simulator and
+on an iPhone 15 Pro. Full Xcode/iPhone SDKs, iOS Rust targets, CocoaPods,
+target-gated dependencies, the mobile-only frontend, the minimal command
+registry, reproducible development-team configuration, and signed physical-device
+installation are in place. Persistence, Keychain/Data Protection, lifecycle,
+accessibility, and capability-isolation probes remain pending. See [the dated
+preflight](IPHONE_FEASIBILITY_PREFLIGHT.md).
 
 Deliverables:
 

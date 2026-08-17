@@ -1,6 +1,6 @@
 # iPhone feasibility preflight
 
-Status: simulator feasibility shell built and launched; physical-device signing pending
+Status: feasibility shell built, signed, installed, and launched on physical hardware
 
 Date checked: 2026-08-16
 
@@ -9,14 +9,13 @@ and [the mobile implementation plan](MOBILE_COMPANION_IMPLEMENTATION_PLAN.md).
 
 ## Outcome
 
-The native feasibility shell now compiles, installs, launches, and completes its
-Rust-to-webview startup health check in an iPhone 17 simulator. The iOS build has
-its own frontend entry, Tauri config, capability manifest, Rust entry point, and
-command registry. macOS-only services and native dependencies are excluded at
-compile time instead of being hidden at runtime.
-
-Physical-device installation remains pending because Xcode does not yet expose
-a valid Apple Development signing identity or development team on this Mac.
+The native feasibility shell compiles, installs, launches, and completes its
+Rust-to-webview startup health check in an iPhone 17 simulator. The same shell
+was signed with the configured personal development team, installed on an
+iPhone 15 Pro, launched through CoreDevice, and observed as a live process. The
+iOS build has its own frontend entry, Tauri config, capability manifest, Rust
+entry point, and command registry. macOS-only services and native dependencies
+are excluded at compile time instead of being hidden at runtime.
 
 ## Verified environment
 
@@ -32,8 +31,9 @@ a valid Apple Development signing identity or development team on this Mac.
 | Full Xcode / iPhoneOS SDK | Xcode 26.6 / iOS 26.5 |
 | Installed Rust targets | macOS, iOS device, Apple Silicon simulator, Intel simulator |
 | CocoaPods | 1.17.0 |
-| Valid code-signing identities | none |
+| Valid code-signing identity | Apple Development certificate for the configured personal team |
 | Simulator proof | iPhone 17: build, install, launch, and `mobile_health` passed |
+| Physical-device proof | iPhone 15 Pro: signed build, install, launch, and live-process check passed |
 
 Evidence commands:
 
@@ -78,13 +78,13 @@ The current mobile shell exposes only `mobile_health`. Mobile-local database
 migration/smoke commands, Keychain/Data Protection probes, and the first Notes
 vertical-slice commands remain intentionally unimplemented.
 
-## Owner prerequisite
+## Completed signing setup
 
-1. In Xcode Settings, sign in with the Apple ID that will own development signing.
-2. Create or download an Apple Development certificate and select the team for
-   the `com.noted.iphone` bundle identifier. A paid Apple Developer
-   Program membership is required later for TestFlight; a local device spike can
-   begin with an available personal team, subject to Apple's signing limits.
+Xcode is signed in, an Apple Development certificate is available, and the
+personal development team is recorded in `tauri.ios.conf.json` for the
+`com.noted.iphone` bundle identifier. A paid Apple Developer Program membership
+is still required later for TestFlight; personal-team installations remain
+subject to Apple's signing and reprovisioning limits.
 
 The completed toolchain setup was:
 
@@ -95,8 +95,9 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
 brew install cocoapods
 ```
 
-The simulator gate is open. The physical-device gate opens when Xcode can see an
-eligible development team and a connected iPhone.
+The simulator and first physical-device gates are open. The remaining M2 work is
+the persistence, Keychain/Data Protection, lifecycle, accessibility, and
+capability-isolation probe set described in the implementation plan.
 
 ## Reproducing the simulator proof
 
@@ -105,6 +106,18 @@ bun run ios:check
 bun run tauri ios init --config src-tauri/tauri.ios.conf.json --ci --skip-targets-install
 bun run tauri ios build --debug --target aarch64-sim --no-sign --ci \
   --config src-tauri/tauri.ios.conf.json
+```
+
+## Reproducing the physical-device proof
+
+With the configured development team and a trusted iPhone connected:
+
+```sh
+bun run tauri ios build --debug --target aarch64 --ci \
+  --export-method debugging --config src-tauri/tauri.ios.conf.json
+xcrun devicectl device install app --device <device-id> \
+  src-tauri/gen/apple/build/tauri-app_iOS.xcarchive/Products/Applications/Noted.app
+xcrun devicectl device process launch --device <device-id> com.noted.iphone
 ```
 
 No synchronized schema migration or real library data is included in this spike.

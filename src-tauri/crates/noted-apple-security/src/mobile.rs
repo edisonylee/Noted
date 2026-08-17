@@ -137,7 +137,8 @@ impl<R: Runtime> AppleSecurity<R> {
         ciphertext: &[u8],
         receipt_id: &str,
         envelope_digest: &[u8],
-    ) -> Result<PendingBootstrapHandle> {
+        metadata: &BootstrapMetadataV1,
+    ) -> Result<StagedBootstrapDescriptor> {
         let wire: StageBootstrapWire = self.0.run_mobile_plugin(
             "stageBootstrapAuthenticated",
             StageBootstrapArgs::new(
@@ -149,9 +150,19 @@ impl<R: Runtime> AppleSecurity<R> {
                 ciphertext,
                 receipt_id,
                 envelope_digest,
+                metadata,
             )?,
         )?;
-        PendingBootstrapHandle::parse(wire.pending_bootstrap_handle)
+        wire.metadata.validate()?;
+        if &wire.metadata != metadata {
+            return Err(Error::InvalidNativeResponse(
+                "native bootstrap metadata mismatch",
+            ));
+        }
+        Ok(StagedBootstrapDescriptor {
+            pending_bootstrap_handle: PendingBootstrapHandle::parse(wire.pending_bootstrap_handle)?,
+            metadata: wire.metadata,
+        })
     }
 
     pub fn activate_bootstrap(

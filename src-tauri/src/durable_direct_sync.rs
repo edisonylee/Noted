@@ -410,7 +410,9 @@ impl SqliteDirectSyncAuthority {
         authority_now: u64,
     ) -> Result<PrepareAckResponseOutcome, DurableAuthorityError> {
         if !is_uuid_v7(request_id) || !is_uuid_v7(device_id) {
-            return Err(DurableAuthorityError::InvalidInput("request_id_or_device_id"));
+            return Err(DurableAuthorityError::InvalidInput(
+                "request_id_or_device_id",
+            ));
         }
         i64_from_u64(authority_now, "authority_now")?;
         self.write(|database| {
@@ -689,12 +691,12 @@ impl ExactWireDirectSyncAuthority for SqliteDirectSyncAuthority {
         )
         .map_err(AuthorityStoreError::from)?
         {
-            PreparePushOutcome::ExactReplay(replay) => Ok(
-                PreparePushResponseOutcome::ExactReplay(ExactWireResponse {
+            PreparePushOutcome::ExactReplay(replay) => {
+                Ok(PreparePushResponseOutcome::ExactReplay(ExactWireResponse {
                     status_code: replay.status_code,
                     body: replay.exact_response_bytes,
-                }),
-            ),
+                }))
+            }
             PreparePushOutcome::NeedsFinalization(prepared) => {
                 let receipt = prepared.receipt.clone();
                 let authority_token = serde_json::to_vec(&prepared)
@@ -812,9 +814,7 @@ impl DirectSyncEnrollment for SqliteDirectSyncAuthority {
                 return Err(DurableAuthorityError::InvalidInput("scope_not_granted"));
             }
             let capability = capabilities.record_kinds.get(kind).ok_or(
-                DurableAuthorityError::StateUnavailable(
-                    "active enrollment capability is missing",
-                ),
+                DurableAuthorityError::StateUnavailable("active enrollment capability is missing"),
             )?;
             if require_write && capability.max_write_schema_version == 0 {
                 return Err(DurableAuthorityError::InvalidInput("scope_not_granted"));
@@ -953,9 +953,7 @@ fn durable_enrollment_capabilities(
             DurableAuthorityError::StateUnavailable("enrollment capabilities are invalid")
         })?;
     let device_capabilities: ProtocolCapabilities = serde_json::from_str(&device_capabilities_json)
-        .map_err(|_| {
-            DurableAuthorityError::StateUnavailable("device capabilities are invalid")
-        })?;
+        .map_err(|_| DurableAuthorityError::StateUnavailable("device capabilities are invalid"))?;
     receipt_capabilities.validate()?;
     device_capabilities.validate()?;
     if receipt_capabilities != device_capabilities {

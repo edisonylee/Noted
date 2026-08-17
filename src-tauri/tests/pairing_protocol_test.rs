@@ -1,5 +1,7 @@
 #[path = "../src/pairing_protocol.rs"]
 mod pairing_protocol;
+#[path = "../src/portable.rs"]
+mod portable;
 
 use pairing_protocol::*;
 use serde_json::Value;
@@ -118,6 +120,62 @@ impl PairingCrypto for FixtureCrypto {
         exporter_hasher.update(exporter_context);
         let exporter_secret: [u8; HPKE_EXPORTER_SECRET_BYTES] = exporter_hasher.finalize().into();
 
+        Ok(AuthenticatedHpkeSeal {
+            envelope: AuthenticatedHpkeEnvelope {
+                encapsulated_key: encapsulated_key.to_vec(),
+                ciphertext,
+            },
+            exporter_secret: zeroize::Zeroizing::new(exporter_secret),
+        })
+    }
+
+    fn seal_bootstrap_key_package(
+        &self,
+        _sender_key: LocalHpkeKey,
+        recipient_public_key: &[u8],
+        info: &[u8],
+        associated_data: &[u8],
+        metadata: &BootstrapMetadataV1,
+        exporter_context: &[u8],
+    ) -> Result<AuthenticatedHpkeSeal, ()> {
+        let package = sanitized_fixture_key_package(metadata.key_epoch);
+        let mut encapsulated_hasher = Sha256::new();
+        encapsulated_hasher.update(b"noted.fixture/bootstrap/encapsulated-key");
+        encapsulated_hasher.update(recipient_public_key);
+        encapsulated_hasher.update(info);
+        let encapsulated_key: [u8; HPKE_ENCAPSULATED_KEY_BYTES] =
+            encapsulated_hasher.finalize().into();
+        let mask = Sha256::digest(
+            [
+                b"noted.fixture/bootstrap/mask".as_slice(),
+                encapsulated_key.as_slice(),
+                associated_data,
+            ]
+            .concat(),
+        );
+        let mut ciphertext = package
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| byte ^ mask[index % mask.len()])
+            .collect::<Vec<_>>();
+        let tag = Sha256::digest(
+            [
+                b"noted.fixture/bootstrap/tag".as_slice(),
+                ciphertext.as_slice(),
+                associated_data,
+            ]
+            .concat(),
+        );
+        ciphertext.extend_from_slice(&tag[..16]);
+        let exporter_secret: [u8; HPKE_EXPORTER_SECRET_BYTES] = Sha256::digest(
+            [
+                b"noted.fixture/bootstrap/exporter".as_slice(),
+                ciphertext.as_slice(),
+                exporter_context,
+            ]
+            .concat(),
+        )
+        .into();
         Ok(AuthenticatedHpkeSeal {
             envelope: AuthenticatedHpkeEnvelope {
                 encapsulated_key: encapsulated_key.to_vec(),
@@ -789,9 +847,17 @@ fn confirmation_mismatch_cancels_and_finish_requires_confirmation() {
     let placeholder_bootstrap = BootstrapEnvelope {
         protocol: PAIRING_PROTOCOL.to_owned(),
         receipt_id: begin.receipt_id.clone(),
-        sealed_bootstrap: AuthenticatedHpkeEnvelope {
+        metadata: fixture_bootstrap_metadata(
+            &server_hello.receipt,
+            0,
+            1,
+            "018f47a0-7b80-7000-8000-000000000008",
+            &invitation.tls_spki_sha256,
+        )
+        .unwrap(),
+        sealed_key_package: AuthenticatedHpkeEnvelope {
             encapsulated_key: vec![1; HPKE_ENCAPSULATED_KEY_BYTES],
-            ciphertext: vec![1],
+            ciphertext: vec![1; BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES],
         },
         envelope_digest: vec![0; 32],
     };
@@ -1112,7 +1178,7 @@ fn malformed_payloads_do_not_consume_attempts() {
 #[test]
 fn hpke_wire_envelopes_bind_the_encapsulated_key_and_ciphertext_atomically() {
     let machine = PairingMachine::new_fixture_only(FixtureCrypto::default(), policy()).unwrap();
-    let (_invitation, _hello, _hello_bytes, begin) = register_and_begin(&machine);
+    let (invitation, _hello, _hello_bytes, begin) = register_and_begin(&machine);
     let server_hello: ServerHello = serde_json::from_slice(&begin.server_hello_bytes).unwrap();
 
     assert_eq!(
@@ -1131,23 +1197,62 @@ fn hpke_wire_envelopes_bind_the_encapsulated_key_and_ciphertext_atomically() {
         )
         .unwrap();
     assert_eq!(
-        bootstrap.sealed_bootstrap.encapsulated_key.len(),
+        bootstrap.sealed_key_package.encapsulated_key.len(),
         HPKE_ENCAPSULATED_KEY_BYTES
     );
     assert_eq!(
-        bootstrap.envelope_digest,
-        Sha256::digest(canonical_authenticated_hpke_envelope(
-            &bootstrap.sealed_bootstrap
-        ))
-        .to_vec()
+        bootstrap.sealed_key_package.ciphertext.len(),
+        BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES
     );
-    assert_ne!(server_hello.challenge, bootstrap.sealed_bootstrap);
+    assert_eq!(
+        bootstrap.envelope_digest,
+        bootstrap_envelope_digest(&bootstrap)
+    );
+    assert_ne!(server_hello.challenge, bootstrap.sealed_key_package);
 
-    let mut substituted = bootstrap.sealed_bootstrap.clone();
-    substituted.encapsulated_key[0] ^= 1;
+    let mut substituted = bootstrap.clone();
+    substituted.sealed_key_package.encapsulated_key[0] ^= 1;
     assert_ne!(
-        Sha256::digest(canonical_authenticated_hpke_envelope(&substituted)).to_vec(),
+        bootstrap_envelope_digest(&substituted),
         bootstrap.envelope_digest
+    );
+    let mut changed_metadata = bootstrap.clone();
+    changed_metadata.metadata.purge_generation += 1;
+    assert_ne!(
+        bootstrap_envelope_digest(&changed_metadata),
+        bootstrap.envelope_digest
+    );
+    assert!(matches!(
+        validate_bootstrap(&changed_metadata, &server_hello.receipt),
+        Err(PairingError::BindingMismatch("bootstrap envelope digest"))
+    ));
+
+    let mut purge_overflow = bootstrap.clone();
+    purge_overflow.metadata.purge_generation = i64::MAX as u64 + 1;
+    purge_overflow.envelope_digest = bootstrap_envelope_digest(&purge_overflow);
+    assert_eq!(
+        validate_bootstrap(&purge_overflow, &server_hello.receipt).unwrap_err(),
+        PairingError::InvalidField("bootstrap metadata")
+    );
+    let mut key_epoch_overflow = bootstrap.clone();
+    key_epoch_overflow.metadata.key_epoch = i64::MAX as u64 + 1;
+    key_epoch_overflow.envelope_digest = bootstrap_envelope_digest(&key_epoch_overflow);
+    assert_eq!(
+        validate_bootstrap(&key_epoch_overflow, &server_hello.receipt).unwrap_err(),
+        PairingError::InvalidField("bootstrap metadata")
+    );
+    let mut authority_overflow_receipt = server_hello.receipt.clone();
+    authority_overflow_receipt.authority_generation = i64::MAX as u64 + 1;
+    assert_eq!(
+        fixture_bootstrap_metadata(
+            &authority_overflow_receipt,
+            0,
+            1,
+            "018f47a0-7b80-7000-8000-000000000008",
+            &invitation.tls_spki_sha256,
+        )
+        .unwrap_err(),
+        PairingError::InvalidField("bootstrap metadata")
     );
 
     let fixture: Value =
@@ -1166,12 +1271,12 @@ fn hpke_wire_envelopes_bind_the_encapsulated_key_and_ciphertext_atomically() {
     );
     assert_eq!(
         fixture["bootstrap_info_sha256"],
-        hex(&Sha256::digest(bootstrap_hpke_info(&server_hello.receipt)))
+        hex(&Sha256::digest(bootstrap_hpke_info(&bootstrap.metadata)))
     );
     assert_eq!(
         fixture["bootstrap_exporter_context_sha256"],
         hex(&Sha256::digest(bootstrap_hpke_exporter_context(
-            &server_hello.receipt
+            &bootstrap.metadata
         )))
     );
     assert_eq!(
@@ -1184,11 +1289,11 @@ fn hpke_wire_envelopes_bind_the_encapsulated_key_and_ciphertext_atomically() {
     );
     assert_eq!(
         fixture["bootstrap_encapsulated_key"],
-        hex(&bootstrap.sealed_bootstrap.encapsulated_key)
+        hex(&bootstrap.sealed_key_package.encapsulated_key)
     );
     assert_eq!(
         fixture["bootstrap_ciphertext"],
-        hex(&bootstrap.sealed_bootstrap.ciphertext)
+        hex(&bootstrap.sealed_key_package.ciphertext)
     );
     assert_eq!(
         fixture["bootstrap_envelope_digest"],

@@ -19,8 +19,16 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
+pub use crate::portable::ScopeClass;
+
 pub const PAIRING_PROTOCOL: &str = "noted.direct-pairing.v1";
 pub const PAIRING_SUITE: &str = "tls13+p256-p1363+auth-hpke-x25519-hkdfsha256-aes256gcm";
+pub const BOOTSTRAP_METADATA_VERSION: u32 = 1;
+pub const BOOTSTRAP_KEY_PACKAGE_VERSION: u32 = 1;
+/// Must remain equal to `sync_protocol::SYNC_PROTOCOL_VERSION`; kept here so
+/// standalone pairing conformance tests do not need the full sync module.
+pub const BOOTSTRAP_SYNC_PROTOCOL_VERSION: u32 = 1;
+pub const RECORD_CIPHER_SUITE: &str = "noted.record-aead.v1+aes256gcm+hkdfsha256";
 pub const MAX_INVITATION_LIFETIME_MS: i64 = 5 * 60 * 1_000;
 pub const MAX_CLOCK_SKEW_MS: i64 = 30 * 1_000;
 pub const MAX_FAILED_ATTEMPTS: u8 = 5;
@@ -42,6 +50,8 @@ pub const HPKE_ENCAPSULATED_KEY_BYTES: usize = 32;
 pub const HPKE_EXPORTER_SECRET_BYTES: usize = 32;
 const P1363_SIGNATURE_BYTES: usize = 64;
 const MAX_SEALED_BYTES: usize = 4 * 1024;
+pub const BOOTSTRAP_KEY_PACKAGE_BYTES: usize = 48;
+pub const BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES: usize = BOOTSTRAP_KEY_PACKAGE_BYTES + 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -178,8 +188,39 @@ pub struct BeginEnrollment {
 pub struct BootstrapEnvelope {
     pub protocol: String,
     pub receipt_id: String,
-    pub sealed_bootstrap: AuthenticatedHpkeEnvelope,
+    pub metadata: BootstrapMetadataV1,
+    pub sealed_key_package: AuthenticatedHpkeEnvelope,
     pub envelope_digest: Vec<u8>,
+}
+
+/// Public, versioned bootstrap facts that both replicas can persist safely.
+///
+/// The library key is deliberately absent. The complete value is authenticated
+/// as HPKE associated data and committed together with the ciphertext by
+/// `envelope_digest`, so a public field cannot be changed independently of the
+/// native-only key package.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapMetadataV1 {
+    pub version: u32,
+    pub protocol: String,
+    pub suite: String,
+    pub sync_protocol_version: u32,
+    pub environment: Environment,
+    pub library_data_class: LibraryDataClass,
+    pub receipt_id: String,
+    pub library_id: String,
+    pub device_id: String,
+    pub authority_generation: u64,
+    pub purge_generation: u64,
+    pub key_epoch: u64,
+    pub default_scope_id: String,
+    pub default_scope_class: ScopeClass,
+    pub granted_scopes: BTreeSet<RecordKind>,
+    pub capabilities: BTreeMap<RecordKind, KindCapability>,
+    pub record_cipher_suite: String,
+    pub durable_sync_spki_sha256: Vec<u8>,
+    pub transcript_digest: Vec<u8>,
 }
 
 /// The complete wire output of one authenticated HPKE sender context.
@@ -299,6 +340,19 @@ pub trait PairingCrypto: Send + Sync + 'static {
         info: &[u8],
         associated_data: &[u8],
         plaintext: &[u8],
+        exporter_context: &[u8],
+    ) -> Result<AuthenticatedHpkeSeal, ()>;
+
+    /// Ask the authority key-custody boundary to construct and seal the fixed
+    /// v1 library-key package. Neither the key nor its plaintext package is an
+    /// argument or return value, so protocol/coordinator Rust cannot expose it.
+    fn seal_bootstrap_key_package(
+        &self,
+        sender_key: LocalHpkeKey,
+        recipient_public_key: &[u8],
+        info: &[u8],
+        associated_data: &[u8],
+        metadata: &BootstrapMetadataV1,
         exporter_context: &[u8],
     ) -> Result<AuthenticatedHpkeSeal, ()>;
 
@@ -954,49 +1008,42 @@ impl<C: PairingCrypto> PairingMachine<C> {
                 .ok_or(PairingError::StateUnavailable);
         }
 
-        #[derive(Serialize)]
-        struct FixtureBootstrap<'a> {
-            fixture_marker: &'static str,
-            receipt_id: &'a str,
-            library_id: &'a str,
-            device_id: &'a str,
-            authority_generation: u64,
-            scopes: &'a BTreeSet<RecordKind>,
-        }
-        let plaintext = serde_json::to_vec(&FixtureBootstrap {
-            fixture_marker: "sanitized-fixtures-only",
-            receipt_id,
-            library_id: &receipt_snapshot.receipt.library_id,
-            device_id: &receipt_snapshot.receipt.device_id,
-            authority_generation: receipt_snapshot.receipt.authority_generation,
-            scopes: &receipt_snapshot.receipt.granted_scopes,
-        })
-        .map_err(|_| PairingError::StateUnavailable)?;
-        let associated_data = canonical_receipt(&receipt_snapshot.receipt);
-        let bootstrap_info = bootstrap_hpke_info(&receipt_snapshot.receipt);
-        let bootstrap_exporter_context = bootstrap_hpke_exporter_context(&receipt_snapshot.receipt);
+        let invitation = ledger
+            .invitations
+            .get(&receipt_snapshot.receipt.invitation_id)
+            .ok_or(PairingError::StateUnavailable)?;
+        let metadata = fixture_bootstrap_metadata(
+            &receipt_snapshot.receipt,
+            0,
+            1,
+            "018f47a0-7b80-7000-8000-000000000008",
+            &invitation.tls_spki_sha256,
+        )?;
+        let associated_data = bootstrap_associated_data(&metadata);
+        let bootstrap_info = bootstrap_hpke_info(&metadata);
+        let bootstrap_exporter_context = bootstrap_hpke_exporter_context(&metadata);
         let bootstrap_seal = self
             .crypto
-            .seal_authenticated(
+            .seal_bootstrap_key_package(
                 LocalHpkeKey::MacPairing,
                 &receipt_snapshot.client_hpke_public_key,
                 &bootstrap_info,
                 &associated_data,
-                &plaintext,
+                &metadata,
                 &bootstrap_exporter_context,
             )
             .map_err(|_| PairingError::CryptoUnavailable)?;
-        if validate_hpke_envelope(&bootstrap_seal.envelope).is_err() {
+        if validate_bootstrap_key_package_envelope(&bootstrap_seal.envelope).is_err() {
             return Err(PairingError::CryptoUnavailable);
         }
-        let sealed_bootstrap = bootstrap_seal.envelope;
-        let envelope_digest = sha256(&canonical_authenticated_hpke_envelope(&sealed_bootstrap));
-        let bootstrap = BootstrapEnvelope {
+        let mut bootstrap = BootstrapEnvelope {
             protocol: PAIRING_PROTOCOL.to_owned(),
             receipt_id: receipt_id.to_owned(),
-            sealed_bootstrap,
-            envelope_digest,
+            metadata,
+            sealed_key_package: bootstrap_seal.envelope,
+            envelope_digest: Vec::new(),
         };
+        bootstrap.envelope_digest = bootstrap_envelope_digest(&bootstrap);
         let receipt = ledger.receipts.get_mut(receipt_id).expect("receipt exists");
         receipt.bootstrap = Some(bootstrap.clone());
         receipt.state = ReceiptState::PendingFinish;
@@ -1549,6 +1596,7 @@ pub(crate) fn validate_finish_bindings(
     bootstrap: &BootstrapEnvelope,
     finish: &ClientFinish,
 ) -> Result<(), PairingError> {
+    validate_bootstrap(bootstrap, receipt)?;
     if finish.protocol != PAIRING_PROTOCOL {
         return Err(PairingError::UnsupportedProtocol);
     }
@@ -1572,6 +1620,176 @@ pub(crate) fn validate_finish_bindings(
         return Err(PairingError::BindingMismatch("finish transcript"));
     }
     Ok(())
+}
+
+pub(crate) fn validate_bootstrap(
+    bootstrap: &BootstrapEnvelope,
+    receipt: &EnrollmentReceipt,
+) -> Result<(), PairingError> {
+    if bootstrap.protocol != PAIRING_PROTOCOL {
+        return Err(PairingError::UnsupportedProtocol);
+    }
+    if bootstrap.receipt_id != receipt.receipt_id {
+        return Err(PairingError::BindingMismatch("bootstrap receipt"));
+    }
+    validate_bootstrap_metadata(&bootstrap.metadata, receipt)?;
+    validate_bootstrap_key_package_envelope(&bootstrap.sealed_key_package)?;
+    exact_len(
+        &bootstrap.envelope_digest,
+        DIGEST_BYTES,
+        "bootstrap_envelope_digest",
+    )?;
+    if bootstrap.envelope_digest != bootstrap_envelope_digest(bootstrap) {
+        return Err(PairingError::BindingMismatch("bootstrap envelope digest"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_bootstrap_metadata(
+    metadata: &BootstrapMetadataV1,
+    receipt: &EnrollmentReceipt,
+) -> Result<(), PairingError> {
+    if metadata.version != BOOTSTRAP_METADATA_VERSION {
+        return Err(PairingError::UnsupportedProtocol);
+    }
+    if metadata.protocol != PAIRING_PROTOCOL || metadata.protocol != receipt.protocol {
+        return Err(PairingError::UnsupportedProtocol);
+    }
+    if metadata.suite != PAIRING_SUITE || metadata.suite != receipt.suite {
+        return Err(PairingError::DowngradeRejected);
+    }
+    if metadata.sync_protocol_version != BOOTSTRAP_SYNC_PROTOCOL_VERSION {
+        return Err(PairingError::DowngradeRejected);
+    }
+    if metadata.environment != Environment::Development
+        || metadata.library_data_class != LibraryDataClass::SanitizedFixture
+    {
+        return Err(PairingError::FixtureOnly);
+    }
+    if metadata.receipt_id != receipt.receipt_id
+        || metadata.library_id != receipt.library_id
+        || metadata.device_id != receipt.device_id
+        || metadata.authority_generation != receipt.authority_generation
+        || metadata.environment != receipt.environment
+        || metadata.granted_scopes != receipt.granted_scopes
+        || metadata.capabilities != receipt.capabilities
+        || metadata.transcript_digest != receipt.transcript_digest
+    {
+        return Err(PairingError::BindingMismatch("bootstrap metadata"));
+    }
+    if !is_uuid_v7(&metadata.receipt_id)
+        || !is_uuid_v7(&metadata.library_id)
+        || !is_uuid_v7(&metadata.device_id)
+        || !is_uuid_v7(&metadata.default_scope_id)
+    {
+        return Err(PairingError::InvalidIdentifier);
+    }
+    if metadata.authority_generation == 0
+        || metadata.key_epoch == 0
+        || metadata.authority_generation > i64::MAX as u64
+        || metadata.purge_generation > i64::MAX as u64
+        || metadata.key_epoch > i64::MAX as u64
+        || metadata.default_scope_class != ScopeClass::Unknown
+        || metadata.record_cipher_suite != RECORD_CIPHER_SUITE
+    {
+        return Err(PairingError::InvalidField("bootstrap metadata"));
+    }
+    exact_len(
+        &metadata.durable_sync_spki_sha256,
+        DIGEST_BYTES,
+        "durable_sync_spki_sha256",
+    )?;
+    if metadata
+        .durable_sync_spki_sha256
+        .iter()
+        .all(|byte| *byte == 0)
+    {
+        return Err(PairingError::InvalidField("durable_sync_spki_sha256"));
+    }
+    exact_len(
+        &metadata.transcript_digest,
+        DIGEST_BYTES,
+        "transcript_digest",
+    )?;
+    validate_fixture_scopes_and_capabilities(&metadata.granted_scopes, &metadata.capabilities)
+}
+
+pub(crate) fn fixture_bootstrap_metadata(
+    receipt: &EnrollmentReceipt,
+    purge_generation: u64,
+    key_epoch: u64,
+    default_scope_id: &str,
+    durable_sync_spki_sha256: &[u8],
+) -> Result<BootstrapMetadataV1, PairingError> {
+    let metadata = BootstrapMetadataV1 {
+        version: BOOTSTRAP_METADATA_VERSION,
+        protocol: PAIRING_PROTOCOL.to_owned(),
+        suite: PAIRING_SUITE.to_owned(),
+        sync_protocol_version: BOOTSTRAP_SYNC_PROTOCOL_VERSION,
+        environment: Environment::Development,
+        library_data_class: LibraryDataClass::SanitizedFixture,
+        receipt_id: receipt.receipt_id.clone(),
+        library_id: receipt.library_id.clone(),
+        device_id: receipt.device_id.clone(),
+        authority_generation: receipt.authority_generation,
+        purge_generation,
+        key_epoch,
+        default_scope_id: default_scope_id.to_owned(),
+        default_scope_class: ScopeClass::Unknown,
+        granted_scopes: receipt.granted_scopes.clone(),
+        capabilities: receipt.capabilities.clone(),
+        record_cipher_suite: RECORD_CIPHER_SUITE.to_owned(),
+        durable_sync_spki_sha256: durable_sync_spki_sha256.to_vec(),
+        transcript_digest: receipt.transcript_digest.clone(),
+    };
+    validate_bootstrap_metadata(&metadata, receipt)?;
+    Ok(metadata)
+}
+
+pub fn fixture_record_scopes() -> BTreeSet<RecordKind> {
+    BTreeSet::from([RecordKind::Note, RecordKind::Category, RecordKind::Folder])
+}
+
+pub fn fixture_record_capabilities() -> BTreeMap<RecordKind, KindCapability> {
+    fixture_record_scopes()
+        .into_iter()
+        .map(|kind| {
+            (
+                kind,
+                KindCapability {
+                    reader_version: 1,
+                    writer_version: Some(1),
+                },
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn validate_fixture_scopes_and_capabilities(
+    scopes: &BTreeSet<RecordKind>,
+    capabilities: &BTreeMap<RecordKind, KindCapability>,
+) -> Result<(), PairingError> {
+    if scopes != &fixture_record_scopes() || capabilities != &fixture_record_capabilities() {
+        return Err(PairingError::CapabilityMismatch);
+    }
+    Ok(())
+}
+
+/// Test-only package bytes used by deterministic fixture cryptography. The
+/// 32-byte value is derived from a public fixture domain and is never a user
+/// key. Production crypto implementations must load the real key internally.
+#[cfg(test)]
+pub fn sanitized_fixture_key_package(key_epoch: u64) -> Zeroizing<Vec<u8>> {
+    let key = sha256(&canonical_components(
+        "noted.direct-pairing.v1/sanitized-fixture-library-key",
+        &[("key_epoch", &key_epoch.to_be_bytes())],
+    ));
+    let mut package = Zeroizing::new(Vec::with_capacity(BOOTSTRAP_KEY_PACKAGE_BYTES));
+    package.extend_from_slice(b"NBK1");
+    package.extend_from_slice(&BOOTSTRAP_KEY_PACKAGE_VERSION.to_be_bytes());
+    package.extend_from_slice(&key_epoch.to_be_bytes());
+    package.extend_from_slice(&key);
+    package
 }
 
 pub(crate) fn validate_requested_capabilities(
@@ -1927,6 +2145,59 @@ pub fn canonical_authenticated_hpke_envelope(envelope: &AuthenticatedHpkeEnvelop
     )
 }
 
+pub fn canonical_bootstrap_metadata(metadata: &BootstrapMetadataV1) -> Vec<u8> {
+    let mut builder = CanonicalBuilder::new("noted.direct-pairing.v1/bootstrap-metadata-v1");
+    builder.u64("version", u64::from(metadata.version));
+    builder.text("protocol", &metadata.protocol);
+    builder.text("suite", &metadata.suite);
+    builder.u64(
+        "sync_protocol_version",
+        u64::from(metadata.sync_protocol_version),
+    );
+    builder.text("environment", environment_name(metadata.environment));
+    builder.text(
+        "library_data_class",
+        data_class_name(metadata.library_data_class),
+    );
+    builder.text("receipt_id", &metadata.receipt_id);
+    builder.text("library_id", &metadata.library_id);
+    builder.text("device_id", &metadata.device_id);
+    builder.u64("authority_generation", metadata.authority_generation);
+    builder.u64("purge_generation", metadata.purge_generation);
+    builder.u64("key_epoch", metadata.key_epoch);
+    builder.text("default_scope_id", &metadata.default_scope_id);
+    builder.text(
+        "default_scope_class",
+        scope_class_name(&metadata.default_scope_class),
+    );
+    builder.record_kinds("granted_scopes", &metadata.granted_scopes);
+    builder.capabilities("capabilities", &metadata.capabilities);
+    builder.text("record_cipher_suite", &metadata.record_cipher_suite);
+    builder.bytes(
+        "durable_sync_spki_sha256",
+        &metadata.durable_sync_spki_sha256,
+    );
+    builder.bytes("transcript_digest", &metadata.transcript_digest);
+    builder.finish()
+}
+
+/// Exact commitment signed by ClientFinish. It covers every public bootstrap
+/// field and both HPKE wire components; `envelope_digest` itself is excluded.
+pub fn canonical_bootstrap_envelope(envelope: &BootstrapEnvelope) -> Vec<u8> {
+    let metadata = canonical_bootstrap_metadata(&envelope.metadata);
+    let sealed = canonical_authenticated_hpke_envelope(&envelope.sealed_key_package);
+    let mut builder = CanonicalBuilder::new("noted.direct-pairing.v1/bootstrap-envelope-v1");
+    builder.text("protocol", &envelope.protocol);
+    builder.text("receipt_id", &envelope.receipt_id);
+    builder.bytes("metadata", &metadata);
+    builder.bytes("sealed_key_package", &sealed);
+    builder.finish()
+}
+
+pub fn bootstrap_envelope_digest(envelope: &BootstrapEnvelope) -> Vec<u8> {
+    sha256(&canonical_bootstrap_envelope(envelope))
+}
+
 /// Canonical owner-confirmation commitment persisted by the Mac authority.
 ///
 /// This binds the human decision to the immutable enrollment receipt and to
@@ -1977,12 +2248,23 @@ pub(crate) fn canonical_challenge_plaintext(receipt: &EnrollmentReceipt) -> Vec<
     )
 }
 
-pub fn bootstrap_hpke_info(receipt: &EnrollmentReceipt) -> Vec<u8> {
-    pairing_hpke_context("noted.direct-pairing.v1/hpke/bootstrap/info", receipt)
+pub fn bootstrap_hpke_info(metadata: &BootstrapMetadataV1) -> Vec<u8> {
+    bootstrap_metadata_context("noted.direct-pairing.v1/hpke/bootstrap/info", metadata)
 }
 
-pub fn bootstrap_hpke_exporter_context(receipt: &EnrollmentReceipt) -> Vec<u8> {
-    pairing_hpke_context("noted.direct-pairing.v1/hpke/bootstrap/exporter", receipt)
+pub fn bootstrap_associated_data(metadata: &BootstrapMetadataV1) -> Vec<u8> {
+    bootstrap_metadata_context("noted.direct-pairing.v1/hpke/bootstrap/aad", metadata)
+}
+
+pub fn bootstrap_hpke_exporter_context(metadata: &BootstrapMetadataV1) -> Vec<u8> {
+    bootstrap_metadata_context("noted.direct-pairing.v1/hpke/bootstrap/exporter", metadata)
+}
+
+fn bootstrap_metadata_context(domain: &str, metadata: &BootstrapMetadataV1) -> Vec<u8> {
+    canonical_components(
+        domain,
+        &[("metadata", &canonical_bootstrap_metadata(metadata))],
+    )
 }
 
 fn pairing_hpke_context(domain: &str, receipt: &EnrollmentReceipt) -> Vec<u8> {
@@ -2011,6 +2293,16 @@ pub(crate) fn validate_hpke_envelope(
             .is_none_or(|size| size > MAX_SEALED_BYTES)
     {
         return Err(PairingError::InvalidField("authenticated_hpke_envelope"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_bootstrap_key_package_envelope(
+    envelope: &AuthenticatedHpkeEnvelope,
+) -> Result<(), PairingError> {
+    validate_hpke_envelope(envelope)?;
+    if envelope.ciphertext.len() != BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES {
+        return Err(PairingError::InvalidField("bootstrap_key_package"));
     }
     Ok(())
 }
@@ -2152,6 +2444,14 @@ fn data_class_name(value: LibraryDataClass) -> &'static str {
     match value {
         LibraryDataClass::SanitizedFixture => "sanitized_fixture",
         LibraryDataClass::Personal => "personal",
+    }
+}
+
+fn scope_class_name(value: &ScopeClass) -> &'static str {
+    match value {
+        ScopeClass::Work => "work",
+        ScopeClass::Personal => "personal",
+        ScopeClass::Unknown => "unknown",
     }
 }
 

@@ -6,6 +6,8 @@
   import WebKit
 
   private let maximumFieldBytes = 256 * 1024
+  private let maximumBootstrapBindingBytes = 16 * 1024
+  private let bootstrapKeyPackageCiphertextBytes = 64
 
   private struct PrepareIdentityArgs: Decodable {
     let deviceId: String
@@ -71,10 +73,7 @@
     let ciphertextBase64: String
     let receiptId: String
     let envelopeDigestBase64: String
-  }
-
-  private struct StageBootstrapResponse: Encodable {
-    let pendingBootstrapHandle: String
+    let metadata: BootstrapMetadataV1
   }
 
   private struct BootstrapTransitionArgs: Decodable {
@@ -192,16 +191,19 @@
     @objc func stageBootstrapAuthenticated(_ invoke: Invoke) {
       resolveInvocation(invoke) {
         let args = try invoke.parseArgs(StageBootstrapArgs.self)
-        let handle = try self.vault.stageBootstrapAuthenticated(
+        return try self.vault.stageBootstrapAuthenticated(
           handle: args.handle,
           senderPublicKey: try decodeBase64(args.senderPublicKeyBase64, exact: 32),
-          info: try decodeBase64(args.infoBase64, maximum: maximumFieldBytes),
-          associatedData: try decodeBase64(args.associatedDataBase64, maximum: maximumFieldBytes),
+          info: try decodeBase64(
+            args.infoBase64, maximum: maximumBootstrapBindingBytes),
+          associatedData: try decodeBase64(
+            args.associatedDataBase64, maximum: maximumBootstrapBindingBytes),
           encapsulatedKey: try decodeBase64(args.encapsulatedKeyBase64, exact: 32),
-          ciphertext: try decodeBase64(args.ciphertextBase64, maximum: maximumFieldBytes),
+          ciphertext: try decodeBase64(
+            args.ciphertextBase64, exact: bootstrapKeyPackageCiphertextBytes),
           receiptId: args.receiptId,
-          envelopeDigest: try decodeBase64(args.envelopeDigestBase64, exact: 32))
-        return StageBootstrapResponse(pendingBootstrapHandle: handle)
+          envelopeDigest: try decodeBase64(args.envelopeDigestBase64, exact: 32),
+          metadata: args.metadata)
       }
     }
 

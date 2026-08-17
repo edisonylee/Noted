@@ -9,11 +9,11 @@ use tauri_app_lib::pairing_client::{
 };
 use tauri_app_lib::pairing_protocol::{
     canonical_client_hello_unsigned, canonical_invitation_unsigned, AuthenticatedHpkeEnvelope,
-    AuthenticatedHpkeSeal, BootstrapEnvelope, Environment, FreshValuePurpose, Invitation,
-    KindCapability, LibraryDataClass, LocalHpkeKey, LocalSigningKey, PairingCrypto, PairingError,
-    PairingMachine, PairingPolicy, PairingRole, RecordKind, TransportEvidence,
-    HPKE_EXPORTER_SECRET_BYTES, MAX_INVITATION_LIFETIME_MS, MAX_PAIRING_MESSAGE_BYTES,
-    PAIRING_PROTOCOL, PAIRING_SUITE,
+    AuthenticatedHpkeSeal, BootstrapEnvelope, BootstrapMetadataV1, Environment, FreshValuePurpose,
+    Invitation, KindCapability, LibraryDataClass, LocalHpkeKey, LocalSigningKey, PairingCrypto,
+    PairingError, PairingMachine, PairingPolicy, PairingRole, RecordKind, TransportEvidence,
+    BOOTSTRAP_KEY_PACKAGE_BYTES, HPKE_EXPORTER_SECRET_BYTES, MAX_INVITATION_LIFETIME_MS,
+    MAX_PAIRING_MESSAGE_BYTES, PAIRING_PROTOCOL, PAIRING_SUITE,
 };
 use zeroize::Zeroizing;
 
@@ -24,6 +24,15 @@ const DEVICE_ID: &str = "018f47a0-7b80-7000-8000-000000000103";
 const FINISH_ID: &str = "018f47a0-7b80-7000-8000-000000000104";
 const RECEIPT_ID: &str = "018f47a0-7b80-7000-8000-000000000105";
 const LIBRARY_ID: &str = "018f47a0-7b80-7000-8000-000000000106";
+
+fn fixture_bootstrap_key_package(key_epoch: u64) -> Zeroizing<Vec<u8>> {
+    let mut package = Zeroizing::new(Vec::with_capacity(BOOTSTRAP_KEY_PACKAGE_BYTES));
+    package.extend_from_slice(b"NBK1");
+    package.extend_from_slice(&1_u32.to_be_bytes());
+    package.extend_from_slice(&key_epoch.to_be_bytes());
+    package.extend_from_slice(&[0xa7; 32]);
+    package
+}
 
 fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -88,7 +97,7 @@ fn fixture_seal(
         plaintext,
     ]);
     let mut ciphertext = plaintext.to_vec();
-    ciphertext.extend_from_slice(&tag);
+    ciphertext.extend_from_slice(&tag[..16]);
     let exporter_secret = sha256(&[
         b"noted.fixture/auth-hpke/exporter",
         &encapsulated_key,
@@ -116,10 +125,10 @@ fn fixture_open(
         recipient_public_key,
         info,
     ]);
-    if envelope.encapsulated_key != expected_encapsulated || envelope.ciphertext.len() < 32 {
+    if envelope.encapsulated_key != expected_encapsulated || envelope.ciphertext.len() < 16 {
         return Err(());
     }
-    let split = envelope.ciphertext.len() - 32;
+    let split = envelope.ciphertext.len() - 16;
     let (plaintext, tag) = envelope.ciphertext.split_at(split);
     let expected_tag = sha256(&[
         b"noted.fixture/auth-hpke/tag",
@@ -130,7 +139,7 @@ fn fixture_open(
         associated_data,
         plaintext,
     ]);
-    if tag != expected_tag {
+    if tag != &expected_tag[..16] {
         return Err(());
     }
     Ok(plaintext.to_vec())
@@ -175,6 +184,26 @@ impl PairingCrypto for ServerFixtureCrypto {
             info,
             associated_data,
             plaintext,
+            exporter_context,
+        ))
+    }
+
+    fn seal_bootstrap_key_package(
+        &self,
+        _sender_key: LocalHpkeKey,
+        recipient_public_key: &[u8],
+        info: &[u8],
+        associated_data: &[u8],
+        metadata: &BootstrapMetadataV1,
+        exporter_context: &[u8],
+    ) -> Result<AuthenticatedHpkeSeal, ()> {
+        let package = fixture_bootstrap_key_package(metadata.key_epoch);
+        Ok(fixture_seal(
+            &mac_pairing_hpke_key(),
+            recipient_public_key,
+            info,
+            associated_data,
+            package.as_slice(),
             exporter_context,
         ))
     }
@@ -291,6 +320,7 @@ impl PairingClientCrypto for ClientFixtureCrypto {
         info: &[u8],
         associated_data: &[u8],
         envelope: &AuthenticatedHpkeEnvelope,
+        metadata: &BootstrapMetadataV1,
         receipt: &tauri_app_lib::pairing_protocol::EnrollmentReceipt,
         envelope_digest: &[u8],
     ) -> Result<Self::PendingKeyReference, ()> {
@@ -302,6 +332,14 @@ impl PairingClientCrypto for ClientFixtureCrypto {
             associated_data,
             envelope,
         )?;
+        if plaintext.len() != BOOTSTRAP_KEY_PACKAGE_BYTES
+            || &plaintext[..4] != b"NBK1"
+            || u64::from_be_bytes(plaintext[8..16].try_into().map_err(|_| ())?)
+                != metadata.key_epoch
+            || metadata.receipt_id != receipt.receipt_id
+        {
+            return Err(());
+        }
         let reference = PendingKeyReference(receipt.receipt_id.clone());
         let mut custody = self.custody.lock().map_err(|_| ())?;
         if let Some(existing) = custody.staged.get(&reference.0) {
@@ -853,6 +891,35 @@ fn cancellation_retries_native_discard_without_restaging_or_exporting_key() {
     let custody = handle.custody.lock().unwrap();
     assert!(custody.staged.is_empty());
     assert!(custody.discarded.contains(RECEIPT_ID));
+}
+
+#[test]
+fn rejected_confirmation_remains_cancellation_pending_until_cleanup_commits() {
+    let crypto = ClientFixtureCrypto::new(false, false);
+    let (mut client, server, _invitation, transport) = pair(crypto);
+    let hello = client.create_client_hello(&transport).unwrap();
+    let begin = server
+        .process_client_hello(&hello, None, &transport, NOW + 1_000)
+        .unwrap();
+    let confirmation = client
+        .process_server_hello(&begin.server_hello_bytes, None, &transport, NOW + 1_000)
+        .unwrap();
+
+    assert_eq!(
+        client
+            .confirm_on_device(
+                &confirmation.verification_code,
+                &confirmation.granted_scopes,
+                false,
+            )
+            .unwrap_err(),
+        PairingClientError::Protocol(PairingError::EnrollmentCancelled)
+    );
+    assert_eq!(client.state(), PairingClientState::CancellationPending);
+    assert_eq!(client.checkpoint().user_decision, Some(false));
+
+    client.retry_cancellation().unwrap();
+    assert_eq!(client.state(), PairingClientState::Cancelled);
 }
 
 #[test]

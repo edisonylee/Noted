@@ -1,9 +1,10 @@
 use crate::mobile_deep_link::MobileDeepLink;
 use crate::mobile_pairing_runtime::{
     accept_bootstrap, accept_server_finish, accept_server_hello, begin_fixture_pairing,
-    checkpoint_after_completed_discard, confirm_fixture_pairing, discard_fixture_pairing,
-    recover_fixture_pairing, FixturePairingStatus, NativeBootstrapSnapshot, NativeIdentitySnapshot,
-    NativePairingLifecycle,
+    bootstrap_metadata_from_apple, checkpoint_after_completed_discard, confirm_fixture_pairing,
+    discard_fixture_pairing, recover_fixture_pairing, FixturePairingStatus,
+    NativeBootstrapSnapshot, NativeIdentitySnapshot, NativePairingLifecycle,
+    NativeSigningKeyBacking,
 };
 use crate::mobile_store::{
     MobileNote, MobileNotesWorkspace, MobileStore, MobileStoreHealth, MobileWorkspaceNote,
@@ -13,7 +14,7 @@ use crate::pairing_client::PairingClientState;
 use crate::pairing_protocol::TransportEvidence;
 use noted_apple_security::{
     AppleSecurity, AppleSecurityExt, IdentityInventory, IdentityLifecycle, ProtectedDataEvent,
-    ProtectedDataState, StoreProtectionReport,
+    ProtectedDataState, SigningKeyBacking, StoreProtectionReport,
 };
 use serde::Serialize;
 use std::{
@@ -485,7 +486,7 @@ fn commit_completed_native_discard(
         .as_millis();
     let updated_at =
         i64::try_from(now).map_err(|_| "system clock exceeds i64 milliseconds".to_string())?;
-    let snapshots = pairing_inventory_snapshots(inventory);
+    let snapshots = pairing_inventory_snapshots(inventory)?;
     let Some(completed) = checkpoint_after_completed_discard(&checkpoint, &snapshots, updated_at)
     else {
         return Ok(false);
@@ -494,29 +495,42 @@ fn commit_completed_native_discard(
     Ok(true)
 }
 
-fn pairing_inventory_snapshots(inventory: &IdentityInventory) -> Vec<NativeIdentitySnapshot> {
+fn pairing_inventory_snapshots(
+    inventory: &IdentityInventory,
+) -> Result<Vec<NativeIdentitySnapshot>, String> {
     inventory
         .pending
         .iter()
         .chain(inventory.active.iter())
         .chain(inventory.discarded.iter())
-        .map(|identity| NativeIdentitySnapshot {
-            handle: identity.handle.expose_opaque().to_string(),
-            device_id: identity.device_id.clone(),
-            signing_public_key: identity.signing_public_key.clone(),
-            hpke_public_key: identity.hpke_public_key.clone(),
-            lifecycle: match identity.lifecycle {
-                IdentityLifecycle::Pending => NativePairingLifecycle::Pending,
-                IdentityLifecycle::Active => NativePairingLifecycle::Active,
-                IdentityLifecycle::Discarded => NativePairingLifecycle::Discarded,
-            },
-            bootstrap: identity.bootstrap_recovery.as_ref().map(|binding| {
-                NativeBootstrapSnapshot {
-                    handle: binding.pending_bootstrap_handle.expose_opaque().to_string(),
-                    receipt_id: binding.receipt_id.clone(),
-                    envelope_digest: binding.envelope_digest.clone(),
-                }
-            }),
+        .map(|identity| {
+            Ok(NativeIdentitySnapshot {
+                handle: identity.handle.expose_opaque().to_string(),
+                device_id: identity.device_id.clone(),
+                signing_public_key: identity.signing_public_key.clone(),
+                hpke_public_key: identity.hpke_public_key.clone(),
+                signing_key_backing: match identity.signing_key_backing {
+                    SigningKeyBacking::SecureEnclave => NativeSigningKeyBacking::SecureEnclave,
+                    SigningKeyBacking::SoftwareFixture => NativeSigningKeyBacking::SoftwareFixture,
+                },
+                lifecycle: match identity.lifecycle {
+                    IdentityLifecycle::Pending => NativePairingLifecycle::Pending,
+                    IdentityLifecycle::Active => NativePairingLifecycle::Active,
+                    IdentityLifecycle::Discarded => NativePairingLifecycle::Discarded,
+                },
+                bootstrap: identity
+                    .bootstrap_recovery
+                    .as_ref()
+                    .map(|binding| {
+                        Ok::<NativeBootstrapSnapshot, String>(NativeBootstrapSnapshot {
+                            handle: binding.pending_bootstrap_handle.expose_opaque().to_string(),
+                            receipt_id: binding.receipt_id.clone(),
+                            envelope_digest: binding.envelope_digest.clone(),
+                            metadata: bootstrap_metadata_from_apple(&binding.metadata)?,
+                        })
+                    })
+                    .transpose()?,
+            })
         })
         .collect()
 }

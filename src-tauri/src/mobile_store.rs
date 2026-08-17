@@ -6,13 +6,17 @@ use crate::portable::{
 use crate::{
     pairing_client::{PairingClientCheckpoint, PairingClientState},
     pairing_protocol::{
-        BootstrapEnvelope, Environment, LibraryDataClass, ServerHello, MAX_PAIRING_MESSAGE_BYTES,
+        fixture_record_capabilities, fixture_record_scopes, validate_bootstrap, BootstrapEnvelope,
+        Environment, Invitation, KindCapability, LibraryDataClass, PairingRole, RecordKind,
+        ServerFinish, ServerHello, BOOTSTRAP_SYNC_PROTOCOL_VERSION, MAX_PAIRING_MESSAGE_BYTES,
+        PAIRING_PROTOCOL, PAIRING_SUITE, RECORD_CIPHER_SUITE,
     },
 };
 use rusqlite::{
     params, Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
@@ -23,7 +27,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const PORTABLE_SCHEMA_VERSION: i64 = 4;
+const PORTABLE_SCHEMA_VERSION: i64 = 5;
 const PORTABLE_SCHEMA_V1_CHECKSUM: &str =
     "d6d8377525aa80d91e9e7cb22d4eff4da5cf7998abc8968a5457c1fc86e84b7b";
 const PORTABLE_SCHEMA_V2_CHECKSUM: &str =
@@ -32,10 +36,13 @@ const PORTABLE_SCHEMA_V3_CHECKSUM: &str =
     "17914efe0d9e4d164d7f70f3ed0865184d1f560dcb028f19d39e79cb75d1f70b";
 const PORTABLE_SCHEMA_V4_CHECKSUM: &str =
     "b0a8c29148518f29b2ef257ad344fe6b9bbe8fab1e02100f4ef7a4ab91e7ae8f";
+const PORTABLE_SCHEMA_V5_CHECKSUM: &str =
+    "c88b728d82871ba599c9b92a247e79ccd95cb60165e21d859ac6689dc8c0ea46";
 const PORTABLE_MIGRATION_V1_NAME: &str = "iphone-notes-portability";
 const PORTABLE_MIGRATION_V2_NAME: &str = "iphone-note-lifecycle-and-transaction-groups";
 const PORTABLE_MIGRATION_V3_NAME: &str = "iphone-note-workspace-and-sync-state";
 const PORTABLE_MIGRATION_V4_NAME: &str = "iphone-sanitized-fixture-pairing-checkpoint";
+const PORTABLE_MIGRATION_V5_NAME: &str = "iphone-atomic-pairing-activation";
 const PORTABLE_SCHEMA_V4_DDL: &str = r#"CREATE TABLE mobile_pairing_checkpoint_v1 (
                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                fixture_class TEXT NOT NULL CHECK (fixture_class = 'sanitized_fixture'),
@@ -70,11 +77,35 @@ const PORTABLE_SCHEMA_V4_DDL: &str = r#"CREATE TABLE mobile_pairing_checkpoint_v
                     AND pending_bootstrap_handle IS NULL)
                )
              );"#;
+const PORTABLE_SCHEMA_V5_DDL: &str = r#"CREATE TABLE mobile_pairing_activation_v1 (
+               singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+               fixture_class TEXT NOT NULL CHECK (fixture_class = 'sanitized_fixture'),
+               receipt_id TEXT NOT NULL,
+               library_id TEXT NOT NULL,
+               device_id TEXT NOT NULL,
+               default_scope_id TEXT NOT NULL,
+               authority_generation INTEGER NOT NULL CHECK (authority_generation > 0),
+               purge_generation INTEGER NOT NULL CHECK (purge_generation >= 0),
+               key_epoch INTEGER NOT NULL CHECK (key_epoch > 0),
+               sync_spki_sha256 BLOB NOT NULL CHECK (length(sync_spki_sha256) = 32),
+               record_cipher_suite TEXT NOT NULL
+                 CHECK (length(record_cipher_suite) BETWEEN 1 AND 128),
+               granted_scopes_json TEXT NOT NULL
+                 CHECK (length(granted_scopes_json) BETWEEN 1 AND 4096),
+               capabilities_json TEXT NOT NULL
+                 CHECK (length(capabilities_json) BETWEEN 1 AND 8192),
+               activation_json TEXT NOT NULL
+                 CHECK (length(activation_json) BETWEEN 1 AND 262144),
+               activation_sha256 TEXT NOT NULL CHECK (length(activation_sha256) = 64),
+               adopted_note_count INTEGER NOT NULL CHECK (adopted_note_count >= 0),
+               finalized_at INTEGER NOT NULL CHECK (finalized_at >= 0)
+             );"#;
 const MOBILE_APPLICATION_ID: i64 = 0x4e4f_5449; // ASCII `NOTI`.
 const MOBILE_NOTES_EXPORT_FORMAT: &str = "noted.mobile-notes.export.v1";
 const MOBILE_NOTES_EXPORT_VERSION: u32 = 1;
 const MAX_MOBILE_NOTES_EXPORT_BYTES: usize = 256 * 1024 * 1024;
 const MAX_MOBILE_INBOX_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MOBILE_PAIRING_ACTIVATION_BYTES: usize = 256 * 1024;
 const MAX_MOBILE_TRANSACTION_MEMBERS: usize = 128;
 // These ceilings match the direct-sync parser's per-string and aggregate
 // string budgets. Enforcing them before an outbox row commits prevents a
@@ -179,12 +210,53 @@ pub struct MobileStoreHealth {
 /// messages and opaque native handles, never a private key or decrypted
 /// bootstrap. The explicit table mirrors critical bindings so a corrupted
 /// JSON checkpoint cannot silently redirect native recovery.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MobilePairingCheckpoint {
     pub identity_handle: String,
     pub pending_bootstrap_handle: Option<String>,
     pub client: PairingClientCheckpoint,
     pub updated_at: i64,
+}
+
+/// Public, secret-free material required to make native key activation and
+/// SQLite adoption one recoverable product transition. The active checkpoint
+/// is stored byte-for-byte with these bindings in the same SQLite commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MobilePairingActivation {
+    pub receipt_id: String,
+    pub library_id: String,
+    pub device_id: String,
+    pub default_scope_id: String,
+    pub authority_generation: i64,
+    pub purge_generation: i64,
+    pub key_epoch: i64,
+    pub sync_spki_sha256: Vec<u8>,
+    pub record_cipher_suite: String,
+    pub granted_scopes: BTreeSet<RecordKind>,
+    pub capabilities: BTreeMap<RecordKind, KindCapability>,
+    pub checkpoint: MobilePairingCheckpoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobilePairingActivationResult {
+    pub adopted_note_count: usize,
+    pub replayed: bool,
+}
+
+/// Recovery-oriented state intended for the runtime to combine with its
+/// Keychain inventory. `native_active_pending_finalize` is the only expected
+/// crash window after native key activation and before the SQLite commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobilePairingActivationHealth {
+    pub phase: String,
+    pub database_finalized: bool,
+    pub receipt_id: Option<String>,
+    pub library_state: String,
+    pub enrollment_state: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -641,71 +713,33 @@ impl MobileStore {
         checkpoint: &MobilePairingCheckpoint,
     ) -> Result<(), String> {
         validate_mobile_pairing_checkpoint(checkpoint)?;
+        if checkpoint.client.state == PairingClientState::Active {
+            return Err(
+                "active pairing checkpoints must be committed by finalize_pairing_activation"
+                    .to_string(),
+            );
+        }
         let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
+        let already_finalized: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM mobile_pairing_activation_v1 WHERE singleton = 1)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if already_finalized {
+            return Err("a finalized pairing checkpoint cannot be rolled back".to_string());
+        }
         let replica = replica_identity(&transaction)?;
         if checkpoint.client.identity.device_id != replica.device_id {
             return Err(
                 "pairing checkpoint identity is not bound to the mobile replica".to_string(),
             );
         }
-        let mirrored = pairing_checkpoint_mirrors(checkpoint)?;
-        let checkpoint_json = serde_json::to_string(&checkpoint.client)
-            .map_err(|error| format!("serialize mobile pairing checkpoint: {error}"))?;
-        let decision = checkpoint.client.user_decision.map(i64::from);
-        transaction
-            .execute(
-                "INSERT INTO mobile_pairing_checkpoint_v1 (
-                   singleton, fixture_class, device_id, identity_handle,
-                   pending_bootstrap_handle, state, invitation_bytes,
-                   client_hello_bytes, server_hello_bytes, bootstrap_bytes,
-                   client_finish_bytes, server_finish_bytes, transcript_digest,
-                   receipt_id, envelope_digest, user_decision, checkpoint_json,
-                   updated_at
-                 ) VALUES (
-                   1, 'sanitized_fixture', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
-                   ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
-                 )
-                 ON CONFLICT(singleton) DO UPDATE SET
-                   fixture_class = excluded.fixture_class,
-                   device_id = excluded.device_id,
-                   identity_handle = excluded.identity_handle,
-                   pending_bootstrap_handle = excluded.pending_bootstrap_handle,
-                   state = excluded.state,
-                   invitation_bytes = excluded.invitation_bytes,
-                   client_hello_bytes = excluded.client_hello_bytes,
-                   server_hello_bytes = excluded.server_hello_bytes,
-                   bootstrap_bytes = excluded.bootstrap_bytes,
-                   client_finish_bytes = excluded.client_finish_bytes,
-                   server_finish_bytes = excluded.server_finish_bytes,
-                   transcript_digest = excluded.transcript_digest,
-                   receipt_id = excluded.receipt_id,
-                   envelope_digest = excluded.envelope_digest,
-                   user_decision = excluded.user_decision,
-                   checkpoint_json = excluded.checkpoint_json,
-                   updated_at = excluded.updated_at",
-                params![
-                    checkpoint.client.identity.device_id,
-                    checkpoint.identity_handle,
-                    checkpoint.pending_bootstrap_handle,
-                    mirrored.state,
-                    checkpoint.client.invitation_bytes,
-                    checkpoint.client.client_hello_bytes,
-                    checkpoint.client.server_hello_bytes,
-                    checkpoint.client.bootstrap_bytes,
-                    checkpoint.client.client_finish_bytes,
-                    checkpoint.client.server_finish_bytes,
-                    mirrored.transcript_digest,
-                    mirrored.receipt_id,
-                    mirrored.envelope_digest,
-                    decision,
-                    checkpoint_json,
-                    checkpoint.updated_at,
-                ],
-            )
-            .map_err(|error| error.to_string())?;
+        write_mobile_pairing_checkpoint(&transaction, checkpoint)?;
         transaction.commit().map_err(|error| error.to_string())
     }
 
@@ -861,7 +895,21 @@ fn pairing_checkpoint_mirrors(
         .as_deref()
         .map(|bytes| {
             serde_json::from_slice::<BootstrapEnvelope>(bytes)
-                .map_err(|error| format!("decode checkpoint BootstrapEnvelope: {error}"))
+                .map_err(|error| {
+                    let is_legacy_fixture = serde_json::from_slice::<serde_json::Value>(bytes)
+                        .ok()
+                        .and_then(|value| value.as_object().cloned())
+                        .is_some_and(|object| {
+                            object.contains_key("sealed_bootstrap")
+                                && !object.contains_key("metadata")
+                        });
+                    if is_legacy_fixture {
+                        "legacy fixture pairing checkpoint has no authenticated bootstrap metadata; discard the pending native bootstrap and reset pairing before schema v5 migration"
+                            .to_string()
+                    } else {
+                        format!("decode checkpoint BootstrapEnvelope: {error}")
+                    }
+                })
         })
         .transpose()?;
     if let (Some(server), Some(bootstrap)) = (&server, &bootstrap) {
@@ -881,6 +929,68 @@ fn pairing_checkpoint_mirrors(
             .map(|value| value.receipt.receipt_id.clone()),
         envelope_digest: bootstrap.map(|value| value.envelope_digest),
     })
+}
+
+fn write_mobile_pairing_checkpoint(
+    connection: &Connection,
+    checkpoint: &MobilePairingCheckpoint,
+) -> Result<(), String> {
+    let mirrored = pairing_checkpoint_mirrors(checkpoint)?;
+    let checkpoint_json = serde_json::to_string(&checkpoint.client)
+        .map_err(|error| format!("serialize mobile pairing checkpoint: {error}"))?;
+    let decision = checkpoint.client.user_decision.map(i64::from);
+    connection
+        .execute(
+            "INSERT INTO mobile_pairing_checkpoint_v1 (
+               singleton, fixture_class, device_id, identity_handle,
+               pending_bootstrap_handle, state, invitation_bytes,
+               client_hello_bytes, server_hello_bytes, bootstrap_bytes,
+               client_finish_bytes, server_finish_bytes, transcript_digest,
+               receipt_id, envelope_digest, user_decision, checkpoint_json,
+               updated_at
+             ) VALUES (
+               1, 'sanitized_fixture', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+               ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+             )
+             ON CONFLICT(singleton) DO UPDATE SET
+               fixture_class = excluded.fixture_class,
+               device_id = excluded.device_id,
+               identity_handle = excluded.identity_handle,
+               pending_bootstrap_handle = excluded.pending_bootstrap_handle,
+               state = excluded.state,
+               invitation_bytes = excluded.invitation_bytes,
+               client_hello_bytes = excluded.client_hello_bytes,
+               server_hello_bytes = excluded.server_hello_bytes,
+               bootstrap_bytes = excluded.bootstrap_bytes,
+               client_finish_bytes = excluded.client_finish_bytes,
+               server_finish_bytes = excluded.server_finish_bytes,
+               transcript_digest = excluded.transcript_digest,
+               receipt_id = excluded.receipt_id,
+               envelope_digest = excluded.envelope_digest,
+               user_decision = excluded.user_decision,
+               checkpoint_json = excluded.checkpoint_json,
+               updated_at = excluded.updated_at",
+            params![
+                checkpoint.client.identity.device_id,
+                checkpoint.identity_handle,
+                checkpoint.pending_bootstrap_handle,
+                mirrored.state,
+                checkpoint.client.invitation_bytes,
+                checkpoint.client.client_hello_bytes,
+                checkpoint.client.server_hello_bytes,
+                checkpoint.client.bootstrap_bytes,
+                checkpoint.client.client_finish_bytes,
+                checkpoint.client.server_finish_bytes,
+                mirrored.transcript_digest,
+                mirrored.receipt_id,
+                mirrored.envelope_digest,
+                decision,
+                checkpoint_json,
+                checkpoint.updated_at,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn validate_mobile_pairing_checkpoint(checkpoint: &MobilePairingCheckpoint) -> Result<(), String> {
@@ -972,6 +1082,105 @@ fn verify_mobile_pairing_checkpoint_schema(connection: &Connection) -> Result<()
     Ok(())
 }
 
+fn verify_mobile_pairing_activation_schema(connection: &Connection) -> Result<(), String> {
+    let all_columns: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('mobile_pairing_activation_v1')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let required_columns: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('mobile_pairing_activation_v1')
+             WHERE name IN (
+               'singleton', 'fixture_class', 'receipt_id', 'library_id', 'device_id',
+               'default_scope_id', 'authority_generation', 'purge_generation', 'key_epoch',
+               'sync_spki_sha256', 'record_cipher_suite', 'granted_scopes_json',
+               'capabilities_json', 'activation_json', 'activation_sha256',
+               'adopted_note_count', 'finalized_at'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if all_columns != 17 || required_columns != 17 {
+        return Err("mobile pairing activation schema is incomplete".to_string());
+    }
+    let checkpoint = load_mobile_pairing_checkpoint(connection)?;
+    let Some(stored) = load_mobile_pairing_activation(connection)? else {
+        if checkpoint
+            .as_ref()
+            .is_some_and(|value| value.client.state == PairingClientState::Active)
+        {
+            return Err(
+                "SQLite cannot report Active without an atomic pairing activation record"
+                    .to_string(),
+            );
+        }
+        let identity = replica_identity(connection)?;
+        let enrollment_state: String = connection
+            .query_row(
+                "SELECT enrollment_state FROM mobile_sync_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if identity.library_state != "local_staging" || enrollment_state != "not_enrolled" {
+            return Err(
+                "unfinalized v5 pairing state must remain local_staging and not_enrolled"
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    };
+    if checkpoint.as_ref() != Some(&stored.activation.checkpoint) {
+        return Err("finalized activation does not match the exact Active checkpoint".to_string());
+    }
+    let identity = replica_identity(connection)?;
+    let sync: (String, i64, i64) = connection
+        .query_row(
+            "SELECT enrollment_state, authority_generation, purge_generation
+             FROM mobile_sync_state WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    if identity.library_state != "paired"
+        || identity.library_id != stored.activation.library_id
+        || identity.device_id != stored.activation.device_id
+        || identity.default_scope_id != stored.activation.default_scope_id
+        || sync.0 != "active"
+        || sync.1 != stored.activation.authority_generation
+        || sync.2 != stored.activation.purge_generation
+    {
+        return Err(
+            "finalized pairing activation is not atomically reflected by replica and enrollment state"
+                .to_string(),
+        );
+    }
+    let wrong_default_scope_class: i64 = connection
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM mobile_notes
+                WHERE scope_id = ?1 AND scope_class != 'unknown')
+             + (SELECT COUNT(*) FROM mobile_note_outbox
+                WHERE eligible_for_sync = 1 AND scope_id = ?1 AND scope_class != 'unknown')",
+            [&stored.activation.default_scope_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if wrong_default_scope_class != 0 {
+        return Err("paired default scope is not classified as unknown".to_string());
+    }
+    if stored.finalized_at < stored.activation.checkpoint.updated_at {
+        return Err(
+            "pairing activation finalization time predates its Active checkpoint".to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn load_mobile_pairing_checkpoint(
     connection: &Connection,
 ) -> Result<Option<MobilePairingCheckpoint>, String> {
@@ -1056,6 +1265,618 @@ fn load_mobile_pairing_checkpoint(
         return Err("mobile pairing checkpoint mirror mismatch".to_string());
     }
     Ok(Some(checkpoint))
+}
+
+struct StoredMobilePairingActivation {
+    activation: MobilePairingActivation,
+    activation_json: String,
+    activation_sha256: String,
+    adopted_note_count: usize,
+    finalized_at: i64,
+}
+
+fn validate_mobile_pairing_activation(activation: &MobilePairingActivation) -> Result<(), String> {
+    validate_mobile_pairing_checkpoint(&activation.checkpoint)?;
+    if activation.checkpoint.client.state != PairingClientState::Active
+        || activation.checkpoint.pending_bootstrap_handle.is_some()
+    {
+        return Err("pairing activation requires an exact Active checkpoint".to_string());
+    }
+    if !is_uuid_v7(&activation.receipt_id)
+        || !is_uuid_v7(&activation.library_id)
+        || !is_uuid_v7(&activation.device_id)
+        || !is_uuid_v7(&activation.default_scope_id)
+        || activation.authority_generation <= 0
+        || activation.purge_generation < 0
+        || activation.key_epoch <= 0
+        || activation.sync_spki_sha256.len() != 32
+    {
+        return Err("mobile pairing activation contains an invalid public binding".to_string());
+    }
+    if activation.granted_scopes != fixture_record_scopes()
+        || activation.capabilities != fixture_record_capabilities()
+        || activation.record_cipher_suite != RECORD_CIPHER_SUITE
+    {
+        return Err(
+            "mobile pairing activation requires the exact fixture scope, capability, and cipher suite"
+                .to_string(),
+        );
+    }
+    let client = &activation.checkpoint.client;
+    if client.config.environment != Environment::Development
+        || client.config.library_data_class != LibraryDataClass::SanitizedFixture
+        || client.config.requested_scopes != activation.granted_scopes
+        || client.config.capabilities != activation.capabilities
+        || client.identity.device_id != activation.device_id
+        || client.user_decision != Some(true)
+    {
+        return Err("mobile pairing activation is not bound to its fixture client".to_string());
+    }
+    let invitation: Invitation = serde_json::from_slice(&client.invitation_bytes)
+        .map_err(|error| format!("decode activation Invitation: {error}"))?;
+    let server_hello: ServerHello = serde_json::from_slice(
+        client
+            .server_hello_bytes
+            .as_deref()
+            .ok_or_else(|| "activation checkpoint is missing ServerHello".to_string())?,
+    )
+    .map_err(|error| format!("decode activation ServerHello: {error}"))?;
+    let bootstrap: BootstrapEnvelope = serde_json::from_slice(
+        client
+            .bootstrap_bytes
+            .as_deref()
+            .ok_or_else(|| "activation checkpoint is missing BootstrapEnvelope".to_string())?,
+    )
+    .map_err(|error| format!("decode activation BootstrapEnvelope: {error}"))?;
+    let server_finish: ServerFinish = serde_json::from_slice(
+        client
+            .server_finish_bytes
+            .as_deref()
+            .ok_or_else(|| "activation checkpoint is missing ServerFinish".to_string())?,
+    )
+    .map_err(|error| format!("decode activation ServerFinish: {error}"))?;
+    let client_activation = client
+        .activation
+        .as_ref()
+        .ok_or_else(|| "Active checkpoint is missing its public activation".to_string())?;
+    if client_activation.activated_at_ms < 0
+        || client_activation.activated_at_ms > MAX_PORTABLE_TIMESTAMP_MS
+        || activation.checkpoint.updated_at < client_activation.activated_at_ms
+        || activation.checkpoint.updated_at > MAX_PORTABLE_TIMESTAMP_MS
+    {
+        return Err("mobile pairing activation contains an invalid timestamp".to_string());
+    }
+    let receipt = &client_activation.receipt;
+    validate_bootstrap(&bootstrap, receipt)
+        .map_err(|error| format!("invalid authenticated bootstrap metadata: {error}"))?;
+    if receipt.protocol != PAIRING_PROTOCOL
+        || receipt.suite != PAIRING_SUITE
+        || receipt.mac_role != PairingRole::MacAuthority
+        || receipt.client_role != PairingRole::IphoneCompanion
+        || receipt.client_signing_key_fingerprint
+            != Sha256::digest(&client.identity.signing_public_key).to_vec()
+        || receipt.client_hpke_key_fingerprint
+            != Sha256::digest(&client.identity.hpke_public_key).to_vec()
+        || receipt.mac_signing_key_fingerprint
+            != Sha256::digest(&invitation.mac_pairing_signing_public_key).to_vec()
+        || receipt.mac_hpke_key_fingerprint
+            != Sha256::digest(&invitation.mac_pairing_hpke_public_key).to_vec()
+        || invitation.protocol != PAIRING_PROTOCOL
+        || invitation.suite != PAIRING_SUITE
+        || invitation.authority_role != PairingRole::MacAuthority
+        || invitation.intended_client_role != PairingRole::IphoneCompanion
+        || invitation.scope_ceiling != activation.granted_scopes
+        || server_hello.protocol != PAIRING_PROTOCOL
+        || server_hello.suite != PAIRING_SUITE
+        || server_hello.sender_role != PairingRole::MacAuthority
+        || server_hello.recipient_role != PairingRole::IphoneCompanion
+        || server_finish.protocol != PAIRING_PROTOCOL
+        || server_finish.suite != PAIRING_SUITE
+        || server_finish.sender_role != PairingRole::MacAuthority
+        || server_finish.recipient_role != PairingRole::IphoneCompanion
+        || server_hello.receipt != *receipt
+        || server_finish.receipt != *receipt
+        || server_finish.activated_at_ms != client_activation.activated_at_ms
+        || bootstrap.receipt_id != receipt.receipt_id
+        || invitation.invitation_id != receipt.invitation_id
+        || invitation.library_id != receipt.library_id
+        || invitation.authority_generation != receipt.authority_generation
+        || invitation.environment != Environment::Development
+        || invitation.library_data_class != LibraryDataClass::SanitizedFixture
+    {
+        return Err("mobile pairing activation transcript bindings do not match".to_string());
+    }
+    let metadata = &bootstrap.metadata;
+    let authority_generation = i64::try_from(receipt.authority_generation)
+        .map_err(|_| "pairing authority generation exceeds SQLite range".to_string())?;
+    let purge_generation = i64::try_from(metadata.purge_generation)
+        .map_err(|_| "pairing purge generation exceeds SQLite range".to_string())?;
+    let key_epoch = i64::try_from(metadata.key_epoch)
+        .map_err(|_| "pairing key epoch exceeds SQLite range".to_string())?;
+    if receipt.receipt_id != activation.receipt_id
+        || receipt.library_id != activation.library_id
+        || receipt.device_id != activation.device_id
+        || receipt.environment != Environment::Development
+        || receipt.granted_scopes != activation.granted_scopes
+        || receipt.capabilities != activation.capabilities
+        || authority_generation != activation.authority_generation
+        || metadata.environment != Environment::Development
+        || metadata.library_data_class != LibraryDataClass::SanitizedFixture
+        || metadata.sync_protocol_version != BOOTSTRAP_SYNC_PROTOCOL_VERSION
+        || metadata.receipt_id != activation.receipt_id
+        || metadata.library_id != activation.library_id
+        || metadata.device_id != activation.device_id
+        || metadata.default_scope_id != activation.default_scope_id
+        || metadata.default_scope_class != ScopeClass::Unknown
+        || purge_generation != activation.purge_generation
+        || key_epoch != activation.key_epoch
+        || metadata.durable_sync_spki_sha256 != activation.sync_spki_sha256
+        || metadata.granted_scopes != activation.granted_scopes
+        || metadata.capabilities != activation.capabilities
+        || metadata.record_cipher_suite != activation.record_cipher_suite
+        || metadata.transcript_digest != receipt.transcript_digest
+    {
+        return Err(
+            "mobile pairing activation does not match authenticated bootstrap metadata".to_string(),
+        );
+    }
+    if client.confirmation.as_ref().is_none_or(|confirmation| {
+        confirmation.receipt_id != activation.receipt_id
+            || confirmation.granted_scopes != activation.granted_scopes
+    }) {
+        return Err("mobile pairing activation is missing the exact user confirmation".to_string());
+    }
+    Ok(())
+}
+
+fn serialized_mobile_pairing_activation(
+    activation: &MobilePairingActivation,
+) -> Result<(String, String, String, String), String> {
+    let activation_json = serde_json::to_string(activation).map_err(|error| error.to_string())?;
+    if activation_json.is_empty() || activation_json.len() > MAX_MOBILE_PAIRING_ACTIVATION_BYTES {
+        return Err("mobile pairing activation exceeds its durable size limit".to_string());
+    }
+    let value = serde_json::to_value(activation).map_err(|error| error.to_string())?;
+    let digest = canonical_sha256(&value);
+    let scopes =
+        serde_json::to_string(&activation.granted_scopes).map_err(|error| error.to_string())?;
+    let capabilities =
+        serde_json::to_string(&activation.capabilities).map_err(|error| error.to_string())?;
+    Ok((activation_json, digest, scopes, capabilities))
+}
+
+fn load_mobile_pairing_activation(
+    connection: &Connection,
+) -> Result<Option<StoredMobilePairingActivation>, String> {
+    type StoredRow = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        Vec<u8>,
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+    );
+    let stored: Option<StoredRow> = connection
+        .query_row(
+            "SELECT fixture_class, receipt_id, library_id, device_id, default_scope_id,
+                    authority_generation, purge_generation, key_epoch, sync_spki_sha256,
+                    record_cipher_suite, granted_scopes_json, capabilities_json,
+                    activation_json, activation_sha256, adopted_note_count, finalized_at
+             FROM mobile_pairing_activation_v1 WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                    row.get(15)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let activation: MobilePairingActivation = serde_json::from_str(&stored.12)
+        .map_err(|error| format!("decode mobile pairing activation: {error}"))?;
+    validate_mobile_pairing_activation(&activation)?;
+    let (activation_json, digest, scopes, capabilities) =
+        serialized_mobile_pairing_activation(&activation)?;
+    if stored.0 != "sanitized_fixture"
+        || stored.1 != activation.receipt_id
+        || stored.2 != activation.library_id
+        || stored.3 != activation.device_id
+        || stored.4 != activation.default_scope_id
+        || stored.5 != activation.authority_generation
+        || stored.6 != activation.purge_generation
+        || stored.7 != activation.key_epoch
+        || stored.8 != activation.sync_spki_sha256
+        || stored.9 != activation.record_cipher_suite
+        || stored.10 != scopes
+        || stored.11 != capabilities
+        || stored.12 != activation_json
+        || stored.13 != digest
+        || stored.14 < 0
+        || stored.15 < 0
+    {
+        return Err("mobile pairing activation mirror mismatch".to_string());
+    }
+    Ok(Some(StoredMobilePairingActivation {
+        activation,
+        activation_json,
+        activation_sha256: digest,
+        adopted_note_count: usize::try_from(stored.14)
+            .map_err(|_| "adopted note count exceeds platform range".to_string())?,
+        finalized_at: stored.15,
+    }))
+}
+
+fn pending_checkpoint_precedes_activation(
+    pending: &MobilePairingCheckpoint,
+    active: &MobilePairingCheckpoint,
+) -> bool {
+    if pending.identity_handle != active.identity_handle
+        || pending.pending_bootstrap_handle.is_none()
+        || active.pending_bootstrap_handle.is_some()
+        || pending.updated_at > active.updated_at
+    {
+        return false;
+    }
+    let mut expected = active.client.clone();
+    expected.state = PairingClientState::PendingActivation;
+    expected.activation = None;
+    pending.client == expected
+}
+
+fn adopt_staging_for_pairing_activation(
+    transaction: &Transaction<'_>,
+    library_id: &str,
+    default_scope_id: &str,
+) -> Result<usize, String> {
+    let staging_identity = replica_identity(transaction)?;
+    if staging_identity.library_state != "local_staging" {
+        return Err(
+            "atomic pairing activation requires the untouched local_staging replica".to_string(),
+        );
+    }
+    let has_externally_observed_state: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM mobile_notes
+               WHERE accepted_revision > 0
+                  OR accepted_version_id IS NOT NULL
+                  OR accepted_content_hash IS NOT NULL
+                  OR sync_state IN ('sending', 'acknowledged', 'conflict')
+               UNION ALL
+               SELECT 1 FROM mobile_note_outbox
+               WHERE state IN ('sending', 'acknowledged', 'conflict')
+                  OR attempts > 0
+                  OR acknowledged_at IS NOT NULL
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if has_externally_observed_state {
+        return Err(
+            "staging-library adoption is forbidden after a record has been accepted or exposed to sync"
+                .to_string(),
+        );
+    }
+
+    struct AdoptionNote {
+        id: i64,
+        record_id: String,
+        title: String,
+        body: String,
+        created_at: i64,
+        updated_at: i64,
+        working_revision: i64,
+        working_branch_id: String,
+        canonical_hash: String,
+        lifecycle_state: String,
+        trashed_at: Option<i64>,
+        tombstoned_at: Option<i64>,
+        provenance_json: String,
+        scope_id: String,
+        scope_class: String,
+        authority: String,
+    }
+    let notes = transaction
+        .prepare(
+            "SELECT id, record_id, title, body, created_at, updated_at,
+                    working_revision, working_branch_id, canonical_hash, lifecycle_state,
+                    trashed_at, tombstoned_at, provenance_json, scope_id, scope_class, authority
+             FROM mobile_notes ORDER BY id",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    Ok(AdoptionNote {
+                        id: row.get(0)?,
+                        record_id: row.get(1)?,
+                        title: row.get(2)?,
+                        body: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                        working_revision: row.get(6)?,
+                        working_branch_id: row.get(7)?,
+                        canonical_hash: row.get(8)?,
+                        lifecycle_state: row.get(9)?,
+                        trashed_at: row.get(10)?,
+                        tombstoned_at: row.get(11)?,
+                        provenance_json: row.get(12)?,
+                        scope_id: row.get(13)?,
+                        scope_class: row.get(14)?,
+                        authority: row.get(15)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|error| error.to_string())?;
+
+    let adoption_time = next_timestamp(transaction)?;
+    transaction
+        .execute(
+            "UPDATE mobile_note_outbox
+             SET state = 'superseded', eligible_for_sync = 0, superseded_at = ?1
+             WHERE library_id = ?2 AND eligible_for_sync = 1",
+            params![adoption_time, staging_identity.library_id],
+        )
+        .map_err(|error| error.to_string())?;
+    let changed = transaction
+        .execute(
+            "UPDATE mobile_replica
+             SET library_id = ?1, default_scope_id = ?2, library_state = 'paired'
+             WHERE singleton = 1 AND library_state = 'local_staging'",
+            params![library_id, default_scope_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed != 1 {
+        return Err("mobile replica changed during atomic pairing activation".to_string());
+    }
+    transaction
+        .execute(
+            "UPDATE mobile_note_folders SET library_id = ?1 WHERE library_id = ?2",
+            params![library_id, staging_identity.library_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE mobile_note_categories SET library_id = ?1 WHERE library_id = ?2",
+            params![library_id, staging_identity.library_id],
+        )
+        .map_err(|error| error.to_string())?;
+    let paired_identity = replica_identity(transaction)?;
+
+    struct PlannedAdoption {
+        note_index: usize,
+        scope_id: String,
+        scope_class: String,
+        working_revision: i64,
+        working_version_id: String,
+        mutation_id: String,
+        ciphertext_bytes: usize,
+    }
+    let mut plans = Vec::with_capacity(notes.len());
+    for (note_index, note) in notes.iter().enumerate() {
+        let remaps_default_scope = note.scope_id == staging_identity.default_scope_id;
+        let scope_id = if remaps_default_scope {
+            default_scope_id.to_string()
+        } else {
+            note.scope_id.clone()
+        };
+        let scope_class = if remaps_default_scope {
+            "unknown".to_string()
+        } else {
+            note.scope_class.clone()
+        };
+        let working_revision = note
+            .working_revision
+            .checked_add(1)
+            .ok_or_else(|| "mobile note working revision overflowed".to_string())?;
+        let working_version_id = new_uuid_v7();
+        let mutation_id = new_uuid_v7();
+        let payload_json = serialize_mutation_payload(
+            &paired_identity,
+            &Mutation {
+                operation: "create",
+                record_id: &note.record_id,
+                title: &note.title,
+                body: &note.body,
+                base_revision: 0,
+                proposed_revision: 1,
+                local_revision: working_revision,
+                version_id: &working_version_id,
+                branch_id: &note.working_branch_id,
+                base_version_id: None,
+                accepted_content_hash: None,
+                mutation_id: &mutation_id,
+                canonical_hash: &note.canonical_hash,
+                lifecycle_state: &note.lifecycle_state,
+                trashed_at: note.trashed_at,
+                tombstoned_at: note.tombstoned_at,
+                created_at: note.created_at,
+                updated_at: note.updated_at,
+                authority: &note.authority,
+                provenance_json: &note.provenance_json,
+                scope_id: &scope_id,
+                scope_class: &scope_class,
+            },
+        )?;
+        plans.push(PlannedAdoption {
+            note_index,
+            scope_id,
+            scope_class,
+            working_revision,
+            working_version_id,
+            mutation_id,
+            ciphertext_bytes: payload_json
+                .len()
+                .checked_add(MOBILE_MUTATION_CIPHERTEXT_OVERHEAD_BYTES)
+                .ok_or_else(|| "mobile note mutation ciphertext size overflowed".to_string())?,
+        });
+    }
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut group_bytes = 0usize;
+    for (plan_index, plan) in plans.iter().enumerate() {
+        let needs_new_group = groups.last().is_some_and(|group| {
+            group.len() >= MAX_MOBILE_TRANSACTION_MEMBERS
+                || group_bytes
+                    .checked_add(plan.ciphertext_bytes)
+                    .is_none_or(|total| total > MAX_MOBILE_TRANSACTION_CIPHERTEXT_BYTES)
+        });
+        if groups.is_empty() || needs_new_group {
+            groups.push(Vec::new());
+            group_bytes = 0;
+        }
+        groups.last_mut().expect("group exists").push(plan_index);
+        group_bytes = group_bytes
+            .checked_add(plan.ciphertext_bytes)
+            .ok_or_else(|| "mobile outbox transaction size overflowed".to_string())?;
+    }
+    for group in groups {
+        let outbox_transaction = begin_outbox_transaction(transaction, group.len())?;
+        for (member_index, plan_index) in group.into_iter().enumerate() {
+            let plan = &plans[plan_index];
+            let note = &notes[plan.note_index];
+            transaction
+                .execute(
+                    "UPDATE mobile_notes
+                     SET library_id = ?1,
+                         accepted_revision = 0,
+                         accepted_version_id = NULL,
+                         accepted_content_hash = NULL,
+                         working_revision = ?2,
+                         working_version_id = ?3,
+                         working_base_revision = 0,
+                         pending_mutation_id = ?4,
+                         sync_state = 'pending',
+                         scope = ?6,
+                         scope_id = ?5,
+                         scope_class = ?6
+                     WHERE id = ?7",
+                    params![
+                        library_id,
+                        plan.working_revision,
+                        plan.working_version_id,
+                        plan.mutation_id,
+                        plan.scope_id,
+                        plan.scope_class,
+                        note.id,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+            enqueue_mutation(
+                transaction,
+                &paired_identity,
+                &outbox_transaction,
+                i64::try_from(member_index)
+                    .map_err(|_| "outbox transaction has too many members".to_string())?,
+                Mutation {
+                    operation: "create",
+                    record_id: &note.record_id,
+                    title: &note.title,
+                    body: &note.body,
+                    base_revision: 0,
+                    proposed_revision: 1,
+                    local_revision: plan.working_revision,
+                    version_id: &plan.working_version_id,
+                    branch_id: &note.working_branch_id,
+                    base_version_id: None,
+                    accepted_content_hash: None,
+                    mutation_id: &plan.mutation_id,
+                    canonical_hash: &note.canonical_hash,
+                    lifecycle_state: &note.lifecycle_state,
+                    trashed_at: note.trashed_at,
+                    tombstoned_at: note.tombstoned_at,
+                    created_at: note.created_at,
+                    updated_at: note.updated_at,
+                    authority: &note.authority,
+                    provenance_json: &note.provenance_json,
+                    scope_id: &plan.scope_id,
+                    scope_class: &plan.scope_class,
+                },
+            )?;
+        }
+    }
+    Ok(notes.len())
+}
+
+fn activate_sync_enrollment_in_transaction(
+    transaction: &Transaction<'_>,
+    activation: &MobilePairingActivation,
+) -> Result<(), String> {
+    let identity = replica_identity(transaction)?;
+    if identity.library_state != "paired"
+        || identity.library_id != activation.library_id
+        || identity.device_id != activation.device_id
+        || identity.default_scope_id != activation.default_scope_id
+    {
+        return Err("mobile replica adoption does not match pairing activation".to_string());
+    }
+    let (enrollment_state, current_authority, current_purge): (String, i64, i64) = transaction
+        .query_row(
+            "SELECT enrollment_state, authority_generation, purge_generation
+             FROM mobile_sync_state WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    if enrollment_state != "not_enrolled"
+        || activation.authority_generation < current_authority
+        || activation.purge_generation < current_purge
+    {
+        return Err("mobile sync enrollment is not an untouched monotonic activation".to_string());
+    }
+    let pending: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM mobile_note_outbox WHERE eligible_for_sync = 1)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let changed = transaction
+        .execute(
+            "UPDATE mobile_sync_state
+             SET enrollment_state = 'active', sync_state = ?1,
+                 authority_generation = ?2, purge_generation = ?3,
+                 last_error_code = NULL
+             WHERE singleton = 1 AND enrollment_state = 'not_enrolled'",
+            params![
+                if pending { "pending" } else { "idle" },
+                activation.authority_generation,
+                activation.purge_generation,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed != 1 {
+        return Err("mobile sync enrollment changed during pairing activation".to_string());
+    }
+    Ok(())
 }
 
 impl MobileStore {
@@ -1925,11 +2746,181 @@ impl MobileStore {
         Ok(envelope.payload.notes.len())
     }
 
+    /// Commits the only durable transition from a staged phone to a paired,
+    /// enrolled replica. Native code first performs its idempotent Keychain
+    /// activation, then supplies the resulting exact Active checkpoint here.
+    pub fn finalize_pairing_activation(
+        &self,
+        activation: &MobilePairingActivation,
+    ) -> Result<MobilePairingActivationResult, String> {
+        validate_mobile_pairing_activation(activation)?;
+        let (activation_json, activation_sha256, scopes_json, capabilities_json) =
+            serialized_mobile_pairing_activation(activation)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+
+        if let Some(stored) = load_mobile_pairing_activation(&transaction)? {
+            if stored.activation != *activation
+                || stored.activation_json != activation_json
+                || stored.activation_sha256 != activation_sha256
+            {
+                return Err(
+                    "byte-different mobile pairing activation replay was rejected".to_string(),
+                );
+            }
+            verify_mobile_pairing_activation_schema(&transaction)?;
+            transaction.commit().map_err(|error| error.to_string())?;
+            return Ok(MobilePairingActivationResult {
+                adopted_note_count: stored.adopted_note_count,
+                replayed: true,
+            });
+        }
+
+        let pending = load_mobile_pairing_checkpoint(&transaction)?.ok_or_else(|| {
+            "pairing activation has no durable PendingActivation checkpoint".to_string()
+        })?;
+        if !pending_checkpoint_precedes_activation(&pending, &activation.checkpoint) {
+            return Err(
+                "pairing activation does not exactly advance its durable PendingActivation checkpoint"
+                    .to_string(),
+            );
+        }
+        let identity = replica_identity(&transaction)?;
+        if identity.library_state != "local_staging" || identity.device_id != activation.device_id {
+            return Err(
+                "pairing activation requires the matching untouched local_staging replica"
+                    .to_string(),
+            );
+        }
+        let enrollment_state: String = transaction
+            .query_row(
+                "SELECT enrollment_state FROM mobile_sync_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if enrollment_state != "not_enrolled" {
+            return Err(
+                "pairing activation requires an untouched not_enrolled sync state".to_string(),
+            );
+        }
+
+        let adopted_note_count = adopt_staging_for_pairing_activation(
+            &transaction,
+            &activation.library_id,
+            &activation.default_scope_id,
+        )?;
+        activate_sync_enrollment_in_transaction(&transaction, activation)?;
+        let finalized_at = next_timestamp(&transaction)?.max(activation.checkpoint.updated_at);
+        let adopted_note_count_i64 = i64::try_from(adopted_note_count)
+            .map_err(|_| "adopted note count exceeds SQLite range".to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO mobile_pairing_activation_v1 (
+                   singleton, fixture_class, receipt_id, library_id, device_id,
+                   default_scope_id, authority_generation, purge_generation, key_epoch,
+                   sync_spki_sha256, record_cipher_suite, granted_scopes_json,
+                   capabilities_json, activation_json, activation_sha256,
+                   adopted_note_count, finalized_at
+                 ) VALUES (
+                   1, 'sanitized_fixture', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                   ?9, ?10, ?11, ?12, ?13, ?14, ?15
+                 )",
+                params![
+                    activation.receipt_id,
+                    activation.library_id,
+                    activation.device_id,
+                    activation.default_scope_id,
+                    activation.authority_generation,
+                    activation.purge_generation,
+                    activation.key_epoch,
+                    activation.sync_spki_sha256,
+                    activation.record_cipher_suite,
+                    scopes_json,
+                    capabilities_json,
+                    activation_json,
+                    activation_sha256,
+                    adopted_note_count_i64,
+                    finalized_at,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        write_mobile_pairing_checkpoint(&transaction, &activation.checkpoint)?;
+        verify_mobile_pairing_activation_schema(&transaction)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(MobilePairingActivationResult {
+            adopted_note_count,
+            replayed: false,
+        })
+    }
+
+    pub fn finalized_pairing_activation(&self) -> Result<Option<MobilePairingActivation>, String> {
+        let connection = self.lock_connection()?;
+        let activation = load_mobile_pairing_activation(&connection)?;
+        verify_mobile_pairing_activation_schema(&connection)?;
+        Ok(activation.map(|value| value.activation))
+    }
+
+    /// Combines the durable checkpoint with native Keychain inventory so the
+    /// runtime can distinguish the one crash-recovery window from completion.
+    pub fn pairing_activation_health(
+        &self,
+        native_activation_is_active: bool,
+    ) -> Result<MobilePairingActivationHealth, String> {
+        let connection = self.lock_connection()?;
+        let checkpoint = load_mobile_pairing_checkpoint(&connection)?;
+        let activation = load_mobile_pairing_activation(&connection)?;
+        verify_mobile_pairing_activation_schema(&connection)?;
+        let identity = replica_identity(&connection)?;
+        let enrollment_state: String = connection
+            .query_row(
+                "SELECT enrollment_state FROM mobile_sync_state WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let phase = if activation.is_some() {
+            "finalized"
+        } else if checkpoint
+            .as_ref()
+            .is_some_and(|value| value.client.state == PairingClientState::PendingActivation)
+        {
+            if native_activation_is_active {
+                "native_active_pending_finalize"
+            } else {
+                "pending_native_activation"
+            }
+        } else if native_activation_is_active {
+            "native_active_without_pending_checkpoint"
+        } else if checkpoint.is_some() {
+            "pairing"
+        } else {
+            "not_started"
+        };
+        let receipt_id = activation
+            .as_ref()
+            .map(|value| value.activation.receipt_id.clone())
+            .or_else(|| {
+                checkpoint
+                    .as_ref()
+                    .and_then(|value| pairing_checkpoint_mirrors(value).ok()?.receipt_id)
+            });
+        Ok(MobilePairingActivationHealth {
+            phase: phase.to_string(),
+            database_finalized: activation.is_some(),
+            receipt_id,
+            library_state: identity.library_state,
+            enrollment_state,
+        })
+    }
+
     /// Attach an unpaired phone's staging records to the library and default
     /// scope proven by the first pairing handshake. Record IDs are retained;
     /// the staging-only scope is remapped to the Mac's canonical scope ID.
     #[allow(dead_code)]
-    pub fn adopt_staging_library(
+    fn adopt_staging_library(
         &self,
         mac_library_id: &str,
         mac_default_scope_id: &str,
@@ -2228,77 +3219,6 @@ impl MobileStore {
 
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(notes.len())
-    }
-
-    /// Activates the already-adopted Mac library after the pairing transcript,
-    /// key package, and enrollment receipt have all been verified. This method
-    /// stores no secret material; native Keychain storage owns those keys.
-    pub fn activate_sync_enrollment(
-        &self,
-        library_id: &str,
-        default_scope_id: &str,
-        authority_generation: i64,
-        purge_generation: i64,
-    ) -> Result<(), String> {
-        if !is_uuid_v7(library_id)
-            || !is_uuid(default_scope_id)
-            || authority_generation <= 0
-            || purge_generation < 0
-        {
-            return Err(
-                "mobile sync enrollment contains invalid identity or generation data".to_string(),
-            );
-        }
-        let mut connection = self.lock_connection()?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| error.to_string())?;
-        let identity = replica_identity(&transaction)?;
-        if identity.library_state != "paired"
-            || identity.library_id != library_id
-            || identity.default_scope_id != default_scope_id
-        {
-            return Err(
-                "mobile replica must adopt the paired Mac library before enrollment".to_string(),
-            );
-        }
-        let (current_authority, current_purge): (i64, i64) = transaction
-            .query_row(
-                "SELECT authority_generation, purge_generation
-                 FROM mobile_sync_state WHERE singleton = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|error| error.to_string())?;
-        if authority_generation < current_authority || purge_generation < current_purge {
-            return Err("mobile sync enrollment cannot roll back a durable generation".to_string());
-        }
-        let pending: bool = transaction
-            .query_row(
-                "SELECT EXISTS(
-                   SELECT 1 FROM mobile_note_outbox WHERE eligible_for_sync = 1
-                 )",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "UPDATE mobile_sync_state
-                 SET enrollment_state = 'active',
-                     sync_state = ?1,
-                     authority_generation = ?2,
-                     purge_generation = ?3,
-                     last_error_code = NULL
-                 WHERE singleton = 1",
-                params![
-                    if pending { "pending" } else { "idle" },
-                    authority_generation,
-                    purge_generation
-                ],
-            )
-            .map_err(|error| error.to_string())?;
-        transaction.commit().map_err(|error| error.to_string())
     }
 
     /// Applies one authenticated and decrypted direct-sync transaction. The
@@ -4655,6 +5575,8 @@ fn prepare_mobile_migration_recovery(
         verify_mobile_schema_v2(connection)?;
     } else if user_version == 3 {
         verify_mobile_schema_v3(connection)?;
+    } else if user_version == 4 {
+        verify_mobile_schema_v4(connection)?;
     }
     if database_path == Path::new(":memory:") {
         return Ok(None);
@@ -4860,12 +5782,22 @@ fn migrate_portable_notes_to_version(
             1 => verify_mobile_schema_v1(connection),
             2 => verify_mobile_schema_v2(connection),
             3 => verify_mobile_schema_v3(connection),
+            4 => verify_mobile_schema_v4(connection),
             _ => verify_current_mobile_schema(connection),
         };
+    }
+    if user_version == 4 {
+        verify_mobile_schema_v4(connection)?;
+        migrate_mobile_schema_v5(connection, recovery_path)?;
+        return verify_current_mobile_schema(connection);
     }
     if user_version == 3 {
         verify_mobile_schema_v3(connection)?;
         migrate_mobile_schema_v4(connection, recovery_path)?;
+        if target_version == 4 {
+            return verify_mobile_schema_v4(connection);
+        }
+        migrate_mobile_schema_v5(connection, None)?;
         return verify_current_mobile_schema(connection);
     }
     if user_version == 2 {
@@ -4875,6 +5807,10 @@ fn migrate_portable_notes_to_version(
             return verify_mobile_schema_v3(connection);
         }
         migrate_mobile_schema_v4(connection, None)?;
+        if target_version == 4 {
+            return verify_mobile_schema_v4(connection);
+        }
+        migrate_mobile_schema_v5(connection, None)?;
         return verify_current_mobile_schema(connection);
     }
     if user_version == 1 {
@@ -4888,6 +5824,10 @@ fn migrate_portable_notes_to_version(
             return verify_mobile_schema_v3(connection);
         }
         migrate_mobile_schema_v4(connection, None)?;
+        if target_version == 4 {
+            return verify_mobile_schema_v4(connection);
+        }
+        migrate_mobile_schema_v5(connection, None)?;
         return verify_current_mobile_schema(connection);
     }
     if user_version != 0 {
@@ -5091,6 +6031,10 @@ fn migrate_portable_notes_to_version(
         return verify_mobile_schema_v3(connection);
     }
     migrate_mobile_schema_v4(connection, None)?;
+    if target_version == 4 {
+        return verify_mobile_schema_v4(connection);
+    }
+    migrate_mobile_schema_v5(connection, None)?;
     verify_current_mobile_schema(connection)
 }
 
@@ -5605,6 +6549,85 @@ fn migrate_mobile_schema_v4(
     transaction.commit().map_err(|error| error.to_string())
 }
 
+fn migrate_mobile_schema_v5(
+    connection: &mut Connection,
+    recovery_path: Option<&Path>,
+) -> Result<(), String> {
+    verify_mobile_schema_v4(connection)?;
+    if load_mobile_pairing_checkpoint(connection)?
+        .is_some_and(|checkpoint| checkpoint.client.state == PairingClientState::Active)
+    {
+        return Err(
+            "an already-active v4 fixture pairing has no atomic activation record; reset pairing before schema v5 migration"
+                .to_string(),
+        );
+    }
+    let identity = replica_identity(connection)?;
+    let enrollment_state: String = connection
+        .query_row(
+            "SELECT enrollment_state FROM mobile_sync_state WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if identity.library_state != "local_staging" || enrollment_state != "not_enrolled" {
+        return Err(
+            "a non-atomic v4 paired/enrolled fixture requires reset before schema v5 migration"
+                .to_string(),
+        );
+    }
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(PORTABLE_SCHEMA_V5_DDL)
+        .map_err(|error| error.to_string())?;
+
+    let migration_time = now_millis()?;
+    let inserted_history = transaction
+        .execute(
+            "INSERT INTO mobile_schema_migrations
+               (version, name, checksum, migrated_at, product_version)
+             VALUES (5, ?1, ?2, ?3, ?4)",
+            params![
+                PORTABLE_MIGRATION_V5_NAME,
+                PORTABLE_SCHEMA_V5_CHECKSUM,
+                migration_time,
+                env!("CARGO_PKG_VERSION"),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if inserted_history != 1 {
+        return Err("mobile schema v5 could not append its migration history".to_string());
+    }
+    let updated_state = transaction
+        .execute(
+            "UPDATE mobile_schema_state
+             SET schema_version = 5,
+                 min_reader_version = 5,
+                 min_writer_version = 5,
+                 migration_checksum = ?1,
+                 migrated_at = ?2,
+                 product_version = ?3,
+                 migration_recovery_path = COALESCE(?4, migration_recovery_path)
+             WHERE singleton = 1 AND schema_version = 4",
+            params![
+                PORTABLE_SCHEMA_V5_CHECKSUM,
+                migration_time,
+                env!("CARGO_PKG_VERSION"),
+                recovery_path.map(|path| path.to_string_lossy().into_owned()),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if updated_state != 1 {
+        return Err("mobile schema v5 could not advance its compatibility stamp".to_string());
+    }
+    transaction
+        .pragma_update(None, "user_version", 5)
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
 fn verify_mobile_schema_v2(connection: &Connection) -> Result<(), String> {
     let user_version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -5845,13 +6868,13 @@ fn verify_mobile_schema_v3(connection: &Connection) -> Result<(), String> {
     validate_mobile_workspace_state(connection)
 }
 
-fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
+fn verify_mobile_schema_v4(connection: &Connection) -> Result<(), String> {
     let user_version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|error| error.to_string())?;
-    if user_version != PORTABLE_SCHEMA_VERSION {
+    if user_version != 4 {
         return Err(format!(
-            "mobile schema verifier expected user_version {PORTABLE_SCHEMA_VERSION}, found {user_version}"
+            "mobile schema v4 verifier expected user_version 4, found {user_version}"
         ));
     }
     let application_id: i64 = connection
@@ -5936,7 +6959,7 @@ fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
             row.get(0)
         })
         .map_err(|error| error.to_string())?;
-    if history_count != PORTABLE_SCHEMA_VERSION {
+    if history_count != 4 {
         return Err("mobile migration history is not contiguous".to_string());
     }
     verify_migration_history_guards(connection)?;
@@ -5972,6 +6995,142 @@ fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
     validate_outbox_transaction_groups(connection)?;
     validate_mobile_workspace_state(connection)?;
     verify_mobile_pairing_checkpoint_schema(connection)
+}
+
+fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
+    let user_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if user_version != PORTABLE_SCHEMA_VERSION {
+        return Err(format!(
+            "mobile schema verifier expected user_version {PORTABLE_SCHEMA_VERSION}, found {user_version}"
+        ));
+    }
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if application_id != MOBILE_APPLICATION_ID {
+        return Err(format!(
+            "mobile database is missing the expected application_id {MOBILE_APPLICATION_ID:#010x}"
+        ));
+    }
+    let state = connection
+        .query_row(
+            "SELECT schema_version, min_reader_version, min_writer_version,
+                    migration_checksum
+             FROM mobile_schema_state WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .map_err(|error| format!("mobile database compatibility stamp is invalid: {error}"))?;
+    if state.1 > PORTABLE_SCHEMA_VERSION {
+        return Err(format!(
+            "mobile database reader protocol floor {} is newer than this binary's {}",
+            state.1, PORTABLE_SCHEMA_VERSION
+        ));
+    }
+    if state.2 > PORTABLE_SCHEMA_VERSION {
+        return Err(format!(
+            "mobile database writer protocol floor {} is newer than this binary's {}",
+            state.2, PORTABLE_SCHEMA_VERSION
+        ));
+    }
+    if state.0 != 5 || state.1 != 5 || state.2 != 5 {
+        return Err("mobile schema v5 compatibility floor is invalid".to_string());
+    }
+    if state.3 != PORTABLE_SCHEMA_V5_CHECKSUM {
+        return Err("mobile schema v5 checksum does not match this binary".to_string());
+    }
+    for (version, expected_name, expected_checksum) in [
+        (
+            1_i64,
+            PORTABLE_MIGRATION_V1_NAME,
+            PORTABLE_SCHEMA_V1_CHECKSUM,
+        ),
+        (
+            2_i64,
+            PORTABLE_MIGRATION_V2_NAME,
+            PORTABLE_SCHEMA_V2_CHECKSUM,
+        ),
+        (
+            3_i64,
+            PORTABLE_MIGRATION_V3_NAME,
+            PORTABLE_SCHEMA_V3_CHECKSUM,
+        ),
+        (
+            4_i64,
+            PORTABLE_MIGRATION_V4_NAME,
+            PORTABLE_SCHEMA_V4_CHECKSUM,
+        ),
+        (
+            5_i64,
+            PORTABLE_MIGRATION_V5_NAME,
+            PORTABLE_SCHEMA_V5_CHECKSUM,
+        ),
+    ] {
+        let history = connection
+            .query_row(
+                "SELECT name, checksum FROM mobile_schema_migrations WHERE version = ?1",
+                [version],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|error| format!("mobile migration v{version} history is invalid: {error}"))?;
+        if history.0 != expected_name || history.1 != expected_checksum {
+            return Err(format!(
+                "mobile migration v{version} history does not match this binary"
+            ));
+        }
+    }
+    let history_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM mobile_schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| error.to_string())?;
+    if history_count != PORTABLE_SCHEMA_VERSION {
+        return Err("mobile migration history is not contiguous".to_string());
+    }
+    verify_migration_history_guards(connection)?;
+    verify_mobile_database_integrity(connection)?;
+    let required_tables: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table' AND name IN (
+               'mobile_note_categories', 'mobile_note_folders', 'mobile_note_filing',
+               'mobile_sync_state', 'mobile_sync_inbox', 'mobile_note_conflicts',
+               'mobile_pairing_checkpoint_v1', 'mobile_pairing_activation_v1'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let has_conflict_of: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pragma_table_info('mobile_notes') WHERE name = 'conflict_of'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if required_tables != 8 || !has_conflict_of {
+        return Err(
+            "mobile schema v5 is missing workspace, sync-state, or pairing activation storage"
+                .to_string(),
+        );
+    }
+    validate_replica_identity(&replica_identity(connection)?)?;
+    validate_portable_notes(connection)?;
+    validate_outbox_transaction_groups(connection)?;
+    validate_mobile_workspace_state(connection)?;
+    verify_mobile_pairing_checkpoint_schema(connection)?;
+    verify_mobile_pairing_activation_schema(connection)
 }
 
 fn validate_mobile_workspace_state(connection: &Connection) -> Result<(), String> {
@@ -7316,8 +8475,15 @@ fn next_timestamp(connection: &Connection) -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pairing_client::{ClientPublicIdentity, PairingClientConfig};
-    use crate::pairing_protocol::{KindCapability, RecordKind};
+    use crate::pairing_client::{
+        ClientPublicIdentity, PairingActivation, PairingClientConfig, PairingConfirmation,
+    };
+    use crate::pairing_protocol::{
+        bootstrap_envelope_digest, fixture_bootstrap_metadata, AuthenticatedHpkeEnvelope,
+        EnrollmentReceipt, KindCapability, PairingRole, RecordKind,
+        BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES, HPKE_ENCAPSULATED_KEY_BYTES, PAIRING_PROTOCOL,
+        PAIRING_SUITE,
+    };
 
     fn store() -> MobileStore {
         MobileStore::open(Path::new(":memory:")).expect("open in-memory mobile store")
@@ -7444,6 +8610,165 @@ mod tests {
         }
     }
 
+    fn fixture_pairing_activation(store: &MobileStore) -> MobilePairingActivation {
+        let device_id = store
+            .replica_device_id()
+            .expect("fixture replica device ID");
+        let receipt_id = new_uuid_v7();
+        let library_id = new_uuid_v7();
+        let default_scope_id = new_uuid_v7();
+        let invitation_id = new_uuid_v7();
+        let scopes = fixture_record_scopes();
+        let capabilities = fixture_record_capabilities();
+        let receipt = EnrollmentReceipt {
+            protocol: PAIRING_PROTOCOL.to_string(),
+            suite: PAIRING_SUITE.to_string(),
+            receipt_id: receipt_id.clone(),
+            invitation_id: invitation_id.clone(),
+            library_id: library_id.clone(),
+            device_id: device_id.clone(),
+            client_signing_key_fingerprint: Sha256::digest(vec![4_u8; 65]).to_vec(),
+            client_hpke_key_fingerprint: Sha256::digest(vec![7_u8; 32]).to_vec(),
+            mac_signing_key_fingerprint: Sha256::digest(vec![5_u8; 65]).to_vec(),
+            mac_hpke_key_fingerprint: Sha256::digest(vec![6_u8; 32]).to_vec(),
+            granted_scopes: scopes.clone(),
+            capabilities: capabilities.clone(),
+            authority_generation: 2,
+            created_at_ms: 1_725_000_000_000,
+            expires_at_ms: 1_725_000_060_000,
+            transcript_digest: vec![5; 32],
+            environment: Environment::Development,
+            mac_role: PairingRole::MacAuthority,
+            client_role: PairingRole::IphoneCompanion,
+        };
+        let invitation = Invitation {
+            protocol: PAIRING_PROTOCOL.to_string(),
+            suite: PAIRING_SUITE.to_string(),
+            invitation_id,
+            invitation_nonce: vec![6; 32],
+            authority_signing_public_key: vec![4; 65],
+            mac_pairing_signing_public_key: vec![5; 65],
+            mac_pairing_hpke_public_key: vec![6; 32],
+            tls_spki_sha256: vec![7; 32],
+            library_id: library_id.clone(),
+            authority_generation: 2,
+            scope_ceiling: scopes.clone(),
+            created_at_ms: 1_725_000_000_000,
+            expires_at_ms: 1_725_000_060_000,
+            environment: Environment::Development,
+            authority_role: PairingRole::MacAuthority,
+            intended_client_role: PairingRole::IphoneCompanion,
+            library_data_class: LibraryDataClass::SanitizedFixture,
+            authority_signature: vec![8; 64],
+        };
+        let server_hello = ServerHello {
+            protocol: PAIRING_PROTOCOL.to_string(),
+            suite: PAIRING_SUITE.to_string(),
+            server_nonce: vec![9; 32],
+            receipt: receipt.clone(),
+            challenge: AuthenticatedHpkeEnvelope {
+                encapsulated_key: vec![10; HPKE_ENCAPSULATED_KEY_BYTES],
+                ciphertext: vec![11; 32],
+            },
+            sender_role: PairingRole::MacAuthority,
+            recipient_role: PairingRole::IphoneCompanion,
+            proof_signature: vec![12; 64],
+        };
+        let sync_spki_sha256 = vec![13; 32];
+        let metadata =
+            fixture_bootstrap_metadata(&receipt, 3, 4, &default_scope_id, &sync_spki_sha256)
+                .expect("fixture bootstrap metadata");
+        let mut bootstrap = BootstrapEnvelope {
+            protocol: PAIRING_PROTOCOL.to_string(),
+            receipt_id: receipt_id.clone(),
+            metadata,
+            sealed_key_package: AuthenticatedHpkeEnvelope {
+                encapsulated_key: vec![14; HPKE_ENCAPSULATED_KEY_BYTES],
+                ciphertext: vec![15; BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES],
+            },
+            envelope_digest: Vec::new(),
+        };
+        bootstrap.envelope_digest = bootstrap_envelope_digest(&bootstrap);
+        let activated_at_ms = 1_725_000_020_000;
+        let server_finish = ServerFinish {
+            protocol: PAIRING_PROTOCOL.to_string(),
+            suite: PAIRING_SUITE.to_string(),
+            receipt: receipt.clone(),
+            activated_at_ms,
+            sender_role: PairingRole::MacAuthority,
+            recipient_role: PairingRole::IphoneCompanion,
+            signature: vec![16; 64],
+        };
+        let checkpoint = MobilePairingCheckpoint {
+            identity_handle: "018f47a0-7b80-4000-8000-000000000001".to_string(),
+            pending_bootstrap_handle: None,
+            client: PairingClientCheckpoint {
+                version: 1,
+                config: PairingClientConfig {
+                    environment: Environment::Development,
+                    library_data_class: LibraryDataClass::SanitizedFixture,
+                    requested_scopes: scopes.clone(),
+                    capabilities: capabilities.clone(),
+                    display_name: "Fixture iPhone".to_string(),
+                    app_version: "0.1.0".to_string(),
+                    build_version: "1".to_string(),
+                },
+                state: PairingClientState::Active,
+                invitation_bytes: serde_json::to_vec(&invitation).expect("encode invitation"),
+                identity: ClientPublicIdentity {
+                    device_id: device_id.clone(),
+                    signing_public_key: vec![4; 65],
+                    hpke_public_key: vec![7; 32],
+                },
+                client_hello_bytes: Some(br#"{"fixture":"client-hello"}"#.to_vec()),
+                server_hello_bytes: Some(
+                    serde_json::to_vec(&server_hello).expect("encode server hello"),
+                ),
+                confirmation: Some(PairingConfirmation {
+                    receipt_id: receipt_id.clone(),
+                    verification_code: "12345678".to_string(),
+                    granted_scopes: scopes.clone(),
+                }),
+                user_decision: Some(true),
+                bootstrap_bytes: Some(serde_json::to_vec(&bootstrap).expect("encode bootstrap")),
+                client_finish_bytes: Some(br#"{"fixture":"client-finish"}"#.to_vec()),
+                server_finish_bytes: Some(
+                    serde_json::to_vec(&server_finish).expect("encode server finish"),
+                ),
+                activation: Some(PairingActivation {
+                    receipt,
+                    activated_at_ms,
+                }),
+            },
+            updated_at: 1_725_000_030_000,
+        };
+        MobilePairingActivation {
+            receipt_id,
+            library_id,
+            device_id,
+            default_scope_id,
+            authority_generation: 2,
+            purge_generation: 3,
+            key_epoch: 4,
+            sync_spki_sha256,
+            record_cipher_suite: RECORD_CIPHER_SUITE.to_string(),
+            granted_scopes: scopes,
+            capabilities,
+            checkpoint,
+        }
+    }
+
+    fn save_pending_predecessor(store: &MobileStore, activation: &MobilePairingActivation) {
+        let mut pending = activation.checkpoint.clone();
+        pending.client.state = PairingClientState::PendingActivation;
+        pending.client.activation = None;
+        pending.pending_bootstrap_handle = Some("018f47a0-7b80-4000-8000-000000000002".to_string());
+        pending.updated_at -= 1;
+        store
+            .save_pairing_checkpoint(&pending)
+            .expect("save pending activation predecessor");
+    }
+
     #[test]
     fn pairing_checkpoint_round_trips_exact_public_bytes_and_opaque_handles() {
         let path = temporary_path("pairing-checkpoint");
@@ -7521,6 +8846,278 @@ mod tests {
             .expect_err("mirror mismatch must fail closed")
             .contains("mirror mismatch"));
         drop(store);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn pairing_activation_is_one_atomic_commit_and_exact_replay_survives_reopen() {
+        let path = temporary_path("atomic-pairing-activation");
+        let store = MobileStore::open(&path).expect("open fixture store");
+        let note = store
+            .create("Offline", "created before pairing")
+            .expect("create staged note");
+        let activation = fixture_pairing_activation(&store);
+        save_pending_predecessor(&store, &activation);
+        assert_eq!(
+            store
+                .pairing_activation_health(false)
+                .expect("pending-native health")
+                .phase,
+            "pending_native_activation"
+        );
+        assert_eq!(
+            store
+                .pairing_activation_health(true)
+                .expect("native-active recovery health")
+                .phase,
+            "native_active_pending_finalize"
+        );
+
+        let result = store
+            .finalize_pairing_activation(&activation)
+            .expect("finalize activation");
+        assert_eq!(result.adopted_note_count, 1);
+        assert!(!result.replayed);
+        assert_eq!(
+            store
+                .load_pairing_checkpoint()
+                .expect("load Active checkpoint"),
+            Some(activation.checkpoint.clone())
+        );
+        let connection = store.lock_connection().expect("lock finalized store");
+        let state: (String, String, String, String, String) = connection
+            .query_row(
+                "SELECT replica.library_state, sync.enrollment_state,
+                        notes.library_id, notes.scope_id, notes.scope_class
+                 FROM mobile_replica AS replica
+                 JOIN mobile_sync_state AS sync ON sync.singleton = replica.singleton
+                 JOIN mobile_notes AS notes ON notes.record_id = ?1",
+                [&note.record_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("read atomic activation state");
+        assert_eq!(state.0, "paired");
+        assert_eq!(state.1, "active");
+        assert_eq!(state.2, activation.library_id);
+        assert_eq!(state.3, activation.default_scope_id);
+        assert_eq!(state.4, "unknown");
+        drop(connection);
+        drop(store);
+
+        let reopened = MobileStore::open(&path).expect("reopen finalized activation");
+        assert_eq!(
+            reopened
+                .pairing_activation_health(true)
+                .expect("read finalized health")
+                .phase,
+            "finalized"
+        );
+        assert_eq!(
+            reopened
+                .finalize_pairing_activation(&activation)
+                .expect("exact activation replay"),
+            MobilePairingActivationResult {
+                adopted_note_count: 1,
+                replayed: true,
+            }
+        );
+        let different = fixture_pairing_activation(&reopened);
+        assert!(reopened
+            .finalize_pairing_activation(&different)
+            .expect_err("different valid replay must fail")
+            .contains("different"));
+        drop(reopened);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn pairing_activation_failure_rolls_back_every_domain_boundary() {
+        let path = temporary_path("pairing-activation-rollback");
+        let store = MobileStore::open(&path).expect("open fixture store");
+        store
+            .create("Staged", "must remain staged")
+            .expect("create note");
+        let activation = fixture_pairing_activation(&store);
+        save_pending_predecessor(&store, &activation);
+        store
+            .lock_connection()
+            .expect("lock fixture store")
+            .execute_batch(
+                "CREATE TRIGGER fail_pairing_activation
+                 BEFORE INSERT ON mobile_pairing_activation_v1
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected activation commit failure');
+                 END;",
+            )
+            .expect("install failure trigger");
+        let error = store
+            .finalize_pairing_activation(&activation)
+            .expect_err("injected activation failure must roll back");
+        assert!(
+            error.contains("injected activation commit failure"),
+            "{error}"
+        );
+        drop(store);
+
+        let reopened = MobileStore::open(&path).expect("reopen rolled-back activation");
+        let health = reopened
+            .pairing_activation_health(true)
+            .expect("read recovery health");
+        assert_eq!(health.phase, "native_active_pending_finalize");
+        assert_eq!(health.library_state, "local_staging");
+        assert_eq!(health.enrollment_state, "not_enrolled");
+        assert_eq!(
+            reopened
+                .finalized_pairing_activation()
+                .expect("load activation"),
+            None
+        );
+        assert_eq!(
+            reopened
+                .load_pairing_checkpoint()
+                .expect("load pending checkpoint")
+                .expect("pending checkpoint")
+                .client
+                .state,
+            PairingClientState::PendingActivation
+        );
+        drop(reopened);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn pairing_activation_rejects_transport_attempt_and_bad_fixture_bindings_without_changes() {
+        let store = store();
+        store
+            .create("Attempted", "must not move")
+            .expect("create note");
+        let activation = fixture_pairing_activation(&store);
+        save_pending_predecessor(&store, &activation);
+        store
+            .lock_connection()
+            .expect("lock store")
+            .execute(
+                "UPDATE mobile_note_outbox SET attempts = 1 WHERE eligible_for_sync = 1",
+                [],
+            )
+            .expect("simulate transport attempt");
+        assert!(store
+            .finalize_pairing_activation(&activation)
+            .expect_err("transport attempt must fail")
+            .contains("forbidden"));
+        let health = store
+            .pairing_activation_health(false)
+            .expect("unchanged health");
+        assert_eq!(health.library_state, "local_staging");
+        assert_eq!(health.enrollment_state, "not_enrolled");
+
+        let mut production = activation.clone();
+        production.checkpoint.client.config.environment = Environment::Production;
+        assert!(store
+            .finalize_pairing_activation(&production)
+            .expect_err("production activation must fail")
+            .contains("sanitized fixture"));
+        let mut personal = activation.clone();
+        personal.checkpoint.client.config.library_data_class = LibraryDataClass::Personal;
+        assert!(store
+            .finalize_pairing_activation(&personal)
+            .expect_err("personal activation must fail")
+            .contains("sanitized fixture"));
+        let mut wrong_scopes = activation;
+        wrong_scopes.granted_scopes.remove(&RecordKind::Folder);
+        assert!(store
+            .finalize_pairing_activation(&wrong_scopes)
+            .expect_err("partial scopes must fail")
+            .contains("exact fixture"));
+        let mut bad_identifier = wrong_scopes;
+        bad_identifier.granted_scopes = fixture_record_scopes();
+        bad_identifier.library_id = "not-a-uuid".to_string();
+        assert!(store
+            .finalize_pairing_activation(&bad_identifier)
+            .expect_err("invalid library id must fail")
+            .contains("invalid public binding"));
+    }
+
+    #[test]
+    fn pairing_activation_rejects_non_staging_replica_without_partial_enrollment() {
+        let store = store();
+        let activation = fixture_pairing_activation(&store);
+        save_pending_predecessor(&store, &activation);
+        store
+            .lock_connection()
+            .expect("lock fixture store")
+            .execute(
+                "UPDATE mobile_replica
+                 SET library_state = 'paired', library_id = ?1, default_scope_id = ?2
+                 WHERE singleton = 1",
+                params![activation.library_id, activation.default_scope_id],
+            )
+            .expect("simulate prior non-atomic adoption");
+        let error = store
+            .finalize_pairing_activation(&activation)
+            .expect_err("non-staging activation must fail");
+        assert!(error.contains("local_staging"), "{error}");
+        let connection = store.lock_connection().expect("lock rejected store");
+        let state: (String, i64) = connection
+            .query_row(
+                "SELECT enrollment_state,
+                        (SELECT COUNT(*) FROM mobile_pairing_activation_v1)
+                 FROM mobile_sync_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read rejected activation state");
+        assert_eq!(state, ("not_enrolled".to_string(), 0));
+    }
+
+    #[test]
+    fn active_checkpoint_cannot_be_saved_outside_atomic_finalizer() {
+        let store = store();
+        let activation = fixture_pairing_activation(&store);
+        let error = store
+            .save_pairing_checkpoint(&activation.checkpoint)
+            .expect_err("standalone Active checkpoint must fail");
+        assert!(error.contains("finalize_pairing_activation"), "{error}");
+        assert_eq!(
+            store.load_pairing_checkpoint().expect("load checkpoint"),
+            None
+        );
+    }
+
+    #[test]
+    fn pairing_activation_tampering_fails_closed_on_read_and_reopen() {
+        let path = temporary_path("pairing-activation-tamper");
+        let store = MobileStore::open(&path).expect("open fixture store");
+        let activation = fixture_pairing_activation(&store);
+        save_pending_predecessor(&store, &activation);
+        store
+            .finalize_pairing_activation(&activation)
+            .expect("finalize fixture activation");
+        store
+            .lock_connection()
+            .expect("lock activation store")
+            .execute(
+                "UPDATE mobile_pairing_activation_v1 SET key_epoch = key_epoch + 1",
+                [],
+            )
+            .expect("tamper activation mirror");
+        assert!(store
+            .finalized_pairing_activation()
+            .expect_err("tampered activation must fail closed")
+            .contains("mirror mismatch"));
+        drop(store);
+        let error = MobileStore::open(&path)
+            .err()
+            .expect("tampered activation must fail reopen");
+        assert!(error.contains("mirror mismatch"), "{error}");
         remove_database(&path);
     }
 
@@ -7830,15 +9427,6 @@ mod tests {
         source
             .tombstone(&tombstoned.record_id)
             .expect("tombstone export note");
-        let library_id = new_uuid_v7();
-        let scope_id = new_uuid_v7();
-        assert_eq!(
-            source
-                .adopt_staging_library(&library_id, &scope_id)
-                .expect("adopt paired library before export"),
-            3
-        );
-
         let export = source.export_notes().expect("export portable notes");
         let decoded: serde_json::Value =
             serde_json::from_str(&export).expect("parse exported JSON");
@@ -7846,7 +9434,10 @@ mod tests {
             serde_json::from_str(&export).expect("decode source export");
         assert_eq!(decoded["format"], MOBILE_NOTES_EXPORT_FORMAT);
         assert_eq!(decoded["formatVersion"], MOBILE_NOTES_EXPORT_VERSION);
-        assert_eq!(source_envelope.payload.replica.library_state, "paired");
+        assert_eq!(
+            source_envelope.payload.replica.library_state,
+            "local_staging"
+        );
         assert!(decoded["payload"]["notes"]
             .as_array()
             .expect("export notes array")
@@ -8329,7 +9920,8 @@ mod tests {
                 (1, PORTABLE_SCHEMA_V1_CHECKSUM.to_string()),
                 (2, PORTABLE_SCHEMA_V2_CHECKSUM.to_string()),
                 (3, PORTABLE_SCHEMA_V3_CHECKSUM.to_string()),
-                (4, PORTABLE_SCHEMA_V4_CHECKSUM.to_string())
+                (4, PORTABLE_SCHEMA_V4_CHECKSUM.to_string()),
+                (5, PORTABLE_SCHEMA_V5_CHECKSUM.to_string())
             ]
         );
         let lifecycle: (String, i64, i64) = connection
@@ -8356,8 +9948,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_v3_upgrades_to_v4_once_with_an_exact_recovery_snapshot() {
-        let path = temporary_path("v3-to-v4-pairing-checkpoint");
+    fn schema_v3_upgrades_through_v5_once_with_an_exact_recovery_snapshot() {
+        let path = temporary_path("v3-to-v5-pairing-activation");
         {
             let mut connection = Connection::open(&path).expect("open v3 fixture database");
             migrate_portable_notes_to_version(&mut connection, None, 3)
@@ -8380,8 +9972,8 @@ mod tests {
                 .expect("inspect v3 pairing schema"));
         }
 
-        let (recovery_path, v4_migrated_at) = {
-            let store = MobileStore::open(&path).expect("upgrade v3 database to v4");
+        let (recovery_path, v5_migrated_at) = {
+            let store = MobileStore::open(&path).expect("upgrade v3 database to v5");
             let recovery_path = PathBuf::from(
                 store
                     .migration_recovery_path()
@@ -8417,8 +10009,8 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM mobile_schema_migrations", [], |row| {
                         row.get::<_, i64>(0)
                     })
-                    .expect("count v4 migration history"),
-                4
+                    .expect("count v5 migration history"),
+                5
             );
             assert!(connection
                 .query_row(
@@ -8430,18 +10022,28 @@ mod tests {
                     |row| row.get::<_, bool>(0),
                 )
                 .expect("inspect v4 pairing schema"));
+            assert!(connection
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM sqlite_schema
+                       WHERE type = 'table' AND name = 'mobile_pairing_activation_v1'
+                     )",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("inspect v5 pairing activation schema"));
             let migrated_at = connection
                 .query_row(
-                    "SELECT migrated_at FROM mobile_schema_migrations WHERE version = 4",
+                    "SELECT migrated_at FROM mobile_schema_migrations WHERE version = 5",
                     [],
                     |row| row.get::<_, i64>(0),
                 )
-                .expect("read v4 migration instant");
+                .expect("read v5 migration instant");
             drop(connection);
             (recovery_path, migrated_at)
         };
 
-        let reopened = MobileStore::open(&path).expect("reopen v4 database idempotently");
+        let reopened = MobileStore::open(&path).expect("reopen v5 database idempotently");
         assert_eq!(
             reopened
                 .migration_recovery_path()
@@ -8449,16 +10051,16 @@ mod tests {
                 .as_deref(),
             recovery_path.to_str()
         );
-        let connection = reopened.connection.lock().expect("lock reopened v4 store");
+        let connection = reopened.connection.lock().expect("lock reopened v5 store");
         assert_eq!(
             connection
                 .query_row(
-                    "SELECT migrated_at FROM mobile_schema_migrations WHERE version = 4",
+                    "SELECT migrated_at FROM mobile_schema_migrations WHERE version = 5",
                     [],
                     |row| row.get::<_, i64>(0),
                 )
-                .expect("read stable v4 migration instant"),
-            v4_migrated_at
+                .expect("read stable v5 migration instant"),
+            v5_migrated_at
         );
         assert_eq!(
             connection
@@ -8466,7 +10068,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .expect("count stable migration history"),
-            4
+            5
         );
         drop(connection);
         drop(reopened);
@@ -8485,23 +10087,267 @@ mod tests {
     }
 
     #[test]
-    fn stamped_v4_pairing_schema_is_never_silently_recreated_after_drop() {
-        let path = temporary_path("v4-pairing-schema-drop");
+    fn schema_v5_checksum_is_the_sha256_of_the_exact_atomic_activation_ddl() {
+        use sha2::{Digest as _, Sha256};
+
+        assert_eq!(
+            format!("{:x}", Sha256::digest(PORTABLE_SCHEMA_V5_DDL.as_bytes())),
+            PORTABLE_SCHEMA_V5_CHECKSUM
+        );
+    }
+
+    #[test]
+    fn schema_v4_upgrades_to_v5_once_with_exact_history_and_recovery() {
+        let path = temporary_path("v4-to-v5-atomic-activation");
         {
-            let store = MobileStore::open(&path).expect("create v4 store");
+            let mut connection = Connection::open(&path).expect("open v4 fixture database");
+            migrate_portable_notes_to_version(&mut connection, None, 4)
+                .expect("construct exact v4 schema");
+            assert_eq!(
+                connection
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .expect("read v4 version"),
+                4
+            );
+        }
+        let store = MobileStore::open(&path).expect("upgrade v4 database to v5");
+        let recovery_path = PathBuf::from(
+            store
+                .migration_recovery_path()
+                .expect("read v5 recovery state")
+                .expect("v4 recovery snapshot path"),
+        );
+        let snapshot =
+            Connection::open_with_flags(&recovery_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("open v4 recovery snapshot");
+        assert_eq!(
+            snapshot
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("read recovery version"),
+            4
+        );
+        assert!(!snapshot
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM sqlite_schema
+                   WHERE type = 'table' AND name = 'mobile_pairing_activation_v1'
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("inspect recovery activation schema"));
+        drop(snapshot);
+        let v5_migrated_at = store
+            .lock_connection()
+            .expect("lock upgraded store")
+            .query_row(
+                "SELECT migrated_at FROM mobile_schema_migrations WHERE version = 5",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read v5 migration time");
+        drop(store);
+
+        let reopened = MobileStore::open(&path).expect("reopen v5 store idempotently");
+        let connection = reopened.lock_connection().expect("lock reopened store");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM mobile_schema_migrations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("count ordered history"),
+            5
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT migrated_at FROM mobile_schema_migrations WHERE version = 5",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("read stable v5 migration time"),
+            v5_migrated_at
+        );
+        drop(connection);
+        drop(reopened);
+        remove_database(&path);
+        let _ = std::fs::remove_file(recovery_path);
+    }
+
+    #[test]
+    fn active_v4_fixture_requires_explicit_reset_instead_of_synthetic_v5_activation() {
+        let path = temporary_path("active-v4-reset-required");
+        let fixture_store = store();
+        let activation = fixture_pairing_activation(&fixture_store);
+        {
+            let mut connection = Connection::open(&path).expect("open v4 fixture database");
+            migrate_portable_notes_to_version(&mut connection, None, 4)
+                .expect("construct exact v4 schema");
+            connection
+                .execute(
+                    "UPDATE mobile_replica SET device_id = ?1 WHERE singleton = 1",
+                    [&activation.device_id],
+                )
+                .expect("bind v4 replica device");
+            write_mobile_pairing_checkpoint(&connection, &activation.checkpoint)
+                .expect("seed active v4 fixture checkpoint");
+            verify_mobile_schema_v4(&connection).expect("verify seeded v4 fixture");
+        }
+        let error = MobileStore::open(&path)
+            .err()
+            .expect("active v4 fixture cannot synthesize v5 activation");
+        assert!(error.contains("reset pairing"), "{error}");
+        let connection = Connection::open(&path).expect("inspect rejected v4 store");
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("read unchanged schema version"),
+            4
+        );
+        assert!(!connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM sqlite_schema
+                   WHERE type = 'table' AND name = 'mobile_pairing_activation_v1'
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("confirm no synthesized activation table"));
+        drop(connection);
+        remove_database(&path);
+        let recovery_directory = path
+            .parent()
+            .expect("fixture database parent")
+            .join("migration-recovery");
+        let recovery_prefix = format!(
+            "{}-pre-schema-v5-",
+            path.file_stem()
+                .and_then(|value| value.to_str())
+                .expect("fixture database stem")
+        );
+        if let Ok(entries) = std::fs::read_dir(recovery_directory) {
+            for entry in entries.flatten() {
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(&recovery_prefix))
+                {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_v4_bootstrap_shape_fails_with_precise_discard_recovery_signal() {
+        let path = temporary_path("legacy-v4-bootstrap-reset");
+        let fixture_store = store();
+        let activation = fixture_pairing_activation(&fixture_store);
+        let mut pending = activation.checkpoint.clone();
+        pending.client.state = PairingClientState::PendingActivation;
+        pending.client.activation = None;
+        pending.pending_bootstrap_handle = Some("018f47a0-7b80-4000-8000-000000000002".to_string());
+        pending.client.bootstrap_bytes = Some(
+            serde_json::to_vec(&serde_json::json!({
+                "protocol": PAIRING_PROTOCOL,
+                "receipt_id": activation.receipt_id.clone(),
+                "sealed_bootstrap": {
+                    "encapsulated_key": vec![1_u8; 32],
+                    "ciphertext": vec![2_u8; 64]
+                },
+                "envelope_digest": vec![3_u8; 32]
+            }))
+            .expect("encode legacy bootstrap"),
+        );
+        {
+            let mut connection = Connection::open(&path).expect("open v4 fixture database");
+            migrate_portable_notes_to_version(&mut connection, None, 4)
+                .expect("construct exact v4 schema");
+            connection
+                .execute(
+                    "UPDATE mobile_replica SET device_id = ?1 WHERE singleton = 1",
+                    [&activation.device_id],
+                )
+                .expect("bind v4 replica device");
+            let server: ServerHello = serde_json::from_slice(
+                pending
+                    .client
+                    .server_hello_bytes
+                    .as_deref()
+                    .expect("server bytes"),
+            )
+            .expect("decode server hello");
+            let checkpoint_json =
+                serde_json::to_string(&pending.client).expect("encode legacy checkpoint");
+            connection
+                .execute(
+                    "INSERT INTO mobile_pairing_checkpoint_v1 (
+                       singleton, fixture_class, device_id, identity_handle,
+                       pending_bootstrap_handle, state, invitation_bytes,
+                       client_hello_bytes, server_hello_bytes, bootstrap_bytes,
+                       client_finish_bytes, server_finish_bytes, transcript_digest,
+                       receipt_id, envelope_digest, user_decision, checkpoint_json,
+                       updated_at
+                     ) VALUES (
+                       1, 'sanitized_fixture', ?1, ?2, ?3, 'pending_activation', ?4,
+                       ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, ?13, ?14
+                     )",
+                    params![
+                        activation.device_id,
+                        pending.identity_handle,
+                        pending.pending_bootstrap_handle,
+                        pending.client.invitation_bytes,
+                        pending.client.client_hello_bytes,
+                        pending.client.server_hello_bytes,
+                        pending.client.bootstrap_bytes,
+                        pending.client.client_finish_bytes,
+                        pending.client.server_finish_bytes,
+                        server.receipt.transcript_digest,
+                        server.receipt.receipt_id,
+                        vec![3_u8; 32],
+                        checkpoint_json,
+                        pending.updated_at,
+                    ],
+                )
+                .expect("seed legacy v4 checkpoint");
+        }
+        let error = MobileStore::open(&path)
+            .err()
+            .expect("legacy bootstrap must require recovery");
+        assert!(
+            error.contains("discard the pending native bootstrap"),
+            "{error}"
+        );
+        let connection = Connection::open(&path).expect("inspect unchanged v4 store");
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("read unchanged v4 version"),
+            4
+        );
+        drop(connection);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn stamped_v5_pairing_schema_is_never_silently_recreated_after_drop() {
+        let path = temporary_path("v5-pairing-schema-drop");
+        {
+            let store = MobileStore::open(&path).expect("create v5 store");
             store
                 .connection
                 .lock()
-                .expect("lock v4 store")
-                .execute("DROP TABLE mobile_pairing_checkpoint_v1", [])
-                .expect("drop pairing checkpoint table fixture");
+                .expect("lock v5 store")
+                .execute("DROP TABLE mobile_pairing_activation_v1", [])
+                .expect("drop pairing activation table fixture");
         }
 
         let error = MobileStore::open(&path)
             .err()
             .expect("dropped pairing table must fail closed");
         assert!(
-            error.contains("pairing") || error.contains("schema v4"),
+            error.contains("pairing") || error.contains("schema v5"),
             "{error}"
         );
         let connection = Connection::open(&path).expect("inspect rejected v4 store");
@@ -8509,7 +10355,7 @@ mod tests {
             .query_row(
                 "SELECT EXISTS(
                    SELECT 1 FROM sqlite_schema
-                   WHERE type = 'table' AND name = 'mobile_pairing_checkpoint_v1'
+                   WHERE type = 'table' AND name = 'mobile_pairing_activation_v1'
                  )",
                 [],
                 |row| row.get::<_, bool>(0),
@@ -8521,21 +10367,21 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .expect("count untouched migration history"),
-            4
+            5
         );
         drop(connection);
         remove_database(&path);
     }
 
     #[test]
-    fn stamped_v4_pairing_migration_checksum_tampering_fails_closed() {
-        let path = temporary_path("v4-pairing-checksum-tamper");
+    fn stamped_v5_pairing_migration_checksum_tampering_fails_closed() {
+        let path = temporary_path("v5-pairing-checksum-tamper");
         {
-            let store = MobileStore::open(&path).expect("create v4 store");
+            let store = MobileStore::open(&path).expect("create v5 store");
             store
                 .connection
                 .lock()
-                .expect("lock v4 store")
+                .expect("lock v5 store")
                 .execute(
                     "UPDATE mobile_schema_state
                      SET migration_checksum = '0000000000000000000000000000000000000000000000000000000000000000'
@@ -8547,8 +10393,8 @@ mod tests {
 
         let error = MobileStore::open(&path)
             .err()
-            .expect("tampered v4 checksum must fail closed");
-        assert!(error.contains("v4 checksum"), "{error}");
+            .expect("tampered v5 checksum must fail closed");
+        assert!(error.contains("v5 checksum"), "{error}");
         remove_database(&path);
     }
 

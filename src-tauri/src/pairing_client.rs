@@ -7,15 +7,15 @@
 //! cross-language vectors, and external cryptographic review are complete.
 
 use crate::pairing_protocol::{
-    self, canonical_authenticated_hpke_envelope, canonical_challenge_plaintext,
-    canonical_client_finish_unsigned, canonical_client_hello_signed,
-    canonical_client_hello_unsigned, canonical_invitation_signed, canonical_invitation_unsigned,
-    canonical_receipt, canonical_server_finish_unsigned, canonical_server_hello_unsigned,
-    derive_verification_code, invitation_nonce_proof, pairing_transcript_digest,
-    parse_bounded_json, validate_hpke_envelope, AuthenticatedHpkeEnvelope, BootstrapEnvelope,
-    ClientFinish, ClientHello, EnrollmentReceipt, Environment, Invitation, KindCapability,
-    LibraryDataClass, PairingError, PairingRole, RecordKind, ServerFinish, ServerHello,
-    TransportEvidence, HPKE_EXPORTER_SECRET_BYTES, MAX_CLOCK_SKEW_MS, MAX_INVITATION_LIFETIME_MS,
+    self, canonical_challenge_plaintext, canonical_client_finish_unsigned,
+    canonical_client_hello_signed, canonical_client_hello_unsigned, canonical_invitation_signed,
+    canonical_invitation_unsigned, canonical_server_finish_unsigned,
+    canonical_server_hello_unsigned, derive_verification_code, invitation_nonce_proof,
+    pairing_transcript_digest, parse_bounded_json, validate_bootstrap, validate_hpke_envelope,
+    AuthenticatedHpkeEnvelope, BootstrapEnvelope, BootstrapMetadataV1, ClientFinish, ClientHello,
+    EnrollmentReceipt, Environment, Invitation, KindCapability, LibraryDataClass, PairingError,
+    PairingRole, RecordKind, ServerFinish, ServerHello, TransportEvidence,
+    HPKE_EXPORTER_SECRET_BYTES, MAX_CLOCK_SKEW_MS, MAX_INVITATION_LIFETIME_MS,
     MAX_PAIRING_MESSAGE_BYTES, PAIRING_PROTOCOL, PAIRING_SUITE,
 };
 use crate::portable::is_uuid_v7;
@@ -103,6 +103,7 @@ pub trait PairingClientCrypto: Send + Sync + 'static {
         info: &[u8],
         associated_data: &[u8],
         envelope: &AuthenticatedHpkeEnvelope,
+        metadata: &BootstrapMetadataV1,
         receipt: &EnrollmentReceipt,
         envelope_digest: &[u8],
     ) -> Result<Self::PendingKeyReference, ()>;
@@ -412,6 +413,12 @@ impl<C: PairingClientCrypto> PairingClient<C> {
         Some((receipt.receipt_id.clone(), bootstrap.envelope_digest))
     }
 
+    pub fn expected_bootstrap_metadata(&self) -> Option<BootstrapMetadataV1> {
+        let bootstrap: BootstrapEnvelope =
+            parse_server_message(self.bootstrap_bytes.as_deref()?, None).ok()?;
+        Some(bootstrap.metadata)
+    }
+
     pub fn pending_key_reference(&self) -> Option<&C::PendingKeyReference> {
         self.pending_key.as_ref()
     }
@@ -656,7 +663,7 @@ impl<C: PairingClientCrypto> PairingClient<C> {
             .ok_or(PairingClientError::Protocol(PairingError::StateUnavailable))?;
         if !approved {
             self.user_decision = Some(false);
-            self.state = PairingClientState::Cancelled;
+            self.state = PairingClientState::CancellationPending;
             return Err(PairingClientError::Protocol(
                 PairingError::EnrollmentCancelled,
             ));
@@ -665,7 +672,7 @@ impl<C: PairingClientCrypto> PairingClient<C> {
             || displayed_scopes != &confirmation.granted_scopes
         {
             self.user_decision = Some(false);
-            self.state = PairingClientState::Cancelled;
+            self.state = PairingClientState::CancellationPending;
             return Err(PairingClientError::Protocol(
                 PairingError::VerificationMismatch,
             ));
@@ -782,9 +789,10 @@ impl<C: PairingClientCrypto> PairingClient<C> {
             .crypto
             .stage_bootstrap_authenticated(
                 &self.invitation.mac_pairing_hpke_public_key,
-                &pairing_protocol::bootstrap_hpke_info(&server.receipt),
-                &canonical_receipt(&server.receipt),
-                &bootstrap.sealed_bootstrap,
+                &pairing_protocol::bootstrap_hpke_info(&bootstrap.metadata),
+                &pairing_protocol::bootstrap_associated_data(&bootstrap.metadata),
+                &bootstrap.sealed_key_package,
+                &bootstrap.metadata,
                 &server.receipt,
                 &bootstrap.envelope_digest,
             )
@@ -1227,6 +1235,10 @@ fn validate_config(config: &PairingClientConfig) -> Result<(), PairingClientErro
     validate_text(&config.app_version, 64, "app_version")?;
     validate_text(&config.build_version, 64, "build_version")?;
     validate_capability_map(&config.requested_scopes, &config.capabilities)?;
+    pairing_protocol::validate_fixture_scopes_and_capabilities(
+        &config.requested_scopes,
+        &config.capabilities,
+    )?;
     Ok(())
 }
 
@@ -1409,32 +1421,6 @@ fn validate_capability_map(
                 .is_some_and(|writer| writer > capability.reader_version)
     }) {
         return Err(PairingError::CapabilityMismatch.into());
-    }
-    Ok(())
-}
-
-fn validate_bootstrap(
-    bootstrap: &BootstrapEnvelope,
-    receipt: &EnrollmentReceipt,
-) -> Result<(), PairingClientError> {
-    if bootstrap.protocol != PAIRING_PROTOCOL {
-        return Err(PairingError::UnsupportedProtocol.into());
-    }
-    if bootstrap.receipt_id != receipt.receipt_id {
-        return Err(PairingError::BindingMismatch("bootstrap receipt").into());
-    }
-    validate_hpke_envelope(&bootstrap.sealed_bootstrap)?;
-    exact_len(
-        &bootstrap.envelope_digest,
-        DIGEST_BYTES,
-        "bootstrap_envelope_digest",
-    )?;
-    if bootstrap.envelope_digest
-        != sha256(&canonical_authenticated_hpke_envelope(
-            &bootstrap.sealed_bootstrap,
-        ))
-    {
-        return Err(PairingError::BindingMismatch("bootstrap envelope digest").into());
     }
     Ok(())
 }

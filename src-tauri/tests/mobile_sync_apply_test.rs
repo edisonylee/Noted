@@ -12,6 +12,10 @@ use tauri_app_lib::{
     portable::{canonical_sha256, is_uuid_v7, new_uuid_v7},
 };
 
+#[path = "support/mobile_pairing.rs"]
+mod mobile_pairing_support;
+use mobile_pairing_support::finalize_fixture_pairing;
+
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
@@ -54,17 +58,13 @@ fn replica_fixture(path: &Path) -> ReplicaFixture {
 fn enrolled_store(path: &Path, authority_generation: i64, purge_generation: i64) -> MobileStore {
     let store = MobileStore::open(path).expect("open mobile store");
     let fixture = replica_fixture(path);
-    store
-        .adopt_staging_library(&fixture.library_id, &fixture.default_scope_id)
-        .expect("adopt paired Mac library");
-    store
-        .activate_sync_enrollment(
-            &fixture.library_id,
-            &fixture.default_scope_id,
-            authority_generation,
-            purge_generation,
-        )
-        .expect("activate sync enrollment");
+    finalize_fixture_pairing(
+        &store,
+        &fixture.library_id,
+        &fixture.default_scope_id,
+        authority_generation,
+        purge_generation,
+    );
     store
 }
 

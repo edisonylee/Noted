@@ -10,6 +10,7 @@ pub mod direct_authority_store;
 pub mod direct_pairing;
 pub mod durable_direct_sync;
 pub mod entities;
+pub mod fixture_authority_runtime;
 pub mod gcal;
 pub mod hosted;
 mod managed_files;

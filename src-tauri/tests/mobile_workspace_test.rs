@@ -5,6 +5,10 @@ use std::{
 };
 use tauri_app_lib::{mobile_store::MobileStore, portable::new_uuid_v7};
 
+#[path = "support/mobile_pairing.rs"]
+mod mobile_pairing_support;
+use mobile_pairing_support::finalize_fixture_pairing;
+
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ARCHIVE_FOLDER_ID: &str = "018f47a0-7b80-7000-8000-000000000101";
 const INBOX_TRANSACTION_ID: &str = "018f47a0-7b80-7000-8000-000000000102";
@@ -46,7 +50,7 @@ fn add_archive_folder(path: &Path) {
 }
 
 #[test]
-fn schema_v3_is_ordered_and_keeps_the_prior_export_contract_path_free() {
+fn schema_v5_is_ordered_and_keeps_the_prior_export_contract_path_free() {
     let path = database_path("schema");
     let export = {
         let store = MobileStore::open(&path).expect("migrate fresh store");
@@ -58,7 +62,7 @@ fn schema_v3_is_ordered_and_keeps_the_prior_export_contract_path_free() {
     let user_version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("read schema version");
-    assert_eq!(user_version, 3);
+    assert_eq!(user_version, 5);
     let history = connection
         .prepare("SELECT version FROM mobile_schema_migrations ORDER BY version")
         .and_then(|mut statement| {
@@ -67,7 +71,7 @@ fn schema_v3_is_ordered_and_keeps_the_prior_export_contract_path_free() {
                 .collect::<rusqlite::Result<Vec<_>>>()
         })
         .expect("read ordered migration history");
-    assert_eq!(history, vec![1, 2, 3]);
+    assert_eq!(history, vec![1, 2, 3, 4, 5]);
     let state: (String, String) = connection
         .query_row(
             "SELECT enrollment_state, sync_state FROM mobile_sync_state WHERE singleton = 1",
@@ -336,9 +340,7 @@ fn staging_adoption_chunks_outbox_transactions_at_protocol_member_ceiling() {
     let mac_library_id = new_uuid_v7();
     let mac_scope_id = new_uuid_v7();
     assert_eq!(
-        store
-            .adopt_staging_library(&mac_library_id, &mac_scope_id)
-            .expect("adopt and chunk staging library"),
+        finalize_fixture_pairing(&store, &mac_library_id, &mac_scope_id, 1, 0),
         129
     );
 
@@ -381,9 +383,7 @@ fn staging_adoption_also_chunks_by_encrypted_transaction_byte_ceiling() {
             .create(&format!("Large staging {index}"), &nearly_maximal_body)
             .expect("create individually sendable staging note");
     }
-    store
-        .adopt_staging_library(&new_uuid_v7(), &new_uuid_v7())
-        .expect("adopt and byte-pack staging notes");
+    finalize_fixture_pairing(&store, &new_uuid_v7(), &new_uuid_v7(), 1, 0);
 
     let connection = Connection::open(&path).expect("inspect byte-packed transactions");
     let transaction_shapes = connection

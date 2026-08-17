@@ -1441,12 +1441,7 @@ pub fn create_note_folder(
     Ok(folder_id)
 }
 
-pub fn rename_note_folder(
-    conn: &Connection,
-    folder_id: i64,
-    name: &str,
-    now: &str,
-) -> Result<()> {
+pub fn rename_note_folder(conn: &Connection, folder_id: i64, name: &str, now: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
         return Err(anyhow::anyhow!("folder name cannot be empty"));

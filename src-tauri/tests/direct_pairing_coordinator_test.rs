@@ -19,12 +19,14 @@ use tauri_app_lib::{
     pairing_protocol::{
         canonical_client_finish_unsigned, canonical_client_hello_unsigned,
         canonical_invitation_unsigned, enrollment_confirmation_digest, invitation_nonce_proof,
-        AuthenticatedHpkeEnvelope, AuthenticatedHpkeSeal, BootstrapEnvelope, ClientFinish,
-        ClientHello, Environment, FreshValuePurpose, Invitation, KindCapability, LibraryDataClass,
-        LocalHpkeKey, LocalSigningKey, PairingCrypto, PairingError, PairingPolicy, PairingRole,
-        RecordKind, ServerHello, TransportEvidence, HPKE_EXPORTER_SECRET_BYTES, PAIRING_PROTOCOL,
+        AuthenticatedHpkeEnvelope, AuthenticatedHpkeSeal, BootstrapEnvelope, BootstrapMetadataV1,
+        ClientFinish, ClientHello, Environment, FreshValuePurpose, Invitation, KindCapability,
+        LibraryDataClass, LocalHpkeKey, LocalSigningKey, PairingCrypto, PairingError,
+        PairingPolicy, PairingRole, RecordKind, ScopeClass, ServerHello, TransportEvidence,
+        BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES, HPKE_EXPORTER_SECRET_BYTES, PAIRING_PROTOCOL,
         PAIRING_SUITE,
     },
+    sync_protocol::SYNC_PROTOCOL_VERSION,
 };
 use zeroize::Zeroizing;
 
@@ -33,6 +35,7 @@ const MAC_DEVICE_ID: &str = "018f47a0-7b80-7000-8000-000000000102";
 const PHONE_DEVICE_ID: &str = "018f47a0-7b80-7000-8000-000000000103";
 const NOW_MS: i64 = 1_776_100_000_000;
 const AUTHORITY_GENERATION: u64 = 9;
+const UNKNOWN_SCOPE_ID: &str = "018f47a0-7b80-7000-8000-000000000104";
 
 const AUTHORITY_KEY: [u8; 65] = [0xa1; 65];
 const MAC_SIGNING_KEY: [u8; 65] = [0xb2; 65];
@@ -42,6 +45,15 @@ const CLIENT_SIGNING_KEY: [u8; 65] = [0xe5; 65];
 const CLIENT_HPKE_KEY: [u8; 32] = [0xf6; 32];
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(1);
+
+fn fixture_bootstrap_key_package(key_epoch: u64) -> Zeroizing<Vec<u8>> {
+    let mut package = Zeroizing::new(Vec::with_capacity(48));
+    package.extend_from_slice(b"NBK1");
+    package.extend_from_slice(&1_u32.to_be_bytes());
+    package.extend_from_slice(&key_epoch.to_be_bytes());
+    package.extend_from_slice(&[0xa7; 32]);
+    package
+}
 
 struct TestDatabase {
     path: PathBuf,
@@ -107,7 +119,14 @@ fn seed(database: &TestDatabase) {
              );
              CREATE UNIQUE INDEX portable_devices_one_local_authority
                ON portable_devices(library_id)
-               WHERE role = 'authority' AND enrollment_state = 'active';",
+               WHERE role = 'authority' AND enrollment_state = 'active';
+             CREATE TABLE library_scopes (
+               scope_id TEXT PRIMARY KEY,
+               library_id TEXT NOT NULL REFERENCES libraries(library_id) ON DELETE CASCADE,
+               scope_class TEXT NOT NULL CHECK(scope_class IN ('work', 'personal', 'unknown')),
+               created_at TEXT NOT NULL,
+               UNIQUE(library_id, scope_class)
+             );",
         )
         .expect("install portable fixture anchors");
     connection
@@ -131,6 +150,13 @@ fn seed(database: &TestDatabase) {
             params![MAC_DEVICE_ID, LIBRARY_ID],
         )
         .expect("seed fixture authority");
+    connection
+        .execute(
+            "INSERT INTO library_scopes(scope_id, library_id, scope_class, created_at)
+             VALUES (?1, ?2, 'unknown', '2026-08-17T00:00:00Z')",
+            params![UNKNOWN_SCOPE_ID, LIBRARY_ID],
+        )
+        .expect("seed fixture unknown scope");
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .expect("start fixture schema transaction");
@@ -251,6 +277,32 @@ impl PairingCrypto for FixtureCrypto {
         })
     }
 
+    fn seal_bootstrap_key_package(
+        &self,
+        sender_key: LocalHpkeKey,
+        recipient_public_key: &[u8],
+        info: &[u8],
+        associated_data: &[u8],
+        metadata: &BootstrapMetadataV1,
+        exporter_context: &[u8],
+    ) -> Result<AuthenticatedHpkeSeal, ()> {
+        let package = fixture_bootstrap_key_package(metadata.key_epoch);
+        let mut seal = self.seal_authenticated(
+            sender_key,
+            recipient_public_key,
+            info,
+            associated_data,
+            package.as_slice(),
+            exporter_context,
+        )?;
+        let tag = Sha256::digest([seal.envelope.ciphertext.as_slice(), associated_data].concat());
+        seal.envelope.ciphertext.extend_from_slice(&tag);
+        seal.envelope
+            .ciphertext
+            .truncate(BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES);
+        Ok(seal)
+    }
+
     fn fresh_bytes(&self, _purpose: FreshValuePurpose, length: usize) -> Result<Vec<u8>, ()> {
         let sequence = self.next_value.fetch_add(1, Ordering::SeqCst) as u8;
         Ok(vec![sequence; length])
@@ -282,13 +334,22 @@ fn uuid(value: u64) -> String {
 }
 
 fn scopes() -> BTreeSet<RecordKind> {
-    [RecordKind::Note, RecordKind::Folder].into_iter().collect()
+    [RecordKind::Note, RecordKind::Category, RecordKind::Folder]
+        .into_iter()
+        .collect()
 }
 
 fn capabilities() -> BTreeMap<RecordKind, KindCapability> {
     [
         (
             RecordKind::Note,
+            KindCapability {
+                reader_version: 1,
+                writer_version: Some(1),
+            },
+        ),
+        (
+            RecordKind::Category,
             KindCapability {
                 reader_version: 1,
                 writer_version: Some(1),
@@ -592,6 +653,20 @@ fn committed_pairing_responses_replay_byte_for_byte_after_every_restart() {
     };
     let bootstrap: BootstrapEnvelope =
         serde_json::from_slice(&bootstrap_bytes).expect("decode bootstrap");
+    assert_eq!(bootstrap.metadata.purge_generation, 0);
+    assert_eq!(bootstrap.metadata.key_epoch, 1);
+    assert_eq!(bootstrap.metadata.default_scope_id, UNKNOWN_SCOPE_ID);
+    assert_eq!(bootstrap.metadata.default_scope_class, ScopeClass::Unknown);
+    assert_eq!(
+        bootstrap.metadata.sync_protocol_version,
+        SYNC_PROTOCOL_VERSION
+    );
+    assert_eq!(bootstrap.metadata.granted_scopes, scopes());
+    assert_eq!(bootstrap.metadata.capabilities, capabilities());
+    assert_eq!(
+        bootstrap.metadata.durable_sync_spki_sha256,
+        TLS_PIN.to_vec()
+    );
     let client_finish = finish(1, &server, &bootstrap);
     let first_finish = coordinator
         .process_client_finish(&encode(&client_finish), None, &transport())

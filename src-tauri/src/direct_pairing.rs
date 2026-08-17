@@ -15,7 +15,6 @@ use std::{
 };
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -24,23 +23,27 @@ use crate::{
         ConsumeOutcome, DirectAuthorityStore, InvitationRegistration, NewInvitation, StoreError,
     },
     pairing_protocol::{
-        bootstrap_hpke_exporter_context, bootstrap_hpke_info,
-        canonical_authenticated_hpke_envelope, canonical_challenge_plaintext,
-        canonical_client_finish_signed, canonical_client_finish_unsigned,
-        canonical_client_hello_signed, canonical_client_hello_unsigned,
-        canonical_invitation_signed, canonical_invitation_unsigned, canonical_receipt,
-        canonical_server_finish_unsigned, canonical_server_hello_unsigned,
-        challenge_hpke_exporter_context, challenge_hpke_info, derive_verification_code,
-        enrollment_confirmation_digest, invitation_nonce_proof, is_uuid_v7, negotiate_capabilities,
-        pairing_transcript_digest, parse_bounded_json, validate_client_finish_shape,
-        validate_client_hello_shape, validate_finish_bindings, validate_hpke_envelope,
-        validate_invitation_shape, validate_policy, validate_requested_capabilities,
-        validate_transport_evidence, AuthenticatedHpkeEnvelope, BootstrapEnvelope, ClientFinish,
-        ClientHello, EnrollmentReceipt, Environment, FreshValuePurpose, KindCapability,
-        LocalHpkeKey, LocalSigningKey, PairingCrypto, PairingError, PairingPolicy, PairingRole,
-        RecordKind, ServerFinish, ServerHello, TransportEvidence, PAIRING_PROTOCOL, PAIRING_SUITE,
+        bootstrap_associated_data, bootstrap_envelope_digest, bootstrap_hpke_exporter_context,
+        bootstrap_hpke_info, canonical_challenge_plaintext, canonical_client_finish_signed,
+        canonical_client_finish_unsigned, canonical_client_hello_signed,
+        canonical_client_hello_unsigned, canonical_invitation_signed,
+        canonical_invitation_unsigned, canonical_receipt, canonical_server_finish_unsigned,
+        canonical_server_hello_unsigned, challenge_hpke_exporter_context, challenge_hpke_info,
+        derive_verification_code, enrollment_confirmation_digest, fixture_bootstrap_metadata,
+        invitation_nonce_proof, is_uuid_v7, negotiate_capabilities, pairing_transcript_digest,
+        parse_bounded_json, validate_bootstrap, validate_bootstrap_key_package_envelope,
+        validate_client_finish_shape, validate_client_hello_shape, validate_finish_bindings,
+        validate_hpke_envelope, validate_invitation_shape, validate_policy,
+        validate_requested_capabilities, validate_transport_evidence, AuthenticatedHpkeEnvelope,
+        BootstrapEnvelope, ClientFinish, ClientHello, EnrollmentReceipt, Environment,
+        FreshValuePurpose, KindCapability, LocalHpkeKey, LocalSigningKey, PairingCrypto,
+        PairingError, PairingPolicy, PairingRole, RecordKind, ServerFinish, ServerHello,
+        TransportEvidence, BOOTSTRAP_SYNC_PROTOCOL_VERSION, PAIRING_PROTOCOL, PAIRING_SUITE,
     },
 };
+
+const _: [(); crate::sync_protocol::SYNC_PROTOCOL_VERSION as usize] =
+    [(); BOOTSTRAP_SYNC_PROTOCOL_VERSION as usize];
 
 const P256_PUBLIC_KEY_BYTES: usize = 65;
 const X25519_PUBLIC_KEY_BYTES: usize = 32;
@@ -485,7 +488,7 @@ impl<C: PairingCrypto, T: AuthorityClock> DirectPairingCoordinator<C, T> {
             return map_confirmation_outcome(outcome);
         }
 
-        let bootstrap = self.generate_bootstrap(&snapshot)?;
+        let bootstrap = self.generate_bootstrap(&connection, &snapshot)?;
         let confirmation_digest = confirmation_digest_array(
             &snapshot.receipt,
             true,
@@ -833,48 +836,42 @@ impl<C: PairingCrypto, T: AuthorityClock> DirectPairingCoordinator<C, T> {
 
     fn generate_bootstrap(
         &self,
+        connection: &Connection,
         snapshot: &ReceiptSnapshot,
     ) -> Result<BootstrapMaterial, CoordinatorError> {
-        #[derive(Serialize)]
-        struct FixtureBootstrap<'a> {
-            fixture_marker: &'static str,
-            receipt_id: &'a str,
-            library_id: &'a str,
-            device_id: &'a str,
-            authority_generation: u64,
-            scopes: &'a BTreeSet<RecordKind>,
-        }
         let receipt = &snapshot.receipt;
-        let plaintext = serde_json::to_vec(&FixtureBootstrap {
-            fixture_marker: "sanitized-fixtures-only",
-            receipt_id: &receipt.receipt_id,
-            library_id: &receipt.library_id,
-            device_id: &receipt.device_id,
-            authority_generation: receipt.authority_generation,
-            scopes: &receipt.granted_scopes,
-        })
-        .map_err(|_| CoordinatorError::Serialization)?;
+        let (purge_generation, key_epoch, default_scope_id) =
+            load_bootstrap_authority_state(connection, &receipt.library_id)?;
+        let metadata = fixture_bootstrap_metadata(
+            receipt,
+            purge_generation,
+            key_epoch,
+            &default_scope_id,
+            &snapshot.tls_spki_sha256,
+        )?;
         let seal = self
             .crypto
-            .seal_authenticated(
+            .seal_bootstrap_key_package(
                 LocalHpkeKey::MacPairing,
                 &snapshot.client_hpke_public_key,
-                &bootstrap_hpke_info(receipt),
-                &canonical_receipt(receipt),
-                &plaintext,
-                &bootstrap_hpke_exporter_context(receipt),
+                &bootstrap_hpke_info(&metadata),
+                &bootstrap_associated_data(&metadata),
+                &metadata,
+                &bootstrap_hpke_exporter_context(&metadata),
             )
             .map_err(|_| CoordinatorError::Protocol(PairingError::CryptoUnavailable))?;
-        validate_hpke_envelope(&seal.envelope)?;
+        validate_bootstrap_key_package_envelope(&seal.envelope)?;
         let envelope_bytes =
             serde_json::to_vec(&seal.envelope).map_err(|_| CoordinatorError::Serialization)?;
-        let envelope_digest = sha256_array(&canonical_authenticated_hpke_envelope(&seal.envelope));
-        let response = BootstrapEnvelope {
+        let mut response = BootstrapEnvelope {
             protocol: PAIRING_PROTOCOL.to_owned(),
             receipt_id: receipt.receipt_id.clone(),
-            sealed_bootstrap: seal.envelope,
-            envelope_digest: envelope_digest.to_vec(),
+            metadata,
+            sealed_key_package: seal.envelope,
+            envelope_digest: Vec::new(),
         };
+        let envelope_digest = to_array(&bootstrap_envelope_digest(&response))?;
+        response.envelope_digest = envelope_digest.to_vec();
         let response_bytes =
             serde_json::to_vec(&response).map_err(|_| CoordinatorError::Serialization)?;
         Ok(BootstrapMaterial {
@@ -937,6 +934,37 @@ struct GeneratedServerHello {
     receipt: EnrollmentReceipt,
     exact_response_bytes: Vec<u8>,
     verification_code: String,
+}
+
+fn load_bootstrap_authority_state(
+    connection: &Connection,
+    library_id: &str,
+) -> Result<(u64, u64, String), CoordinatorError> {
+    let row: Option<(i64, i64, String)> = connection
+        .query_row(
+            "SELECT l.purge_generation, l.current_key_epoch, s.scope_id
+             FROM libraries l
+             JOIN library_scopes s ON s.library_id = l.library_id
+             WHERE l.library_id = ?1 AND s.scope_class = 'unknown'",
+            [library_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((purge_generation, key_epoch, default_scope_id)) = row else {
+        return Err(CoordinatorError::StateUnavailable(
+            "durable unknown bootstrap scope is missing",
+        ));
+    };
+    let purge_generation = u64::try_from(purge_generation)
+        .map_err(|_| CoordinatorError::StateUnavailable("negative purge generation"))?;
+    let key_epoch = u64::try_from(key_epoch)
+        .map_err(|_| CoordinatorError::StateUnavailable("negative key epoch"))?;
+    if key_epoch == 0 || !is_uuid_v7(&default_scope_id) {
+        return Err(CoordinatorError::StateUnavailable(
+            "durable bootstrap key or scope is invalid",
+        ));
+    }
+    Ok((purge_generation, key_epoch, default_scope_id))
 }
 
 fn load_invitation(
@@ -1217,11 +1245,9 @@ fn committed_bootstrap(snapshot: &ReceiptSnapshot) -> Result<BootstrapMaterial, 
         .map_err(|_| CoordinatorError::StateUnavailable("invalid stored bootstrap envelope"))?;
     let response: BootstrapEnvelope = serde_json::from_slice(&response_bytes)
         .map_err(|_| CoordinatorError::StateUnavailable("invalid stored bootstrap response"))?;
-    if response.protocol != PAIRING_PROTOCOL
-        || response.receipt_id != snapshot.receipt.receipt_id
-        || response.sealed_bootstrap != envelope
+    if validate_bootstrap(&response, &snapshot.receipt).is_err()
+        || response.sealed_key_package != envelope
         || response.envelope_digest != envelope_digest
-        || sha256_array(&canonical_authenticated_hpke_envelope(&envelope)) != envelope_digest
     {
         return Err(CoordinatorError::StateUnavailable(
             "stored bootstrap binding is inconsistent",

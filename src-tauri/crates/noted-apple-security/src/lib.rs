@@ -10,9 +10,10 @@ mod models;
 
 pub use error::{Error, NativeErrorCode, Result};
 pub use models::{
-    BootstrapRecovery, IdentityHandle, IdentityInventory, IdentityLifecycle, OpenedHpke,
-    PendingBootstrapHandle, ProtectedDataEvent, ProtectedDataState, PublicIdentity,
-    SigningKeyBacking, StoreProtectionReport,
+    BootstrapCapabilityV1, BootstrapMetadataV1, BootstrapRecovery, IdentityHandle,
+    IdentityInventory, IdentityLifecycle, OpenedHpke, PendingBootstrapHandle, ProtectedDataEvent,
+    ProtectedDataState, PublicIdentity, SigningKeyBacking, StagedBootstrapDescriptor,
+    StoreProtectionReport,
 };
 
 use tauri::plugin::{Builder, TauriPlugin};

@@ -120,8 +120,6 @@ final class CrossLanguageGoldenVectorTests: XCTestCase {
     let challenge = try dictionary(notedHPKE, "challenge")
     let bootstrap = try dictionary(notedHPKE, "bootstrap")
     let transcriptDigest = try hex(canonical, "transcript_digest_hex")
-    let receipt = try canonicalReceipt(root: root, transcriptDigest: transcriptDigest)
-
     XCTAssertEqual(try string(challenge, "info_source"), "challenge_hpke_info(receipt)")
     XCTAssertEqual(
       try string(challenge, "associated_data_source"),
@@ -160,31 +158,78 @@ final class CrossLanguageGoldenVectorTests: XCTestCase {
       try authenticatedHPKEEnvelopeDigest(vector: challenge),
       try hex(challenge, "envelope_digest_hex"))
 
-    XCTAssertEqual(try string(bootstrap, "info_source"), "bootstrap_hpke_info(receipt)")
+    let bootstrapContract = try dictionary(crossLanguage, "bootstrap_contract")
+    let metadata = try bootstrapMetadata(root: root, transcriptDigest: transcriptDigest)
+    XCTAssertEqual(
+      try BootstrapContractV1.canonicalMetadata(metadata),
+      try base64(bootstrapContract, "metadata_canonical_base64"))
+    XCTAssertEqual(
+      Data(SHA256.hash(data: try BootstrapContractV1.canonicalMetadata(metadata))),
+      try hex(bootstrapContract, "metadata_digest_hex"))
+
+    XCTAssertEqual(try string(bootstrap, "info_source"), "bootstrap_hpke_info(metadata)")
     XCTAssertEqual(
       try string(bootstrap, "associated_data_source"),
-      "canonical_receipt(receipt)")
+      "bootstrap_associated_data(metadata)")
     XCTAssertEqual(
       try string(bootstrap, "exporter_context_source"),
-      "bootstrap_hpke_exporter_context(receipt)")
+      "bootstrap_hpke_exporter_context(metadata)")
+    XCTAssertNil(bootstrap["plaintext_base64"])
     let bootstrapResult = try openNotedAuthenticatedHPKE(
       root: root,
       keyMaterial: notedHPKE,
       vector: bootstrap,
-      info: try pairingHPKEContext(
-        domain: "noted.direct-pairing.v1/hpke/bootstrap/info",
-        root: root,
-        transcriptDigest: transcriptDigest),
-      associatedData: receipt,
-      exporterContext: try pairingHPKEContext(
-        domain: "noted.direct-pairing.v1/hpke/bootstrap/exporter",
-        root: root,
-        transcriptDigest: transcriptDigest))
-    XCTAssertEqual(bootstrapResult.plaintext, try base64(bootstrap, "plaintext_base64"))
+      info: try BootstrapContractV1.info(metadata: metadata),
+      associatedData: try BootstrapContractV1.associatedData(metadata: metadata),
+      exporterContext: try BootstrapContractV1.exporterContext(metadata: metadata))
+    XCTAssertEqual(bootstrapResult.plaintext.count, try integer(bootstrap, "key_package_byte_count"))
+    XCTAssertNoThrow(try BootstrapContractV1.validateKeyPackage(bootstrapResult.plaintext, metadata: metadata))
+    XCTAssertEqual(
+      Data(SHA256.hash(data: bootstrapResult.plaintext)),
+      try hex(bootstrap, "key_package_sha256_hex"))
     XCTAssertEqual(bootstrapResult.exporter, try hex(bootstrap, "exported_value_hex"))
     XCTAssertEqual(
       try authenticatedHPKEEnvelopeDigest(vector: bootstrap),
       try hex(bootstrap, "envelope_digest_hex"))
+    XCTAssertEqual(
+      try BootstrapContractV1.envelopeDigest(
+        protocolName: try string(root, "protocol"),
+        receiptId: metadata.receiptId,
+        metadata: metadata,
+        encapsulatedKey: try hex(bootstrap, "encapsulated_key_hex"),
+        ciphertext: try hex(bootstrap, "ciphertext_hex")),
+      try hex(bootstrap, "bootstrap_envelope_digest_hex"))
+  }
+
+  func testBootstrapMetadataRejectsValuesOutsideSQLiteRange() throws {
+    let root = try loadFixture()
+    let crossLanguage = try dictionary(root, "cross_language")
+    let canonical = try dictionary(crossLanguage, "canonical")
+    let valid = try bootstrapMetadata(
+      root: root,
+      transcriptDigest: try hex(canonical, "transcript_digest_hex"))
+    let overflow = BootstrapMetadataV1(
+      version: valid.version,
+      protocolName: valid.protocolName,
+      suite: valid.suite,
+      syncProtocolVersion: valid.syncProtocolVersion,
+      environment: valid.environment,
+      libraryDataClass: valid.libraryDataClass,
+      receiptId: valid.receiptId,
+      libraryId: valid.libraryId,
+      deviceId: valid.deviceId,
+      authorityGeneration: valid.authorityGeneration,
+      purgeGeneration: valid.purgeGeneration,
+      keyEpoch: UInt64(Int64.max) + 1,
+      defaultScopeId: valid.defaultScopeId,
+      defaultScopeClass: valid.defaultScopeClass,
+      grantedScopes: valid.grantedScopes,
+      capabilities: valid.capabilities,
+      recordCipherSuite: valid.recordCipherSuite,
+      durableSyncSpkiSha256: valid.durableSyncSpkiSha256,
+      transcriptDigest: valid.transcriptDigest)
+
+    XCTAssertThrowsError(try BootstrapContractV1.validate(metadata: overflow))
   }
 
   private func loadFixture() throws -> [String: Any] {
@@ -289,6 +334,65 @@ final class CrossLanguageGoldenVectorTests: XCTestCase {
         ("device_id", Data(try string(receipt, "device_id").utf8)),
         ("transcript_digest", transcriptDigest),
       ])
+  }
+
+  private func bootstrapMetadata(
+    root: [String: Any],
+    transcriptDigest: Data
+  ) throws -> BootstrapMetadataV1 {
+    let crossLanguage = try dictionary(root, "cross_language")
+    let contract = try dictionary(crossLanguage, "bootstrap_contract")
+    let metadata = try dictionary(contract, "metadata")
+    guard let grantedScopes = metadata["granted_scopes"] as? [String] else {
+      throw VectorError.invalid("bootstrap granted_scopes")
+    }
+    let rawCapabilities = try dictionary(metadata, "capabilities")
+    var capabilities: [String: BootstrapCapabilityV1] = [:]
+    for (kind, rawCapability) in rawCapabilities {
+      guard let rawCapability = rawCapability as? [String: Any] else {
+        throw VectorError.invalid("bootstrap capability \(kind)")
+      }
+      capabilities[kind] = BootstrapCapabilityV1(
+        readerVersion: UInt32(try integer(rawCapability, "reader_version")),
+        writerVersion: rawCapability["writer_version"]
+          .flatMap { ($0 as? NSNumber)?.uint32Value })
+    }
+    let parsed = BootstrapMetadataV1(
+      version: UInt32(try integer(metadata, "version")),
+      protocolName: try string(metadata, "protocol"),
+      suite: try string(metadata, "suite"),
+      syncProtocolVersion: UInt32(try integer(metadata, "sync_protocol_version")),
+      environment: try string(metadata, "environment"),
+      libraryDataClass: try string(metadata, "library_data_class"),
+      receiptId: try string(metadata, "receipt_id"),
+      libraryId: try string(metadata, "library_id"),
+      deviceId: try string(metadata, "device_id"),
+      authorityGeneration: UInt64(try integer(metadata, "authority_generation")),
+      purgeGeneration: UInt64(try integer(metadata, "purge_generation")),
+      keyEpoch: UInt64(try integer(metadata, "key_epoch")),
+      defaultScopeId: try string(metadata, "default_scope_id"),
+      defaultScopeClass: try string(metadata, "default_scope_class"),
+      grantedScopes: grantedScopes,
+      capabilities: capabilities,
+      recordCipherSuite: try string(metadata, "record_cipher_suite"),
+      durableSyncSpkiSha256: [UInt8](try hex(metadata, "durable_sync_spki_sha256_hex")),
+      transcriptDigest: [UInt8](try hex(metadata, "transcript_digest_hex")))
+    XCTAssertEqual(parsed.version, BootstrapContractV1.metadataVersion)
+    XCTAssertEqual(parsed.protocolName, BootstrapContractV1.pairingProtocol)
+    XCTAssertEqual(parsed.suite, BootstrapContractV1.pairingSuite)
+    XCTAssertEqual(parsed.syncProtocolVersion, BootstrapContractV1.syncProtocolVersion)
+    XCTAssertEqual(parsed.environment, "development")
+    XCTAssertEqual(parsed.libraryDataClass, "sanitized_fixture")
+    XCTAssertGreaterThan(parsed.authorityGeneration, 0)
+    XCTAssertGreaterThan(parsed.keyEpoch, 0)
+    XCTAssertEqual(parsed.defaultScopeClass, "unknown")
+    XCTAssertEqual(parsed.grantedScopes, BootstrapContractV1.exactScopes)
+    XCTAssertEqual(parsed.capabilities.count, BootstrapContractV1.exactScopes.count)
+    XCTAssertEqual(parsed.recordCipherSuite, BootstrapContractV1.recordCipherSuite)
+    XCTAssertEqual(parsed.durableSyncSpkiSha256.count, 32)
+    XCTAssertEqual(Data(parsed.transcriptDigest), transcriptDigest)
+    try BootstrapContractV1.validate(metadata: parsed)
+    return parsed
   }
 
   @available(macOS 14.0, iOS 17.0, *)

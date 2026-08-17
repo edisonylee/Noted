@@ -3,14 +3,23 @@
 use crate::{Error, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub(crate) const MAX_SIGNING_MESSAGE_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_HPKE_FIELD_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_BOOTSTRAP_BINDING_BYTES: usize = 16 * 1024;
 pub(crate) const P256_PUBLIC_KEY_BYTES: usize = 65;
 pub(crate) const P256_SIGNATURE_BYTES: usize = 64;
 pub(crate) const X25519_PUBLIC_KEY_BYTES: usize = 32;
 pub(crate) const SHA256_BYTES: usize = 32;
+pub(crate) const BOOTSTRAP_KEY_PACKAGE_BYTES: usize = 48;
+pub(crate) const BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES: usize = BOOTSTRAP_KEY_PACKAGE_BYTES + 16;
+pub const BOOTSTRAP_METADATA_VERSION: u32 = 1;
+pub const BOOTSTRAP_SYNC_PROTOCOL_VERSION: u32 = 1;
+pub const PAIRING_PROTOCOL: &str = "noted.direct-pairing.v1";
+pub const PAIRING_SUITE: &str = "tls13+p256-p1363+auth-hpke-x25519-hkdfsha256-aes256gcm";
+pub const RECORD_CIPHER_SUITE: &str = "noted.record-aead.v1+aes256gcm+hkdfsha256";
 #[cfg(feature = "sanitized-development-fixtures")]
 pub(crate) const FIXTURE_GATE: &str = "sanitized-development-fixture-v1";
 
@@ -92,12 +101,96 @@ pub struct PublicIdentity {
     pub bootstrap_recovery: Option<BootstrapRecovery>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BootstrapCapabilityV1 {
+    pub reader_version: u32,
+    pub writer_version: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BootstrapMetadataV1 {
+    pub version: u32,
+    pub protocol: String,
+    pub suite: String,
+    pub sync_protocol_version: u32,
+    pub environment: String,
+    pub library_data_class: String,
+    pub receipt_id: String,
+    pub library_id: String,
+    pub device_id: String,
+    pub authority_generation: u64,
+    pub purge_generation: u64,
+    pub key_epoch: u64,
+    pub default_scope_id: String,
+    pub default_scope_class: String,
+    pub granted_scopes: Vec<String>,
+    pub capabilities: BTreeMap<String, BootstrapCapabilityV1>,
+    pub record_cipher_suite: String,
+    pub durable_sync_spki_sha256: [u8; SHA256_BYTES],
+    pub transcript_digest: [u8; SHA256_BYTES],
+}
+
+impl BootstrapMetadataV1 {
+    pub fn validate(&self) -> Result<()> {
+        let expected_scopes = ["note", "category", "folder"];
+        let exact_capability = BootstrapCapabilityV1 {
+            reader_version: 1,
+            writer_version: Some(1),
+        };
+        if self.version != BOOTSTRAP_METADATA_VERSION
+            || self.protocol != PAIRING_PROTOCOL
+            || self.suite != PAIRING_SUITE
+            || self.sync_protocol_version != BOOTSTRAP_SYNC_PROTOCOL_VERSION
+            || self.environment != "development"
+            || self.library_data_class != "sanitized_fixture"
+            || self.authority_generation == 0
+            || self.key_epoch == 0
+            || self.authority_generation > i64::MAX as u64
+            || self.purge_generation > i64::MAX as u64
+            || self.key_epoch > i64::MAX as u64
+            || self.default_scope_class != "unknown"
+            || self.record_cipher_suite != RECORD_CIPHER_SUITE
+            || self.durable_sync_spki_sha256.iter().all(|byte| *byte == 0)
+            || self
+                .granted_scopes
+                .iter()
+                .map(String::as_str)
+                .ne(expected_scopes)
+            || self.capabilities.len() != expected_scopes.len()
+            || expected_scopes
+                .iter()
+                .any(|scope| self.capabilities.get(*scope).copied() != Some(exact_capability))
+        {
+            return Err(Error::InvalidNativeResponse("bootstrap metadata"));
+        }
+        for identifier in [
+            &self.receipt_id,
+            &self.library_id,
+            &self.device_id,
+            &self.default_scope_id,
+        ] {
+            validate_uuid_v7(identifier)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StagedBootstrapDescriptor {
+    pub pending_bootstrap_handle: PendingBootstrapHandle,
+    pub metadata: BootstrapMetadataV1,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BootstrapRecovery {
     pub pending_bootstrap_handle: PendingBootstrapHandle,
     pub receipt_id: String,
     pub envelope_digest: Vec<u8>,
+    pub metadata: BootstrapMetadataV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +249,7 @@ pub(crate) struct BootstrapRecoveryWire {
     pub pending_bootstrap_handle: String,
     pub receipt_id: String,
     pub envelope_digest_base64: String,
+    pub metadata: BootstrapMetadataV1,
 }
 
 impl TryFrom<PublicIdentityWire> for PublicIdentity {
@@ -163,6 +257,7 @@ impl TryFrom<PublicIdentityWire> for PublicIdentity {
 
     fn try_from(wire: PublicIdentityWire) -> Result<Self> {
         validate_uuid_v7(&wire.device_id)?;
+        let device_id = wire.device_id;
         let signing_public_key = decode_exact(
             &wire.signing_public_key_base64,
             P256_PUBLIC_KEY_BYTES,
@@ -171,9 +266,33 @@ impl TryFrom<PublicIdentityWire> for PublicIdentity {
         if signing_public_key.first() != Some(&0x04) {
             return Err(Error::InvalidNativeResponse("P-256 public key encoding"));
         }
+        let bootstrap_recovery = wire
+            .bootstrap_recovery
+            .map(|recovery| -> Result<BootstrapRecovery> {
+                validate_uuid_v7(&recovery.receipt_id)?;
+                recovery.metadata.validate()?;
+                if recovery.metadata.receipt_id != recovery.receipt_id
+                    || recovery.metadata.device_id != device_id
+                {
+                    return Err(Error::InvalidNativeResponse("bootstrap recovery metadata"));
+                }
+                Ok(BootstrapRecovery {
+                    pending_bootstrap_handle: PendingBootstrapHandle::parse(
+                        recovery.pending_bootstrap_handle,
+                    )?,
+                    receipt_id: recovery.receipt_id,
+                    envelope_digest: decode_exact(
+                        &recovery.envelope_digest_base64,
+                        SHA256_BYTES,
+                        "bootstrap envelope digest",
+                    )?,
+                    metadata: recovery.metadata,
+                })
+            })
+            .transpose()?;
         Ok(Self {
             handle: IdentityHandle::parse(wire.handle)?,
-            device_id: wire.device_id,
+            device_id,
             signing_public_key,
             hpke_public_key: decode_exact(
                 &wire.hpke_public_key_base64,
@@ -182,23 +301,7 @@ impl TryFrom<PublicIdentityWire> for PublicIdentity {
             )?,
             lifecycle: wire.lifecycle,
             signing_key_backing: wire.signing_key_backing,
-            bootstrap_recovery: wire
-                .bootstrap_recovery
-                .map(|recovery| -> Result<BootstrapRecovery> {
-                    validate_uuid_v7(&recovery.receipt_id)?;
-                    Ok(BootstrapRecovery {
-                        pending_bootstrap_handle: PendingBootstrapHandle::parse(
-                            recovery.pending_bootstrap_handle,
-                        )?,
-                        receipt_id: recovery.receipt_id,
-                        envelope_digest: decode_exact(
-                            &recovery.envelope_digest_base64,
-                            SHA256_BYTES,
-                            "bootstrap envelope digest",
-                        )?,
-                    })
-                })
-                .transpose()?,
+            bootstrap_recovery,
         })
     }
 }
@@ -406,6 +509,7 @@ pub(crate) struct StageBootstrapArgs<'a> {
     pub ciphertext_base64: String,
     pub receipt_id: &'a str,
     pub envelope_digest_base64: String,
+    pub metadata: &'a BootstrapMetadataV1,
 }
 
 impl<'a> StageBootstrapArgs<'a> {
@@ -419,16 +523,18 @@ impl<'a> StageBootstrapArgs<'a> {
         ciphertext: &[u8],
         receipt_id: &'a str,
         envelope_digest: &[u8],
+        metadata: &'a BootstrapMetadataV1,
     ) -> Result<Self> {
+        metadata.validate()?;
         if sender_public_key.len() != X25519_PUBLIC_KEY_BYTES
             || encapsulated_key.len() != X25519_PUBLIC_KEY_BYTES
             || envelope_digest.len() != SHA256_BYTES
             || receipt_id.is_empty()
             || receipt_id.len() > 128
-            || info.len() > MAX_HPKE_FIELD_BYTES
-            || associated_data.len() > MAX_HPKE_FIELD_BYTES
-            || ciphertext.len() > MAX_HPKE_FIELD_BYTES
-            || ciphertext.len() < 16
+            || info.len() > MAX_BOOTSTRAP_BINDING_BYTES
+            || associated_data.len() > MAX_BOOTSTRAP_BINDING_BYTES
+            || ciphertext.len() != BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES
+            || metadata.receipt_id != receipt_id
         {
             return Err(Error::InvalidNativeResponse(
                 "invalid staged-bootstrap request",
@@ -443,6 +549,7 @@ impl<'a> StageBootstrapArgs<'a> {
             ciphertext_base64: BASE64.encode(ciphertext),
             receipt_id,
             envelope_digest_base64: BASE64.encode(envelope_digest),
+            metadata,
         })
     }
 }
@@ -451,6 +558,7 @@ impl<'a> StageBootstrapArgs<'a> {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StageBootstrapWire {
     pub pending_bootstrap_handle: String,
+    pub metadata: BootstrapMetadataV1,
 }
 
 #[derive(Debug, Serialize)]
@@ -551,6 +659,42 @@ fn decode_bounded(value: &str, maximum: usize, field: &'static str) -> Result<Ve
 mod tests {
     use super::*;
 
+    fn bootstrap_metadata() -> BootstrapMetadataV1 {
+        let capability = BootstrapCapabilityV1 {
+            reader_version: 1,
+            writer_version: Some(1),
+        };
+        BootstrapMetadataV1 {
+            version: 1,
+            protocol: PAIRING_PROTOCOL.to_owned(),
+            suite: PAIRING_SUITE.to_owned(),
+            sync_protocol_version: 1,
+            environment: "development".to_owned(),
+            library_data_class: "sanitized_fixture".to_owned(),
+            receipt_id: "018f47a0-7b80-7000-8000-000000000004".to_owned(),
+            library_id: "018f47a0-7b80-7000-8000-000000000005".to_owned(),
+            device_id: "018f47a0-7b80-7000-8000-000000000002".to_owned(),
+            authority_generation: 7,
+            purge_generation: 2,
+            key_epoch: 3,
+            default_scope_id: "018f47a0-7b80-7000-8000-000000000006".to_owned(),
+            default_scope_class: "unknown".to_owned(),
+            granted_scopes: vec![
+                "note".to_owned(),
+                "category".to_owned(),
+                "folder".to_owned(),
+            ],
+            capabilities: BTreeMap::from([
+                ("note".to_owned(), capability),
+                ("category".to_owned(), capability),
+                ("folder".to_owned(), capability),
+            ]),
+            record_cipher_suite: RECORD_CIPHER_SUITE.to_owned(),
+            durable_sync_spki_sha256: [0x66; 32],
+            transcript_digest: [0x77; 32],
+        }
+    }
+
     #[test]
     fn opaque_handles_require_canonical_lowercase_uuid_shape() {
         assert!(IdentityHandle::parse("018f47a0-7b80-7000-8000-000000000001".into()).is_ok());
@@ -599,6 +743,7 @@ mod tests {
                 pending_bootstrap_handle: "018f47a0-7b80-4000-8000-000000000003".into(),
                 receipt_id: "018f47a0-7b80-7000-8000-000000000004".into(),
                 envelope_digest_base64: BASE64.encode([0x55; 32]),
+                metadata: bootstrap_metadata(),
             }),
         };
         let identity = PublicIdentity::try_from(wire).expect("parse public recovery binding");
@@ -610,6 +755,77 @@ mod tests {
             "018f47a0-7b80-4000-8000-000000000003"
         );
         assert_eq!(recovery.envelope_digest, vec![0x55; 32]);
+        assert_eq!(recovery.metadata, bootstrap_metadata());
+        let encoded = serde_json::to_string(&recovery).expect("encode public recovery");
+        assert!(!encoded.contains("keyPackage"));
+        assert!(!encoded.contains("plaintext"));
+    }
+
+    #[test]
+    fn public_inventory_rejects_bootstrap_metadata_for_another_device() {
+        let wire = PublicIdentityWire {
+            handle: "018f47a0-7b80-4000-8000-000000000001".into(),
+            device_id: "018f47a0-7b80-7000-8000-000000000001".into(),
+            signing_public_key_base64: BASE64.encode([0x04; 65]),
+            hpke_public_key_base64: BASE64.encode([0x22; 32]),
+            lifecycle: IdentityLifecycle::Pending,
+            signing_key_backing: SigningKeyBacking::SecureEnclave,
+            bootstrap_recovery: Some(BootstrapRecoveryWire {
+                pending_bootstrap_handle: "018f47a0-7b80-4000-8000-000000000003".into(),
+                receipt_id: "018f47a0-7b80-7000-8000-000000000004".into(),
+                envelope_digest_base64: BASE64.encode([0x55; 32]),
+                metadata: bootstrap_metadata(),
+            }),
+        };
+
+        assert!(matches!(
+            PublicIdentity::try_from(wire),
+            Err(Error::InvalidNativeResponse("bootstrap recovery metadata"))
+        ));
+    }
+
+    #[test]
+    fn bootstrap_metadata_and_stage_request_fail_closed_on_bounds_or_downgrade() {
+        let mut metadata = bootstrap_metadata();
+        assert!(metadata.validate().is_ok());
+        metadata.sync_protocol_version = 0;
+        assert!(metadata.validate().is_err());
+        metadata = bootstrap_metadata();
+        metadata.durable_sync_spki_sha256 = [0; 32];
+        assert!(metadata.validate().is_err());
+        metadata = bootstrap_metadata();
+        metadata.granted_scopes.swap(0, 1);
+        assert!(metadata.validate().is_err());
+        metadata = bootstrap_metadata();
+        metadata.key_epoch = i64::MAX as u64 + 1;
+        assert!(metadata.validate().is_err());
+
+        let handle = IdentityHandle::parse("018f47a0-7b80-4000-8000-000000000001".to_owned())
+            .expect("fixture handle");
+        assert!(StageBootstrapArgs::new(
+            &handle,
+            &[0x11; 32],
+            &[0x22; 32],
+            &[0x33; 32],
+            &[0x44; 32],
+            &[0x55; BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES],
+            &bootstrap_metadata().receipt_id,
+            &[0x66; 32],
+            &bootstrap_metadata(),
+        )
+        .is_ok());
+        assert!(StageBootstrapArgs::new(
+            &handle,
+            &[0x11; 32],
+            &[0x22; 32],
+            &[0x33; 32],
+            &[0x44; 32],
+            &[0x55; BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES + 1],
+            &bootstrap_metadata().receipt_id,
+            &[0x66; 32],
+            &bootstrap_metadata(),
+        )
+        .is_err());
     }
 
     #[test]

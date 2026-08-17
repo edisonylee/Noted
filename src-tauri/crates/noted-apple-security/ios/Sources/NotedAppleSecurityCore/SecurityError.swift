@@ -13,6 +13,7 @@ public enum NotedSecurityError: Error, Equatable, Sendable {
   case invalidIdentityState(expected: String, actual: String)
   case identityCorrupted(String)
   case bootstrapReplayMismatch
+  case legacyBootstrapRequiresDiscard
   case signingFailed
   case hpkeOpenFailed
   case protectedDataUnavailable
@@ -33,6 +34,7 @@ public enum NotedSecurityError: Error, Equatable, Sendable {
     case .invalidIdentityState: "invalid_identity_state"
     case .identityCorrupted: "identity_corrupted"
     case .bootstrapReplayMismatch: "bootstrap_replay_mismatch"
+    case .legacyBootstrapRequiresDiscard: "legacy_bootstrap_requires_discard"
     case .signingFailed: "signing_failed"
     case .hpkeOpenFailed: "hpke_open_failed"
     case .protectedDataUnavailable: "protected_data_unavailable"
@@ -57,6 +59,8 @@ public enum NotedSecurityError: Error, Equatable, Sendable {
       "Identity state must be \(expected), found \(actual)"
     case .identityCorrupted(let detail): "The Keychain identity record is invalid: \(detail)"
     case .bootstrapReplayMismatch: "The pending bootstrap does not match the accepted replay"
+    case .legacyBootstrapRequiresDiscard:
+      "The legacy sanitized bootstrap must be discarded and paired again"
     case .signingFailed: "The native signing operation failed"
     case .hpkeOpenFailed: "Authenticated HPKE open failed"
     case .protectedDataUnavailable: "Protected data is unavailable while the device is locked"

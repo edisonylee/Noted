@@ -61,7 +61,10 @@ public final class IdentityVault: @unchecked Sendable {
   public func inventory() throws -> IdentityInventory {
     try queue.sync {
       let records = try store.loadAll()
-      try records.forEach(validate)
+      // Inventory is the recovery entry point for pre-contract pending
+      // bootstraps. Expose only their identity tombstone candidate; the public
+      // descriptor deliberately omits a metadata-less bootstrap binding.
+      try records.forEach { try validate($0, allowLegacyPendingBootstrap: true) }
       let descriptors = records.map { $0.publicDescriptor() }
       return IdentityInventory(
         pending: descriptors.filter { $0.lifecycle == .pending }.sorted { $0.handle < $1.handle },
@@ -111,8 +114,9 @@ public final class IdentityVault: @unchecked Sendable {
     encapsulatedKey: Data,
     ciphertext: Data,
     receiptId: String,
-    envelopeDigest: Data
-  ) throws -> String {
+    envelopeDigest: Data,
+    metadata: BootstrapMetadataV1
+  ) throws -> StagedBootstrapDescriptor {
     try queue.sync {
       let canonicalHandle = try validatedHandle(handle)
       var record = try store.load(handle: canonicalHandle)
@@ -124,14 +128,34 @@ public final class IdentityVault: @unchecked Sendable {
         throw NotedSecurityError.invalidArguments("invalid receipt binding")
       }
       try UUIDv7Generator.validate(receiptId)
+      try BootstrapContractV1.validate(metadata: metadata)
+      let expectedInfo = try BootstrapContractV1.info(metadata: metadata)
+      let expectedAssociatedData = try BootstrapContractV1.associatedData(metadata: metadata)
+      let expectedEnvelopeDigest = try BootstrapContractV1.envelopeDigest(
+        protocolName: metadata.protocolName,
+        receiptId: receiptId,
+        metadata: metadata,
+        encapsulatedKey: encapsulatedKey,
+        ciphertext: ciphertext)
+      guard metadata.receiptId == receiptId,
+        info == expectedInfo,
+        associatedData == expectedAssociatedData,
+        ciphertext.count == BootstrapContractV1.keyPackageCiphertextByteCount,
+        envelopeDigest == expectedEnvelopeDigest
+      else {
+        throw NotedSecurityError.invalidArguments("invalid bootstrap contract")
+      }
 
       if let existing = record.pendingBootstrap {
         guard existing.receiptId == receiptId,
-          existing.envelopeDigest == envelopeDigest
+          existing.envelopeDigest == envelopeDigest,
+          existing.metadata == Optional(metadata)
         else {
           throw NotedSecurityError.bootstrapReplayMismatch
         }
-        return existing.handle
+        return StagedBootstrapDescriptor(
+          pendingBootstrapHandle: existing.handle,
+          metadata: metadata)
       }
 
       let opened = try AppleCrypto.openAuthenticatedHpke(
@@ -142,14 +166,22 @@ public final class IdentityVault: @unchecked Sendable {
         encapsulatedKey: encapsulatedKey,
         ciphertext: ciphertext,
         exporterContext: nil)
+      try BootstrapContractV1.validateKeyPackage(opened.plaintext, metadata: metadata)
       let pending = try IdentityLifecycleMachine.stage(
         record: &record,
         bootstrapHandle: UUID().uuidString.lowercased(),
         receiptId: receiptId,
         envelopeDigest: envelopeDigest,
-        material: opened.plaintext)
+        material: opened.plaintext,
+        metadata: metadata)
+      try validate(record)
       try store.replace(record)
-      return pending.handle
+      guard let stagedMetadata = pending.metadata else {
+        throw NotedSecurityError.legacyBootstrapRequiresDiscard
+      }
+      return StagedBootstrapDescriptor(
+        pendingBootstrapHandle: pending.handle,
+        metadata: stagedMetadata)
     }
   }
 
@@ -179,7 +211,7 @@ public final class IdentityVault: @unchecked Sendable {
   ) throws -> PublicIdentityDescriptor {
     try queue.sync {
       var record = try store.load(handle: try validatedHandle(identityHandle))
-      try validate(record)
+      try validate(record, allowLegacyPendingBootstrap: true)
       let pendingHandle = try pendingBootstrapHandle.map(validatedHandle)
       try IdentityLifecycleMachine.discardPending(
         record: &record,
@@ -201,7 +233,10 @@ public final class IdentityVault: @unchecked Sendable {
     return handle
   }
 
-  private func validate(_ record: IdentityRecord) throws {
+  private func validate(
+    _ record: IdentityRecord,
+    allowLegacyPendingBootstrap: Bool = false
+  ) throws {
     guard record.version == 1,
       record.handle == record.handle.lowercased(),
       UUID(uuidString: record.handle)?.uuidString.lowercased() == record.handle,
@@ -211,6 +246,8 @@ public final class IdentityVault: @unchecked Sendable {
     else {
       throw NotedSecurityError.identityCorrupted("record shape")
     }
+    try IdentityBootstrapValidator.validate(
+      record, allowLegacyPendingBootstrap: allowLegacyPendingBootstrap)
     switch record.lifecycle {
     case .pending:
       guard record.signingKeyRepresentation != nil,
@@ -240,6 +277,47 @@ public final class IdentityVault: @unchecked Sendable {
         throw NotedSecurityError.identityCorrupted("discard tombstone contains secret material")
       }
     }
+  }
+}
+
+/// Keeps the one legacy recovery exception narrow and independently testable:
+/// only a metadata-less bootstrap on a still-pending identity may be listed so
+/// the caller can discard the entire identity. Active custody and every
+/// metadata-bearing bootstrap always use the complete authenticated contract.
+enum IdentityBootstrapValidator {
+  static func validate(
+    _ record: IdentityRecord,
+    allowLegacyPendingBootstrap: Bool = false
+  ) throws {
+    if let pending = record.pendingBootstrap {
+      try validate(
+        pending,
+        deviceId: record.deviceId,
+        allowLegacyMetadata: allowLegacyPendingBootstrap && record.lifecycle == .pending)
+    }
+    if let active = record.activeBootstrap {
+      try validate(active, deviceId: record.deviceId, allowLegacyMetadata: false)
+    }
+  }
+
+  private static func validate(
+    _ bootstrap: StagedBootstrap,
+    deviceId: String,
+    allowLegacyMetadata: Bool
+  ) throws {
+    guard let metadata = bootstrap.metadata else {
+      if allowLegacyMetadata { return }
+      throw NotedSecurityError.legacyBootstrapRequiresDiscard
+    }
+    guard bootstrap.envelopeDigest.count == 32,
+      bootstrap.receiptId == metadata.receiptId,
+      metadata.deviceId == deviceId
+    else {
+      throw NotedSecurityError.identityCorrupted("bootstrap binding")
+    }
+    try BootstrapContractV1.validate(metadata: metadata)
+    try BootstrapContractV1.validateKeyPackage(
+      bootstrap.material, metadata: metadata)
   }
 }
 

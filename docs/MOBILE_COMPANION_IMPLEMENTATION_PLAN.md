@@ -2,13 +2,13 @@
 
 Status: M0 direction accepted; M1 checkpoint complete; M2 native shell and
 local-only Notes proven on physical hardware; the M3 portability implementation
-checkpoint is complete; the M4 sanitized-fixture implementation checkpoint is
-in place, but its production and personal-data gates remain closed; no sync has
-shipped
+checkpoint is complete; the M4 authenticated fixture bootstrap and activation
+checkpoint is complete, but encrypted record transport, production, and
+personal-data gates remain closed; no sync has shipped
 
 Date: 2026-08-14
 
-Last updated: 2026-08-16
+Last updated: 2026-08-17
 
 Scope: iPhone first, while preserving macOS as the primary capture and intelligence platform
 
@@ -1440,8 +1440,9 @@ Rollback:
 **Purpose:** prove one complete path—migration, local replica, mobile UI, offline
 edit, conflict, and direct sync—before expanding record families.
 
-Status: sanitized-fixture implementation checkpoint complete; milestone gate not
-passed. The branch now contains the portable local Notes workspace and mobile UI,
+Status: authenticated sanitized-fixture bootstrap and activation checkpoint
+complete; milestone gate not passed. The branch now contains the portable local
+Notes workspace and mobile UI,
 including Inbox, Needs filing, spaces/folders, search, create/edit, filing/undo,
 Trash/restore, read-only external-authority records, conflict preservation and
 resolution choices. Stable `noted://library/<library-id>/notes/<record-id>` deep
@@ -1468,49 +1469,69 @@ native plugin. Secure Enclave P-256 signing, ThisDeviceOnly Keychain X25519 and
 bootstrap storage, and CryptoKit authenticated HPKE expose only public keys and
 opaque handles to Rust. The HPKE sender operation is atomic: one sender context
 produces its encapsulated key, ciphertext, and exporter; signatures and digests
-bind the complete envelope. The SAS uses the frozen RFC 5869 HKDF-SHA256
-construction, and Rust/Swift golden vectors cover canonical transcripts,
-P1363 signatures, RFC 9180 authenticated HPKE, exporter bytes, envelope digests,
-and SAS output. The plugin has no JavaScript crypto commands and its fixture
-mode requires the exact debug/simulator/runtime gate.
+bind the complete envelope. The authenticated fixed-size bootstrap package now
+delivers the library key directly into native-only custody and binds the exact
+pairing/sync protocol versions, receipt, library, device, default unknown scope,
+Notes capabilities, authority/purge/key generations, record cipher suite,
+durable-sync SPKI pin, and transcript digest. Both Swift and Rust reject
+wrong-device or byte-different recovery metadata before mutation. The SAS uses
+the frozen RFC 5869 HKDF-SHA256 construction, and Rust/Swift golden vectors cover
+canonical transcripts, P1363 signatures, RFC 9180 authenticated HPKE, exporter
+bytes, envelope digests, bootstrap metadata, and SAS output. The plugin has no
+JavaScript crypto commands and its fixture mode requires the exact
+debug/simulator/runtime gate.
 
 The local replica also has a crash-safe protected-data and pairing boundary. It
 closes SQLite behind the same operation mutex, returns a typed locked error to
 every command, reopens through the full recovery/migration/verifier path, and
-uses in-memory SQLite temporary storage. The ordered v4 migration durably stores
-only exact protocol bytes, public identity bindings, and opaque native handles;
-startup rejects Keychain/SQLite identity divergence and recovers interrupted
-activation or cancellation without inventing state. Native callbacks enforce
-the lifecycle epoch, and existing plus newly created SQLite, WAL, SHM, and
-recovery files are hardened to complete protection and excluded from backup
-before the store is published ready. Source-owned iOS configuration pins iOS 17
-and declares only the local-network/Bonjour purpose required by direct sync.
+uses in-memory SQLite temporary storage. The ordered v5 migration durably stores
+only exact protocol bytes, authenticated public metadata, public identity
+bindings, and opaque native handles. Pairing activation is one immediate SQLite
+transaction that adopts local staging records without changing their public
+IDs, enrolls the replica, mirrors the authenticated activation, and advances the
+exact active checkpoint. Exact replay is idempotent; byte-different replay,
+partial activation, legacy active-v4 state, and Keychain/SQLite divergence fail
+closed. A rejection is durably marked cancellation-pending before native cleanup,
+so restart can only finish the discard and cannot resurrect confirmation.
+Native callbacks enforce the lifecycle epoch, and existing plus newly created
+SQLite, WAL, SHM, and recovery files are hardened to complete protection and
+excluded from backup before the store is published ready. Source-owned iOS
+configuration pins iOS 17 and declares only the local-network/Bonjour purpose
+required by direct sync.
 
-On the Mac side, a durable fixture authority now persists invitations, receipts,
-device enrollment, replay evidence, counters, revocation, authority generation,
-and checkpoints. The six-route exact-wire coordinator atomically prepares,
-signs, serializes, and finalizes responses, including byte-identical replay
-after restart. A strict pinned-TLS 1.3 client/server adapter enforces the exact
-P-256 SPKI pin, disables 0-RTT and resumption, and bounds hosts, origins, bodies,
-headers, time, and concurrency. It is deliberately loopback-only test
-infrastructure: Bonjour, manual connect, product LAN listeners, and the phone's
-network driver do not exist yet. Immutable replay evidence is retained for
-audit; only the trusted five-minute window counts toward replay admission, so
-the protocol is not permanently locked after the cap, but on-disk evidence is
-not yet compacted or size-bounded.
+On the Mac side, an isolated fixture authority now provisions a create-new,
+symlink-safe, mode-0600 database containing generated sanitized Note, Category,
+and Folder data only. Its immutable marker and digests fail closed on tampering;
+reopen is read-only and restart-stable. One serialized runtime owns pairing,
+sync, and revocation and persists invitations, receipts, device enrollment,
+replay evidence, counters, authority generation, and checkpoints. The six-route
+exact-wire coordinator atomically prepares, signs, serializes, and finalizes
+responses, including byte-identical replay after restart. A strict pinned-TLS
+1.3 client/server adapter enforces the exact P-256 SPKI pin, disables 0-RTT and
+resumption, and bounds hosts, origins, bodies, headers, time, and concurrency.
+It is deliberately loopback-only test infrastructure: it has no personal-data
+constructor, product listener, Bonjour/manual-connect driver, or Tauri command
+surface. Immutable replay evidence is retained for audit; only the trusted
+five-minute window counts toward replay admission, so the protocol is not
+permanently locked after the cap, but on-disk evidence is not yet compacted or
+size-bounded.
 
 The following work still blocks the M4 gate and any personal-data sync:
 
-- an authenticated pairing and sync network driver around the pinned-TLS
+- a native authenticated pairing and sync network driver around the pinned-TLS
   adapters, including Bonjour discovery and manual connect without trusting
-  discovery metadata or passing protocol messages through JavaScript;
-- a complete bootstrap package that transfers native-only library key material
-  plus validated public library/default-scope/authority/purge metadata, then
-  atomically adopts the staging replica and activates sync enrollment;
-- native record encryption/decryption and one end-to-end sanitized Notes
-  bootstrap plus incremental push/pull over the product transport; the current
-  high-level pairing commands stop after identity activation and do not enroll
-  the mobile replica or move Notes through the channel;
+  discovery metadata or passing protocol messages through JavaScript. The
+  existing fixture command that accepts claimed SPKI evidence from its caller is
+  a harness only and cannot satisfy this gate;
+- native record encryption/decryption, real fixture-author signatures, an exact
+  signed request journal, bounded ciphertext bootstrap staging, and one
+  end-to-end sanitized Notes bootstrap plus incremental push/pull over that
+  product transport. Provisioned fixture records are not yet encoded with the
+  advertised record AEAD/signature contract and therefore cannot count as an
+  end-to-end proof;
+- an authenticated phone-side revocation transition that disables native key
+  use, retires unsafe outbox work, preserves the chosen offline export policy,
+  and permits a clean re-enrollment;
 - production Mac key custody/signing and structural enforcement that pairing,
   revocation, and sync share one authority instance;
 - external review of the implemented pairing, cryptography, transport, and
@@ -1524,6 +1545,13 @@ The following work still blocks the M4 gate and any personal-data sync:
 No hosted provider has been selected or provisioned, and no hosted-sync spend is
 authorized by this checkpoint. Provider evaluation begins only after the full
 M4 gate below passes.
+
+Checkpoint verification includes the full 43-test mobile-store suite, 40 mobile
+workspace/apply and pairing-client/runtime tests, 75 protocol/direct-sync and
+fixture-authority tests, 22 Swift native-security tests, shared Rust/Swift golden
+vectors, frontend/iOS contract checks, and Rust library compilation for both the
+iPhone device and simulator targets. These prove the bounded fixture contracts;
+they do not substitute for the physical-device and external-review gates above.
 
 Deliverables:
 

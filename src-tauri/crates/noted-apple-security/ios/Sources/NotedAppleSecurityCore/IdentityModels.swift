@@ -27,6 +27,7 @@ public struct BootstrapRecoveryDescriptor: Codable, Equatable, Sendable {
   public let pendingBootstrapHandle: String
   public let receiptId: String
   public let envelopeDigestBase64: String
+  public let metadata: BootstrapMetadataV1
 }
 
 public struct IdentityInventory: Codable, Equatable, Sendable {
@@ -40,6 +41,9 @@ struct StagedBootstrap: Codable, Equatable, Sendable {
   let receiptId: String
   let envelopeDigest: Data
   let material: Data
+  /// Optional only so the pre-contract fixture record can be decoded and
+  /// classified for explicit discard. New staging never writes nil.
+  let metadata: BootstrapMetadataV1?
 }
 
 struct IdentityRecord: Codable, Equatable, Sendable {
@@ -64,17 +68,25 @@ enum IdentityLifecycleMachine {
     bootstrapHandle: String,
     receiptId: String,
     envelopeDigest: Data,
-    material: Data
+    material: Data,
+    metadata: BootstrapMetadataV1
   ) throws -> StagedBootstrap {
     guard record.lifecycle == .pending else {
       throw NotedSecurityError.invalidIdentityState(
         expected: IdentityLifecycle.pending.rawValue,
         actual: record.lifecycle.rawValue)
     }
+    guard metadata.deviceId == record.deviceId else {
+      throw NotedSecurityError.invalidArguments("bootstrap device binding")
+    }
     if let existing = record.pendingBootstrap {
+      guard existing.metadata != nil else {
+        throw NotedSecurityError.legacyBootstrapRequiresDiscard
+      }
       guard existing.receiptId == receiptId,
         existing.envelopeDigest == envelopeDigest,
-        existing.material == material
+        existing.material == material,
+        existing.metadata == metadata
       else {
         throw NotedSecurityError.bootstrapReplayMismatch
       }
@@ -84,7 +96,8 @@ enum IdentityLifecycleMachine {
       handle: bootstrapHandle,
       receiptId: receiptId,
       envelopeDigest: envelopeDigest,
-      material: material)
+      material: material,
+      metadata: metadata)
     record.pendingBootstrap = pending
     return pending
   }
@@ -156,7 +169,9 @@ enum IdentityLifecycleMachine {
 
 extension IdentityRecord {
   func publicDescriptor() -> PublicIdentityDescriptor {
-    let bootstrap = pendingBootstrap ?? activeBootstrap
+    let bootstrap = (pendingBootstrap ?? activeBootstrap).flatMap { staged in
+      staged.metadata.map { (staged, $0) }
+    }
     return PublicIdentityDescriptor(
       handle: handle,
       deviceId: deviceId,
@@ -164,11 +179,12 @@ extension IdentityRecord {
       hpkePublicKeyBase64: agreementPublicKey.base64EncodedString(),
       lifecycle: lifecycle,
       signingKeyBacking: signingKeyBacking,
-      bootstrapRecovery: bootstrap.map {
+      bootstrapRecovery: bootstrap.map { staged, metadata in
         BootstrapRecoveryDescriptor(
-          pendingBootstrapHandle: $0.handle,
-          receiptId: $0.receiptId,
-          envelopeDigestBase64: $0.envelopeDigest.base64EncodedString())
+          pendingBootstrapHandle: staged.handle,
+          receiptId: staged.receiptId,
+          envelopeDigestBase64: staged.envelopeDigest.base64EncodedString(),
+          metadata: metadata)
       })
   }
 }

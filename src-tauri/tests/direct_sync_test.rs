@@ -8,10 +8,12 @@ use tauri_app_lib::direct_sync::*;
 use tauri_app_lib::pairing_protocol::{
     canonical_client_finish_unsigned, canonical_client_hello_unsigned,
     canonical_invitation_unsigned, invitation_nonce_proof, AuthenticatedHpkeEnvelope,
-    AuthenticatedHpkeSeal, ClientFinish, ClientHello, Environment, FreshValuePurpose, Invitation,
-    KindCapability, LibraryDataClass, LocalHpkeKey, LocalSigningKey, PairingCrypto, PairingMachine,
-    PairingPolicy, PairingRole, RecordKind as PairingRecordKind, ServerHello, TransportEvidence,
-    HPKE_ENCAPSULATED_KEY_BYTES, HPKE_EXPORTER_SECRET_BYTES, PAIRING_PROTOCOL, PAIRING_SUITE,
+    AuthenticatedHpkeSeal, BootstrapMetadataV1, ClientFinish, ClientHello, Environment,
+    FreshValuePurpose, Invitation, KindCapability, LibraryDataClass, LocalHpkeKey, LocalSigningKey,
+    PairingCrypto, PairingMachine, PairingPolicy, PairingRole, RecordKind as PairingRecordKind,
+    ServerHello, TransportEvidence, BOOTSTRAP_KEY_PACKAGE_BYTES,
+    BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES, HPKE_ENCAPSULATED_KEY_BYTES,
+    HPKE_EXPORTER_SECRET_BYTES, PAIRING_PROTOCOL, PAIRING_SUITE,
 };
 use tauri_app_lib::sync_protocol::{
     AuthorityState, MutationDraft, ProtocolCapabilities, ReceiptDisposition, RecordKindCapability,
@@ -134,6 +136,44 @@ impl PairingCrypto for FixturePairingCrypto {
             },
             exporter_secret: zeroize::Zeroizing::new(exporter_secret),
         })
+    }
+
+    fn seal_bootstrap_key_package(
+        &self,
+        sender_key: LocalHpkeKey,
+        recipient_public_key: &[u8],
+        info: &[u8],
+        associated_data: &[u8],
+        metadata: &BootstrapMetadataV1,
+        exporter_context: &[u8],
+    ) -> Result<AuthenticatedHpkeSeal, ()> {
+        let mut package = Vec::with_capacity(BOOTSTRAP_KEY_PACKAGE_BYTES);
+        package.extend_from_slice(b"NBK1");
+        package.extend_from_slice(&1_u32.to_be_bytes());
+        package.extend_from_slice(&metadata.key_epoch.to_be_bytes());
+        package.extend_from_slice(&[0x5a; 32]);
+        let mut seal = self.seal_authenticated(
+            sender_key,
+            recipient_public_key,
+            info,
+            associated_data,
+            &package,
+            exporter_context,
+        )?;
+        let tag = sha256(
+            [
+                b"noted.direct-sync.fixture/bootstrap-tag".as_slice(),
+                seal.envelope.ciphertext.as_slice(),
+                associated_data,
+            ]
+            .concat()
+            .as_slice(),
+        );
+        seal.envelope.ciphertext.extend_from_slice(&tag);
+        seal.envelope
+            .ciphertext
+            .truncate(BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES);
+        Ok(seal)
     }
 
     fn fresh_bytes(&self, purpose: FreshValuePurpose, length: usize) -> Result<Vec<u8>, ()> {

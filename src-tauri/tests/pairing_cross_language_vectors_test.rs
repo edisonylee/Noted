@@ -2,6 +2,8 @@
 
 #[path = "../src/pairing_protocol.rs"]
 mod pairing_protocol;
+#[path = "../src/portable.rs"]
+mod portable;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use hpke::{
@@ -10,14 +12,16 @@ use hpke::{
 };
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 use pairing_protocol::{
-    bootstrap_hpke_exporter_context, bootstrap_hpke_info, canonical_authenticated_hpke_envelope,
+    bootstrap_associated_data, bootstrap_envelope_digest, bootstrap_hpke_exporter_context,
+    bootstrap_hpke_info, canonical_authenticated_hpke_envelope, canonical_bootstrap_metadata,
     canonical_challenge_plaintext, canonical_receipt, challenge_hpke_exporter_context,
     challenge_hpke_info, derive_verification_code, pairing_transcript_digest,
-    AuthenticatedHpkeEnvelope, EnrollmentReceipt, Environment, KindCapability, PairingRole,
-    RecordKind, PAIRING_PROTOCOL, PAIRING_SUITE,
+    sanitized_fixture_key_package, AuthenticatedHpkeEnvelope, BootstrapEnvelope,
+    BootstrapMetadataV1, EnrollmentReceipt, Environment, KindCapability, LibraryDataClass,
+    PairingRole, RecordKind, ScopeClass, BOOTSTRAP_KEY_PACKAGE_BYTES, PAIRING_PROTOCOL,
+    PAIRING_SUITE, RECORD_CIPHER_SUITE,
 };
 use rand_core::{CryptoRng, RngCore};
-use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -194,6 +198,90 @@ fn canonical_material(root: &Value) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     (receipt_proposal_bytes, transcript_bytes, transcript_digest)
 }
 
+fn bootstrap_metadata_from_vector(
+    root: &Value,
+    receipt: &EnrollmentReceipt,
+) -> BootstrapMetadataV1 {
+    let contract = field(field(root, "cross_language"), "bootstrap_contract");
+    let metadata = field(contract, "metadata");
+    let granted_scopes = field(metadata, "granted_scopes")
+        .as_array()
+        .expect("bootstrap granted_scopes must be an array")
+        .iter()
+        .map(|value| record_kind(value.as_str().expect("bootstrap scope must be text")))
+        .collect::<BTreeSet<_>>();
+    let capabilities = field(metadata, "capabilities")
+        .as_object()
+        .expect("bootstrap capabilities must be an object")
+        .iter()
+        .map(|(kind, value)| {
+            (
+                record_kind(kind),
+                KindCapability {
+                    reader_version: field(value, "reader_version")
+                        .as_u64()
+                        .expect("bootstrap reader version must be unsigned")
+                        as u32,
+                    writer_version: field(value, "writer_version").as_u64().map(|v| v as u32),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let parsed = BootstrapMetadataV1 {
+        version: field(metadata, "version")
+            .as_u64()
+            .expect("metadata version") as u32,
+        protocol: text(metadata, "protocol"),
+        suite: text(metadata, "suite"),
+        sync_protocol_version: field(metadata, "sync_protocol_version")
+            .as_u64()
+            .expect("sync protocol version") as u32,
+        environment: match text(metadata, "environment").as_str() {
+            "development" => Environment::Development,
+            "production" => Environment::Production,
+            value => panic!("unknown bootstrap environment {value}"),
+        },
+        library_data_class: match text(metadata, "library_data_class").as_str() {
+            "sanitized_fixture" => LibraryDataClass::SanitizedFixture,
+            "personal" => LibraryDataClass::Personal,
+            value => panic!("unknown bootstrap library data class {value}"),
+        },
+        receipt_id: text(metadata, "receipt_id"),
+        library_id: text(metadata, "library_id"),
+        device_id: text(metadata, "device_id"),
+        authority_generation: field(metadata, "authority_generation")
+            .as_u64()
+            .expect("authority generation"),
+        purge_generation: field(metadata, "purge_generation")
+            .as_u64()
+            .expect("purge generation"),
+        key_epoch: field(metadata, "key_epoch").as_u64().expect("key epoch"),
+        default_scope_id: text(metadata, "default_scope_id"),
+        default_scope_class: match text(metadata, "default_scope_class").as_str() {
+            "unknown" => ScopeClass::Unknown,
+            "work" => ScopeClass::Work,
+            "personal" => ScopeClass::Personal,
+            value => panic!("unknown default scope class {value}"),
+        },
+        granted_scopes,
+        capabilities,
+        record_cipher_suite: text(metadata, "record_cipher_suite"),
+        durable_sync_spki_sha256: hex_field(metadata, "durable_sync_spki_sha256_hex"),
+        transcript_digest: hex_field(metadata, "transcript_digest_hex"),
+    };
+    assert_eq!(parsed.protocol, text(root, "protocol"));
+    assert_eq!(parsed.suite, text(root, "suite"));
+    assert_eq!(parsed.receipt_id, receipt.receipt_id);
+    assert_eq!(parsed.library_id, receipt.library_id);
+    assert_eq!(parsed.device_id, receipt.device_id);
+    assert_eq!(parsed.authority_generation, receipt.authority_generation);
+    assert_eq!(parsed.granted_scopes, receipt.granted_scopes);
+    assert_eq!(parsed.capabilities, receipt.capabilities);
+    assert_eq!(parsed.transcript_digest, receipt.transcript_digest);
+    assert_eq!(parsed.record_cipher_suite, RECORD_CIPHER_SUITE);
+    parsed
+}
+
 /// Known-answer-test input only. Implementing `CryptoRng` is deliberately
 /// confined to this integration-test binary so `setup_sender` can reproduce a
 /// published artifact byte for byte. Production code must always use fresh OS
@@ -365,16 +453,6 @@ fn canonical_transcript_receipt_and_sas_match_the_shared_vector() {
 
 #[test]
 fn noted_challenge_and_bootstrap_hpke_boundaries_match_the_shared_vector() {
-    #[derive(Serialize)]
-    struct FixtureBootstrap<'a> {
-        fixture_marker: &'static str,
-        receipt_id: &'a str,
-        library_id: &'a str,
-        device_id: &'a str,
-        authority_generation: u64,
-        scopes: &'a BTreeSet<RecordKind>,
-    }
-
     let root = fixture();
     let cross_language = field(&root, "cross_language");
     let noted_hpke = field(cross_language, "noted_hpke");
@@ -382,7 +460,6 @@ fn noted_challenge_and_bootstrap_hpke_boundaries_match_the_shared_vector() {
     let bootstrap_vector = field(noted_hpke, "bootstrap");
     let (_, _, transcript_digest) = canonical_material(&root);
     let receipt = receipt_from_vector(&root, transcript_digest.clone());
-    let receipt_bytes = canonical_receipt(&receipt);
 
     let challenge = reproduce_protocol_seal(
         noted_hpke,
@@ -393,22 +470,17 @@ fn noted_challenge_and_bootstrap_hpke_boundaries_match_the_shared_vector() {
         &challenge_hpke_exporter_context(&receipt),
     );
 
-    let bootstrap_plaintext = serde_json::to_vec(&FixtureBootstrap {
-        fixture_marker: "sanitized-fixtures-only",
-        receipt_id: &receipt.receipt_id,
-        library_id: &receipt.library_id,
-        device_id: &receipt.device_id,
-        authority_generation: receipt.authority_generation,
-        scopes: &receipt.granted_scopes,
-    })
-    .expect("sanitized bootstrap fixture must serialize");
+    let metadata = bootstrap_metadata_from_vector(&root, &receipt);
+    let metadata_canonical = canonical_bootstrap_metadata(&metadata);
+    let bootstrap_plaintext = sanitized_fixture_key_package(metadata.key_epoch);
+    assert_eq!(bootstrap_plaintext.len(), BOOTSTRAP_KEY_PACKAGE_BYTES);
     let bootstrap = reproduce_protocol_seal(
         noted_hpke,
         bootstrap_vector,
-        &bootstrap_hpke_info(&receipt),
-        &receipt_bytes,
-        &bootstrap_plaintext,
-        &bootstrap_hpke_exporter_context(&receipt),
+        &bootstrap_hpke_info(&metadata),
+        &bootstrap_associated_data(&metadata),
+        bootstrap_plaintext.as_slice(),
+        &bootstrap_hpke_exporter_context(&metadata),
     );
 
     for (vector, seal) in [
@@ -433,9 +505,30 @@ fn noted_challenge_and_bootstrap_hpke_boundaries_match_the_shared_vector() {
             encode_hex(&envelope_digest)
         );
     }
+    let contract = field(cross_language, "bootstrap_contract");
     assert_eq!(
-        text(bootstrap_vector, "plaintext_base64"),
-        encode_base64(&bootstrap_plaintext)
+        text(contract, "metadata_canonical_base64"),
+        encode_base64(&metadata_canonical)
+    );
+    assert_eq!(
+        text(contract, "metadata_digest_hex"),
+        encode_hex(&sha256(&metadata_canonical))
+    );
+    let mut envelope = BootstrapEnvelope {
+        protocol: PAIRING_PROTOCOL.to_owned(),
+        receipt_id: receipt.receipt_id.clone(),
+        metadata,
+        sealed_key_package: bootstrap.envelope.clone(),
+        envelope_digest: Vec::new(),
+    };
+    envelope.envelope_digest = bootstrap_envelope_digest(&envelope);
+    assert_eq!(
+        text(bootstrap_vector, "key_package_sha256_hex"),
+        encode_hex(&sha256(bootstrap_plaintext.as_slice()))
+    );
+    assert_eq!(
+        text(bootstrap_vector, "bootstrap_envelope_digest_hex"),
+        encode_hex(&envelope.envelope_digest)
     );
 }
 

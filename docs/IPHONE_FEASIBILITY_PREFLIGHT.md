@@ -1,6 +1,6 @@
 # iPhone feasibility preflight
 
-Status: feasibility shell built, signed, installed, and launched on physical hardware
+Status: native shell and first local Notes slice verified on physical hardware
 
 Date checked: 2026-08-16
 
@@ -9,13 +9,17 @@ and [the mobile implementation plan](MOBILE_COMPANION_IMPLEMENTATION_PLAN.md).
 
 ## Outcome
 
-The native feasibility shell compiles, installs, launches, and completes its
-Rust-to-webview startup health check in an iPhone 17 simulator. The same shell
-was signed with the configured personal development team, installed on an
-iPhone 15 Pro, launched through CoreDevice, and observed as a live process. The
-iOS build has its own frontend entry, Tauri config, capability manifest, Rust
-entry point, and command registry. macOS-only services and native dependencies
-are excluded at compile time instead of being hidden at runtime.
+The native app compiles, installs, launches, and completes its Rust-to-webview
+startup health check in an iPhone 17 simulator. The signed app was installed on
+an iPhone 15 Pro and launched through CoreDevice. Its first real product slice
+provides local note creation, editing, tombstoned deletion, and search backed by
+an isolated WAL-mode SQLite database in the iOS application-data directory.
+File-backed store tests prove that saved notes survive a database close and
+reopen.
+
+The iOS build has its own frontend entry, Tauri config, capability manifest,
+Rust entry point, and command registry. macOS-only services and native
+dependencies are excluded at compile time instead of being hidden at runtime.
 
 ## Verified environment
 
@@ -32,8 +36,8 @@ are excluded at compile time instead of being hidden at runtime.
 | Installed Rust targets | macOS, iOS device, Apple Silicon simulator, Intel simulator |
 | CocoaPods | 1.17.0 |
 | Valid code-signing identity | Apple Development certificate for the configured personal team |
-| Simulator proof | iPhone 17: build, install, launch, and `mobile_health` passed |
-| Physical-device proof | iPhone 15 Pro: signed build, install, launch, and live-process check passed |
+| Simulator proof | iPhone 17: local Notes UI rendered; signed-boundary and store tests passed |
+| Physical-device proof | iPhone 15 Pro: signed Notes build installed and launched |
 
 Evidence commands:
 
@@ -74,9 +78,13 @@ compile and bundle:
 - the dormant LAN phone server and its broad historical dispatcher;
 - the legacy mobile shell, which is gated by `phoneLan` and includes Ask.
 
-The current mobile shell exposes only `mobile_health`. Mobile-local database
-migration/smoke commands, Keychain/Data Protection probes, and the first Notes
-vertical-slice commands remain intentionally unimplemented.
+The current iPhone registry exposes `mobile_health` plus five local Notes
+commands: list/search, create, update, and delete. The Notes database is isolated
+from the desktop database and intentionally excludes sqlite-vec. Cross-device
+record identity and synchronization are not implied by this local slice.
+
+Keychain/Data Protection probes, a shared portable record schema, migration
+smoke tests against that schema, and synchronization remain unimplemented.
 
 ## Completed signing setup
 
@@ -95,9 +103,9 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
 brew install cocoapods
 ```
 
-The simulator and first physical-device gates are open. The remaining M2 work is
-the persistence, Keychain/Data Protection, lifecycle, accessibility, and
-capability-isolation probe set described in the implementation plan.
+The simulator, first physical-device, and basic local-persistence gates are open.
+The remaining M2 work is the Keychain/Data Protection, lifecycle, accessibility,
+and capability-isolation probe set described in the implementation plan.
 
 ## Reproducing the simulator proof
 

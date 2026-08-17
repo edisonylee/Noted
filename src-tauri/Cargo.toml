@@ -22,12 +22,13 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 hound = "3"
 
 [dependencies]
-# The iOS feasibility shell intentionally keeps this common dependency set
-# minimal. Desktop-only services and native libraries live in the target table
-# below so they cannot leak into an iPhone binary.
+# The iOS app keeps this common dependency set minimal. Desktop-only services
+# and native libraries live in the target table below so they cannot leak into
+# an iPhone binary. rusqlite provides the isolated on-device notes store.
 tauri = { version = "2", features = ["macos-private-api", "protocol-asset"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 tauri-plugin-opener = "2"
@@ -35,8 +36,7 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 printpdf = "0.7"
 
-# Local DB + vector search (pinned compatible combo — see sqlite-vec rust docs)
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+# Desktop vector search (pinned compatible combo — see sqlite-vec rust docs)
 sqlite-vec = "=0.1.9"
 zerocopy = "0.7"
 

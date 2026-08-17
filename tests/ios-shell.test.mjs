@@ -8,13 +8,21 @@ async function read(relativePath) {
   return readFile(new URL(relativePath, root), "utf8");
 }
 
-test("iOS backend exports only the feasibility health command", async () => {
+test("iOS backend exports only local notes and health commands", async () => {
   const entry = await read("src-tauri/src/lib.rs");
   const mobile = await read("src-tauri/src/mobile.rs");
 
   assert.match(entry, /cfg\(not\(target_os = "ios"\)\)\]\s*include!\("desktop\.rs"\)/);
   assert.match(entry, /cfg\(target_os = "ios"\)\]\s*mod mobile/);
-  assert.match(mobile, /generate_handler!\[mobile_health\]/);
+  for (const command of [
+    "mobile_health",
+    "list_mobile_notes",
+    "create_mobile_note",
+    "update_mobile_note",
+    "delete_mobile_note",
+  ]) {
+    assert.match(mobile, new RegExp(`\\b${command}\\b`));
+  }
 
   for (const forbidden of [
     "meeting_start",
@@ -25,6 +33,16 @@ test("iOS backend exports only the feasibility health command", async () => {
   ]) {
     assert.equal(mobile.includes(forbidden), false, `${forbidden} leaked into the iOS registry`);
   }
+});
+
+test("mobile notes use an isolated on-device SQLite store", async () => {
+  const entry = await read("src-tauri/src/mobile.rs");
+  const store = await read("src-tauri/src/mobile_store.rs");
+
+  assert.match(entry, /noted-mobile\.sqlite3/);
+  assert.match(store, /CREATE TABLE IF NOT EXISTS mobile_notes/);
+  assert.match(store, /PRAGMA journal_mode = WAL/);
+  assert.equal(store.includes("sqlite_vec"), false);
 });
 
 test("desktop native dependencies are target-gated away from iOS", async () => {
@@ -57,7 +75,7 @@ test("mobile frontend bundle excludes desktop command surfaces", async () => {
   const assetsUrl = new URL("dist-ios/assets/", root);
   const assets = await readdir(assetsUrl);
   const scripts = assets.filter((name) => name.endsWith(".js"));
-  assert.equal(scripts.length, 1, "the feasibility shell should emit one JavaScript entry");
+  assert.equal(scripts.length, 1, "the iPhone app should emit one isolated JavaScript entry");
 
   const scriptUrl = new URL(scripts[0], assetsUrl);
   const script = await readFile(scriptUrl, "utf8");
@@ -70,6 +88,7 @@ test("mobile frontend bundle excludes desktop command surfaces", async () => {
     "get_provider_settings",
     "agent_context_pending",
     "Ollama",
+    "Your companion is taking shape",
   ]) {
     assert.equal(script.includes(forbidden), false, `${forbidden} leaked into the mobile assets`);
   }

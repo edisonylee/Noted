@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "mobile",
-  "description": "Minimal capability surface for the native iPhone feasibility shell",
+  "description": "Isolated capability surface for the native iPhone companion",
   "platforms": ["iOS"],
   "windows": ["main"],
   "permissions": ["core:default"]

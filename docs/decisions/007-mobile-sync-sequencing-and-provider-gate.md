@@ -6,10 +6,17 @@ Date: 2026-08-16
 
 Owners: product, mobile, data architecture, security, and hosted services
 
-Implementation status: direct sync and hosted relay are not implemented. The
-native iPhone shell and local-only Notes prototype are verified on physical
-hardware; portable records and synchronization begin at mobile milestones M3
-and M4.
+Implementation status: M3 portable Notes records are implemented. M4 now has a
+sanitized-fixture Notes UI/store, deterministic convergence application logic,
+and the logical pairing/direct-sync cores. The narrow router, scope and replay
+rules, TLS/pin evidence, bootstrap/push/pull/checkpoint semantics, and local
+conflict preservation are tested without a network. Bootstrap is paged against
+one authenticated checkpoint, accepted transactions are guaranteed pullable,
+and revocation is serialized with in-flight fixture requests. Production
+cryptography, the TLS/HTTP adapter, durable Mac authority/device registry,
+external review, and combined physical Mac-to-iPhone validation are not
+complete. Direct sync and the hosted relay therefore have not shipped, and the
+M4 provider-evaluation gate has not opened.
 
 ## Context
 
@@ -110,6 +117,13 @@ Provider evaluation begins only after the M4 Notes gate proves that:
 - pairing, revocation, schema negotiation, and encrypted bootstrap pass their
   threat tests; and
 - the transport adapter contract is stable enough to implement twice.
+
+The current sanitized-fixture checkpoint is evidence toward those conditions,
+not a pass. It proves the logical store, convergence, pairing state-machine, and
+narrow routing contracts in deterministic tests. It does not prove production
+key custody or cryptographic interoperability, a pinned TLS 1.3 connection, a
+durable Mac authority, real-device background/lifecycle behavior, or an external
+security review.
 
 Hosted provisioning and spend belong to M7, when off-LAN access, clean-device
 recovery, or an external tester cohort provides a concrete need. Paying for a

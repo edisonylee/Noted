@@ -2,12 +2,13 @@
 
 Status: M0 direction accepted; M1 checkpoint complete; M2 native shell and
 local-only Notes proven on physical hardware; the M3 portability implementation
-checkpoint is complete; M4 sanitized-fixture protocol work is underway; no sync
-has shipped
+checkpoint is complete; the M4 sanitized-fixture implementation checkpoint is
+in place, but its production and personal-data gates remain closed; no sync has
+shipped
 
 Date: 2026-08-14
 
-Last updated: 2026-08-16
+Last updated: 2026-08-17
 
 Scope: iPhone first, while preserving macOS as the primary capture and intelligence platform
 
@@ -1434,6 +1435,48 @@ Rollback:
 
 **Purpose:** prove one complete path—migration, local replica, mobile UI, offline
 edit, conflict, and direct sync—before expanding record families.
+
+Status: sanitized-fixture implementation checkpoint complete; milestone gate not
+passed. The branch now contains the portable local Notes workspace and mobile UI,
+including Inbox, Needs filing, spaces/folders, search, create/edit, filing/undo,
+Trash/restore, read-only external-authority records, conflict preservation and
+resolution choices. Stable `noted://library/<library-id>/notes/<record-id>` deep
+links use public UUIDv7 identities. The local store applies validated logical
+bootstrap and incremental transactions, retains accepted heads and phone working
+branches, quarantines invalid inbox work, and is covered by deterministic
+convergence tests for replay, sequence gaps, payload rebinding, interruption,
+restart, fast-forward, conflicts, lifecycle changes, and authority/purge
+generation mismatches.
+
+The pairing state machine and narrow direct-sync router contract are also
+implemented for generated or sanitized fixtures. They enforce the accepted
+transcript, explicit Notes scopes, invitation and receipt replay rules, bounded
+parsing, TLS 1.3/no-0-RTT evidence, SPKI pin binding, signed request/response
+boundaries, checkpoint-bound paged bootstrap, byte- and member-bounded atomic
+transactions, serialized revocation, and exactly the allowed versioned sync
+operations. The phone outbox uses the same encrypted-byte ceiling, including
+AEAD overhead, so locally accepted batches remain sendable. These are logical
+cores and test seams, not a production network service. Fixture cryptography is
+deliberately unable to enroll a personal library.
+
+The following work still blocks the M4 gate and any personal-data sync:
+
+- production cryptography backed by the intended Apple key APIs, with
+  cross-language golden vectors;
+- a real pinned TLS 1.3 HTTP adapter and local-network discovery/manual-connect
+  path around the narrow router;
+- a durable Mac authority, invitation, enrollment, device-registry, revocation,
+  cursor, and checkpoint adapter;
+- external review of the implemented pairing, cryptography, transport, and
+  convergence boundaries;
+- end-to-end pairing, encrypted bootstrap, push/pull, conflict, restart, and
+  airplane-mode validation between the Mac and a physical iPhone; and
+- the outstanding M2 physical-device Data Protection, Keychain, backup,
+  reinstall, locked-device, lifecycle, accessibility, and recorder-load gates.
+
+No hosted provider has been selected or provisioned, and no hosted-sync spend is
+authorized by this checkpoint. Provider evaluation begins only after the full
+M4 gate below passes.
 
 Deliverables:
 

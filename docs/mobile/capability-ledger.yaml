@@ -1,13 +1,14 @@
 schema_version: "noted.mobile-capability-ledger.v1"
-last_updated: "2026-08-16"
+last_updated: "2026-08-17"
 scope: "Supported standard-profile capabilities on iPhone; parked experiments and explicit exclusions are recorded rather than silently promoted."
 source_of_truth: "docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md"
 
 current_checkpoint:
-  milestone: "M2"
-  proven: "Signed native shell plus isolated local Notes list/create/edit/search/tombstone persistence on a physical iPhone."
-  not_proven: "Portable identity, pairing, synchronization, conflict handling, restore, broad navigation, or production iOS data protection."
-  next: "M3 ordered migrations and portable Notes records on Mac and iPhone."
+  milestone: "M4 sanitized-fixture implementation; gate remains closed"
+  proven: "M2 signed physical-device shell and local persistence, plus M3 ordered migration and portable Notes contracts."
+  implemented_now: "Portable Notes workspace/UI and local store; filing/undo, Trash/restore, external-authority fail-closed behavior, conflict preservation choices, public-ID note deep links, deterministic convergence application, and fixture-only pairing/direct-sync logical cores."
+  not_proven: "Production cryptography and key custody, a real pinned TLS/HTTP adapter, durable Mac authority/device registry, external cryptographic review, combined Mac-to-physical-iPhone sync, or the outstanding physical Data Protection/Keychain/lifecycle/accessibility and recorder-load gates."
+  next: "Close the remaining M2 and M4 production-security and physical-device gates before personal-data sync or hosted-provider evaluation."
 
 hosted_provider_gate:
   evaluate_after: "M4 direct Notes convergence passes."
@@ -17,6 +18,9 @@ hosted_provider_gate:
 
 status_definitions:
   local_prototype: "Present only in the isolated native iPhone prototype; not portable or synchronized."
+  implementation_checkpoint: "Implemented in the current branch and covered by deterministic tests; not necessarily shipped or physically validated."
+  partial_implementation_checkpoint: "A named subset is implemented in the current branch; the implementation_note records what remains in that capability."
+  fixture_protocol_core: "The logical protocol/state core is implemented for generated or sanitized fixtures; production crypto, transport, durable authority, and personal-data use remain gated."
   planned: "Accepted mobile contract with implementation gated by the named milestone."
   revived_scope_planned: "A component exists in the repository but is not a routed standard desktop surface; mobile inclusion is deliberate new/revived scope."
   excluded: "Intentionally absent from mobile v1 with a recorded reason."
@@ -80,7 +84,8 @@ capabilities:
     offline_behavior: "Pairing requires a reachable Mac; an already paired library remains usable offline."
     mac_dependency: "Mac-owned device registry during direct-only operation."
     milestone: "M4"
-    status: "planned"
+    status: "fixture_protocol_core"
+    implementation_note: "Invitation/enrollment/replay/scope/revocation state and authorization seams are deterministic fixture cores; QR scanning, production keys, pinned transport, durable Mac registry, and pairing UI remain."
     exclusion_reason: null
     contract_test: "mobile.sync.direct_pairing"
     desktop_source: "docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md"
@@ -94,7 +99,8 @@ capabilities:
     offline_behavior: "Last state and pending local work remain visible."
     mac_dependency: "Mac for direct sync; relay after optional M7 enrollment."
     milestone: "M4"
-    status: "planned"
+    status: "partial_implementation_checkpoint"
+    implementation_note: "The Notes workspace shows local sync state, pending count, and last-success summary; transport selection, Mac reachability, retry, and full error actions remain."
     exclusion_reason: null
     contract_test: "mobile.sync.status_model"
     desktop_source: "src/useConnection.ts"
@@ -108,7 +114,8 @@ capabilities:
     offline_behavior: "Already committed batches are usable while bootstrap is paused or disconnected."
     mac_dependency: "Reachable Mac in direct mode; relay after M7."
     milestone: "M4"
-    status: "planned"
+    status: "fixture_protocol_core"
+    implementation_note: "Atomic Notes bootstrap application, cursor/replay validation, dependency ordering, interruption, and restart are tested; encrypted transfer and resumable production transport remain."
     exclusion_reason: null
     contract_test: "mobile.sync.resumable_bootstrap"
     desktop_source: "docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md"
@@ -122,7 +129,8 @@ capabilities:
     offline_behavior: "List is readable; revocation queues until an authority is reachable."
     mac_dependency: "Mac registry in direct mode; relay registry after M7."
     milestone: "M4"
-    status: "planned"
+    status: "fixture_protocol_core"
+    implementation_note: "The pairing core models enrolled/revoked devices and authority rotation; durable Mac persistence and the user-facing device registry remain."
     exclusion_reason: null
     contract_test: "mobile.sync.device_registry"
     desktop_source: "docs/decisions/007-mobile-sync-sequencing-and-provider-gate.md"
@@ -136,7 +144,8 @@ capabilities:
     offline_behavior: "Conflict branches remain readable and cannot be evicted."
     mac_dependency: "Authority is required only to accept the resolution."
     milestone: "M4"
-    status: "planned"
+    status: "partial_implementation_checkpoint"
+    implementation_note: "The local store preserves both branches and the Notes UI offers Keep as copy or Use Mac version; side-by-side merge and publication through a live authority remain."
     exclusion_reason: null
     contract_test: "mobile.sync.conflict_preservation"
     desktop_source: "docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md"
@@ -163,8 +172,9 @@ capabilities:
     mobile_behavior: "Resolve stable public IDs to the owning local screen and report stale or unavailable revisions honestly."
     offline_behavior: "Works for locally available records and revisions."
     mac_dependency: "None for local targets."
-    milestone: "M5"
-    status: "planned"
+    milestone: "M4"
+    status: "implementation_checkpoint"
+    implementation_note: "Strict noted:// library/note parsing, local library/record validation, native open handling, and safe unavailable-target errors are implemented with public UUIDv7 IDs."
     exclusion_reason: null
     contract_test: "mobile.navigation.public_id_deep_link"
     desktop_source: "docs/agent-context/context-record-v1.md"
@@ -514,7 +524,7 @@ capabilities:
     offline_behavior: "Full."
     mac_dependency: "None."
     milestone: "M4"
-    status: "local_prototype"
+    status: "implementation_checkpoint"
     exclusion_reason: null
     contract_test: "mobile.notes.list_and_open"
     desktop_source: "src/NotesView.tsx"
@@ -528,7 +538,7 @@ capabilities:
     offline_behavior: "Full local write."
     mac_dependency: "None until synchronization."
     milestone: "M4"
-    status: "local_prototype"
+    status: "implementation_checkpoint"
     exclusion_reason: null
     contract_test: "mobile.notes.create_edit"
     desktop_source: "src/MobileShell.tsx"
@@ -542,7 +552,8 @@ capabilities:
     offline_behavior: "Full."
     mac_dependency: "Semantic expansion optional later."
     milestone: "M4"
-    status: "local_prototype"
+    status: "partial_implementation_checkpoint"
+    implementation_note: "Indexed lexical search over the selected local Notes collection and previews are implemented; transcript search and richer filters/snippets remain."
     exclusion_reason: null
     contract_test: "mobile.notes.lexical_search"
     desktop_source: "src-tauri/src/mobile_store.rs"
@@ -556,7 +567,8 @@ capabilities:
     offline_behavior: "Full."
     mac_dependency: "None."
     milestone: "M4"
-    status: "planned"
+    status: "partial_implementation_checkpoint"
+    implementation_note: "Inbox, Needs filing, Trash, and folder collections are implemented; explicit All Notes and Meetings collections remain."
     exclusion_reason: null
     contract_test: "mobile.notes.saved_views"
     desktop_source: "src/NotesView.tsx"
@@ -570,7 +582,8 @@ capabilities:
     offline_behavior: "Full."
     mac_dependency: "None."
     milestone: "M4"
-    status: "planned"
+    status: "partial_implementation_checkpoint"
+    implementation_note: "The notebook index browses stable folder/space paths and keeps unenrolled scope state closed; a dedicated personal/work space switch remains."
     exclusion_reason: null
     contract_test: "mobile.notes.space_switching"
     desktop_source: "src/NotesView.tsx"
@@ -584,7 +597,8 @@ capabilities:
     offline_behavior: "Full local write."
     mac_dependency: "None until sync acceptance."
     milestone: "M4"
-    status: "planned"
+    status: "partial_implementation_checkpoint"
+    implementation_note: "Nested logical paths and a filing destination picker are implemented; create, rename, reorder, and delete folder controls remain."
     exclusion_reason: null
     contract_test: "mobile.notes.folder_crud_and_order"
     desktop_source: "src/NotesView.tsx"
@@ -598,7 +612,7 @@ capabilities:
     offline_behavior: "Full local write and undo."
     mac_dependency: "None until sync acceptance."
     milestone: "M4"
-    status: "planned"
+    status: "implementation_checkpoint"
     exclusion_reason: null
     contract_test: "mobile.notes.filing_and_undo"
     desktop_source: "src/NotesView.tsx"
@@ -668,7 +682,7 @@ capabilities:
     offline_behavior: "Full local write."
     mac_dependency: "None until sync acceptance."
     milestone: "M4"
-    status: "planned"
+    status: "implementation_checkpoint"
     exclusion_reason: null
     contract_test: "mobile.notes.trash_restore"
     desktop_source: "src-tauri/src/mobile_store.rs"
@@ -710,7 +724,7 @@ capabilities:
     offline_behavior: "Migration is local and restart-safe."
     mac_dependency: "Mac and iPhone migrate their own replicas independently before pairing."
     milestone: "M3"
-    status: "planned"
+    status: "implementation_checkpoint"
     exclusion_reason: null
     contract_test: "mobile.notes.prototype_to_portable_migration"
     desktop_source: "src-tauri/src/mobile_store.rs"
@@ -724,7 +738,8 @@ capabilities:
     offline_behavior: "Both branches remain locally readable."
     mac_dependency: "Authority accepts the resolution when reachable."
     milestone: "M4"
-    status: "planned"
+    status: "partial_implementation_checkpoint"
+    implementation_note: "Conflict evidence and the phone branch are retained; Keep as copy and Use Mac version are implemented. Side-by-side comparison, merge, and live authority acceptance remain."
     exclusion_reason: null
     contract_test: "mobile.notes.conflict_resolution"
     desktop_source: "docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md"
@@ -1018,7 +1033,8 @@ capabilities:
     offline_behavior: "Local state remains available."
     mac_dependency: "Authority required for remote actions."
     milestone: "M4"
-    status: "planned"
+    status: "partial_implementation_checkpoint"
+    implementation_note: "Notes shows current local sync state, pending count, last success, and conflict state; the full Settings surface, paired-device actions, retry, and revoke remain."
     exclusion_reason: null
     contract_test: "mobile.settings.sync"
     desktop_source: "docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md"

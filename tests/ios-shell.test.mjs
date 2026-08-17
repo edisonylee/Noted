@@ -8,7 +8,7 @@ async function read(relativePath) {
   return readFile(new URL(relativePath, root), "utf8");
 }
 
-test("iOS backend exports only local notes and health commands", async () => {
+test("iOS backend exports only bounded local notes and navigation commands", async () => {
   const entry = await read("src-tauri/src/lib.rs");
   const mobile = await read("src-tauri/src/mobile.rs");
 
@@ -16,10 +16,17 @@ test("iOS backend exports only local notes and health commands", async () => {
   assert.match(entry, /cfg\(target_os = "ios"\)\]\s*mod mobile/);
   for (const command of [
     "mobile_health",
+    "get_mobile_notes_workspace",
     "list_mobile_notes",
     "create_mobile_note",
     "update_mobile_note",
     "delete_mobile_note",
+    "trash_mobile_note",
+    "restore_mobile_note",
+    "file_mobile_note",
+    "undo_mobile_note_filing",
+    "resolve_mobile_note_conflict",
+    "resolve_mobile_deep_link",
     "export_mobile_notes",
     "restore_mobile_notes_export",
   ]) {
@@ -34,6 +41,25 @@ test("iOS backend exports only local notes and health commands", async () => {
     "chat",
   ]) {
     assert.equal(mobile.includes(forbidden), false, `${forbidden} leaked into the iOS registry`);
+  }
+
+  assert.match(mobile, /tauri_plugin_deep_link::init\(\)/);
+});
+
+test("mobile deep links are strict public-ID navigation hints", async () => {
+  const config = JSON.parse(await read("src-tauri/tauri.ios.conf.json"));
+  const capability = JSON.parse(await read("src-tauri/capabilities/mobile.json"));
+  const parser = await read("src-tauri/src/mobile_deep_link.rs");
+  const listener = await read("src/mobileDeepLinks.ts");
+
+  assert.deepEqual(config.plugins["deep-link"].mobile, [{ scheme: ["noted"], appLink: false }]);
+  assert.ok(capability.permissions.includes("deep-link:default"));
+  assert.ok(parser.includes("{MOBILE_DEEP_LINK_SCHEME}://library/{library_id}/notes/{record_id}"));
+  assert.match(parser, /raw\.contains\(\['\?', '#', '@', '%'\]\)/);
+  assert.match(listener, /resolve_mobile_deep_link/);
+  assert.match(listener, /noted:open-note/);
+  for (const forbidden of ["token=", "localStorage", "sessionStorage", "databasePath"]) {
+    assert.equal(listener.includes(forbidden), false, `${forbidden} must not appear in mobile link handling`);
   }
 });
 

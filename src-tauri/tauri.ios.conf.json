@@ -12,6 +12,16 @@
       "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'"
     }
   },
+  "plugins": {
+    "deep-link": {
+      "mobile": [
+        {
+          "scheme": ["noted"],
+          "appLink": false
+        }
+      ]
+    }
+  },
   "bundle": {
     "iOS": {
       "developmentTeam": "MYGAYC672C"

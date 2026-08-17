@@ -6,7 +6,15 @@ Date: 2026-08-16
 
 Owners: mobile, data architecture, and security
 
-Implementation status: protocol contract only; no pairing transport or production key material has shipped.
+Implementation status: the sanitized-fixture protocol core is implemented and
+deterministically tested. It includes the bounded canonical parser, invitation
+and enrollment state machine, scope/capability enforcement, replay and
+idempotency behavior, confirmation state, authority rotation, revocation, and
+the authorization seam used by the direct-sync logical router. The tests bind
+TLS 1.3/no-0-RTT evidence and the exact SPKI pin, but there is no production
+TLS/HTTP transport, Apple-backed cryptography or key storage, durable Mac
+authority adapter, or personal-data enrollment. No pairing transport or
+production key material has shipped.
 
 ## Context
 
@@ -202,6 +210,36 @@ offer pending-branch export before device reset or revocation.
 - Fuzzing and parser/resource limits for every pairing and sync envelope.
 - External review of this design and the implementation. Until that review is
   closed, only generated or sanitized fixture libraries may cross the channel.
+
+### Current checkpoint
+
+The implemented state machine intentionally accepts only the
+`sanitized_fixture` library data class. Deterministic tests cover stable
+transcript/SAS fixtures, restart and idempotent finish, changed-content replay,
+simultaneous scans, expiry and attempt limits, scope/role/environment/library/
+authority/pin binding, revocation, malformed inputs, and parser resource limits.
+The direct-sync logical core separately verifies the exact route set, request and
+response signatures, enrolled-device scopes, TLS/pin evidence, bounded bodies,
+checkpoint-bound paged bootstrap, bootstrap/checkpoint consistency, replay,
+stale heads, and response limits. Transaction admission proves that every
+accepted transaction can later fit in a pull response, and revocation is
+serialized with in-flight requests so a completed write linearizes either
+before revocation or is rejected after it. The pairing coordinator is not
+cloneable around that revocation gate.
+
+This checkpoint does not relax the fixture-only gate. Before personal data is
+eligible, the production implementation still needs:
+
+- CryptoKit/Secure Enclave and ThisDeviceOnly Keychain adapters for the roles
+  defined above, plus the required cross-language signature/HPKE/SAS vectors;
+- a real pinned TLS 1.3 client/server adapter with 0-RTT disabled and no
+  plaintext fallback;
+- durable Mac storage and atomic transitions for invitations, receipts, device
+  registry, counters, revocation, authority generation, and restart recovery;
+- physical-device Data Protection, locked-device, reinstall, backup, and key-loss
+  probes; and
+- external cryptographic and implementation review followed by an end-to-end
+  sanitized physical-device run.
 
 ## Consequences
 

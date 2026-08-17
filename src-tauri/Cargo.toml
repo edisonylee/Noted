@@ -85,3 +85,8 @@ hound = "3"
 cidre = "0.16"
 # Native window vibrancy: the sidebar's dark-glass look (desktop shows through).
 window-vibrancy = "0.6"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# Native custom-scheme delivery for public-ID note links. The parser and local
+# library check remain in the Rust command boundary before navigation occurs.
+tauri-plugin-deep-link = "2"

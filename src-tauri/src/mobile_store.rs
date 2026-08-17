@@ -3,7 +3,9 @@ use crate::portable::{
     AcceptedHead, AuthorityKind, LifecycleState, LocalBranch, LocalBranchState, RecordAuthority,
     RecordLifecycle, RecordScope, ScopeClass,
 };
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{
+    params, Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -14,17 +16,35 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const PORTABLE_SCHEMA_VERSION: i64 = 2;
+const PORTABLE_SCHEMA_VERSION: i64 = 3;
 const PORTABLE_SCHEMA_V1_CHECKSUM: &str =
     "d6d8377525aa80d91e9e7cb22d4eff4da5cf7998abc8968a5457c1fc86e84b7b";
 const PORTABLE_SCHEMA_V2_CHECKSUM: &str =
     "838992191ee7053706d16154b41f08b1e041526101d496d1d762848a614b8e45";
+const PORTABLE_SCHEMA_V3_CHECKSUM: &str =
+    "17914efe0d9e4d164d7f70f3ed0865184d1f560dcb028f19d39e79cb75d1f70b";
 const PORTABLE_MIGRATION_V1_NAME: &str = "iphone-notes-portability";
 const PORTABLE_MIGRATION_V2_NAME: &str = "iphone-note-lifecycle-and-transaction-groups";
+const PORTABLE_MIGRATION_V3_NAME: &str = "iphone-note-workspace-and-sync-state";
 const MOBILE_APPLICATION_ID: i64 = 0x4e4f_5449; // ASCII `NOTI`.
 const MOBILE_NOTES_EXPORT_FORMAT: &str = "noted.mobile-notes.export.v1";
 const MOBILE_NOTES_EXPORT_VERSION: u32 = 1;
 const MAX_MOBILE_NOTES_EXPORT_BYTES: usize = 256 * 1024 * 1024;
+const MAX_MOBILE_INBOX_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MOBILE_TRANSACTION_MEMBERS: usize = 128;
+// These ceilings match the direct-sync parser's per-string and aggregate
+// string budgets. Enforcing them before an outbox row commits prevents a
+// mutation that the phone can persist but can never upload.
+const MAX_MOBILE_NOTE_TEXT_BYTES: usize = 256 * 1024;
+const MAX_MOBILE_TRANSACTION_CIPHERTEXT_BYTES: usize = 512 * 1024;
+// AES-256-GCM adds a 16-byte tag; the v1 ciphertext field also carries a
+// 12-byte nonce. Associated data and signatures live outside ciphertext.
+const MOBILE_MUTATION_CIPHERTEXT_OVERHEAD_BYTES: usize = 28;
+const MAX_MOBILE_MUTATION_PAYLOAD_BYTES: usize =
+    MAX_MOBILE_TRANSACTION_CIPHERTEXT_BYTES - MOBILE_MUTATION_CIPHERTEXT_OVERHEAD_BYTES;
+// RFC 3339's four-digit year range is also comfortably inside JavaScript's
+// Date range, which keeps remote timestamps safe on product surfaces.
+const MAX_PORTABLE_TIMESTAMP_MS: i64 = 253_402_300_799_999;
 static RECOVERY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -35,6 +55,166 @@ pub struct MobileNote {
     pub body: String,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileWorkspaceNote {
+    pub record_id: String,
+    pub title: String,
+    pub body: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub folder_id: Option<String>,
+    pub folder_name: Option<String>,
+    pub lifecycle_state: String,
+    pub needs_filing: bool,
+    pub sync_state: String,
+    pub conflict_of: Option<String>,
+    pub has_open_conflict: bool,
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileWorkspaceFolder {
+    pub folder_id: String,
+    pub name: String,
+    pub parent_id: Option<String>,
+    /// A logical breadcrumb (for example, `Work / Project`), never a
+    /// filesystem path.
+    pub path: Option<String>,
+    pub note_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileWorkspaceCapabilities {
+    pub filing: bool,
+    pub undo_filing: bool,
+    pub trash: bool,
+    pub restore: bool,
+    pub conflict_resolution: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileWorkspaceSync {
+    pub state: String,
+    pub pending_count: i64,
+    pub last_synced_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileWorkspaceCounts {
+    pub inbox: i64,
+    pub needs_filing: i64,
+    pub trash: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileNotesWorkspace {
+    pub notes: Vec<MobileWorkspaceNote>,
+    pub folders: Vec<MobileWorkspaceFolder>,
+    pub capabilities: MobileWorkspaceCapabilities,
+    pub sync: MobileWorkspaceSync,
+    pub counts: MobileWorkspaceCounts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileStoreHealth {
+    pub storage: String,
+    pub sync: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MobileIncomingCategory {
+    pub category_id: String,
+    pub name: String,
+    pub schema: serde_json::Value,
+    pub authority: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MobileIncomingFolder {
+    pub folder_id: String,
+    pub name: String,
+    pub parent_folder_id: Option<String>,
+    pub position: i64,
+    pub authority: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MobileIncomingNote {
+    pub record_id: String,
+    pub title: String,
+    pub body: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub accepted_revision: i64,
+    pub accepted_version_id: String,
+    pub accepted_content_hash: String,
+    pub lifecycle_state: String,
+    pub trashed_at: Option<i64>,
+    pub tombstoned_at: Option<i64>,
+    pub folder_id: Option<String>,
+    pub authority: String,
+    pub scope_id: String,
+    pub scope_class: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MobileInboxChange {
+    pub sequence: i64,
+    pub transaction_id: String,
+    pub transaction_digest: String,
+    pub library_id: String,
+    pub source_device_id: String,
+    pub authority_generation: i64,
+    pub purge_generation: i64,
+    #[serde(default)]
+    pub categories: Vec<MobileIncomingCategory>,
+    #[serde(default)]
+    pub folders: Vec<MobileIncomingFolder>,
+    #[serde(default)]
+    pub notes: Vec<MobileIncomingNote>,
+}
+
+impl MobileInboxChange {
+    /// Digest of the authenticated, decrypted transaction payload. The digest
+    /// field itself is excluded so a caller cannot make a self-referential
+    /// payload appear valid.
+    pub fn computed_transaction_digest(&self) -> String {
+        canonical_sha256(&serde_json::json!({
+            "sequence": self.sequence,
+            "transactionId": self.transaction_id,
+            "libraryId": self.library_id,
+            "sourceDeviceId": self.source_device_id,
+            "authorityGeneration": self.authority_generation,
+            "purgeGeneration": self.purge_generation,
+            "categories": self.categories,
+            "folders": self.folders,
+            "notes": self.notes,
+        }))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MobileInboxApplyResult {
+    pub sequence: i64,
+    pub applied_count: usize,
+    pub conflict_count: usize,
+    pub state: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -160,6 +340,56 @@ struct PortableState {
 }
 
 #[derive(Debug)]
+struct ExistingSyncNote {
+    title: String,
+    body: String,
+    accepted_revision: i64,
+    accepted_version_id: Option<String>,
+    accepted_content_hash: Option<String>,
+    working_branch_id: String,
+    working_version_id: String,
+    pending_mutation_id: String,
+    lifecycle_state: String,
+    canonical_hash: String,
+    folder_id: Option<String>,
+    conflict_of: Option<String>,
+}
+
+#[derive(Debug)]
+struct ConflictSnapshot {
+    conflict_id: String,
+    record_id: String,
+    local_title: String,
+    local_body: String,
+    local_canonical_hash: String,
+    local_created_at: i64,
+    local_updated_at: i64,
+    local_lifecycle_state: String,
+    local_trashed_at: Option<i64>,
+    local_tombstoned_at: Option<i64>,
+    local_folder_id: Option<String>,
+    local_authority: String,
+    local_scope: String,
+    local_scope_id: String,
+    local_scope_class: String,
+    local_provenance_json: String,
+    accepted_revision: i64,
+    accepted_version_id: String,
+    accepted_content_hash: String,
+    remote_title: String,
+    remote_body: String,
+    remote_created_at: i64,
+    remote_updated_at: i64,
+    remote_lifecycle_state: String,
+    remote_trashed_at: Option<i64>,
+    remote_tombstoned_at: Option<i64>,
+    remote_folder_id: Option<String>,
+    remote_authority: String,
+    remote_scope_id: String,
+    remote_scope_class: String,
+}
+
+#[derive(Debug)]
 struct Mutation<'a> {
     operation: &'a str,
     record_id: &'a str,
@@ -179,6 +409,7 @@ struct Mutation<'a> {
     tombstoned_at: Option<i64>,
     created_at: i64,
     updated_at: i64,
+    authority: &'a str,
     provenance_json: &'a str,
     scope_id: &'a str,
     scope_class: &'a str,
@@ -189,6 +420,44 @@ struct OutboxTransaction {
     transaction_id: String,
     device_transaction_counter: i64,
     member_count: i64,
+}
+
+#[derive(Debug)]
+enum InboxApplyError {
+    /// Authenticated bytes are internally inconsistent with deterministic
+    /// domain rules and may be quarantined so the ordered stream can advance.
+    Semantic(String),
+    /// Storage, clock, locking, or other local failures are retryable and must
+    /// never consume the authenticated sequence.
+    Operational(String),
+}
+
+impl InboxApplyError {
+    fn semantic(message: impl Into<String>) -> Self {
+        Self::Semantic(message.into())
+    }
+
+    fn operational(message: impl Into<String>) -> Self {
+        Self::Operational(message.into())
+    }
+
+    fn into_string(self) -> String {
+        match self {
+            Self::Semantic(message) | Self::Operational(message) => message,
+        }
+    }
+}
+
+fn inbox_sql_error(context: &str, error: rusqlite::Error) -> InboxApplyError {
+    let message = format!("{context}: {error}");
+    match &error {
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.code == ErrorCode::ConstraintViolation =>
+        {
+            InboxApplyError::semantic(message)
+        }
+        _ => InboxApplyError::operational(message),
+    }
 }
 
 #[derive(Serialize)]
@@ -235,11 +504,66 @@ impl MobileStore {
             .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
             .map_err(|error| error.to_string())?;
         migrate_portable_notes(&mut connection, recovery_path.as_deref())?;
+        recover_interrupted_inbox(&connection)?;
         ensure_mobile_search_schema(&mut connection)?;
         verify_mobile_search_schema(&connection)?;
 
         Ok(Self {
             connection: Mutex::new(connection),
+        })
+    }
+
+    pub fn health(&self) -> Result<MobileStoreHealth, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let (library_state, enrollment_state, stored_sync_state): (String, String, String) =
+            connection
+                .query_row(
+                    "SELECT replica.library_state,
+                            sync.enrollment_state, sync.sync_state
+                     FROM mobile_replica AS replica
+                     JOIN mobile_sync_state AS sync ON sync.singleton = 1
+                     WHERE replica.singleton = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(|error| error.to_string())?;
+        let (pending, has_conflict): (bool, bool) = connection
+            .query_row(
+                "SELECT
+                   EXISTS(
+                     SELECT 1 FROM mobile_note_outbox
+                     WHERE eligible_for_sync = 1
+                   ),
+                   EXISTS(
+                     SELECT 1 FROM mobile_note_conflicts WHERE state = 'open'
+                   )",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        let sync = if library_state == "local_staging" {
+            "local"
+        } else if enrollment_state != "active" {
+            "not_enrolled"
+        } else if has_conflict {
+            "error"
+        } else if pending {
+            "pending"
+        } else {
+            match stored_sync_state.as_str() {
+                "idle" => "synced",
+                "pending" => "pending",
+                "syncing" => "syncing",
+                "error" | "conflict" | "revoked" => "error",
+                _ => "not_enrolled",
+            }
+        };
+        Ok(MobileStoreHealth {
+            storage: "ready".to_string(),
+            sync: sync.to_string(),
         })
     }
 
@@ -333,6 +657,292 @@ impl MobileStore {
             .map_err(|error| error.to_string())
     }
 
+    /// Confirms that a public-ID navigation target belongs to this replica and
+    /// is still visible to the mobile product. Deep links never bypass the
+    /// repository's library or lifecycle boundaries.
+    pub fn verify_note_link(&self, library_id: &str, record_id: &str) -> Result<(), String> {
+        if !is_uuid_v7(library_id) || !is_uuid_v7(record_id) {
+            return Err("mobile note link requires canonical UUIDv7 identifiers".to_string());
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let current_library_id: String = connection
+            .query_row(
+                "SELECT library_id FROM mobile_replica WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if current_library_id != library_id {
+            return Err("mobile note link belongs to a different notebook".to_string());
+        }
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM mobile_notes
+                   WHERE library_id = ?1 AND record_id = ?2
+                     AND lifecycle_state IN ('active', 'trash')
+                 )",
+                params![library_id, record_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !exists {
+            return Err("mobile note link is not available in this notebook".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn workspace(
+        &self,
+        query: Option<&str>,
+        view: Option<&str>,
+        folder_id: Option<&str>,
+    ) -> Result<MobileNotesWorkspace, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let library_id: String = connection
+            .query_row(
+                "SELECT library_id FROM mobile_replica WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let view = view
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("inbox");
+        if !matches!(view, "inbox" | "all" | "needsFiling" | "folder" | "trash") {
+            return Err(format!("unsupported mobile notes view {view}"));
+        }
+        let folder_id = folder_id.map(str::trim).filter(|value| !value.is_empty());
+        if folder_id.is_some_and(|value| !is_uuid_v7(value)) {
+            return Err("folderId must be a canonical UUIDv7".to_string());
+        }
+        if view == "folder" && folder_id.is_none() {
+            return Err("folder view requires folderId".to_string());
+        }
+        if let Some(folder_id) = folder_id {
+            let exists: bool = connection
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM mobile_note_folders
+                       WHERE folder_id = ?1 AND library_id = ?2
+                         AND lifecycle_state = 'active'
+                     )",
+                    params![folder_id, library_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !exists {
+                return Err(format!("folder {folder_id} does not exist"));
+            }
+        }
+        let query_pattern = query
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| format!("%{}%", escape_like(value)));
+        let mut statement = connection
+            .prepare(
+                "SELECT notes.record_id, notes.title, notes.body,
+                        notes.created_at, notes.updated_at,
+                        filing.folder_id, folders.name,
+                        notes.lifecycle_state, notes.sync_state,
+                        notes.conflict_of, notes.authority,
+                        EXISTS(
+                          SELECT 1 FROM mobile_note_conflicts AS conflicts
+                          WHERE conflicts.record_id = notes.record_id
+                            AND conflicts.state = 'open'
+                        ),
+                        EXISTS(
+                          SELECT 1 FROM mobile_sync_state
+                          WHERE singleton = 1 AND enrollment_state = 'active'
+                        )
+                 FROM mobile_notes AS notes
+                 LEFT JOIN mobile_note_filing AS filing
+                   ON filing.record_id = notes.record_id
+                 LEFT JOIN mobile_note_folders AS folders
+                   ON folders.folder_id = filing.folder_id
+                  AND folders.lifecycle_state = 'active'
+                 WHERE (
+                   (?1 = 'trash' AND notes.lifecycle_state = 'trash')
+                   OR (?1 != 'trash' AND notes.lifecycle_state = 'active')
+                 )
+                   AND (?1 != 'needsFiling' OR filing.folder_id IS NULL)
+                   AND (?1 != 'folder' OR filing.folder_id = ?2)
+                   AND (?3 IS NULL
+                        OR notes.title LIKE ?3 ESCAPE '\\' COLLATE NOCASE
+                        OR notes.body LIKE ?3 ESCAPE '\\' COLLATE NOCASE)
+                   AND notes.library_id = ?4
+                 ORDER BY notes.updated_at DESC, notes.record_id",
+            )
+            .map_err(|error| error.to_string())?;
+        let notes = statement
+            .query_map(params![view, folder_id, query_pattern, library_id], |row| {
+                let folder_id: Option<String> = row.get(5)?;
+                Ok(MobileWorkspaceNote {
+                    record_id: row.get(0)?,
+                    title: row.get(1)?,
+                    body: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    folder_id: folder_id.clone(),
+                    folder_name: row.get(6)?,
+                    lifecycle_state: public_lifecycle_state(&row.get::<_, String>(7)?),
+                    needs_filing: folder_id.is_none(),
+                    sync_state: public_note_sync_state(&row.get::<_, String>(8)?, row.get(12)?),
+                    conflict_of: row.get(9)?,
+                    has_open_conflict: row.get(11)?,
+                    read_only: row.get::<_, String>(10)? != "noted",
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+
+        let raw_folders = connection
+            .prepare(
+                "SELECT folders.folder_id, folders.name, folders.parent_folder_id,
+                        folders.position,
+                        COUNT(CASE WHEN notes.lifecycle_state = 'active' THEN 1 END)
+                 FROM mobile_note_folders AS folders
+                 LEFT JOIN mobile_note_filing AS filing
+                   ON filing.folder_id = folders.folder_id
+                 LEFT JOIN mobile_notes AS notes
+                   ON notes.record_id = filing.record_id
+                 WHERE folders.lifecycle_state = 'active'
+                   AND folders.library_id = ?1
+                 GROUP BY folders.folder_id, folders.name,
+                          folders.parent_folder_id, folders.position
+                 ORDER BY folders.position, folders.name, folders.folder_id",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map([&library_id], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .map_err(|error| error.to_string())?;
+        let folder_index = raw_folders
+            .iter()
+            .map(|(folder_id, name, parent_id, _, _)| {
+                (folder_id.clone(), (name.clone(), parent_id.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let folders = raw_folders
+            .into_iter()
+            .map(|(folder_id, name, parent_id, _, note_count)| {
+                Ok(MobileWorkspaceFolder {
+                    path: Some(logical_folder_path(&folder_id, &folder_index)?),
+                    folder_id,
+                    name,
+                    parent_id,
+                    note_count,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let (enrollment_state, stored_sync_state, last_synced_at, library_state): (
+            String,
+            String,
+            Option<i64>,
+            String,
+        ) = connection
+            .query_row(
+                "SELECT sync.enrollment_state, sync.sync_state, sync.last_synced_at,
+                        replica.library_state
+                 FROM mobile_sync_state AS sync
+                 CROSS JOIN mobile_replica AS replica
+                 WHERE sync.singleton = 1 AND replica.singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        let pending_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(DISTINCT transaction_id)
+                 FROM mobile_note_outbox WHERE eligible_for_sync = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let has_conflict: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM mobile_note_conflicts WHERE state = 'open'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let (inbox_count, needs_filing_count, trash_count): (i64, i64, i64) = connection
+            .query_row(
+                "SELECT
+                   COUNT(CASE WHEN notes.lifecycle_state = 'active' THEN 1 END),
+                   COUNT(CASE WHEN notes.lifecycle_state = 'active'
+                                   AND filing.folder_id IS NULL THEN 1 END),
+                   COUNT(CASE WHEN notes.lifecycle_state = 'trash' THEN 1 END)
+                 FROM mobile_notes AS notes
+                 LEFT JOIN mobile_note_filing AS filing
+                   ON filing.record_id = notes.record_id
+                 WHERE notes.library_id = ?1",
+                [&library_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        let enrolled = enrollment_state == "active";
+        let sync_state = if !enrolled {
+            if library_state == "local_staging" {
+                "local".to_string()
+            } else {
+                "not_enrolled".to_string()
+            }
+        } else if has_conflict {
+            "error".to_string()
+        } else if pending_count > 0 {
+            "pending".to_string()
+        } else {
+            match stored_sync_state.as_str() {
+                "idle" => "synced".to_string(),
+                "not_enrolled" => "not_enrolled".to_string(),
+                "pending" | "syncing" | "error" => stored_sync_state,
+                "conflict" | "revoked" => "error".to_string(),
+                _ => "error".to_string(),
+            }
+        };
+        Ok(MobileNotesWorkspace {
+            notes,
+            folders,
+            capabilities: MobileWorkspaceCapabilities {
+                filing: true,
+                undo_filing: true,
+                trash: true,
+                restore: true,
+                conflict_resolution: enrolled,
+            },
+            sync: MobileWorkspaceSync {
+                state: sync_state,
+                pending_count,
+                last_synced_at,
+            },
+            counts: MobileWorkspaceCounts {
+                inbox: inbox_count,
+                needs_filing: needs_filing_count,
+                trash: trash_count,
+            },
+        })
+    }
+
     pub fn create(&self, title: &str, body: &str) -> Result<MobileNote, String> {
         let mut connection = self
             .connection
@@ -415,6 +1025,7 @@ impl MobileStore {
                 tombstoned_at: None,
                 created_at: timestamp,
                 updated_at: timestamp,
+                authority: "noted",
                 provenance_json,
                 scope_id: &identity.default_scope_id,
                 scope_class: "personal",
@@ -447,6 +1058,7 @@ impl MobileStore {
             .filter(|state| state.lifecycle_state == "active")
             .ok_or_else(|| format!("note {record_id} does not exist"))?;
         ensure_noted_authority(&state)?;
+        ensure_no_open_note_conflict(&transaction, record_id)?;
         let timestamp = next_timestamp(&transaction)?;
         let working_revision = state.working_revision.saturating_add(1);
         let working_version_id = new_uuid_v7();
@@ -510,6 +1122,7 @@ impl MobileStore {
                 tombstoned_at: None,
                 created_at: state.created_at,
                 updated_at: timestamp,
+                authority: &state.authority,
                 provenance_json: &state.provenance_json,
                 scope_id: &state.scope_id,
                 scope_class: &state.scope_class,
@@ -530,6 +1143,21 @@ impl MobileStore {
 
     pub fn delete(&self, record_id: &str) -> Result<(), String> {
         self.set_lifecycle(record_id, "trash", "trash")
+    }
+
+    pub fn file_note(
+        &self,
+        record_id: &str,
+        folder_id: &str,
+    ) -> Result<MobileWorkspaceNote, String> {
+        if !is_uuid_v7(folder_id) {
+            return Err("folderId must be a canonical UUIDv7".to_string());
+        }
+        self.set_filing(record_id, Some(folder_id), "file")
+    }
+
+    pub fn undo_note_filing(&self, record_id: &str) -> Result<MobileWorkspaceNote, String> {
+        self.set_filing(record_id, None, "undoFiling")
     }
 
     #[allow(dead_code)]
@@ -554,6 +1182,158 @@ impl MobileStore {
     #[allow(dead_code)]
     pub fn tombstone(&self, record_id: &str) -> Result<(), String> {
         self.set_lifecycle(record_id, "tombstone", "tombstone")
+    }
+
+    fn set_filing(
+        &self,
+        record_id: &str,
+        requested_folder_id: Option<&str>,
+        action: &str,
+    ) -> Result<MobileWorkspaceNote, String> {
+        if !is_uuid_v7(record_id) {
+            return Err("note recordId must be a canonical UUIDv7".to_string());
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let identity = replica_identity(&transaction)?;
+        let state = portable_state(&transaction, record_id)?
+            .filter(|state| state.lifecycle_state == "active")
+            .ok_or_else(|| format!("note {record_id} does not exist"))?;
+        ensure_noted_authority(&state)?;
+        ensure_no_open_note_conflict(&transaction, record_id)?;
+        let (title, body): (String, String) = transaction
+            .query_row(
+                "SELECT title, body FROM mobile_notes WHERE record_id = ?1",
+                [record_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        let current_filing: Option<(Option<String>, Option<String>)> = transaction
+            .query_row(
+                "SELECT folder_id, previous_folder_id
+                 FROM mobile_note_filing WHERE record_id = ?1",
+                [record_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let current_folder_id = current_filing
+            .as_ref()
+            .and_then(|(folder_id, _)| folder_id.clone());
+        let target_folder_id = match action {
+            "file" => requested_folder_id.map(str::to_string),
+            "undoFiling" => current_filing
+                .as_ref()
+                .ok_or_else(|| format!("note {record_id} has no filing change to undo"))?
+                .1
+                .clone(),
+            _ => return Err(format!("unsupported filing action {action}")),
+        };
+        if action == "file" && target_folder_id == current_folder_id {
+            return workspace_note_by_id(&transaction, record_id);
+        }
+        if let Some(folder_id) = target_folder_id.as_deref() {
+            let valid_folder: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM mobile_note_folders
+                       WHERE folder_id = ?1 AND library_id = ?2
+                         AND lifecycle_state = 'active'
+                     )",
+                    params![folder_id, identity.library_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            if !valid_folder {
+                return Err(format!("folder {folder_id} does not exist"));
+            }
+        }
+
+        let timestamp = next_timestamp(&transaction)?;
+        let working_revision = state.working_revision.saturating_add(1);
+        let working_version_id = new_uuid_v7();
+        let mutation_id = new_uuid_v7();
+        let outbox_transaction = begin_outbox_transaction(&transaction, 1)?;
+        let canonical_hash = note_content_hash(&title, &body);
+        transaction
+            .execute(
+                "INSERT INTO mobile_note_filing (
+                   record_id, folder_id, previous_folder_id, filed_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?4)
+                 ON CONFLICT(record_id) DO UPDATE SET
+                   folder_id = excluded.folder_id,
+                   previous_folder_id = excluded.previous_folder_id,
+                   filed_at = excluded.filed_at,
+                   updated_at = excluded.updated_at",
+                params![record_id, target_folder_id, current_folder_id, timestamp],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "UPDATE mobile_notes
+                 SET updated_at = ?1,
+                     working_revision = ?2,
+                     working_version_id = ?3,
+                     working_base_revision = accepted_revision,
+                     pending_mutation_id = ?4,
+                     sync_state = 'pending',
+                     last_modified_device_id = ?5
+                 WHERE record_id = ?6 AND lifecycle_state = 'active'",
+                params![
+                    timestamp,
+                    working_revision,
+                    working_version_id,
+                    mutation_id,
+                    identity.device_id,
+                    record_id,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        enqueue_mutation(
+            &transaction,
+            &identity,
+            &outbox_transaction,
+            0,
+            Mutation {
+                operation: "update",
+                record_id,
+                title: &title,
+                body: &body,
+                base_revision: state.accepted_revision,
+                proposed_revision: state.accepted_revision.saturating_add(1),
+                local_revision: working_revision,
+                version_id: &working_version_id,
+                branch_id: &state.working_branch_id,
+                base_version_id: state.accepted_version_id.as_deref(),
+                accepted_content_hash: state.accepted_content_hash.as_deref(),
+                mutation_id: &mutation_id,
+                canonical_hash: &canonical_hash,
+                lifecycle_state: "active",
+                trashed_at: None,
+                tombstoned_at: None,
+                created_at: state.created_at,
+                updated_at: timestamp,
+                authority: &state.authority,
+                provenance_json: &state.provenance_json,
+                scope_id: &state.scope_id,
+                scope_class: &state.scope_class,
+            },
+        )?;
+        attach_organization_payload(
+            &transaction,
+            &mutation_id,
+            action,
+            target_folder_id.as_deref(),
+            current_folder_id.as_deref(),
+        )?;
+        let note = workspace_note_by_id(&transaction, record_id)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(note)
     }
 
     /// Recreates the disposable full-text index from authoritative note rows.
@@ -663,6 +1443,20 @@ impl MobileStore {
             &fresh_replica.install_id,
             restored_at,
         )?;
+        transaction
+            .execute(
+                "UPDATE mobile_note_folders
+                 SET library_id = ?1",
+                [&envelope.payload.replica.library_id],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "UPDATE mobile_note_categories
+                 SET library_id = ?1",
+                [&envelope.payload.replica.library_id],
+            )
+            .map_err(|error| error.to_string())?;
         validate_replica_identity(&replica_identity(&transaction)?)?;
         validate_portable_notes(&transaction)?;
         validate_outbox_transaction_groups(&transaction)?;
@@ -750,6 +1544,7 @@ impl MobileStore {
             lifecycle_state: String,
             trashed_at: Option<i64>,
             tombstoned_at: Option<i64>,
+            authority: String,
             provenance_json: String,
             scope_id: String,
             scope_class: String,
@@ -761,6 +1556,7 @@ impl MobileStore {
                     "SELECT id, record_id, title, body, created_at, updated_at,
                             working_revision, working_branch_id, canonical_hash, lifecycle_state,
                             trashed_at, tombstoned_at, provenance_json, scope_id, scope_class
+                            , authority
                      FROM mobile_notes ORDER BY id",
                 )
                 .map_err(|error| error.to_string())?;
@@ -782,6 +1578,7 @@ impl MobileStore {
                         provenance_json: row.get(12)?,
                         scope_id: row.get(13)?,
                         scope_class: row.get(14)?,
+                        authority: row.get(15)?,
                     })
                 })
                 .map_err(|error| error.to_string())?;
@@ -810,55 +1607,49 @@ impl MobileStore {
                 params![mac_library_id, mac_default_scope_id],
             )
             .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "UPDATE mobile_note_folders
+                 SET library_id = ?1
+                 WHERE library_id = ?2",
+                params![mac_library_id, staging_identity.library_id],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "UPDATE mobile_note_categories
+                 SET library_id = ?1
+                 WHERE library_id = ?2",
+                params![mac_library_id, staging_identity.library_id],
+            )
+            .map_err(|error| error.to_string())?;
         let paired_identity = replica_identity(&transaction)?;
 
-        let outbox_transaction = if notes.is_empty() {
-            None
-        } else {
-            Some(begin_outbox_transaction(&transaction, notes.len())?)
-        };
-        for (member_index, note) in notes.iter().enumerate() {
+        struct PlannedAdoption {
+            note_index: usize,
+            scope_id: String,
+            working_revision: i64,
+            working_version_id: String,
+            mutation_id: String,
+            ciphertext_bytes: usize,
+        }
+
+        let mut plans = Vec::with_capacity(notes.len());
+        for (note_index, note) in notes.iter().enumerate() {
             let scope_id = if note.scope_id == staging_identity.default_scope_id {
-                mac_default_scope_id
+                mac_default_scope_id.to_string()
             } else {
-                &note.scope_id
+                note.scope_id.clone()
             };
-            let working_revision = note.working_revision.saturating_add(1);
+            let working_revision = note
+                .working_revision
+                .checked_add(1)
+                .ok_or_else(|| "mobile note working revision overflowed".to_string())?;
             let working_version_id = new_uuid_v7();
             let mutation_id = new_uuid_v7();
-            transaction
-                .execute(
-                    "UPDATE mobile_notes
-                     SET library_id = ?1,
-                         accepted_revision = 0,
-                         accepted_version_id = NULL,
-                         accepted_content_hash = NULL,
-                         working_revision = ?2,
-                    working_version_id = ?3,
-                         working_base_revision = 0,
-                         pending_mutation_id = ?4,
-                         sync_state = 'pending',
-                         scope_id = ?5
-                     WHERE id = ?6",
-                    params![
-                        mac_library_id,
-                        working_revision,
-                        working_version_id,
-                        mutation_id,
-                        scope_id,
-                        note.id
-                    ],
-                )
-                .map_err(|error| error.to_string())?;
-            enqueue_mutation(
-                &transaction,
+            let payload_json = serialize_mutation_payload(
                 &paired_identity,
-                outbox_transaction
-                    .as_ref()
-                    .expect("non-empty adoption has an outbox transaction"),
-                i64::try_from(member_index)
-                    .map_err(|_| "outbox transaction has too many members".to_string())?,
-                Mutation {
+                &Mutation {
                     operation: "create",
                     record_id: &note.record_id,
                     title: &note.title,
@@ -877,15 +1668,471 @@ impl MobileStore {
                     tombstoned_at: note.tombstoned_at,
                     created_at: note.created_at,
                     updated_at: note.updated_at,
+                    authority: &note.authority,
                     provenance_json: &note.provenance_json,
-                    scope_id,
+                    scope_id: &scope_id,
                     scope_class: &note.scope_class,
                 },
             )?;
+            plans.push(PlannedAdoption {
+                note_index,
+                scope_id,
+                working_revision,
+                working_version_id,
+                mutation_id,
+                ciphertext_bytes: payload_json
+                    .len()
+                    .checked_add(MOBILE_MUTATION_CIPHERTEXT_OVERHEAD_BYTES)
+                    .ok_or_else(|| "mobile note mutation ciphertext size overflowed".to_string())?,
+            });
+        }
+
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        let mut group_bytes = 0usize;
+        for plan_index in 0..plans.len() {
+            let plan_bytes = plans[plan_index].ciphertext_bytes;
+            let needs_new_group = groups.last().is_some_and(|group| {
+                group.len() >= MAX_MOBILE_TRANSACTION_MEMBERS
+                    || group_bytes
+                        .checked_add(plan_bytes)
+                        .is_none_or(|total| total > MAX_MOBILE_TRANSACTION_CIPHERTEXT_BYTES)
+            });
+            if groups.is_empty() || needs_new_group {
+                groups.push(Vec::new());
+                group_bytes = 0;
+            }
+            groups.last_mut().expect("group exists").push(plan_index);
+            group_bytes = group_bytes
+                .checked_add(plan_bytes)
+                .ok_or_else(|| "mobile outbox transaction size overflowed".to_string())?;
+        }
+
+        for group in groups {
+            let outbox_transaction = begin_outbox_transaction(&transaction, group.len())?;
+            for (transaction_member_index, plan_index) in group.into_iter().enumerate() {
+                let plan = &plans[plan_index];
+                let note = &notes[plan.note_index];
+                transaction
+                    .execute(
+                        "UPDATE mobile_notes
+                         SET library_id = ?1,
+                             accepted_revision = 0,
+                             accepted_version_id = NULL,
+                             accepted_content_hash = NULL,
+                             working_revision = ?2,
+                             working_version_id = ?3,
+                             working_base_revision = 0,
+                             pending_mutation_id = ?4,
+                             sync_state = 'pending',
+                             scope_id = ?5
+                         WHERE id = ?6",
+                        params![
+                            mac_library_id,
+                            plan.working_revision,
+                            plan.working_version_id,
+                            plan.mutation_id,
+                            plan.scope_id,
+                            note.id
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+                enqueue_mutation(
+                    &transaction,
+                    &paired_identity,
+                    &outbox_transaction,
+                    i64::try_from(transaction_member_index)
+                        .map_err(|_| "outbox transaction has too many members".to_string())?,
+                    Mutation {
+                        operation: "create",
+                        record_id: &note.record_id,
+                        title: &note.title,
+                        body: &note.body,
+                        base_revision: 0,
+                        proposed_revision: 1,
+                        local_revision: plan.working_revision,
+                        version_id: &plan.working_version_id,
+                        branch_id: &note.working_branch_id,
+                        base_version_id: None,
+                        accepted_content_hash: None,
+                        mutation_id: &plan.mutation_id,
+                        canonical_hash: &note.canonical_hash,
+                        lifecycle_state: &note.lifecycle_state,
+                        trashed_at: note.trashed_at,
+                        tombstoned_at: note.tombstoned_at,
+                        created_at: note.created_at,
+                        updated_at: note.updated_at,
+                        authority: &note.authority,
+                        provenance_json: &note.provenance_json,
+                        scope_id: &plan.scope_id,
+                        scope_class: &note.scope_class,
+                    },
+                )?;
+            }
         }
 
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(notes.len())
+    }
+
+    /// Activates the already-adopted Mac library after the pairing transcript,
+    /// key package, and enrollment receipt have all been verified. This method
+    /// stores no secret material; native Keychain storage owns those keys.
+    pub fn activate_sync_enrollment(
+        &self,
+        library_id: &str,
+        default_scope_id: &str,
+        authority_generation: i64,
+        purge_generation: i64,
+    ) -> Result<(), String> {
+        if !is_uuid_v7(library_id)
+            || !is_uuid(default_scope_id)
+            || authority_generation <= 0
+            || purge_generation < 0
+        {
+            return Err(
+                "mobile sync enrollment contains invalid identity or generation data".to_string(),
+            );
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let identity = replica_identity(&transaction)?;
+        if identity.library_state != "paired"
+            || identity.library_id != library_id
+            || identity.default_scope_id != default_scope_id
+        {
+            return Err(
+                "mobile replica must adopt the paired Mac library before enrollment".to_string(),
+            );
+        }
+        let (current_authority, current_purge): (i64, i64) = transaction
+            .query_row(
+                "SELECT authority_generation, purge_generation
+                 FROM mobile_sync_state WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| error.to_string())?;
+        if authority_generation < current_authority || purge_generation < current_purge {
+            return Err("mobile sync enrollment cannot roll back a durable generation".to_string());
+        }
+        let pending: bool = transaction
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM mobile_note_outbox WHERE eligible_for_sync = 1
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "UPDATE mobile_sync_state
+                 SET enrollment_state = 'active',
+                     sync_state = ?1,
+                     authority_generation = ?2,
+                     purge_generation = ?3,
+                     last_error_code = NULL
+                 WHERE singleton = 1",
+                params![
+                    if pending { "pending" } else { "idle" },
+                    authority_generation,
+                    purge_generation
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    /// Applies one authenticated and decrypted direct-sync transaction. The
+    /// inbox receipt is committed before domain rows change, and replay is
+    /// byte-bound by sequence, transaction ID, and canonical digest.
+    pub fn apply_inbox_change(
+        &self,
+        change: &MobileInboxChange,
+    ) -> Result<MobileInboxApplyResult, String> {
+        validate_mobile_inbox_change(change)?;
+        let payload_json = serde_json::to_string(change).map_err(|error| error.to_string())?;
+        if payload_json.len() > MAX_MOBILE_INBOX_BYTES {
+            return Err("mobile sync inbox transaction exceeds the 4 MiB limit".to_string());
+        }
+
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let received_at = now_millis()?;
+        {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+            validate_inbox_authority(&transaction, change).map_err(InboxApplyError::into_string)?;
+            let cursors: (i64, i64) = transaction
+                .query_row(
+                    "SELECT downloaded_cursor, applied_cursor
+                     FROM mobile_sync_state WHERE singleton = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|error| error.to_string())?;
+            let existing: Option<(String, String, String)> = transaction
+                .query_row(
+                    "SELECT transaction_id, transaction_digest, state
+                     FROM mobile_sync_inbox WHERE sequence = ?1",
+                    [change.sequence],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            if let Some((transaction_id, digest, state)) = existing {
+                if transaction_id != change.transaction_id || digest != change.transaction_digest {
+                    return Err(
+                        "mobile sync sequence reuse changed authenticated bytes".to_string()
+                    );
+                }
+                if state == "applied" || state == "quarantined" {
+                    transaction.commit().map_err(|error| error.to_string())?;
+                    return Ok(MobileInboxApplyResult {
+                        sequence: change.sequence,
+                        applied_count: 0,
+                        conflict_count: 0,
+                        state,
+                    });
+                }
+                if change.sequence != cursors.1.saturating_add(1) || change.sequence > cursors.0 {
+                    return Err(
+                        "mobile sync replay is not the next unapplied transaction".to_string()
+                    );
+                }
+            } else {
+                if change.sequence != cursors.0.saturating_add(1)
+                    || change.sequence != cursors.1.saturating_add(1)
+                {
+                    return Err("mobile sync inbox sequence is not contiguous".to_string());
+                }
+                transaction
+                    .execute(
+                        "INSERT INTO mobile_sync_inbox (
+                           sequence, transaction_id, transaction_digest,
+                           payload_json, state, received_at
+                         ) VALUES (?1, ?2, ?3, ?4, 'received', ?5)",
+                        params![
+                            change.sequence,
+                            change.transaction_id,
+                            change.transaction_digest,
+                            payload_json,
+                            received_at
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+                transaction
+                    .execute(
+                        "UPDATE mobile_sync_state
+                         SET downloaded_cursor = ?1, sync_state = 'syncing',
+                             last_error_code = NULL
+                         WHERE singleton = 1",
+                        [change.sequence],
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            transaction.commit().map_err(|error| error.to_string())?;
+        }
+
+        {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| error.to_string())?;
+            let changed = transaction
+                .execute(
+                    "UPDATE mobile_sync_inbox
+                     SET state = 'applying', apply_started_at = ?1, error_code = NULL
+                     WHERE sequence = ?2 AND state = 'received'
+                       AND ?2 = (SELECT applied_cursor + 1
+                                 FROM mobile_sync_state WHERE singleton = 1)",
+                    params![now_millis()?, change.sequence],
+                )
+                .map_err(|error| error.to_string())?;
+            if changed != 1 {
+                return Err("mobile sync inbox transaction cannot enter applying state".to_string());
+            }
+            transaction.commit().map_err(|error| error.to_string())?;
+        }
+
+        let apply_result = (|| -> Result<(usize, usize), InboxApplyError> {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| InboxApplyError::operational(error.to_string()))?;
+            validate_inbox_authority(&transaction, change)?;
+            apply_incoming_categories(&transaction, change)?;
+            apply_incoming_folders(&transaction, change)?;
+            let mut conflicts = 0_usize;
+            for note in &change.notes {
+                if apply_incoming_note(&transaction, change, note)? {
+                    conflicts += 1;
+                }
+            }
+            let applied_at = now_millis().map_err(InboxApplyError::operational)?;
+            let changed_row = transaction
+                .execute(
+                    "UPDATE mobile_sync_inbox
+                     SET state = 'applied', applied_at = ?1, error_code = NULL
+                     WHERE sequence = ?2 AND state = 'applying'",
+                    params![applied_at, change.sequence],
+                )
+                .map_err(|error| {
+                    InboxApplyError::operational(format!(
+                        "checkpoint applied inbox transaction: {error}"
+                    ))
+                })?;
+            if changed_row != 1 {
+                return Err(InboxApplyError::operational(
+                    "mobile sync inbox lost its applying checkpoint",
+                ));
+            }
+            let pending: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM mobile_note_outbox WHERE eligible_for_sync = 1
+                     )",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| {
+                    InboxApplyError::operational(format!(
+                        "inspect pending mobile mutations: {error}"
+                    ))
+                })?;
+            transaction
+                .execute(
+                    "UPDATE mobile_sync_state
+                     SET applied_cursor = ?1,
+                         sync_state = ?2,
+                         last_synced_at = ?3,
+                         last_error_code = NULL
+                     WHERE singleton = 1 AND applied_cursor + 1 = ?1",
+                    params![
+                        change.sequence,
+                        if conflicts > 0 {
+                            "conflict"
+                        } else if pending {
+                            "pending"
+                        } else {
+                            "idle"
+                        },
+                        applied_at
+                    ],
+                )
+                .map_err(|error| {
+                    InboxApplyError::operational(format!(
+                        "advance mobile sync apply cursor: {error}"
+                    ))
+                })?;
+            transaction
+                .commit()
+                .map_err(|error| InboxApplyError::operational(error.to_string()))?;
+            Ok((
+                change.categories.len() + change.folders.len() + change.notes.len(),
+                conflicts,
+            ))
+        })();
+
+        match apply_result {
+            Ok((applied_count, conflict_count)) => Ok(MobileInboxApplyResult {
+                sequence: change.sequence,
+                applied_count,
+                conflict_count,
+                state: if conflict_count > 0 {
+                    "conflict".to_string()
+                } else {
+                    "applied".to_string()
+                },
+            }),
+            Err(InboxApplyError::Semantic(error)) => {
+                quarantine_inbox_change(&mut connection, change.sequence, &error)?;
+                Ok(MobileInboxApplyResult {
+                    sequence: change.sequence,
+                    applied_count: 0,
+                    conflict_count: 0,
+                    state: "quarantined".to_string(),
+                })
+            }
+            Err(InboxApplyError::Operational(error)) => {
+                return_inbox_change_to_received(&mut connection, change.sequence)?;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn resolve_note_conflict(
+        &self,
+        record_id: &str,
+        resolution: &str,
+    ) -> Result<MobileWorkspaceNote, String> {
+        if !is_uuid_v7(record_id) {
+            return Err("note recordId must be a canonical UUIDv7".to_string());
+        }
+        if !matches!(resolution, "keepAsCopy" | "useRemote") {
+            return Err("unsupported mobile note conflict resolution".to_string());
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let identity = replica_identity(&transaction)?;
+        let conflict = load_open_conflict(&transaction, record_id)?
+            .ok_or_else(|| format!("note {record_id} has no open conflict"))?;
+        let resolved_at = next_timestamp(&transaction)?;
+        retire_resolved_conflict_outbox(&transaction, record_id, resolved_at)?;
+
+        let returned_record_id = if resolution == "keepAsCopy" {
+            create_conflict_copy(&transaction, &identity, &conflict)?
+        } else {
+            conflict.record_id.clone()
+        };
+        materialize_conflict_remote(&transaction, &identity, &conflict)?;
+        transaction
+            .execute(
+                "UPDATE mobile_note_conflicts
+                 SET state = ?1, resolved_at = ?2
+                 WHERE conflict_id = ?3 AND state = 'open'",
+                params![
+                    if resolution == "keepAsCopy" {
+                        "kept_copy"
+                    } else {
+                        "used_remote"
+                    },
+                    resolved_at,
+                    conflict.conflict_id
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        let pending: bool = transaction
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM mobile_note_outbox WHERE eligible_for_sync = 1
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "UPDATE mobile_sync_state
+                 SET sync_state = ?1, last_error_code = NULL
+                 WHERE singleton = 1 AND enrollment_state = 'active'",
+                [if pending { "pending" } else { "idle" }],
+            )
+            .map_err(|error| error.to_string())?;
+        let result = workspace_note_by_id(&transaction, &returned_record_id)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(result)
     }
 
     fn set_lifecycle(
@@ -908,6 +2155,7 @@ impl MobileStore {
         let state = portable_state(&transaction, record_id)?
             .ok_or_else(|| format!("note {record_id} does not exist"))?;
         ensure_noted_authority(&state)?;
+        ensure_no_open_note_conflict(&transaction, record_id)?;
         let expected_state = match lifecycle {
             "trash" => "active",
             "active" => "trash",
@@ -1003,6 +2251,7 @@ impl MobileStore {
                 tombstoned_at,
                 created_at: state.created_at,
                 updated_at: timestamp,
+                authority: &state.authority,
                 provenance_json: &state.provenance_json,
                 scope_id: &state.scope_id,
                 scope_class: &state.scope_class,
@@ -1010,6 +2259,1122 @@ impl MobileStore {
         )?;
         transaction.commit().map_err(|error| error.to_string())
     }
+}
+
+fn validate_mobile_inbox_change(change: &MobileInboxChange) -> Result<(), String> {
+    let member_count = change.categories.len() + change.folders.len() + change.notes.len();
+    if change.sequence <= 0
+        || member_count == 0
+        || member_count > MAX_MOBILE_TRANSACTION_MEMBERS
+        || !is_uuid(&change.transaction_id)
+        || !is_uuid_v7(&change.library_id)
+        || !is_uuid(&change.source_device_id)
+        || change.authority_generation <= 0
+        || change.purge_generation < 0
+        || !is_sha256(&change.transaction_digest)
+    {
+        return Err("mobile sync inbox envelope is invalid".to_string());
+    }
+    if change.computed_transaction_digest() != change.transaction_digest {
+        return Err("mobile sync inbox digest does not bind its payload".to_string());
+    }
+
+    let mut category_ids = BTreeSet::new();
+    for category in &change.categories {
+        if !category_ids.insert(category.category_id.as_str())
+            || !is_uuid_v7(&category.category_id)
+            || category.name.trim().is_empty()
+            || !(0..=MAX_PORTABLE_TIMESTAMP_MS).contains(&category.updated_at)
+            || !matches!(category.authority.as_str(), "noted" | "external")
+        {
+            return Err("mobile sync category payload is invalid".to_string());
+        }
+    }
+
+    let mut folder_ids = BTreeSet::new();
+    for folder in &change.folders {
+        if !folder_ids.insert(folder.folder_id.as_str())
+            || !is_uuid_v7(&folder.folder_id)
+            || folder
+                .parent_folder_id
+                .as_deref()
+                .is_some_and(|parent| !is_uuid_v7(parent) || parent == folder.folder_id)
+            || folder.name.trim().is_empty()
+            || folder.position < 0
+            || !(0..=MAX_PORTABLE_TIMESTAMP_MS).contains(&folder.updated_at)
+            || !matches!(folder.authority.as_str(), "noted" | "external")
+        {
+            return Err("mobile sync folder payload is invalid".to_string());
+        }
+    }
+
+    let mut note_ids = BTreeSet::new();
+    for note in &change.notes {
+        let lifecycle_valid = match note.lifecycle_state.as_str() {
+            "active" => note.trashed_at.is_none() && note.tombstoned_at.is_none(),
+            "trash" => {
+                note.trashed_at
+                    .is_some_and(|trashed| trashed >= note.created_at && trashed <= note.updated_at)
+                    && note.tombstoned_at.is_none()
+            }
+            "tombstone" => {
+                note.trashed_at
+                    .zip(note.tombstoned_at)
+                    .is_some_and(|(trashed, tombstoned)| {
+                        trashed >= note.created_at
+                            && trashed <= tombstoned
+                            && tombstoned <= note.updated_at
+                    })
+            }
+            _ => false,
+        };
+        if !note_ids.insert(note.record_id.as_str())
+            || !is_uuid_v7(&note.record_id)
+            || note.accepted_revision <= 0
+            || !is_uuid(&note.accepted_version_id)
+            || !is_sha256(&note.accepted_content_hash)
+            || note.accepted_content_hash != note_content_hash(note.title.trim(), &note.body)
+            || note.title.len() > MAX_MOBILE_NOTE_TEXT_BYTES
+            || note.body.len() > MAX_MOBILE_NOTE_TEXT_BYTES
+            || !(0..=MAX_PORTABLE_TIMESTAMP_MS).contains(&note.created_at)
+            || note.updated_at > MAX_PORTABLE_TIMESTAMP_MS
+            || note.updated_at < note.created_at
+            || !lifecycle_valid
+            || note
+                .folder_id
+                .as_deref()
+                .is_some_and(|folder_id| !is_uuid_v7(folder_id))
+            || !matches!(note.authority.as_str(), "noted" | "external")
+            || !is_uuid(&note.scope_id)
+            || !matches!(note.scope_class.as_str(), "personal" | "work" | "unknown")
+        {
+            return Err("mobile sync note payload is invalid".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_inbox_authority(
+    transaction: &Transaction<'_>,
+    change: &MobileInboxChange,
+) -> Result<(), InboxApplyError> {
+    let identity = replica_identity(transaction).map_err(InboxApplyError::operational)?;
+    let state: (String, i64, i64) = transaction
+        .query_row(
+            "SELECT enrollment_state, authority_generation, purge_generation
+             FROM mobile_sync_state WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| {
+            InboxApplyError::operational(format!("read mobile sync authority: {error}"))
+        })?;
+    if identity.library_state != "paired"
+        || state.0 != "active"
+        || identity.library_id != change.library_id
+        || state.1 != change.authority_generation
+        || state.2 != change.purge_generation
+    {
+        return Err(InboxApplyError::semantic(
+            "mobile sync inbox is not bound to the active library generation",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_incoming_categories(
+    transaction: &Transaction<'_>,
+    change: &MobileInboxChange,
+) -> Result<(), InboxApplyError> {
+    for category in &change.categories {
+        let changed = transaction
+            .execute(
+                "INSERT INTO mobile_note_categories (
+                   category_id, library_id, name, normalized_name, schema_json,
+                   authority, lifecycle_state, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?7)
+                 ON CONFLICT(category_id) DO UPDATE SET
+                   name = excluded.name,
+                   normalized_name = excluded.normalized_name,
+                   schema_json = excluded.schema_json,
+                   authority = excluded.authority,
+                   lifecycle_state = 'active',
+                   updated_at = excluded.updated_at
+                 WHERE mobile_note_categories.library_id = excluded.library_id",
+                params![
+                    category.category_id,
+                    change.library_id,
+                    category.name.trim(),
+                    normalized_workspace_name(&category.name),
+                    serde_json::to_string(&category.schema)
+                        .map_err(|error| InboxApplyError::semantic(error.to_string()))?,
+                    category.authority,
+                    category.updated_at,
+                ],
+            )
+            .map_err(|error| inbox_sql_error("apply mobile sync category", error))?;
+        if changed != 1 {
+            return Err(InboxApplyError::semantic(format!(
+                "mobile sync category {} collides with another library",
+                category.category_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn apply_incoming_folders(
+    transaction: &Transaction<'_>,
+    change: &MobileInboxChange,
+) -> Result<(), InboxApplyError> {
+    validate_proposed_folder_graph(transaction, change)?;
+    let mut known = transaction
+        .prepare(
+            "SELECT folder_id FROM mobile_note_folders
+             WHERE library_id = ?1 AND lifecycle_state = 'active'",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([&change.library_id], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()
+        })
+        .map_err(|error| {
+            InboxApplyError::operational(format!("load mobile folder graph: {error}"))
+        })?;
+    let mut remaining = change
+        .folders
+        .iter()
+        .map(|folder| (folder.folder_id.clone(), folder))
+        .collect::<BTreeMap<_, _>>();
+    while !remaining.is_empty() {
+        let ready = remaining
+            .iter()
+            .filter_map(|(folder_id, folder)| {
+                if folder
+                    .parent_folder_id
+                    .as_ref()
+                    .is_none_or(|parent| known.contains(parent))
+                {
+                    Some(folder_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if ready.is_empty() {
+            return Err(InboxApplyError::semantic(
+                "mobile sync folder graph has a missing parent or cycle",
+            ));
+        }
+        for folder_id in ready {
+            let folder = remaining
+                .remove(&folder_id)
+                .expect("ready folder remains present");
+            let changed = transaction
+                .execute(
+                    "INSERT INTO mobile_note_folders (
+                       folder_id, library_id, parent_folder_id, name,
+                       normalized_name, position, authority, lifecycle_state,
+                       created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'active', ?8, ?8)
+                     ON CONFLICT(folder_id) DO UPDATE SET
+                       parent_folder_id = excluded.parent_folder_id,
+                       name = excluded.name,
+                       normalized_name = excluded.normalized_name,
+                       position = excluded.position,
+                       authority = excluded.authority,
+                       lifecycle_state = 'active',
+                       updated_at = excluded.updated_at
+                     WHERE mobile_note_folders.library_id = excluded.library_id",
+                    params![
+                        folder.folder_id,
+                        change.library_id,
+                        folder.parent_folder_id,
+                        folder.name.trim(),
+                        normalized_workspace_name(&folder.name),
+                        folder.position,
+                        folder.authority,
+                        folder.updated_at,
+                    ],
+                )
+                .map_err(|error| inbox_sql_error("apply mobile sync folder", error))?;
+            if changed != 1 {
+                return Err(InboxApplyError::semantic(format!(
+                    "mobile sync folder {} collides with another library",
+                    folder.folder_id
+                )));
+            }
+            known.insert(folder_id);
+        }
+    }
+    Ok(())
+}
+
+fn validate_proposed_folder_graph(
+    transaction: &Transaction<'_>,
+    change: &MobileInboxChange,
+) -> Result<(), InboxApplyError> {
+    let mut graph = transaction
+        .prepare(
+            "SELECT folder_id, parent_folder_id
+             FROM mobile_note_folders
+             WHERE library_id = ?1 AND lifecycle_state = 'active'",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([&change.library_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })?
+                .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+        })
+        .map_err(|error| {
+            InboxApplyError::operational(format!("load proposed mobile folder graph: {error}"))
+        })?;
+    for folder in &change.folders {
+        graph.insert(folder.folder_id.clone(), folder.parent_folder_id.clone());
+    }
+    if graph
+        .values()
+        .flatten()
+        .any(|parent| !graph.contains_key(parent))
+    {
+        return Err(InboxApplyError::semantic(
+            "mobile sync folder graph has a missing parent",
+        ));
+    }
+    for folder_id in graph.keys() {
+        let mut seen = BTreeSet::new();
+        let mut cursor = Some(folder_id.as_str());
+        while let Some(current) = cursor {
+            if !seen.insert(current) {
+                return Err(InboxApplyError::semantic(
+                    "mobile sync folder graph contains a cycle",
+                ));
+            }
+            cursor = graph.get(current).and_then(Option::as_deref);
+        }
+    }
+    Ok(())
+}
+
+fn apply_incoming_note(
+    transaction: &Transaction<'_>,
+    change: &MobileInboxChange,
+    note: &MobileIncomingNote,
+) -> Result<bool, InboxApplyError> {
+    ensure_incoming_folder_exists(transaction, &change.library_id, note.folder_id.as_deref())?;
+    let existing = load_existing_sync_note(transaction, &note.record_id)?;
+    let Some(existing) = existing else {
+        insert_remote_note(transaction, change, note)?;
+        return Ok(false);
+    };
+    if existing.conflict_of.as_deref() == Some(note.record_id.as_str()) {
+        return Err(InboxApplyError::semantic(
+            "mobile sync conflict-copy identity is self-referential",
+        ));
+    }
+    let has_open_conflict: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM mobile_note_conflicts
+               WHERE record_id = ?1 AND state = 'open'
+             )",
+            [&note.record_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| {
+            InboxApplyError::operational(format!("inspect open mobile note conflict: {error}"))
+        })?;
+    if has_open_conflict {
+        return Err(InboxApplyError::semantic(
+            "mobile note must resolve its current conflict before another advance",
+        ));
+    }
+    if note.accepted_revision < existing.accepted_revision {
+        return Err(InboxApplyError::semantic(
+            "mobile sync note attempted an accepted-head rollback",
+        ));
+    }
+    if note.accepted_revision == existing.accepted_revision {
+        if existing.accepted_version_id.as_deref() != Some(&note.accepted_version_id)
+            || existing.accepted_content_hash.as_deref() != Some(&note.accepted_content_hash)
+        {
+            return Err(InboxApplyError::semantic(
+                "mobile sync reused an accepted revision with different bytes",
+            ));
+        }
+        return Ok(false);
+    }
+
+    let has_local_branch: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM mobile_note_outbox
+               WHERE record_id = ?1 AND eligible_for_sync = 1
+             )",
+            [&note.record_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| {
+            InboxApplyError::operational(format!("inspect local mobile note branch: {error}"))
+        })?;
+    let remote_acknowledges_local = has_local_branch
+        && existing.working_version_id == note.accepted_version_id
+        && existing.canonical_hash == note.accepted_content_hash;
+    if has_local_branch && !remote_acknowledges_local {
+        preserve_note_conflict(transaction, note, &existing)?;
+        return Ok(true);
+    }
+
+    materialize_remote_note(transaction, change, note, false)?;
+    if remote_acknowledges_local {
+        acknowledge_local_outbox_group(
+            transaction,
+            &note.record_id,
+            &existing.pending_mutation_id,
+            note.updated_at,
+        )?;
+    }
+    Ok(false)
+}
+
+fn load_existing_sync_note(
+    transaction: &Transaction<'_>,
+    record_id: &str,
+) -> Result<Option<ExistingSyncNote>, InboxApplyError> {
+    transaction
+        .query_row(
+            "SELECT notes.title, notes.body,
+                    notes.accepted_revision, notes.accepted_version_id,
+                    notes.accepted_content_hash, notes.working_branch_id,
+                    notes.working_version_id, notes.pending_mutation_id,
+                    notes.lifecycle_state, notes.canonical_hash,
+                    filing.folder_id, notes.conflict_of
+             FROM mobile_notes AS notes
+             LEFT JOIN mobile_note_filing AS filing
+               ON filing.record_id = notes.record_id
+             WHERE notes.record_id = ?1",
+            [record_id],
+            |row| {
+                Ok(ExistingSyncNote {
+                    title: row.get(0)?,
+                    body: row.get(1)?,
+                    accepted_revision: row.get(2)?,
+                    accepted_version_id: row.get(3)?,
+                    accepted_content_hash: row.get(4)?,
+                    working_branch_id: row.get(5)?,
+                    working_version_id: row.get(6)?,
+                    pending_mutation_id: row.get(7)?,
+                    lifecycle_state: row.get(8)?,
+                    canonical_hash: row.get(9)?,
+                    folder_id: row.get(10)?,
+                    conflict_of: row.get(11)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| {
+            InboxApplyError::operational(format!("load existing mobile sync note: {error}"))
+        })
+}
+
+fn insert_remote_note(
+    transaction: &Transaction<'_>,
+    change: &MobileInboxChange,
+    note: &MobileIncomingNote,
+) -> Result<(), InboxApplyError> {
+    let provenance_json = incoming_note_provenance_json(change, note)?;
+    transaction
+        .execute(
+            "INSERT INTO mobile_notes (
+               title, body, created_at, updated_at, deleted_at,
+               library_id, record_id, record_kind, record_schema_version,
+               accepted_revision, accepted_version_id, accepted_content_hash,
+               working_revision, working_branch_id, working_version_id,
+               working_base_revision, pending_mutation_id, sync_state,
+               lifecycle_state, trashed_at, tombstoned_at, canonical_hash,
+               authority, scope, scope_id, scope_class, sensitivity,
+               provenance_json, origin_device_id, last_modified_device_id,
+               origin_install_id, conflict_of
+             ) VALUES (
+               ?1, ?2, ?3, ?4, ?5,
+               ?6, ?7, 'note', 1,
+               ?8, ?9, ?10,
+               ?8, ?9, ?9,
+               ?8, ?9, 'acknowledged',
+               ?11, ?12, ?13, ?10,
+               ?14, ?15, ?16, ?15, 'standard',
+               ?17, ?18, ?18,
+               ?18, NULL
+             )",
+            params![
+                note.title.trim(),
+                note.body,
+                note.created_at,
+                note.updated_at,
+                note.trashed_at,
+                change.library_id,
+                note.record_id,
+                note.accepted_revision,
+                note.accepted_version_id,
+                note.accepted_content_hash,
+                note.lifecycle_state,
+                note.trashed_at,
+                note.tombstoned_at,
+                note.authority,
+                note.scope_class,
+                note.scope_id,
+                provenance_json,
+                change.source_device_id,
+            ],
+        )
+        .map_err(|error| inbox_sql_error("insert remote mobile note", error))?;
+    set_remote_filing(
+        transaction,
+        &note.record_id,
+        note.folder_id.as_deref(),
+        note.updated_at,
+    )
+}
+
+fn incoming_note_provenance_json(
+    change: &MobileInboxChange,
+    note: &MobileIncomingNote,
+) -> Result<String, InboxApplyError> {
+    let provenance = if note.authority == "external" {
+        serde_json::json!({
+            "source": "external_authority",
+            "transport": "direct_sync",
+            "source_device_id": change.source_device_id,
+        })
+    } else {
+        serde_json::json!({
+            "source": "direct_sync",
+            "source_device_id": change.source_device_id,
+        })
+    };
+    serde_json::to_string(&provenance).map_err(|error| InboxApplyError::semantic(error.to_string()))
+}
+
+fn materialize_remote_note(
+    transaction: &Transaction<'_>,
+    change: &MobileInboxChange,
+    note: &MobileIncomingNote,
+    preserve_conflict_marker: bool,
+) -> Result<(), InboxApplyError> {
+    let provenance_json = incoming_note_provenance_json(change, note)?;
+    let changed = transaction
+        .execute(
+            "UPDATE mobile_notes
+             SET title = ?1, body = ?2, created_at = ?3, updated_at = ?4,
+                 deleted_at = ?5,
+                 accepted_revision = ?6,
+                 accepted_version_id = ?7,
+                 accepted_content_hash = ?8,
+                 working_revision = ?6,
+                 working_branch_id = ?7,
+                 working_version_id = ?7,
+                 working_base_revision = ?6,
+                 pending_mutation_id = ?7,
+                 sync_state = 'acknowledged',
+                 lifecycle_state = ?9,
+                 trashed_at = ?10,
+                 tombstoned_at = ?11,
+                 canonical_hash = ?8,
+                 authority = ?12,
+                 scope = ?13,
+                 scope_id = ?14,
+                 scope_class = ?13,
+                 provenance_json = ?15,
+                 last_modified_device_id = ?16,
+                 conflict_of = CASE WHEN ?17 THEN conflict_of ELSE NULL END
+             WHERE record_id = ?18 AND library_id = ?19",
+            params![
+                note.title.trim(),
+                note.body,
+                note.created_at,
+                note.updated_at,
+                note.trashed_at,
+                note.accepted_revision,
+                note.accepted_version_id,
+                note.accepted_content_hash,
+                note.lifecycle_state,
+                note.trashed_at,
+                note.tombstoned_at,
+                note.authority,
+                note.scope_class,
+                note.scope_id,
+                provenance_json,
+                change.source_device_id,
+                preserve_conflict_marker,
+                note.record_id,
+                change.library_id,
+            ],
+        )
+        .map_err(|error| inbox_sql_error("materialize remote mobile note", error))?;
+    if changed != 1 {
+        return Err(InboxApplyError::semantic(format!(
+            "mobile sync note {} does not exist",
+            note.record_id
+        )));
+    }
+    set_remote_filing(
+        transaction,
+        &note.record_id,
+        note.folder_id.as_deref(),
+        note.updated_at,
+    )
+}
+
+fn preserve_note_conflict(
+    transaction: &Transaction<'_>,
+    note: &MobileIncomingNote,
+    local: &ExistingSyncNote,
+) -> Result<(), InboxApplyError> {
+    let conflict_id = new_uuid_v7();
+    transaction
+        .execute(
+            "INSERT INTO mobile_note_conflicts (
+               conflict_id, record_id, local_branch_id, local_version_id,
+               local_title, local_body, local_canonical_hash,
+               local_lifecycle_state, local_folder_id,
+               accepted_revision, accepted_version_id, accepted_content_hash,
+               remote_title, remote_body, remote_created_at, remote_updated_at,
+               remote_lifecycle_state, remote_trashed_at, remote_tombstoned_at,
+               remote_folder_id, remote_authority, remote_scope_id,
+               remote_scope_class, state, created_at
+             ) VALUES (
+               ?1, ?2, ?3, ?4,
+               ?5, ?6, ?7,
+               ?8, ?9,
+               ?10, ?11, ?12,
+               ?13, ?14, ?15, ?16,
+               ?17, ?18, ?19,
+               ?20, ?21, ?22,
+               ?23, 'open', ?24
+             )",
+            params![
+                conflict_id,
+                note.record_id,
+                local.working_branch_id,
+                local.working_version_id,
+                local.title,
+                local.body,
+                local.canonical_hash,
+                local.lifecycle_state,
+                local.folder_id,
+                note.accepted_revision,
+                note.accepted_version_id,
+                note.accepted_content_hash,
+                note.title.trim(),
+                note.body,
+                note.created_at,
+                note.updated_at,
+                note.lifecycle_state,
+                note.trashed_at,
+                note.tombstoned_at,
+                note.folder_id,
+                note.authority,
+                note.scope_id,
+                note.scope_class,
+                now_millis().map_err(InboxApplyError::operational)?,
+            ],
+        )
+        .map_err(|error| inbox_sql_error("preserve mobile note conflict", error))?;
+    transaction
+        .execute(
+            "UPDATE mobile_notes
+             SET accepted_revision = ?1,
+                 accepted_version_id = ?2,
+                 accepted_content_hash = ?3,
+                 sync_state = 'conflict'
+             WHERE record_id = ?4",
+            params![
+                note.accepted_revision,
+                note.accepted_version_id,
+                note.accepted_content_hash,
+                note.record_id
+            ],
+        )
+        .map_err(|error| inbox_sql_error("mark conflicted mobile note", error))?;
+    mark_local_outbox_group_conflict(transaction, &note.record_id, &local.pending_mutation_id)
+}
+
+fn acknowledge_local_outbox_group(
+    transaction: &Transaction<'_>,
+    record_id: &str,
+    pending_mutation_id: &str,
+    acknowledged_at: i64,
+) -> Result<(), InboxApplyError> {
+    let transaction_id: Option<String> = transaction
+        .query_row(
+            "SELECT transaction_id FROM mobile_note_outbox
+             WHERE record_id = ?1 AND mutation_id = ?2",
+            params![record_id, pending_mutation_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| {
+            InboxApplyError::operational(format!("load acknowledged outbox group: {error}"))
+        })?;
+    if let Some(transaction_id) = transaction_id {
+        transaction
+            .execute(
+                "UPDATE mobile_note_outbox
+                 SET state = 'acknowledged', eligible_for_sync = 0,
+                     acknowledged_at = ?1
+                 WHERE transaction_id = ?2 AND eligible_for_sync = 1",
+                params![acknowledged_at, transaction_id],
+            )
+            .map_err(|error| {
+                InboxApplyError::operational(format!("acknowledge local outbox group: {error}"))
+            })?;
+    }
+    Ok(())
+}
+
+fn mark_local_outbox_group_conflict(
+    transaction: &Transaction<'_>,
+    record_id: &str,
+    pending_mutation_id: &str,
+) -> Result<(), InboxApplyError> {
+    let transaction_id: Option<String> = transaction
+        .query_row(
+            "SELECT transaction_id FROM mobile_note_outbox
+             WHERE record_id = ?1 AND mutation_id = ?2",
+            params![record_id, pending_mutation_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| {
+            InboxApplyError::operational(format!("load conflicted outbox group: {error}"))
+        })?;
+    if let Some(transaction_id) = transaction_id {
+        transaction
+            .execute(
+                "UPDATE mobile_note_outbox
+                 SET state = 'conflict', eligible_for_sync = 0
+                 WHERE transaction_id = ?1 AND eligible_for_sync = 1",
+                [transaction_id],
+            )
+            .map_err(|error| {
+                InboxApplyError::operational(format!("mark local outbox group conflict: {error}"))
+            })?;
+    }
+    Ok(())
+}
+
+fn retire_resolved_conflict_outbox(
+    transaction: &Transaction<'_>,
+    record_id: &str,
+    resolved_at: i64,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "UPDATE mobile_note_outbox
+             SET state = 'conflict', eligible_for_sync = 0,
+                 superseded_at = COALESCE(superseded_at, ?1)
+             WHERE record_id = ?2
+               AND (eligible_for_sync = 1 OR state IN ('pending', 'sending'))",
+            params![resolved_at, record_id],
+        )
+        .map_err(|error| error.to_string())?;
+    let has_unretired_branch: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM mobile_note_outbox
+               WHERE record_id = ?1 AND eligible_for_sync = 1
+             )",
+            [record_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if has_unretired_branch {
+        Err(format!(
+            "note {record_id} conflict resolution left an eligible local branch"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn set_remote_filing(
+    transaction: &Transaction<'_>,
+    record_id: &str,
+    folder_id: Option<&str>,
+    updated_at: i64,
+) -> Result<(), InboxApplyError> {
+    transaction
+        .execute(
+            "INSERT INTO mobile_note_filing (
+               record_id, folder_id, previous_folder_id, filed_at, updated_at
+             ) VALUES (?1, ?2, NULL, ?3, ?3)
+             ON CONFLICT(record_id) DO UPDATE SET
+               folder_id = excluded.folder_id,
+               previous_folder_id = NULL,
+               filed_at = excluded.filed_at,
+               updated_at = excluded.updated_at",
+            params![record_id, folder_id, updated_at],
+        )
+        .map_err(|error| inbox_sql_error("apply remote mobile note filing", error))?;
+    Ok(())
+}
+
+fn ensure_incoming_folder_exists(
+    transaction: &Transaction<'_>,
+    library_id: &str,
+    folder_id: Option<&str>,
+) -> Result<(), InboxApplyError> {
+    let Some(folder_id) = folder_id else {
+        return Ok(());
+    };
+    let exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM mobile_note_folders
+               WHERE folder_id = ?1 AND library_id = ?2
+                 AND lifecycle_state = 'active'
+             )",
+            params![folder_id, library_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| {
+            InboxApplyError::operational(format!("inspect incoming mobile note folder: {error}"))
+        })?;
+    if exists {
+        Ok(())
+    } else {
+        Err(InboxApplyError::semantic(format!(
+            "mobile sync note references missing folder {folder_id}"
+        )))
+    }
+}
+
+fn quarantine_inbox_change(
+    connection: &mut Connection,
+    sequence: i64,
+    _reason: &str,
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE mobile_sync_inbox
+             SET state = 'quarantined', applied_at = ?1,
+                 error_code = 'semantic_validation_failed'
+             WHERE sequence = ?2 AND state IN ('received', 'applying')",
+            params![now_millis()?, sequence],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE mobile_sync_state
+             SET applied_cursor = ?1, sync_state = 'error',
+                 last_error_code = 'semantic_validation_failed'
+             WHERE singleton = 1 AND applied_cursor + 1 = ?1",
+            [sequence],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+fn return_inbox_change_to_received(
+    connection: &mut Connection,
+    sequence: i64,
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    let changed = transaction
+        .execute(
+            "UPDATE mobile_sync_inbox
+             SET state = 'received', apply_started_at = NULL,
+                 error_code = 'transient_apply_failed'
+             WHERE sequence = ?1 AND state = 'applying'",
+            [sequence],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed != 1 {
+        return Err("mobile sync inbox could not preserve its retry checkpoint".to_string());
+    }
+    transaction
+        .execute(
+            "UPDATE mobile_sync_state
+             SET sync_state = 'error', last_error_code = 'transient_apply_failed'
+             WHERE singleton = 1",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+fn load_open_conflict(
+    transaction: &Transaction<'_>,
+    record_id: &str,
+) -> Result<Option<ConflictSnapshot>, String> {
+    transaction
+        .query_row(
+            "SELECT conflicts.conflict_id, conflicts.record_id,
+                    conflicts.local_title, conflicts.local_body,
+                    conflicts.local_canonical_hash,
+                    notes.created_at, notes.updated_at,
+                    conflicts.local_lifecycle_state,
+                    notes.trashed_at, notes.tombstoned_at,
+                    conflicts.local_folder_id,
+                    notes.authority, notes.scope, notes.scope_id,
+                    notes.scope_class, notes.provenance_json,
+                    conflicts.accepted_revision,
+                    conflicts.accepted_version_id,
+                    conflicts.accepted_content_hash,
+                    conflicts.remote_title, conflicts.remote_body,
+                    conflicts.remote_created_at, conflicts.remote_updated_at,
+                    conflicts.remote_lifecycle_state,
+                    conflicts.remote_trashed_at,
+                    conflicts.remote_tombstoned_at,
+                    conflicts.remote_folder_id, conflicts.remote_authority,
+                    conflicts.remote_scope_id, conflicts.remote_scope_class
+             FROM mobile_note_conflicts AS conflicts
+             JOIN mobile_notes AS notes
+               ON notes.record_id = conflicts.record_id
+             WHERE conflicts.record_id = ?1 AND conflicts.state = 'open'",
+            [record_id],
+            |row| {
+                Ok(ConflictSnapshot {
+                    conflict_id: row.get(0)?,
+                    record_id: row.get(1)?,
+                    local_title: row.get(2)?,
+                    local_body: row.get(3)?,
+                    local_canonical_hash: row.get(4)?,
+                    local_created_at: row.get(5)?,
+                    local_updated_at: row.get(6)?,
+                    local_lifecycle_state: row.get(7)?,
+                    local_trashed_at: row.get(8)?,
+                    local_tombstoned_at: row.get(9)?,
+                    local_folder_id: row.get(10)?,
+                    local_authority: row.get(11)?,
+                    local_scope: row.get(12)?,
+                    local_scope_id: row.get(13)?,
+                    local_scope_class: row.get(14)?,
+                    local_provenance_json: row.get(15)?,
+                    accepted_revision: row.get(16)?,
+                    accepted_version_id: row.get(17)?,
+                    accepted_content_hash: row.get(18)?,
+                    remote_title: row.get(19)?,
+                    remote_body: row.get(20)?,
+                    remote_created_at: row.get(21)?,
+                    remote_updated_at: row.get(22)?,
+                    remote_lifecycle_state: row.get(23)?,
+                    remote_trashed_at: row.get(24)?,
+                    remote_tombstoned_at: row.get(25)?,
+                    remote_folder_id: row.get(26)?,
+                    remote_authority: row.get(27)?,
+                    remote_scope_id: row.get(28)?,
+                    remote_scope_class: row.get(29)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn create_conflict_copy(
+    transaction: &Transaction<'_>,
+    identity: &ReplicaIdentity,
+    conflict: &ConflictSnapshot,
+) -> Result<String, String> {
+    let record_id = new_uuid_v7();
+    let branch_id = new_uuid_v7();
+    let version_id = new_uuid_v7();
+    let mutation_id = new_uuid_v7();
+    let timestamp = next_timestamp(transaction)?.max(conflict.local_updated_at.saturating_add(1));
+    let outbox_transaction = begin_outbox_transaction(transaction, 1)?;
+    transaction
+        .execute(
+            "INSERT INTO mobile_notes (
+               title, body, created_at, updated_at, deleted_at,
+               library_id, record_id, record_kind, record_schema_version,
+               accepted_revision, accepted_version_id, accepted_content_hash,
+               working_revision, working_branch_id, working_version_id,
+               working_base_revision, pending_mutation_id, sync_state,
+               lifecycle_state, trashed_at, tombstoned_at, canonical_hash,
+               authority, scope, scope_id, scope_class, sensitivity,
+               provenance_json, origin_device_id, last_modified_device_id,
+               origin_install_id, conflict_of
+             ) VALUES (
+               ?1, ?2, ?3, ?4, ?5,
+               ?6, ?7, 'note', 1,
+               0, NULL, NULL,
+               1, ?8, ?9,
+               0, ?10, 'pending',
+               ?11, ?12, ?13, ?14,
+               ?15, ?16, ?17, ?18, 'standard',
+               ?19, ?20, ?20,
+               ?21, ?22
+             )",
+            params![
+                conflict.local_title,
+                conflict.local_body,
+                conflict.local_created_at,
+                timestamp,
+                conflict.local_trashed_at,
+                identity.library_id,
+                record_id,
+                branch_id,
+                version_id,
+                mutation_id,
+                conflict.local_lifecycle_state,
+                conflict.local_trashed_at,
+                conflict.local_tombstoned_at,
+                conflict.local_canonical_hash,
+                conflict.local_authority,
+                conflict.local_scope,
+                conflict.local_scope_id,
+                conflict.local_scope_class,
+                conflict.local_provenance_json,
+                identity.device_id,
+                identity.install_id,
+                conflict.record_id,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    let folder_id = if let Some(folder_id) = conflict.local_folder_id.as_deref() {
+        let exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM mobile_note_folders
+                   WHERE folder_id = ?1 AND library_id = ?2
+                     AND lifecycle_state = 'active'
+                 )",
+                params![folder_id, identity.library_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        exists.then_some(folder_id)
+    } else {
+        None
+    };
+    set_remote_filing(transaction, &record_id, folder_id, timestamp)
+        .map_err(InboxApplyError::into_string)?;
+    enqueue_mutation(
+        transaction,
+        identity,
+        &outbox_transaction,
+        0,
+        Mutation {
+            operation: "create",
+            record_id: &record_id,
+            title: &conflict.local_title,
+            body: &conflict.local_body,
+            base_revision: 0,
+            proposed_revision: 1,
+            local_revision: 1,
+            version_id: &version_id,
+            branch_id: &branch_id,
+            base_version_id: None,
+            accepted_content_hash: None,
+            mutation_id: &mutation_id,
+            canonical_hash: &conflict.local_canonical_hash,
+            lifecycle_state: &conflict.local_lifecycle_state,
+            trashed_at: conflict.local_trashed_at,
+            tombstoned_at: conflict.local_tombstoned_at,
+            created_at: conflict.local_created_at,
+            updated_at: timestamp,
+            authority: &conflict.local_authority,
+            provenance_json: &conflict.local_provenance_json,
+            scope_id: &conflict.local_scope_id,
+            scope_class: &conflict.local_scope_class,
+        },
+    )?;
+    Ok(record_id)
+}
+
+fn materialize_conflict_remote(
+    transaction: &Transaction<'_>,
+    identity: &ReplicaIdentity,
+    conflict: &ConflictSnapshot,
+) -> Result<(), String> {
+    ensure_incoming_folder_exists(
+        transaction,
+        &identity.library_id,
+        conflict.remote_folder_id.as_deref(),
+    )
+    .map_err(InboxApplyError::into_string)?;
+    let provenance_json = serde_json::to_string(&if conflict.remote_authority == "external" {
+        serde_json::json!({
+            "source": "external_authority",
+            "transport": "direct_sync",
+        })
+    } else {
+        serde_json::json!({"source": "direct_sync"})
+    })
+    .map_err(|error| error.to_string())?;
+    let changed = transaction
+        .execute(
+            "UPDATE mobile_notes
+             SET title = ?1, body = ?2, created_at = ?3, updated_at = ?4,
+                 deleted_at = ?5,
+                 accepted_revision = ?6,
+                 accepted_version_id = ?7,
+                 accepted_content_hash = ?8,
+                 working_revision = ?6,
+                 working_branch_id = ?7,
+                 working_version_id = ?7,
+                 working_base_revision = ?6,
+                 pending_mutation_id = ?7,
+                 sync_state = 'acknowledged',
+                 lifecycle_state = ?9,
+                 trashed_at = ?10,
+                 tombstoned_at = ?11,
+                 canonical_hash = ?8,
+                 authority = ?12,
+                 scope = ?13,
+                 scope_id = ?14,
+                 scope_class = ?13,
+                 provenance_json = ?15,
+                 conflict_of = NULL
+             WHERE record_id = ?16 AND library_id = ?17",
+            params![
+                conflict.remote_title,
+                conflict.remote_body,
+                conflict.remote_created_at,
+                conflict.remote_updated_at,
+                conflict.remote_trashed_at,
+                conflict.accepted_revision,
+                conflict.accepted_version_id,
+                conflict.accepted_content_hash,
+                conflict.remote_lifecycle_state,
+                conflict.remote_trashed_at,
+                conflict.remote_tombstoned_at,
+                conflict.remote_authority,
+                conflict.remote_scope_class,
+                conflict.remote_scope_id,
+                provenance_json,
+                conflict.record_id,
+                identity.library_id,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed != 1 {
+        return Err(format!(
+            "conflicted note {} no longer exists",
+            conflict.record_id
+        ));
+    }
+    set_remote_filing(
+        transaction,
+        &conflict.record_id,
+        conflict.remote_folder_id.as_deref(),
+        conflict.remote_updated_at,
+    )
+    .map_err(InboxApplyError::into_string)
+}
+
+fn normalized_workspace_name(name: &str) -> String {
+    name.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn ensure_mobile_search_schema(connection: &mut Connection) -> Result<(), String> {
@@ -1842,6 +4207,8 @@ fn prepare_mobile_migration_recovery(
     }
     if user_version == 1 {
         verify_mobile_schema_v1(connection)?;
+    } else if user_version == 2 {
+        verify_mobile_schema_v2(connection)?;
     }
     if database_path == Path::new(":memory:") {
         return Ok(None);
@@ -2018,7 +4385,7 @@ fn migrate_portable_notes_to_version(
     recovery_path: Option<&Path>,
     target_version: i64,
 ) -> Result<(), String> {
-    if !matches!(target_version, 1 | PORTABLE_SCHEMA_VERSION) {
+    if !matches!(target_version, 1 | 2 | PORTABLE_SCHEMA_VERSION) {
         return Err(format!(
             "unsupported mobile migration target {target_version}"
         ));
@@ -2031,15 +4398,36 @@ fn migrate_portable_notes_to_version(
             "mobile database schema {user_version} is newer than supported schema {PORTABLE_SCHEMA_VERSION}"
         ));
     }
+    if user_version > target_version {
+        return Err(format!(
+            "mobile database schema {user_version} cannot migrate backward to {target_version}"
+        ));
+    }
     if user_version == PORTABLE_SCHEMA_VERSION {
         return verify_current_mobile_schema(connection);
     }
     if user_version < 0 {
         return Err("mobile database schema version cannot be negative".to_string());
     }
+    if user_version == target_version {
+        return match user_version {
+            1 => verify_mobile_schema_v1(connection),
+            2 => verify_mobile_schema_v2(connection),
+            _ => verify_current_mobile_schema(connection),
+        };
+    }
+    if user_version == 2 {
+        verify_mobile_schema_v2(connection)?;
+        migrate_mobile_schema_v3(connection, recovery_path)?;
+        return verify_current_mobile_schema(connection);
+    }
     if user_version == 1 {
         verify_mobile_schema_v1(connection)?;
         migrate_mobile_schema_v2(connection, recovery_path)?;
+        if target_version == 2 {
+            return verify_mobile_schema_v2(connection);
+        }
+        migrate_mobile_schema_v3(connection, None)?;
         return verify_current_mobile_schema(connection);
     }
     if user_version != 0 {
@@ -2235,6 +4623,10 @@ fn migrate_portable_notes_to_version(
         return verify_mobile_schema_v1(connection);
     }
     migrate_mobile_schema_v2(connection, None)?;
+    if target_version == 2 {
+        return verify_mobile_schema_v2(connection);
+    }
+    migrate_mobile_schema_v3(connection, None)?;
     verify_current_mobile_schema(connection)
 }
 
@@ -2499,13 +4891,206 @@ fn migrate_mobile_schema_v2(
     transaction.commit().map_err(|error| error.to_string())
 }
 
-fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
+fn migrate_mobile_schema_v3(
+    connection: &mut Connection,
+    recovery_path: Option<&Path>,
+) -> Result<(), String> {
+    verify_mobile_schema_v2(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    ensure_columns(&transaction, "mobile_notes", &[("conflict_of", "TEXT")])?;
+    transaction
+        .execute_batch(
+            "CREATE TABLE mobile_note_categories (
+               category_id TEXT PRIMARY KEY,
+               library_id TEXT NOT NULL,
+               name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+               normalized_name TEXT NOT NULL CHECK (length(normalized_name) > 0),
+               schema_json TEXT NOT NULL DEFAULT '{}',
+               authority TEXT NOT NULL CHECK (authority IN ('noted', 'external')),
+               lifecycle_state TEXT NOT NULL DEFAULT 'active'
+                 CHECK (lifecycle_state IN ('active', 'tombstone')),
+               created_at INTEGER NOT NULL,
+               updated_at INTEGER NOT NULL,
+               UNIQUE(library_id, normalized_name)
+             );
+             CREATE TABLE mobile_note_folders (
+               folder_id TEXT PRIMARY KEY,
+               library_id TEXT NOT NULL,
+               parent_folder_id TEXT REFERENCES mobile_note_folders(folder_id),
+               name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+               normalized_name TEXT NOT NULL CHECK (length(normalized_name) > 0),
+               position INTEGER NOT NULL DEFAULT 0,
+               authority TEXT NOT NULL CHECK (authority IN ('noted', 'external')),
+               lifecycle_state TEXT NOT NULL DEFAULT 'active'
+                 CHECK (lifecycle_state IN ('active', 'tombstone')),
+               created_at INTEGER NOT NULL,
+               updated_at INTEGER NOT NULL,
+               CHECK (parent_folder_id IS NULL OR parent_folder_id != folder_id),
+               UNIQUE(library_id, parent_folder_id, normalized_name)
+             );
+             CREATE TABLE mobile_note_filing (
+               record_id TEXT PRIMARY KEY REFERENCES mobile_notes(record_id),
+               folder_id TEXT REFERENCES mobile_note_folders(folder_id),
+               previous_folder_id TEXT REFERENCES mobile_note_folders(folder_id),
+               filed_at INTEGER NOT NULL,
+               updated_at INTEGER NOT NULL,
+               CHECK (folder_id IS NULL OR previous_folder_id IS NULL
+                      OR folder_id != previous_folder_id)
+             );
+             CREATE TABLE mobile_sync_state (
+               singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+               enrollment_state TEXT NOT NULL DEFAULT 'not_enrolled'
+                 CHECK (enrollment_state IN ('not_enrolled', 'active', 'revoked')),
+               sync_state TEXT NOT NULL DEFAULT 'not_enrolled'
+                 CHECK (sync_state IN ('not_enrolled', 'idle', 'pending', 'syncing', 'conflict', 'error', 'revoked')),
+               authority_generation INTEGER NOT NULL DEFAULT 1 CHECK (authority_generation > 0),
+               purge_generation INTEGER NOT NULL DEFAULT 0 CHECK (purge_generation >= 0),
+               downloaded_cursor INTEGER NOT NULL DEFAULT 0 CHECK (downloaded_cursor >= 0),
+               applied_cursor INTEGER NOT NULL DEFAULT 0 CHECK (applied_cursor >= 0),
+               last_synced_at INTEGER,
+               last_error_code TEXT,
+               CHECK (applied_cursor <= downloaded_cursor)
+             );
+             CREATE TABLE mobile_sync_inbox (
+               sequence INTEGER PRIMARY KEY CHECK (sequence > 0),
+               transaction_id TEXT NOT NULL UNIQUE,
+               transaction_digest TEXT NOT NULL UNIQUE CHECK (length(transaction_digest) = 64),
+               payload_json TEXT NOT NULL,
+               state TEXT NOT NULL DEFAULT 'received'
+                 CHECK (state IN ('received', 'applying', 'applied', 'quarantined')),
+               received_at INTEGER NOT NULL,
+               apply_started_at INTEGER,
+               applied_at INTEGER,
+               error_code TEXT
+             );
+             CREATE TABLE mobile_note_conflicts (
+               conflict_id TEXT PRIMARY KEY,
+               record_id TEXT NOT NULL REFERENCES mobile_notes(record_id),
+               local_branch_id TEXT NOT NULL,
+               local_version_id TEXT NOT NULL,
+               local_title TEXT NOT NULL,
+               local_body TEXT NOT NULL,
+               local_canonical_hash TEXT NOT NULL CHECK (length(local_canonical_hash) = 64),
+               local_lifecycle_state TEXT NOT NULL,
+               local_folder_id TEXT REFERENCES mobile_note_folders(folder_id),
+               accepted_revision INTEGER NOT NULL CHECK (accepted_revision > 0),
+               accepted_version_id TEXT NOT NULL,
+               accepted_content_hash TEXT NOT NULL CHECK (length(accepted_content_hash) = 64),
+               remote_title TEXT NOT NULL,
+               remote_body TEXT NOT NULL,
+               remote_created_at INTEGER NOT NULL,
+               remote_updated_at INTEGER NOT NULL,
+               remote_lifecycle_state TEXT NOT NULL,
+               remote_trashed_at INTEGER,
+               remote_tombstoned_at INTEGER,
+               remote_folder_id TEXT REFERENCES mobile_note_folders(folder_id),
+               remote_authority TEXT NOT NULL,
+               remote_scope_id TEXT NOT NULL,
+               remote_scope_class TEXT NOT NULL,
+               state TEXT NOT NULL DEFAULT 'open'
+                 CHECK (state IN ('open', 'kept_copy', 'used_remote')),
+               created_at INTEGER NOT NULL,
+               resolved_at INTEGER
+             );
+             CREATE UNIQUE INDEX idx_mobile_note_conflicts_open
+               ON mobile_note_conflicts(record_id) WHERE state = 'open';
+             CREATE INDEX idx_mobile_note_folders_parent_position
+               ON mobile_note_folders(parent_folder_id, position, name);
+             CREATE INDEX idx_mobile_note_filing_folder
+               ON mobile_note_filing(folder_id, record_id);
+             CREATE INDEX idx_mobile_sync_inbox_state_sequence
+               ON mobile_sync_inbox(state, sequence);",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let identity = replica_identity(&transaction)?;
+    let (replica_created_at, migration_time): (i64, i64) = (
+        transaction
+            .query_row(
+                "SELECT created_at FROM mobile_replica WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?,
+        now_millis()?,
+    );
+    let default_folder_id = deterministic_backfill_uuid_v7(
+        u64::try_from(replica_created_at.max(0)).unwrap_or(0),
+        &format!("noted.iphone-folder.{}", identity.library_id),
+        "notes",
+    );
+    transaction
+        .execute(
+            "INSERT INTO mobile_note_folders (
+               folder_id, library_id, parent_folder_id, name, normalized_name,
+               position, authority, lifecycle_state, created_at, updated_at
+             ) VALUES (?1, ?2, NULL, 'Notes', 'notes', 0, 'noted', 'active', ?3, ?3)",
+            params![
+                default_folder_id,
+                identity.library_id,
+                replica_created_at.max(0)
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO mobile_sync_state (
+               singleton, enrollment_state, sync_state, authority_generation,
+               purge_generation, downloaded_cursor, applied_cursor
+             ) VALUES (1, 'not_enrolled', 'not_enrolled', 1, 0, 0, 0)",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO mobile_schema_migrations
+               (version, name, checksum, migrated_at, product_version)
+             VALUES (3, ?1, ?2, ?3, ?4)",
+            params![
+                PORTABLE_MIGRATION_V3_NAME,
+                PORTABLE_SCHEMA_V3_CHECKSUM,
+                migration_time,
+                env!("CARGO_PKG_VERSION"),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    let updated_state = transaction
+        .execute(
+            "UPDATE mobile_schema_state
+             SET schema_version = 3,
+                 min_reader_version = 3,
+                 min_writer_version = 3,
+                 migration_checksum = ?1,
+                 migrated_at = ?2,
+                 product_version = ?3,
+                 migration_recovery_path = COALESCE(?4, migration_recovery_path)
+             WHERE singleton = 1 AND schema_version = 2",
+            params![
+                PORTABLE_SCHEMA_V3_CHECKSUM,
+                migration_time,
+                env!("CARGO_PKG_VERSION"),
+                recovery_path.map(|path| path.to_string_lossy().into_owned()),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if updated_state != 1 {
+        return Err("mobile schema v3 could not advance its compatibility stamp".to_string());
+    }
+    transaction
+        .pragma_update(None, "user_version", 3)
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+fn verify_mobile_schema_v2(connection: &Connection) -> Result<(), String> {
     let user_version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|error| error.to_string())?;
-    if user_version != PORTABLE_SCHEMA_VERSION {
+    if user_version != 2 {
         return Err(format!(
-            "mobile schema verifier expected user_version {PORTABLE_SCHEMA_VERSION}, found {user_version}"
+            "mobile schema v2 verifier expected user_version 2, found {user_version}"
         ));
     }
     let application_id: i64 = connection
@@ -2533,21 +5118,21 @@ fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
             },
         )
         .map_err(|error| format!("mobile database compatibility stamp is invalid: {error}"))?;
-    if state.0 != PORTABLE_SCHEMA_VERSION {
+    if state.0 != 2 {
         return Err(format!(
-            "mobile schema stamp {} does not match user_version {PORTABLE_SCHEMA_VERSION}",
+            "mobile schema stamp {} does not match user_version 2",
             state.0
         ));
     }
-    if state.1 != PORTABLE_SCHEMA_VERSION {
+    if state.1 != 2 {
         return Err(format!(
-            "mobile database reader protocol floor {} does not match schema {PORTABLE_SCHEMA_VERSION}",
+            "mobile database reader protocol floor {} does not match schema 2",
             state.1
         ));
     }
-    if state.2 != PORTABLE_SCHEMA_VERSION {
+    if state.2 != 2 {
         return Err(format!(
-            "mobile database writer protocol floor {} does not match schema {PORTABLE_SCHEMA_VERSION}",
+            "mobile database writer protocol floor {} does not match schema 2",
             state.2
         ));
     }
@@ -2580,7 +5165,7 @@ fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
             row.get(0)
         })
         .map_err(|error| error.to_string())?;
-    if history_count != PORTABLE_SCHEMA_VERSION {
+    if history_count != 2 {
         return Err("mobile migration history is not contiguous".to_string());
     }
     verify_migration_history_guards(connection)?;
@@ -2628,6 +5213,292 @@ fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
         return Err("mobile outbox has competing eligible branches".to_string());
     }
     validate_outbox_transaction_groups(connection)?;
+    Ok(())
+}
+
+fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
+    let user_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if user_version != PORTABLE_SCHEMA_VERSION {
+        return Err(format!(
+            "mobile schema verifier expected user_version {PORTABLE_SCHEMA_VERSION}, found {user_version}"
+        ));
+    }
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if application_id != MOBILE_APPLICATION_ID {
+        return Err(format!(
+            "mobile database is missing the expected application_id {MOBILE_APPLICATION_ID:#010x}"
+        ));
+    }
+    let state = connection
+        .query_row(
+            "SELECT schema_version, min_reader_version, min_writer_version,
+                    migration_checksum
+             FROM mobile_schema_state WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .map_err(|error| format!("mobile database compatibility stamp is invalid: {error}"))?;
+    if state.1 > PORTABLE_SCHEMA_VERSION {
+        return Err(format!(
+            "mobile database reader protocol floor {} is newer than this binary's {}",
+            state.1, PORTABLE_SCHEMA_VERSION
+        ));
+    }
+    if state.2 > PORTABLE_SCHEMA_VERSION {
+        return Err(format!(
+            "mobile database writer protocol floor {} is newer than this binary's {}",
+            state.2, PORTABLE_SCHEMA_VERSION
+        ));
+    }
+    if state.0 != 3 || state.1 != 3 || state.2 != 3 {
+        return Err("mobile schema v3 compatibility floor is invalid".to_string());
+    }
+    if state.3 != PORTABLE_SCHEMA_V3_CHECKSUM {
+        return Err("mobile schema v3 checksum does not match this binary".to_string());
+    }
+    for (version, expected_name, expected_checksum) in [
+        (
+            1_i64,
+            PORTABLE_MIGRATION_V1_NAME,
+            PORTABLE_SCHEMA_V1_CHECKSUM,
+        ),
+        (
+            2_i64,
+            PORTABLE_MIGRATION_V2_NAME,
+            PORTABLE_SCHEMA_V2_CHECKSUM,
+        ),
+        (
+            3_i64,
+            PORTABLE_MIGRATION_V3_NAME,
+            PORTABLE_SCHEMA_V3_CHECKSUM,
+        ),
+    ] {
+        let history = connection
+            .query_row(
+                "SELECT name, checksum FROM mobile_schema_migrations WHERE version = ?1",
+                [version],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|error| format!("mobile migration v{version} history is invalid: {error}"))?;
+        if history.0 != expected_name || history.1 != expected_checksum {
+            return Err(format!(
+                "mobile migration v{version} history does not match this binary"
+            ));
+        }
+    }
+    let history_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM mobile_schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| error.to_string())?;
+    if history_count != 3 {
+        return Err("mobile migration history is not contiguous".to_string());
+    }
+    verify_migration_history_guards(connection)?;
+    verify_mobile_database_integrity(connection)?;
+    let required_tables: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table' AND name IN (
+               'mobile_note_categories', 'mobile_note_folders', 'mobile_note_filing',
+               'mobile_sync_state', 'mobile_sync_inbox', 'mobile_note_conflicts'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let has_conflict_of: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pragma_table_info('mobile_notes') WHERE name = 'conflict_of'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if required_tables != 6 || !has_conflict_of {
+        return Err("mobile schema v3 is missing workspace or sync-state storage".to_string());
+    }
+    validate_replica_identity(&replica_identity(connection)?)?;
+    validate_portable_notes(connection)?;
+    validate_outbox_transaction_groups(connection)?;
+    validate_mobile_workspace_state(connection)
+}
+
+fn validate_mobile_workspace_state(connection: &Connection) -> Result<(), String> {
+    let identity = replica_identity(connection)?;
+    let sync_state: (String, String, i64, i64, i64, i64) = connection
+        .query_row(
+            "SELECT enrollment_state, sync_state, authority_generation,
+                    purge_generation, downloaded_cursor, applied_cursor
+             FROM mobile_sync_state WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map_err(|error| format!("mobile sync state is invalid: {error}"))?;
+    if !matches!(sync_state.0.as_str(), "not_enrolled" | "active" | "revoked")
+        || !matches!(
+            sync_state.1.as_str(),
+            "not_enrolled" | "idle" | "pending" | "syncing" | "conflict" | "error" | "revoked"
+        )
+        || sync_state.2 <= 0
+        || sync_state.3 < 0
+        || sync_state.4 < 0
+        || sync_state.5 < 0
+        || sync_state.5 > sync_state.4
+    {
+        return Err("mobile sync state violates its generation or cursor floors".to_string());
+    }
+
+    let invalid_links: i64 = connection
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM mobile_note_filing AS filing
+                LEFT JOIN mobile_notes AS notes ON notes.record_id = filing.record_id
+                WHERE notes.record_id IS NULL)
+             + (SELECT COUNT(*) FROM mobile_note_conflicts AS conflicts
+                LEFT JOIN mobile_notes AS notes ON notes.record_id = conflicts.record_id
+                WHERE notes.record_id IS NULL)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if invalid_links != 0 {
+        return Err("mobile workspace contains orphaned note relationships".to_string());
+    }
+    let wrong_library_rows: i64 = connection
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM mobile_note_categories WHERE library_id != ?1)
+             + (SELECT COUNT(*) FROM mobile_note_folders WHERE library_id != ?1)",
+            [&identity.library_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if wrong_library_rows != 0 {
+        return Err("mobile organization rows belong to another library".to_string());
+    }
+    for (table, id_column) in [
+        ("mobile_note_categories", "category_id"),
+        ("mobile_note_folders", "folder_id"),
+        ("mobile_note_conflicts", "conflict_id"),
+    ] {
+        let query = format!("SELECT {id_column} FROM {table}");
+        let ids = connection
+            .prepare(&query)
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .map_err(|error| error.to_string())?;
+        if ids.iter().any(|identifier| !is_uuid_v7(identifier)) {
+            return Err(format!("{table} contains a non-UUIDv7 public identity"));
+        }
+    }
+    let conflict_of_ids = connection
+        .prepare("SELECT record_id, conflict_of FROM mobile_notes WHERE conflict_of IS NOT NULL")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|error| error.to_string())?;
+    if conflict_of_ids
+        .iter()
+        .any(|(record_id, conflict_of)| !is_uuid_v7(conflict_of) || record_id == conflict_of)
+    {
+        return Err("mobile conflict-copy references are invalid".to_string());
+    }
+    let folder_rows = connection
+        .prepare(
+            "SELECT folder_id, name, parent_folder_id
+             FROM mobile_note_folders WHERE lifecycle_state = 'active'",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|error| error.to_string())?;
+    let folder_index = folder_rows
+        .into_iter()
+        .map(|(folder_id, name, parent_id)| (folder_id, (name, parent_id)))
+        .collect::<BTreeMap<_, _>>();
+    for folder_id in folder_index.keys() {
+        logical_folder_path(folder_id, &folder_index)?;
+    }
+    let inbox = connection
+        .prepare("SELECT transaction_id, transaction_digest FROM mobile_sync_inbox")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|error| error.to_string())?;
+    if inbox
+        .iter()
+        .any(|(transaction_id, digest)| !is_uuid(transaction_id) || !is_sha256(digest))
+    {
+        return Err("mobile sync inbox contains an invalid public identity or digest".to_string());
+    }
+    Ok(())
+}
+
+fn recover_interrupted_inbox(connection: &Connection) -> Result<(), String> {
+    let recovered = connection
+        .execute(
+            "UPDATE mobile_sync_inbox
+             SET state = 'received', apply_started_at = NULL,
+                 error_code = 'interrupted_apply_recovered'
+             WHERE state = 'applying'",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+    if recovered > 0 {
+        connection
+            .execute(
+                "UPDATE mobile_sync_state
+                 SET sync_state = CASE
+                   WHEN enrollment_state = 'active' THEN 'pending'
+                   ELSE sync_state
+                 END,
+                     last_error_code = 'interrupted_apply_recovered'
+                 WHERE singleton = 1",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -2695,8 +5566,12 @@ fn validate_outbox_transaction_groups(connection: &Connection) -> Result<(), Str
                   OR MIN(state) != MAX(state)
                   OR MIN(eligible_for_sync) != MAX(eligible_for_sync)
                   OR MIN(attempts) != MAX(attempts)
+                  OR SUM(length(CAST(payload_json AS BLOB)) + ?1) > ?2
              )",
-            [],
+            params![
+                MOBILE_MUTATION_CIPHERTEXT_OVERHEAD_BYTES as i64,
+                MAX_MOBILE_TRANSACTION_CIPHERTEXT_BYTES as i64
+            ],
             |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
@@ -3003,6 +5878,7 @@ fn backfill_portable_notes(
                     tombstoned_at: legacy_tombstone_time,
                     created_at: row.created_at,
                     updated_at: row.updated_at,
+                    authority: "noted",
                     provenance_json: &provenance_json,
                     scope_id: &scope_id,
                     scope_class: &scope_class,
@@ -3223,15 +6099,37 @@ fn ensure_noted_authority(state: &PortableState) -> Result<(), String> {
     }
 }
 
+fn ensure_no_open_note_conflict(connection: &Connection, record_id: &str) -> Result<(), String> {
+    let has_open_conflict: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM mobile_note_conflicts
+               WHERE record_id = ?1 AND state = 'open'
+             )",
+            [record_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if has_open_conflict {
+        Err(format!(
+            "note {record_id} must resolve its current conflict before it can change"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn begin_outbox_transaction(
     transaction: &Transaction<'_>,
     member_count: usize,
 ) -> Result<OutboxTransaction, String> {
+    if member_count == 0 || member_count > MAX_MOBILE_TRANSACTION_MEMBERS {
+        return Err(format!(
+            "outbox transaction must contain between 1 and {MAX_MOBILE_TRANSACTION_MEMBERS} members"
+        ));
+    }
     let member_count = i64::try_from(member_count)
         .map_err(|_| "outbox transaction has too many members".to_string())?;
-    if member_count <= 0 {
-        return Err("outbox transaction must contain at least one member".to_string());
-    }
     let device_transaction_counter: i64 = transaction
         .query_row(
             "SELECT next_transaction_counter FROM mobile_replica WHERE singleton = 1",
@@ -3257,49 +6155,10 @@ fn begin_outbox_transaction(
     })
 }
 
-fn enqueue_mutation(
-    transaction: &Transaction<'_>,
+fn serialize_mutation_payload(
     identity: &ReplicaIdentity,
-    outbox_transaction: &OutboxTransaction,
-    member_index: i64,
-    mutation: Mutation<'_>,
-) -> Result<(), String> {
-    if member_index < 0 || member_index >= outbox_transaction.member_count {
-        return Err("outbox transaction member index is out of range".to_string());
-    }
-    let has_transaction_members: bool = transaction
-        .query_row(
-            "SELECT EXISTS(
-               SELECT 1 FROM pragma_table_info('mobile_note_outbox')
-               WHERE name = 'transaction_member_index'
-             )",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())?;
-    let has_grouped_pending_state: bool = if has_transaction_members {
-        transaction
-            .query_row(
-                "SELECT EXISTS(
-               SELECT 1 FROM mobile_note_outbox
-               WHERE record_id = ?1
-                 AND eligible_for_sync = 1
-                 AND transaction_member_count > 1
-             )",
-                [mutation.record_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?
-    } else {
-        false
-    };
-    if has_grouped_pending_state {
-        return Err(
-            "a pending grouped transaction must be synchronized before this record changes"
-                .to_string(),
-        );
-    }
-
+    mutation: &Mutation<'_>,
+) -> Result<String, String> {
     let provenance = serde_json::from_str(mutation.provenance_json)
         .unwrap_or_else(|_| serde_json::json!({ "source": "unknown" }));
     let trashed_at = mutation.trashed_at.map(rfc3339_from_millis);
@@ -3357,6 +6216,12 @@ fn enqueue_mutation(
             )
         }
     };
+    let authority_kind = match mutation.authority {
+        "noted" => AuthorityKind::Noted,
+        "external" => AuthorityKind::External,
+        "derived" => AuthorityKind::Derived,
+        authority => return Err(format!("unsupported mobile note authority {authority}")),
+    };
     let proposed_record = ProposedRecordPayload {
         proposal_contract_version: "noted.proposed-record.v1",
         library_id: &identity.library_id,
@@ -3371,8 +6236,14 @@ fn enqueue_mutation(
         },
         sensitivity: "standard",
         authority: RecordAuthority {
-            kind: AuthorityKind::Noted,
-            origin: Some("iphone_native".to_string()),
+            kind: authority_kind,
+            origin: Some(
+                provenance
+                    .get("source")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("iphone_native")
+                    .to_string(),
+            ),
         },
         content,
         content_hash: mutation.canonical_hash,
@@ -3388,6 +6259,69 @@ fn enqueue_mutation(
         proposed_record,
     })
     .map_err(|error| error.to_string())?;
+    let ciphertext_bytes = payload_json
+        .len()
+        .checked_add(MOBILE_MUTATION_CIPHERTEXT_OVERHEAD_BYTES)
+        .ok_or_else(|| "mobile note mutation ciphertext size overflowed".to_string())?;
+    if ciphertext_bytes > MAX_MOBILE_TRANSACTION_CIPHERTEXT_BYTES {
+        return Err(format!(
+            "mobile note mutation exceeds the {MAX_MOBILE_MUTATION_PAYLOAD_BYTES}-byte upload ceiling after encryption reserve"
+        ));
+    }
+    Ok(payload_json)
+}
+
+fn enqueue_mutation(
+    transaction: &Transaction<'_>,
+    identity: &ReplicaIdentity,
+    outbox_transaction: &OutboxTransaction,
+    member_index: i64,
+    mutation: Mutation<'_>,
+) -> Result<(), String> {
+    if member_index < 0 || member_index >= outbox_transaction.member_count {
+        return Err("outbox transaction member index is out of range".to_string());
+    }
+    if mutation.title.len() > MAX_MOBILE_NOTE_TEXT_BYTES
+        || mutation.body.len() > MAX_MOBILE_NOTE_TEXT_BYTES
+    {
+        return Err(format!(
+            "mobile note title and body must each be at most {MAX_MOBILE_NOTE_TEXT_BYTES} UTF-8 bytes"
+        ));
+    }
+    let has_transaction_members: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pragma_table_info('mobile_note_outbox')
+               WHERE name = 'transaction_member_index'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let has_grouped_pending_state: bool = if has_transaction_members {
+        transaction
+            .query_row(
+                "SELECT EXISTS(
+               SELECT 1 FROM mobile_note_outbox
+               WHERE record_id = ?1
+                 AND eligible_for_sync = 1
+                 AND transaction_member_count > 1
+             )",
+                [mutation.record_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?
+    } else {
+        false
+    };
+    if has_grouped_pending_state {
+        return Err(
+            "a pending grouped transaction must be synchronized before this record changes"
+                .to_string(),
+        );
+    }
+
+    let payload_json = serialize_mutation_payload(identity, &mutation)?;
 
     transaction
         .execute(
@@ -3502,6 +6436,136 @@ fn note_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<MobileNote> {
         created_at: row.get(3)?,
         updated_at: row.get(4)?,
     })
+}
+
+fn workspace_note_by_id(
+    connection: &Connection,
+    record_id: &str,
+) -> Result<MobileWorkspaceNote, String> {
+    connection
+        .query_row(
+            "SELECT notes.record_id, notes.title, notes.body,
+                    notes.created_at, notes.updated_at,
+                    filing.folder_id, folders.name,
+                    notes.lifecycle_state, notes.sync_state,
+                    notes.conflict_of, notes.authority,
+                    EXISTS(
+                      SELECT 1 FROM mobile_note_conflicts AS conflicts
+                      WHERE conflicts.record_id = notes.record_id
+                        AND conflicts.state = 'open'
+                    ),
+                    EXISTS(
+                      SELECT 1 FROM mobile_sync_state
+                      WHERE singleton = 1 AND enrollment_state = 'active'
+                    )
+             FROM mobile_notes AS notes
+             LEFT JOIN mobile_note_filing AS filing
+               ON filing.record_id = notes.record_id
+             LEFT JOIN mobile_note_folders AS folders
+               ON folders.folder_id = filing.folder_id
+             WHERE notes.record_id = ?1",
+            [record_id],
+            |row| {
+                let folder_id: Option<String> = row.get(5)?;
+                Ok(MobileWorkspaceNote {
+                    record_id: row.get(0)?,
+                    title: row.get(1)?,
+                    body: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    folder_id: folder_id.clone(),
+                    folder_name: row.get(6)?,
+                    lifecycle_state: public_lifecycle_state(&row.get::<_, String>(7)?),
+                    needs_filing: folder_id.is_none(),
+                    sync_state: public_note_sync_state(&row.get::<_, String>(8)?, row.get(12)?),
+                    conflict_of: row.get(9)?,
+                    has_open_conflict: row.get(11)?,
+                    read_only: row.get::<_, String>(10)? != "noted",
+                })
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn public_lifecycle_state(stored: &str) -> String {
+    match stored {
+        "trash" => "trashed".to_string(),
+        state => state.to_string(),
+    }
+}
+
+fn public_note_sync_state(stored: &str, enrolled: bool) -> String {
+    match stored {
+        "conflict" => "conflict".to_string(),
+        "restore_pending" => "restore_pending".to_string(),
+        _ if !enrolled => "local".to_string(),
+        "sending" | "syncing" => "syncing".to_string(),
+        "acknowledged" | "synced" => "synced".to_string(),
+        "pending" => "pending".to_string(),
+        _ => "local".to_string(),
+    }
+}
+
+fn logical_folder_path(
+    folder_id: &str,
+    folders: &BTreeMap<String, (String, Option<String>)>,
+) -> Result<String, String> {
+    let mut components = Vec::new();
+    let mut visited = BTreeSet::new();
+    let mut current = Some(folder_id.to_string());
+    while let Some(current_id) = current.take() {
+        if !visited.insert(current_id.clone()) {
+            return Err(format!(
+                "mobile folder hierarchy contains a cycle at {current_id}"
+            ));
+        }
+        let (name, parent_id) = folders
+            .get(&current_id)
+            .ok_or_else(|| format!("mobile folder {current_id} has a missing ancestor"))?;
+        components.push(name.clone());
+        current.clone_from(parent_id);
+    }
+    components.reverse();
+    Ok(components.join(" / "))
+}
+
+fn attach_organization_payload(
+    transaction: &Transaction<'_>,
+    mutation_id: &str,
+    action: &str,
+    folder_id: Option<&str>,
+    previous_folder_id: Option<&str>,
+) -> Result<(), String> {
+    let payload_json: String = transaction
+        .query_row(
+            "SELECT payload_json FROM mobile_note_outbox WHERE mutation_id = ?1",
+            [mutation_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let mut payload: serde_json::Value =
+        serde_json::from_str(&payload_json).map_err(|error| error.to_string())?;
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| "mobile mutation payload is not an object".to_string())?;
+    object.insert(
+        "organization".to_string(),
+        serde_json::json!({
+            "action": action,
+            "folderId": folder_id,
+            "previousFolderId": previous_folder_id,
+        }),
+    );
+    transaction
+        .execute(
+            "UPDATE mobile_note_outbox SET payload_json = ?1 WHERE mutation_id = ?2",
+            params![
+                serde_json::to_string(&payload).map_err(|error| error.to_string())?,
+                mutation_id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn escape_like(value: &str) -> String {
@@ -4431,7 +7495,8 @@ mod tests {
                 .expect("collect ordered history"),
             vec![
                 (1, PORTABLE_SCHEMA_V1_CHECKSUM.to_string()),
-                (2, PORTABLE_SCHEMA_V2_CHECKSUM.to_string())
+                (2, PORTABLE_SCHEMA_V2_CHECKSUM.to_string()),
+                (3, PORTABLE_SCHEMA_V3_CHECKSUM.to_string())
             ]
         );
         let lifecycle: (String, i64, i64) = connection
@@ -5128,6 +8193,38 @@ mod tests {
                 .expect("read rolled-back counter"),
             2
         );
+    }
+
+    #[test]
+    fn deep_link_targets_are_bound_to_the_local_library_and_visible_lifecycle() {
+        let store = store();
+        let note = store.create("Linked", "local target").expect("create note");
+        let library_id = {
+            let connection = store.connection.lock().expect("lock store");
+            replica_identity(&connection).expect("identity").library_id
+        };
+
+        store
+            .verify_note_link(&library_id, &note.record_id)
+            .expect("active local note should open");
+        assert!(store
+            .verify_note_link(&new_uuid_v7(), &note.record_id)
+            .expect_err("foreign library must fail")
+            .contains("different notebook"));
+        assert!(store
+            .verify_note_link(&library_id, &new_uuid_v7())
+            .expect_err("unknown note must fail")
+            .contains("not available"));
+
+        store.delete(&note.record_id).expect("trash note");
+        store
+            .verify_note_link(&library_id, &note.record_id)
+            .expect("trash is a visible lifecycle");
+        store.tombstone(&note.record_id).expect("tombstone note");
+        assert!(store
+            .verify_note_link(&library_id, &note.record_id)
+            .expect_err("tombstone must not open")
+            .contains("not available"));
     }
 
     #[test]

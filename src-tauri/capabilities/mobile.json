@@ -4,5 +4,5 @@
   "description": "Isolated capability surface for the native iPhone companion",
   "platforms": ["iOS"],
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "deep-link:default"]
 }

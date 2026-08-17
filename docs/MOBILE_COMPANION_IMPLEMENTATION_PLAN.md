@@ -8,7 +8,7 @@ shipped
 
 Date: 2026-08-14
 
-Last updated: 2026-08-17
+Last updated: 2026-08-16
 
 Scope: iPhone first, while preserving macOS as the primary capture and intelligence platform
 
@@ -1463,28 +1463,63 @@ AEAD overhead, so locally accepted batches remain sendable. These are logical
 cores and test seams, not a production network service. Fixture cryptography is
 deliberately unable to enroll a personal library.
 
-The production-facing crypto seams now make the HPKE sender operation atomic:
-one sender context produces its encapsulated key, ciphertext, and exporter;
-signatures and digests bind the complete envelope. The SAS uses the frozen RFC
-5869 HKDF-SHA256 construction, and sync mutations expose canonical signing bytes
-only after their aggregate manifest is final. This removes two blockers that
-fixture hashes had previously hidden, while leaving the personal-data gate
-closed pending Apple-backed implementations and cross-language vectors.
+The production-facing crypto boundary is now implemented behind an iOS-only
+native plugin. Secure Enclave P-256 signing, ThisDeviceOnly Keychain X25519 and
+bootstrap storage, and CryptoKit authenticated HPKE expose only public keys and
+opaque handles to Rust. The HPKE sender operation is atomic: one sender context
+produces its encapsulated key, ciphertext, and exporter; signatures and digests
+bind the complete envelope. The SAS uses the frozen RFC 5869 HKDF-SHA256
+construction, and Rust/Swift golden vectors cover canonical transcripts,
+P1363 signatures, RFC 9180 authenticated HPKE, exporter bytes, envelope digests,
+and SAS output. The plugin has no JavaScript crypto commands and its fixture
+mode requires the exact debug/simulator/runtime gate.
+
+The local replica also has a crash-safe protected-data and pairing boundary. It
+closes SQLite behind the same operation mutex, returns a typed locked error to
+every command, reopens through the full recovery/migration/verifier path, and
+uses in-memory SQLite temporary storage. The ordered v4 migration durably stores
+only exact protocol bytes, public identity bindings, and opaque native handles;
+startup rejects Keychain/SQLite identity divergence and recovers interrupted
+activation or cancellation without inventing state. Native callbacks enforce
+the lifecycle epoch, and existing plus newly created SQLite, WAL, SHM, and
+recovery files are hardened to complete protection and excluded from backup
+before the store is published ready. Source-owned iOS configuration pins iOS 17
+and declares only the local-network/Bonjour purpose required by direct sync.
+
+On the Mac side, a durable fixture authority now persists invitations, receipts,
+device enrollment, replay evidence, counters, revocation, authority generation,
+and checkpoints. The six-route exact-wire coordinator atomically prepares,
+signs, serializes, and finalizes responses, including byte-identical replay
+after restart. A strict pinned-TLS 1.3 client/server adapter enforces the exact
+P-256 SPKI pin, disables 0-RTT and resumption, and bounds hosts, origins, bodies,
+headers, time, and concurrency. It is deliberately loopback-only test
+infrastructure: Bonjour, manual connect, product LAN listeners, and the phone's
+network driver do not exist yet. Immutable replay evidence is retained for
+audit; only the trusted five-minute window counts toward replay admission, so
+the protocol is not permanently locked after the cap, but on-disk evidence is
+not yet compacted or size-bounded.
 
 The following work still blocks the M4 gate and any personal-data sync:
 
-- production cryptography backed by the intended Apple key APIs, with
-  cross-language golden vectors;
-- a real pinned TLS 1.3 HTTP adapter and local-network discovery/manual-connect
-  path around the narrow router;
-- a durable Mac authority, invitation, enrollment, device-registry, revocation,
-  cursor, and checkpoint adapter;
+- an authenticated pairing and sync network driver around the pinned-TLS
+  adapters, including Bonjour discovery and manual connect without trusting
+  discovery metadata or passing protocol messages through JavaScript;
+- a complete bootstrap package that transfers native-only library key material
+  plus validated public library/default-scope/authority/purge metadata, then
+  atomically adopts the staging replica and activates sync enrollment;
+- native record encryption/decryption and one end-to-end sanitized Notes
+  bootstrap plus incremental push/pull over the product transport; the current
+  high-level pairing commands stop after identity activation and do not enroll
+  the mobile replica or move Notes through the channel;
+- production Mac key custody/signing and structural enforcement that pairing,
+  revocation, and sync share one authority instance;
 - external review of the implemented pairing, cryptography, transport, and
   convergence boundaries;
 - end-to-end pairing, encrypted bootstrap, push/pull, conflict, restart, and
   airplane-mode validation between the Mac and a physical iPhone; and
-- the outstanding M2 physical-device Data Protection, Keychain, backup,
-  reinstall, locked-device, lifecycle, accessibility, and recorder-load gates.
+- the outstanding physical-device Secure Enclave, Data Protection, Keychain,
+  backup, reinstall, locked-device, lifecycle, Bonjour/manual-connect,
+  accessibility, and recorder-load gates.
 
 No hosted provider has been selected or provisioned, and no hosted-sync spend is
 authorized by this checkpoint. Provider evaluation begins only after the full

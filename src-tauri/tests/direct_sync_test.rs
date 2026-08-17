@@ -393,8 +393,11 @@ impl DirectSyncCrypto for FixtureDirectCrypto {
     }
 }
 
-type TestService =
-    DirectSyncService<FixturePairingCrypto, AuthorityStateStore, FixtureDirectCrypto>;
+type TestService = DirectSyncService<
+    PairingMachine<FixturePairingCrypto>,
+    AuthorityStateStore,
+    FixtureDirectCrypto,
+>;
 
 fn authority_with_devices(devices: &[&str]) -> AuthorityState {
     let capabilities = notes_protocol_capabilities();
@@ -498,6 +501,8 @@ impl DirectSyncAuthority for CoordinatedAuthority {
         Ok(())
     }
 }
+
+impl InMemoryDirectSyncAuthority for CoordinatedAuthority {}
 
 fn service_with_authority(
     authority: AuthorityState,
@@ -1538,6 +1543,8 @@ fn a_nonprogressing_authority_page_fails_closed_instead_of_stalling_the_cursor()
         }
     }
 
+    impl InMemoryDirectSyncAuthority for NonprogressingStore {}
+
     let service = DirectSyncService::new(
         active_pairing(),
         NonprogressingStore,
@@ -1727,6 +1734,8 @@ fn partial_atomic_transaction_intersection_fails_closed() {
             Err(AuthorityStoreError::StateUnavailable)
         }
     }
+
+    impl InMemoryDirectSyncAuthority for MixedStore {}
 
     // A hostile/corrupt store returns a transaction whose Note dependency is
     // grouped with a Media member outside the M4 subscription. The service must

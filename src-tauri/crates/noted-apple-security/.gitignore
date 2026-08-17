@@ -1,0 +1,5 @@
+.tauri/
+target/
+ios/.build/
+ios/.swiftpm/
+ios/Package.resolved

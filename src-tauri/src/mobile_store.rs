@@ -3,6 +3,12 @@ use crate::portable::{
     AcceptedHead, AuthorityKind, LifecycleState, LocalBranch, LocalBranchState, RecordAuthority,
     RecordLifecycle, RecordScope, ScopeClass,
 };
+use crate::{
+    pairing_client::{PairingClientCheckpoint, PairingClientState},
+    pairing_protocol::{
+        BootstrapEnvelope, Environment, LibraryDataClass, ServerHello, MAX_PAIRING_MESSAGE_BYTES,
+    },
+};
 use rusqlite::{
     params, Connection, ErrorCode, OptionalExtension, Transaction, TransactionBehavior,
 };
@@ -10,22 +16,60 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
+    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    sync::Mutex,
+    sync::{Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const PORTABLE_SCHEMA_VERSION: i64 = 3;
+const PORTABLE_SCHEMA_VERSION: i64 = 4;
 const PORTABLE_SCHEMA_V1_CHECKSUM: &str =
     "d6d8377525aa80d91e9e7cb22d4eff4da5cf7998abc8968a5457c1fc86e84b7b";
 const PORTABLE_SCHEMA_V2_CHECKSUM: &str =
     "838992191ee7053706d16154b41f08b1e041526101d496d1d762848a614b8e45";
 const PORTABLE_SCHEMA_V3_CHECKSUM: &str =
     "17914efe0d9e4d164d7f70f3ed0865184d1f560dcb028f19d39e79cb75d1f70b";
+const PORTABLE_SCHEMA_V4_CHECKSUM: &str =
+    "b0a8c29148518f29b2ef257ad344fe6b9bbe8fab1e02100f4ef7a4ab91e7ae8f";
 const PORTABLE_MIGRATION_V1_NAME: &str = "iphone-notes-portability";
 const PORTABLE_MIGRATION_V2_NAME: &str = "iphone-note-lifecycle-and-transaction-groups";
 const PORTABLE_MIGRATION_V3_NAME: &str = "iphone-note-workspace-and-sync-state";
+const PORTABLE_MIGRATION_V4_NAME: &str = "iphone-sanitized-fixture-pairing-checkpoint";
+const PORTABLE_SCHEMA_V4_DDL: &str = r#"CREATE TABLE mobile_pairing_checkpoint_v1 (
+               singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+               fixture_class TEXT NOT NULL CHECK (fixture_class = 'sanitized_fixture'),
+               device_id TEXT NOT NULL,
+               identity_handle TEXT NOT NULL,
+               pending_bootstrap_handle TEXT,
+               state TEXT NOT NULL CHECK (state IN (
+                 'ready', 'awaiting_server_hello', 'awaiting_user_confirmation',
+                 'awaiting_bootstrap', 'bootstrap_prepared', 'awaiting_server_finish',
+                 'pending_activation', 'active', 'cancellation_pending', 'cancelled'
+               )),
+               invitation_bytes BLOB NOT NULL
+                 CHECK (length(invitation_bytes) BETWEEN 1 AND 16384),
+               client_hello_bytes BLOB CHECK (length(client_hello_bytes) BETWEEN 1 AND 16384),
+               server_hello_bytes BLOB CHECK (length(server_hello_bytes) BETWEEN 1 AND 16384),
+               bootstrap_bytes BLOB CHECK (length(bootstrap_bytes) BETWEEN 1 AND 16384),
+               client_finish_bytes BLOB CHECK (length(client_finish_bytes) BETWEEN 1 AND 16384),
+               server_finish_bytes BLOB CHECK (length(server_finish_bytes) BETWEEN 1 AND 16384),
+               transcript_digest BLOB CHECK (length(transcript_digest) = 32),
+               receipt_id TEXT,
+               envelope_digest BLOB CHECK (length(envelope_digest) = 32),
+               user_decision INTEGER CHECK (user_decision IN (0, 1)),
+               checkpoint_json TEXT NOT NULL CHECK (length(checkpoint_json) <= 131072),
+               updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
+               CHECK (pending_bootstrap_handle IS NULL OR
+                      (receipt_id IS NOT NULL AND envelope_digest IS NOT NULL)),
+               CHECK (
+                 (state IN ('awaiting_server_finish', 'pending_activation')
+                    AND pending_bootstrap_handle IS NOT NULL)
+                 OR
+                 (state NOT IN ('awaiting_server_finish', 'pending_activation')
+                    AND pending_bootstrap_handle IS NULL)
+               )
+             );"#;
 const MOBILE_APPLICATION_ID: i64 = 0x4e4f_5449; // ASCII `NOTI`.
 const MOBILE_NOTES_EXPORT_FORMAT: &str = "noted.mobile-notes.export.v1";
 const MOBILE_NOTES_EXPORT_VERSION: u32 = 1;
@@ -42,6 +86,7 @@ const MAX_MOBILE_TRANSACTION_CIPHERTEXT_BYTES: usize = 512 * 1024;
 const MOBILE_MUTATION_CIPHERTEXT_OVERHEAD_BYTES: usize = 28;
 const MAX_MOBILE_MUTATION_PAYLOAD_BYTES: usize =
     MAX_MOBILE_TRANSACTION_CIPHERTEXT_BYTES - MOBILE_MUTATION_CIPHERTEXT_OVERHEAD_BYTES;
+pub const MOBILE_STORE_LOCKED_ERROR: &str = "mobile_store_locked_protected_data";
 // RFC 3339's four-digit year range is also comfortably inside JavaScript's
 // Date range, which keeps remote timestamps safe on product surfaces.
 const MAX_PORTABLE_TIMESTAMP_MS: i64 = 253_402_300_799_999;
@@ -128,6 +173,18 @@ pub struct MobileNotesWorkspace {
 pub struct MobileStoreHealth {
     pub storage: String,
     pub sync: String,
+}
+
+/// The only pairing state allowed in SQLite. It contains exact public wire
+/// messages and opaque native handles, never a private key or decrypted
+/// bootstrap. The explicit table mirrors critical bindings so a corrupted
+/// JSON checkpoint cannot silently redirect native recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobilePairingCheckpoint {
+    pub identity_handle: String,
+    pub pending_bootstrap_handle: Option<String>,
+    pub client: PairingClientCheckpoint,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -490,34 +547,211 @@ struct ProposedRecordPayload<'a> {
 }
 
 pub struct MobileStore {
-    connection: Mutex<Connection>,
+    path: PathBuf,
+    connection: ProtectedConnection,
+}
+
+struct ProtectedConnection {
+    slot: Mutex<Option<Connection>>,
+}
+
+impl ProtectedConnection {
+    fn new(connection: Connection) -> Self {
+        Self {
+            slot: Mutex::new(Some(connection)),
+        }
+    }
+
+    fn closed() -> Self {
+        Self {
+            slot: Mutex::new(None),
+        }
+    }
+
+    fn lock(&self) -> Result<MobileConnectionGuard<'_>, String> {
+        let guard = self
+            .slot
+            .lock()
+            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        if guard.is_none() {
+            return Err(MOBILE_STORE_LOCKED_ERROR.to_string());
+        }
+        Ok(MobileConnectionGuard { guard })
+    }
+}
+
+struct MobileConnectionGuard<'a> {
+    guard: MutexGuard<'a, Option<Connection>>,
+}
+
+impl Deref for MobileConnectionGuard<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        self.guard
+            .as_ref()
+            .expect("mobile connection guard is constructed only when open")
+    }
+}
+
+impl DerefMut for MobileConnectionGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.guard
+            .as_mut()
+            .expect("mobile connection guard is constructed only when open")
+    }
 }
 
 impl MobileStore {
     pub fn open(path: &Path) -> Result<Self, String> {
-        let mut connection = Connection::open(path).map_err(|error| error.to_string())?;
-        connection
-            .execute_batch("PRAGMA foreign_keys = ON;")
-            .map_err(|error| error.to_string())?;
-        let recovery_path = prepare_mobile_migration_recovery(path, &connection)?;
-        connection
-            .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
-            .map_err(|error| error.to_string())?;
-        migrate_portable_notes(&mut connection, recovery_path.as_deref())?;
-        recover_interrupted_inbox(&connection)?;
-        ensure_mobile_search_schema(&mut connection)?;
-        verify_mobile_search_schema(&connection)?;
-
+        let connection = open_mobile_connection(path)?;
         Ok(Self {
-            connection: Mutex::new(connection),
+            path: path.to_path_buf(),
+            connection: ProtectedConnection::new(connection),
         })
     }
 
-    pub fn health(&self) -> Result<MobileStoreHealth, String> {
-        let connection = self
+    /// Construct the managed store without touching the protected path. iOS
+    /// uses this state when launching before first unlock or while locked.
+    pub fn closed(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            connection: ProtectedConnection::closed(),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Canonical replica identity that native signing/HPKE key creation must
+    /// bind to before a pairing transcript is constructed.
+    pub fn replica_device_id(&self) -> Result<String, String> {
+        let connection = self.lock_connection()?;
+        Ok(replica_identity(&connection)?.device_id)
+    }
+
+    pub fn load_pairing_checkpoint(&self) -> Result<Option<MobilePairingCheckpoint>, String> {
+        let connection = self.lock_connection()?;
+        load_mobile_pairing_checkpoint(&connection)
+    }
+
+    pub fn save_pairing_checkpoint(
+        &self,
+        checkpoint: &MobilePairingCheckpoint,
+    ) -> Result<(), String> {
+        validate_mobile_pairing_checkpoint(checkpoint)?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let replica = replica_identity(&transaction)?;
+        if checkpoint.client.identity.device_id != replica.device_id {
+            return Err(
+                "pairing checkpoint identity is not bound to the mobile replica".to_string(),
+            );
+        }
+        let mirrored = pairing_checkpoint_mirrors(checkpoint)?;
+        let checkpoint_json = serde_json::to_string(&checkpoint.client)
+            .map_err(|error| format!("serialize mobile pairing checkpoint: {error}"))?;
+        let decision = checkpoint.client.user_decision.map(i64::from);
+        transaction
+            .execute(
+                "INSERT INTO mobile_pairing_checkpoint_v1 (
+                   singleton, fixture_class, device_id, identity_handle,
+                   pending_bootstrap_handle, state, invitation_bytes,
+                   client_hello_bytes, server_hello_bytes, bootstrap_bytes,
+                   client_finish_bytes, server_finish_bytes, transcript_digest,
+                   receipt_id, envelope_digest, user_decision, checkpoint_json,
+                   updated_at
+                 ) VALUES (
+                   1, 'sanitized_fixture', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                   ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+                 )
+                 ON CONFLICT(singleton) DO UPDATE SET
+                   fixture_class = excluded.fixture_class,
+                   device_id = excluded.device_id,
+                   identity_handle = excluded.identity_handle,
+                   pending_bootstrap_handle = excluded.pending_bootstrap_handle,
+                   state = excluded.state,
+                   invitation_bytes = excluded.invitation_bytes,
+                   client_hello_bytes = excluded.client_hello_bytes,
+                   server_hello_bytes = excluded.server_hello_bytes,
+                   bootstrap_bytes = excluded.bootstrap_bytes,
+                   client_finish_bytes = excluded.client_finish_bytes,
+                   server_finish_bytes = excluded.server_finish_bytes,
+                   transcript_digest = excluded.transcript_digest,
+                   receipt_id = excluded.receipt_id,
+                   envelope_digest = excluded.envelope_digest,
+                   user_decision = excluded.user_decision,
+                   checkpoint_json = excluded.checkpoint_json,
+                   updated_at = excluded.updated_at",
+                params![
+                    checkpoint.client.identity.device_id,
+                    checkpoint.identity_handle,
+                    checkpoint.pending_bootstrap_handle,
+                    mirrored.state,
+                    checkpoint.client.invitation_bytes,
+                    checkpoint.client.client_hello_bytes,
+                    checkpoint.client.server_hello_bytes,
+                    checkpoint.client.bootstrap_bytes,
+                    checkpoint.client.client_finish_bytes,
+                    checkpoint.client.server_finish_bytes,
+                    mirrored.transcript_digest,
+                    mirrored.receipt_id,
+                    mirrored.envelope_digest,
+                    decision,
+                    checkpoint_json,
+                    checkpoint.updated_at,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    fn lock_connection(&self) -> Result<MobileConnectionGuard<'_>, String> {
+        self.connection.lock()
+    }
+
+    /// Called by the native protected-data lifecycle adapter. Taking and
+    /// dropping the connection under the same mutex serializes the close after
+    /// every in-flight operation and makes subsequent commands fail closed.
+    pub fn protected_data_became_unavailable(&self) -> Result<(), String> {
+        let mut connection = self
             .connection
+            .slot
             .lock()
             .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        connection.take();
+        Ok(())
+    }
+
+    /// Reopens and re-verifies the store only after iOS reports that protected
+    /// data is available again. A failed reopen leaves the store locked.
+    pub fn protected_data_became_available(&self) -> Result<(), String> {
+        let mut connection = self
+            .connection
+            .slot
+            .lock()
+            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        if connection.is_some() {
+            return Ok(());
+        }
+        let reopened = open_mobile_connection(&self.path)?;
+        *connection = Some(reopened);
+        Ok(())
+    }
+
+    pub fn protected_data_is_available(&self) -> Result<bool, String> {
+        self.connection
+            .slot
+            .lock()
+            .map(|connection| connection.is_some())
+            .map_err(|_| "mobile note store lock was poisoned".to_string())
+    }
+
+    pub fn health(&self) -> Result<MobileStoreHealth, String> {
+        let connection = self.lock_connection()?;
         let (library_state, enrollment_state, stored_sync_state): (String, String, String) =
             connection
                 .query_row(
@@ -566,16 +800,271 @@ impl MobileStore {
             sync: sync.to_string(),
         })
     }
+}
 
+fn open_mobile_connection(path: &Path) -> Result<Connection, String> {
+    let mut connection = Connection::open(path).map_err(|error| error.to_string())?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON; PRAGMA temp_store = MEMORY;")
+        .map_err(|error| error.to_string())?;
+    let recovery_path = prepare_mobile_migration_recovery(path, &connection)?;
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA temp_store = MEMORY;",
+        )
+        .map_err(|error| error.to_string())?;
+    migrate_portable_notes(&mut connection, recovery_path.as_deref())?;
+    recover_interrupted_inbox(&connection)?;
+    ensure_mobile_search_schema(&mut connection)?;
+    verify_mobile_search_schema(&connection)?;
+
+    Ok(connection)
+}
+
+struct PairingCheckpointMirrors {
+    state: &'static str,
+    transcript_digest: Option<Vec<u8>>,
+    receipt_id: Option<String>,
+    envelope_digest: Option<Vec<u8>>,
+}
+
+fn pairing_state_name(state: PairingClientState) -> &'static str {
+    match state {
+        PairingClientState::Ready => "ready",
+        PairingClientState::AwaitingServerHello => "awaiting_server_hello",
+        PairingClientState::AwaitingUserConfirmation => "awaiting_user_confirmation",
+        PairingClientState::AwaitingBootstrap => "awaiting_bootstrap",
+        PairingClientState::BootstrapPrepared => "bootstrap_prepared",
+        PairingClientState::AwaitingServerFinish => "awaiting_server_finish",
+        PairingClientState::PendingActivation => "pending_activation",
+        PairingClientState::Active => "active",
+        PairingClientState::CancellationPending => "cancellation_pending",
+        PairingClientState::Cancelled => "cancelled",
+    }
+}
+
+fn pairing_checkpoint_mirrors(
+    checkpoint: &MobilePairingCheckpoint,
+) -> Result<PairingCheckpointMirrors, String> {
+    let server = checkpoint
+        .client
+        .server_hello_bytes
+        .as_deref()
+        .map(|bytes| {
+            serde_json::from_slice::<ServerHello>(bytes)
+                .map_err(|error| format!("decode checkpoint ServerHello: {error}"))
+        })
+        .transpose()?;
+    let bootstrap = checkpoint
+        .client
+        .bootstrap_bytes
+        .as_deref()
+        .map(|bytes| {
+            serde_json::from_slice::<BootstrapEnvelope>(bytes)
+                .map_err(|error| format!("decode checkpoint BootstrapEnvelope: {error}"))
+        })
+        .transpose()?;
+    if let (Some(server), Some(bootstrap)) = (&server, &bootstrap) {
+        if bootstrap.receipt_id != server.receipt.receipt_id {
+            return Err(
+                "pairing checkpoint bootstrap receipt does not match transcript".to_string(),
+            );
+        }
+    }
+    Ok(PairingCheckpointMirrors {
+        state: pairing_state_name(checkpoint.client.state),
+        transcript_digest: server
+            .as_ref()
+            .map(|value| value.receipt.transcript_digest.clone()),
+        receipt_id: server
+            .as_ref()
+            .map(|value| value.receipt.receipt_id.clone()),
+        envelope_digest: bootstrap.map(|value| value.envelope_digest),
+    })
+}
+
+fn validate_mobile_pairing_checkpoint(checkpoint: &MobilePairingCheckpoint) -> Result<(), String> {
+    if checkpoint.client.version != 1
+        || checkpoint.client.config.environment != Environment::Development
+        || checkpoint.client.config.library_data_class != LibraryDataClass::SanitizedFixture
+    {
+        return Err("only sanitized fixture pairing checkpoints are accepted".to_string());
+    }
+    if !is_uuid(&checkpoint.identity_handle)
+        || checkpoint
+            .pending_bootstrap_handle
+            .as_deref()
+            .is_some_and(|handle| !is_uuid(handle))
+        || !is_uuid_v7(&checkpoint.client.identity.device_id)
+        || checkpoint.updated_at < 0
+    {
+        return Err("mobile pairing checkpoint contains an invalid public identifier".to_string());
+    }
+    for bytes in [
+        Some(checkpoint.client.invitation_bytes.as_slice()),
+        checkpoint.client.client_hello_bytes.as_deref(),
+        checkpoint.client.server_hello_bytes.as_deref(),
+        checkpoint.client.bootstrap_bytes.as_deref(),
+        checkpoint.client.client_finish_bytes.as_deref(),
+        checkpoint.client.server_finish_bytes.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if bytes.is_empty() || bytes.len() > MAX_PAIRING_MESSAGE_BYTES {
+            return Err("mobile pairing checkpoint contains invalid wire bytes".to_string());
+        }
+    }
+    let mirrors = pairing_checkpoint_mirrors(checkpoint)?;
+    let state_requires_pending_handle = matches!(
+        checkpoint.client.state,
+        PairingClientState::AwaitingServerFinish | PairingClientState::PendingActivation
+    );
+    if checkpoint.pending_bootstrap_handle.is_some() != state_requires_pending_handle {
+        return Err(
+            "mobile pairing checkpoint pending handle does not match its durable state".to_string(),
+        );
+    }
+    if checkpoint.pending_bootstrap_handle.is_some()
+        && (mirrors.receipt_id.is_none() || mirrors.envelope_digest.is_none())
+    {
+        return Err(
+            "pending native bootstrap handle is missing its public receipt binding".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn verify_mobile_pairing_checkpoint_schema(connection: &Connection) -> Result<(), String> {
+    let all_columns: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('mobile_pairing_checkpoint_v1')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let required_columns: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('mobile_pairing_checkpoint_v1')
+             WHERE name IN (
+               'singleton', 'fixture_class', 'device_id', 'identity_handle',
+               'pending_bootstrap_handle', 'state', 'invitation_bytes',
+               'client_hello_bytes', 'server_hello_bytes', 'bootstrap_bytes',
+               'client_finish_bytes', 'server_finish_bytes', 'transcript_digest',
+               'receipt_id', 'envelope_digest', 'user_decision', 'checkpoint_json',
+               'updated_at'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if all_columns != 18 || required_columns != 18 {
+        return Err("mobile pairing checkpoint schema is incomplete".to_string());
+    }
+    if let Some(checkpoint) = load_mobile_pairing_checkpoint(connection)? {
+        validate_mobile_pairing_checkpoint(&checkpoint)?;
+        if checkpoint.client.identity.device_id != replica_identity(connection)?.device_id {
+            return Err(
+                "mobile pairing checkpoint identity is not bound to the mobile replica".to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn load_mobile_pairing_checkpoint(
+    connection: &Connection,
+) -> Result<Option<MobilePairingCheckpoint>, String> {
+    struct Stored {
+        device_id: String,
+        identity_handle: String,
+        pending_bootstrap_handle: Option<String>,
+        state: String,
+        invitation_bytes: Vec<u8>,
+        client_hello_bytes: Option<Vec<u8>>,
+        server_hello_bytes: Option<Vec<u8>>,
+        bootstrap_bytes: Option<Vec<u8>>,
+        client_finish_bytes: Option<Vec<u8>>,
+        server_finish_bytes: Option<Vec<u8>>,
+        transcript_digest: Option<Vec<u8>>,
+        receipt_id: Option<String>,
+        envelope_digest: Option<Vec<u8>>,
+        user_decision: Option<i64>,
+        checkpoint_json: String,
+        updated_at: i64,
+    }
+    let stored = connection
+        .query_row(
+            "SELECT device_id, identity_handle, pending_bootstrap_handle, state,
+                    invitation_bytes, client_hello_bytes, server_hello_bytes,
+                    bootstrap_bytes, client_finish_bytes, server_finish_bytes,
+                    transcript_digest, receipt_id, envelope_digest, user_decision,
+                    checkpoint_json, updated_at
+             FROM mobile_pairing_checkpoint_v1 WHERE singleton = 1",
+            [],
+            |row| {
+                Ok(Stored {
+                    device_id: row.get(0)?,
+                    identity_handle: row.get(1)?,
+                    pending_bootstrap_handle: row.get(2)?,
+                    state: row.get(3)?,
+                    invitation_bytes: row.get(4)?,
+                    client_hello_bytes: row.get(5)?,
+                    server_hello_bytes: row.get(6)?,
+                    bootstrap_bytes: row.get(7)?,
+                    client_finish_bytes: row.get(8)?,
+                    server_finish_bytes: row.get(9)?,
+                    transcript_digest: row.get(10)?,
+                    receipt_id: row.get(11)?,
+                    envelope_digest: row.get(12)?,
+                    user_decision: row.get(13)?,
+                    checkpoint_json: row.get(14)?,
+                    updated_at: row.get(15)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let client: PairingClientCheckpoint = serde_json::from_str(&stored.checkpoint_json)
+        .map_err(|error| format!("decode mobile pairing checkpoint: {error}"))?;
+    let checkpoint = MobilePairingCheckpoint {
+        identity_handle: stored.identity_handle,
+        pending_bootstrap_handle: stored.pending_bootstrap_handle,
+        client,
+        updated_at: stored.updated_at,
+    };
+    validate_mobile_pairing_checkpoint(&checkpoint)?;
+    let mirrors = pairing_checkpoint_mirrors(&checkpoint)?;
+    let replica_device_id = replica_identity(connection)?.device_id;
+    if stored.device_id != replica_device_id
+        || stored.device_id != checkpoint.client.identity.device_id
+        || stored.state != mirrors.state
+        || stored.invitation_bytes != checkpoint.client.invitation_bytes
+        || stored.client_hello_bytes != checkpoint.client.client_hello_bytes
+        || stored.server_hello_bytes != checkpoint.client.server_hello_bytes
+        || stored.bootstrap_bytes != checkpoint.client.bootstrap_bytes
+        || stored.client_finish_bytes != checkpoint.client.client_finish_bytes
+        || stored.server_finish_bytes != checkpoint.client.server_finish_bytes
+        || stored.transcript_digest != mirrors.transcript_digest
+        || stored.receipt_id != mirrors.receipt_id
+        || stored.envelope_digest != mirrors.envelope_digest
+        || stored.user_decision != checkpoint.client.user_decision.map(i64::from)
+    {
+        return Err("mobile pairing checkpoint mirror mismatch".to_string());
+    }
+    Ok(Some(checkpoint))
+}
+
+impl MobileStore {
     /// Internal recovery artifact created before the one-time prototype
     /// migration. A future Settings flow can expose an explicit export/reset
     /// choice without guessing a filesystem location.
     #[allow(dead_code)]
     pub fn migration_recovery_path(&self) -> Result<Option<String>, String> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let connection = self.lock_connection()?;
         connection
             .query_row(
                 "SELECT migration_recovery_path FROM mobile_schema_state WHERE singleton = 1",
@@ -588,10 +1077,7 @@ impl MobileStore {
     }
 
     pub fn list(&self, query: Option<&str>) -> Result<Vec<MobileNote>, String> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let connection = self.lock_connection()?;
         let trimmed = query.map(str::trim).filter(|value| !value.is_empty());
 
         if let Some(query) = trimmed {
@@ -664,10 +1150,7 @@ impl MobileStore {
         if !is_uuid_v7(library_id) || !is_uuid_v7(record_id) {
             return Err("mobile note link requires canonical UUIDv7 identifiers".to_string());
         }
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let connection = self.lock_connection()?;
         let current_library_id: String = connection
             .query_row(
                 "SELECT library_id FROM mobile_replica WHERE singleton = 1",
@@ -701,10 +1184,7 @@ impl MobileStore {
         view: Option<&str>,
         folder_id: Option<&str>,
     ) -> Result<MobileNotesWorkspace, String> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let connection = self.lock_connection()?;
         let library_id: String = connection
             .query_row(
                 "SELECT library_id FROM mobile_replica WHERE singleton = 1",
@@ -944,10 +1424,7 @@ impl MobileStore {
     }
 
     pub fn create(&self, title: &str, body: &str) -> Result<MobileNote, String> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
@@ -1043,10 +1520,7 @@ impl MobileStore {
     }
 
     pub fn update(&self, record_id: &str, title: &str, body: &str) -> Result<MobileNote, String> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
@@ -1163,10 +1637,7 @@ impl MobileStore {
     #[allow(dead_code)]
     pub fn restore(&self, record_id: &str) -> Result<MobileNote, String> {
         self.set_lifecycle(record_id, "active", "restore")?;
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let connection = self.lock_connection()?;
         connection
             .query_row(
                 "SELECT record_id, title, body, created_at, updated_at
@@ -1193,10 +1664,7 @@ impl MobileStore {
         if !is_uuid_v7(record_id) {
             return Err("note recordId must be a canonical UUIDv7".to_string());
         }
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
@@ -1340,10 +1808,7 @@ impl MobileStore {
     /// This never changes a portable record, revision, or outbox mutation.
     #[allow(dead_code)]
     pub fn rebuild_search_index(&self) -> Result<(), String> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let mut connection = self.lock_connection()?;
         rebuild_mobile_search_schema(&mut connection)?;
         verify_mobile_search_schema(&connection)
     }
@@ -1353,10 +1818,7 @@ impl MobileStore {
     /// part of this format.
     #[allow(dead_code)]
     pub fn export_notes(&self) -> Result<String, String> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let connection = self.lock_connection()?;
         verify_current_mobile_schema(&connection)?;
         verify_mobile_search_schema(&connection)?;
         let payload = read_mobile_notes_export(&connection)?;
@@ -1395,10 +1857,7 @@ impl MobileStore {
         }
         validate_mobile_notes_export(&envelope.payload)?;
 
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let mut connection = self.lock_connection()?;
         verify_current_mobile_schema(&connection)?;
         verify_mobile_search_schema(&connection)?;
         let transaction = connection
@@ -1481,10 +1940,7 @@ impl MobileStore {
             );
         }
 
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
@@ -1689,8 +2145,8 @@ impl MobileStore {
 
         let mut groups: Vec<Vec<usize>> = Vec::new();
         let mut group_bytes = 0usize;
-        for plan_index in 0..plans.len() {
-            let plan_bytes = plans[plan_index].ciphertext_bytes;
+        for (plan_index, plan) in plans.iter().enumerate() {
+            let plan_bytes = plan.ciphertext_bytes;
             let needs_new_group = groups.last().is_some_and(|group| {
                 group.len() >= MAX_MOBILE_TRANSACTION_MEMBERS
                     || group_bytes
@@ -1793,10 +2249,7 @@ impl MobileStore {
                 "mobile sync enrollment contains invalid identity or generation data".to_string(),
             );
         }
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
@@ -1861,10 +2314,7 @@ impl MobileStore {
             return Err("mobile sync inbox transaction exceeds the 4 MiB limit".to_string());
         }
 
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let mut connection = self.lock_connection()?;
         let received_at = now_millis()?;
         {
             let transaction = connection
@@ -2078,10 +2528,7 @@ impl MobileStore {
         if !matches!(resolution, "keepAsCopy" | "useRemote") {
             return Err("unsupported mobile note conflict resolution".to_string());
         }
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
@@ -2141,10 +2588,7 @@ impl MobileStore {
         lifecycle: &str,
         operation: &str,
     ) -> Result<(), String> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        let mut connection = self.lock_connection()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
@@ -4209,6 +4653,8 @@ fn prepare_mobile_migration_recovery(
         verify_mobile_schema_v1(connection)?;
     } else if user_version == 2 {
         verify_mobile_schema_v2(connection)?;
+    } else if user_version == 3 {
+        verify_mobile_schema_v3(connection)?;
     }
     if database_path == Path::new(":memory:") {
         return Ok(None);
@@ -4385,7 +4831,7 @@ fn migrate_portable_notes_to_version(
     recovery_path: Option<&Path>,
     target_version: i64,
 ) -> Result<(), String> {
-    if !matches!(target_version, 1 | 2 | PORTABLE_SCHEMA_VERSION) {
+    if !(1..=PORTABLE_SCHEMA_VERSION).contains(&target_version) {
         return Err(format!(
             "unsupported mobile migration target {target_version}"
         ));
@@ -4413,12 +4859,22 @@ fn migrate_portable_notes_to_version(
         return match user_version {
             1 => verify_mobile_schema_v1(connection),
             2 => verify_mobile_schema_v2(connection),
+            3 => verify_mobile_schema_v3(connection),
             _ => verify_current_mobile_schema(connection),
         };
+    }
+    if user_version == 3 {
+        verify_mobile_schema_v3(connection)?;
+        migrate_mobile_schema_v4(connection, recovery_path)?;
+        return verify_current_mobile_schema(connection);
     }
     if user_version == 2 {
         verify_mobile_schema_v2(connection)?;
         migrate_mobile_schema_v3(connection, recovery_path)?;
+        if target_version == 3 {
+            return verify_mobile_schema_v3(connection);
+        }
+        migrate_mobile_schema_v4(connection, None)?;
         return verify_current_mobile_schema(connection);
     }
     if user_version == 1 {
@@ -4428,6 +4884,10 @@ fn migrate_portable_notes_to_version(
             return verify_mobile_schema_v2(connection);
         }
         migrate_mobile_schema_v3(connection, None)?;
+        if target_version == 3 {
+            return verify_mobile_schema_v3(connection);
+        }
+        migrate_mobile_schema_v4(connection, None)?;
         return verify_current_mobile_schema(connection);
     }
     if user_version != 0 {
@@ -4627,6 +5087,10 @@ fn migrate_portable_notes_to_version(
         return verify_mobile_schema_v2(connection);
     }
     migrate_mobile_schema_v3(connection, None)?;
+    if target_version == 3 {
+        return verify_mobile_schema_v3(connection);
+    }
+    migrate_mobile_schema_v4(connection, None)?;
     verify_current_mobile_schema(connection)
 }
 
@@ -5084,6 +5548,63 @@ fn migrate_mobile_schema_v3(
     transaction.commit().map_err(|error| error.to_string())
 }
 
+fn migrate_mobile_schema_v4(
+    connection: &mut Connection,
+    recovery_path: Option<&Path>,
+) -> Result<(), String> {
+    verify_mobile_schema_v3(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(PORTABLE_SCHEMA_V4_DDL)
+        .map_err(|error| error.to_string())?;
+
+    let migration_time = now_millis()?;
+    let inserted_history = transaction
+        .execute(
+            "INSERT INTO mobile_schema_migrations
+               (version, name, checksum, migrated_at, product_version)
+             VALUES (4, ?1, ?2, ?3, ?4)",
+            params![
+                PORTABLE_MIGRATION_V4_NAME,
+                PORTABLE_SCHEMA_V4_CHECKSUM,
+                migration_time,
+                env!("CARGO_PKG_VERSION"),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if inserted_history != 1 {
+        return Err("mobile schema v4 could not append its migration history".to_string());
+    }
+    let updated_state = transaction
+        .execute(
+            "UPDATE mobile_schema_state
+             SET schema_version = 4,
+                 min_reader_version = 4,
+                 min_writer_version = 4,
+                 migration_checksum = ?1,
+                 migrated_at = ?2,
+                 product_version = ?3,
+                 migration_recovery_path = COALESCE(?4, migration_recovery_path)
+             WHERE singleton = 1 AND schema_version = 3",
+            params![
+                PORTABLE_SCHEMA_V4_CHECKSUM,
+                migration_time,
+                env!("CARGO_PKG_VERSION"),
+                recovery_path.map(|path| path.to_string_lossy().into_owned()),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if updated_state != 1 {
+        return Err("mobile schema v4 could not advance its compatibility stamp".to_string());
+    }
+    transaction
+        .pragma_update(None, "user_version", 4)
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
 fn verify_mobile_schema_v2(connection: &Connection) -> Result<(), String> {
     let user_version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -5216,13 +5737,13 @@ fn verify_mobile_schema_v2(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
+fn verify_mobile_schema_v3(connection: &Connection) -> Result<(), String> {
     let user_version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|error| error.to_string())?;
-    if user_version != PORTABLE_SCHEMA_VERSION {
+    if user_version != 3 {
         return Err(format!(
-            "mobile schema verifier expected user_version {PORTABLE_SCHEMA_VERSION}, found {user_version}"
+            "mobile schema v3 verifier expected user_version 3, found {user_version}"
         ));
     }
     let application_id: i64 = connection
@@ -5249,18 +5770,6 @@ fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
             },
         )
         .map_err(|error| format!("mobile database compatibility stamp is invalid: {error}"))?;
-    if state.1 > PORTABLE_SCHEMA_VERSION {
-        return Err(format!(
-            "mobile database reader protocol floor {} is newer than this binary's {}",
-            state.1, PORTABLE_SCHEMA_VERSION
-        ));
-    }
-    if state.2 > PORTABLE_SCHEMA_VERSION {
-        return Err(format!(
-            "mobile database writer protocol floor {} is newer than this binary's {}",
-            state.2, PORTABLE_SCHEMA_VERSION
-        ));
-    }
     if state.0 != 3 || state.1 != 3 || state.2 != 3 {
         return Err("mobile schema v3 compatibility floor is invalid".to_string());
     }
@@ -5334,6 +5843,135 @@ fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
     validate_portable_notes(connection)?;
     validate_outbox_transaction_groups(connection)?;
     validate_mobile_workspace_state(connection)
+}
+
+fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
+    let user_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if user_version != PORTABLE_SCHEMA_VERSION {
+        return Err(format!(
+            "mobile schema verifier expected user_version {PORTABLE_SCHEMA_VERSION}, found {user_version}"
+        ));
+    }
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if application_id != MOBILE_APPLICATION_ID {
+        return Err(format!(
+            "mobile database is missing the expected application_id {MOBILE_APPLICATION_ID:#010x}"
+        ));
+    }
+    let state = connection
+        .query_row(
+            "SELECT schema_version, min_reader_version, min_writer_version,
+                    migration_checksum
+             FROM mobile_schema_state WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .map_err(|error| format!("mobile database compatibility stamp is invalid: {error}"))?;
+    if state.1 > PORTABLE_SCHEMA_VERSION {
+        return Err(format!(
+            "mobile database reader protocol floor {} is newer than this binary's {}",
+            state.1, PORTABLE_SCHEMA_VERSION
+        ));
+    }
+    if state.2 > PORTABLE_SCHEMA_VERSION {
+        return Err(format!(
+            "mobile database writer protocol floor {} is newer than this binary's {}",
+            state.2, PORTABLE_SCHEMA_VERSION
+        ));
+    }
+    if state.0 != 4 || state.1 != 4 || state.2 != 4 {
+        return Err("mobile schema v4 compatibility floor is invalid".to_string());
+    }
+    if state.3 != PORTABLE_SCHEMA_V4_CHECKSUM {
+        return Err("mobile schema v4 checksum does not match this binary".to_string());
+    }
+    for (version, expected_name, expected_checksum) in [
+        (
+            1_i64,
+            PORTABLE_MIGRATION_V1_NAME,
+            PORTABLE_SCHEMA_V1_CHECKSUM,
+        ),
+        (
+            2_i64,
+            PORTABLE_MIGRATION_V2_NAME,
+            PORTABLE_SCHEMA_V2_CHECKSUM,
+        ),
+        (
+            3_i64,
+            PORTABLE_MIGRATION_V3_NAME,
+            PORTABLE_SCHEMA_V3_CHECKSUM,
+        ),
+        (
+            4_i64,
+            PORTABLE_MIGRATION_V4_NAME,
+            PORTABLE_SCHEMA_V4_CHECKSUM,
+        ),
+    ] {
+        let history = connection
+            .query_row(
+                "SELECT name, checksum FROM mobile_schema_migrations WHERE version = ?1",
+                [version],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|error| format!("mobile migration v{version} history is invalid: {error}"))?;
+        if history.0 != expected_name || history.1 != expected_checksum {
+            return Err(format!(
+                "mobile migration v{version} history does not match this binary"
+            ));
+        }
+    }
+    let history_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM mobile_schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| error.to_string())?;
+    if history_count != PORTABLE_SCHEMA_VERSION {
+        return Err("mobile migration history is not contiguous".to_string());
+    }
+    verify_migration_history_guards(connection)?;
+    verify_mobile_database_integrity(connection)?;
+    let required_tables: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table' AND name IN (
+               'mobile_note_categories', 'mobile_note_folders', 'mobile_note_filing',
+               'mobile_sync_state', 'mobile_sync_inbox', 'mobile_note_conflicts',
+               'mobile_pairing_checkpoint_v1'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let has_conflict_of: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pragma_table_info('mobile_notes') WHERE name = 'conflict_of'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if required_tables != 7 || !has_conflict_of {
+        return Err(
+            "mobile schema v4 is missing workspace, sync-state, or pairing storage".to_string(),
+        );
+    }
+    validate_replica_identity(&replica_identity(connection)?)?;
+    validate_portable_notes(connection)?;
+    validate_outbox_transaction_groups(connection)?;
+    validate_mobile_workspace_state(connection)?;
+    verify_mobile_pairing_checkpoint_schema(connection)
 }
 
 fn validate_mobile_workspace_state(connection: &Connection) -> Result<(), String> {
@@ -6678,6 +7316,8 @@ fn next_timestamp(connection: &Connection) -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pairing_client::{ClientPublicIdentity, PairingClientConfig};
+    use crate::pairing_protocol::{KindCapability, RecordKind};
 
     fn store() -> MobileStore {
         MobileStore::open(Path::new(":memory:")).expect("open in-memory mobile store")
@@ -6720,9 +7360,8 @@ mod tests {
             Option<i64>,
             Option<i64>,
         ) = store
-            .connection
-            .lock()
-            .expect("lock store")
+            .lock_connection()
+            .expect("open store")
             .query_row(
                 "SELECT deleted_at, lifecycle_state, trashed_at, tombstoned_at
                  FROM mobile_notes WHERE record_id = ?1",
@@ -6734,6 +7373,199 @@ mod tests {
         assert_eq!(lifecycle, "trash");
         assert_eq!(trashed_at, deleted_at);
         assert_eq!(tombstoned_at, None);
+    }
+
+    #[test]
+    fn closed_store_does_not_touch_disk_and_opens_only_after_availability() {
+        let path = temporary_path("closed-before-first-unlock");
+        let store = MobileStore::closed(&path);
+
+        assert_eq!(store.path(), path.as_path());
+        assert!(!path.exists());
+        assert_eq!(store.list(None), Err(MOBILE_STORE_LOCKED_ERROR.to_string()));
+
+        store
+            .protected_data_became_available()
+            .expect("open after protected data becomes available");
+        assert!(path.exists());
+        assert!(store
+            .protected_data_is_available()
+            .expect("read available state"));
+        let device_id = store
+            .replica_device_id()
+            .expect("load canonical replica identity for native key binding");
+        assert!(is_uuid_v7(&device_id));
+
+        drop(store);
+        remove_database(&path);
+    }
+
+    fn fixture_pairing_checkpoint(store: &MobileStore) -> MobilePairingCheckpoint {
+        let device_id = store
+            .replica_device_id()
+            .expect("fixture replica device ID");
+        MobilePairingCheckpoint {
+            identity_handle: "018f47a0-7b80-4000-8000-000000000001".to_string(),
+            pending_bootstrap_handle: None,
+            client: PairingClientCheckpoint {
+                version: 1,
+                config: PairingClientConfig {
+                    environment: Environment::Development,
+                    library_data_class: LibraryDataClass::SanitizedFixture,
+                    requested_scopes: BTreeSet::from([RecordKind::Note]),
+                    capabilities: BTreeMap::from([(
+                        RecordKind::Note,
+                        KindCapability {
+                            reader_version: 1,
+                            writer_version: Some(1),
+                        },
+                    )]),
+                    display_name: "Fixture iPhone".to_string(),
+                    app_version: "0.1.0".to_string(),
+                    build_version: "1".to_string(),
+                },
+                state: PairingClientState::Ready,
+                invitation_bytes: br#"{"fixture":"sanitized"}"#.to_vec(),
+                identity: ClientPublicIdentity {
+                    device_id,
+                    signing_public_key: vec![4; 65],
+                    hpke_public_key: vec![7; 32],
+                },
+                client_hello_bytes: None,
+                server_hello_bytes: None,
+                confirmation: None,
+                user_decision: None,
+                bootstrap_bytes: None,
+                client_finish_bytes: None,
+                server_finish_bytes: None,
+                activation: None,
+            },
+            updated_at: 1_725_000_000_000,
+        }
+    }
+
+    #[test]
+    fn pairing_checkpoint_round_trips_exact_public_bytes_and_opaque_handles() {
+        let path = temporary_path("pairing-checkpoint");
+        let store = MobileStore::open(&path).expect("open fixture store");
+        let checkpoint = fixture_pairing_checkpoint(&store);
+        store
+            .save_pairing_checkpoint(&checkpoint)
+            .expect("save pairing checkpoint");
+        assert_eq!(
+            store
+                .load_pairing_checkpoint()
+                .expect("load pairing checkpoint"),
+            Some(checkpoint.clone())
+        );
+        drop(store);
+
+        let reopened = MobileStore::open(&path).expect("reopen fixture store");
+        assert_eq!(
+            reopened
+                .load_pairing_checkpoint()
+                .expect("load durable pairing checkpoint"),
+            Some(checkpoint)
+        );
+        drop(reopened);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn production_pairing_checkpoint_is_rejected_before_persistence_and_after_reopen() {
+        let path = temporary_path("production-pairing-checkpoint");
+        let store = MobileStore::open(&path).expect("open fixture store");
+        let mut checkpoint = fixture_pairing_checkpoint(&store);
+        checkpoint.client.config.environment = Environment::Production;
+        let error = store
+            .save_pairing_checkpoint(&checkpoint)
+            .expect_err("production checkpoint must not cross the fixture persistence boundary");
+        assert!(error.contains("sanitized fixture"), "{error}");
+        assert_eq!(
+            store
+                .load_pairing_checkpoint()
+                .expect("load rejected checkpoint store"),
+            None
+        );
+        drop(store);
+
+        let reopened = MobileStore::open(&path).expect("reopen fixture store");
+        assert_eq!(
+            reopened
+                .load_pairing_checkpoint()
+                .expect("load reopened checkpoint store"),
+            None
+        );
+        drop(reopened);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn pairing_checkpoint_mirror_tampering_fails_closed() {
+        let path = temporary_path("pairing-checkpoint-tamper");
+        let store = MobileStore::open(&path).expect("open fixture store");
+        let checkpoint = fixture_pairing_checkpoint(&store);
+        store
+            .save_pairing_checkpoint(&checkpoint)
+            .expect("save pairing checkpoint");
+        store
+            .lock_connection()
+            .expect("lock fixture store")
+            .execute(
+                "UPDATE mobile_pairing_checkpoint_v1 SET state = 'active' WHERE singleton = 1",
+                [],
+            )
+            .expect("tamper checkpoint mirror");
+        assert!(store
+            .load_pairing_checkpoint()
+            .expect_err("mirror mismatch must fail closed")
+            .contains("mirror mismatch"));
+        drop(store);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn protected_data_lifecycle_closes_fails_closed_and_reopens_the_replica() {
+        let path = temporary_path("protected-data");
+        let store = MobileStore::open(&path).expect("open protected-data store");
+        let note = store
+            .create("Protected", "survives a locked-device transition")
+            .expect("create protected note");
+
+        store
+            .protected_data_became_unavailable()
+            .expect("close protected store");
+        assert!(!store
+            .protected_data_is_available()
+            .expect("read protected-data state"));
+        assert_eq!(store.list(None), Err(MOBILE_STORE_LOCKED_ERROR.to_string()));
+        assert_eq!(
+            store.create("Blocked", "must not write while locked"),
+            Err(MOBILE_STORE_LOCKED_ERROR.to_string())
+        );
+        store
+            .protected_data_became_unavailable()
+            .expect("repeat close is idempotent");
+
+        store
+            .protected_data_became_available()
+            .expect("reopen protected store");
+        assert!(store
+            .protected_data_is_available()
+            .expect("read reopened state"));
+        assert_eq!(store.list(None).expect("list reopened store")[0], note);
+        let temp_store: i64 = store
+            .lock_connection()
+            .expect("lock reopened store")
+            .query_row("PRAGMA temp_store", [], |row| row.get(0))
+            .expect("read temp-store policy");
+        assert_eq!(temp_store, 2);
+        store
+            .protected_data_became_available()
+            .expect("repeat reopen is idempotent");
+
+        drop(store);
+        remove_database(&path);
     }
 
     #[test]
@@ -7496,7 +8328,8 @@ mod tests {
             vec![
                 (1, PORTABLE_SCHEMA_V1_CHECKSUM.to_string()),
                 (2, PORTABLE_SCHEMA_V2_CHECKSUM.to_string()),
-                (3, PORTABLE_SCHEMA_V3_CHECKSUM.to_string())
+                (3, PORTABLE_SCHEMA_V3_CHECKSUM.to_string()),
+                (4, PORTABLE_SCHEMA_V4_CHECKSUM.to_string())
             ]
         );
         let lifecycle: (String, i64, i64) = connection
@@ -7520,6 +8353,203 @@ mod tests {
         drop(store);
         remove_database(&path);
         let _ = std::fs::remove_file(recovery_path);
+    }
+
+    #[test]
+    fn schema_v3_upgrades_to_v4_once_with_an_exact_recovery_snapshot() {
+        let path = temporary_path("v3-to-v4-pairing-checkpoint");
+        {
+            let mut connection = Connection::open(&path).expect("open v3 fixture database");
+            migrate_portable_notes_to_version(&mut connection, None, 3)
+                .expect("construct the exact v3 schema");
+            assert_eq!(
+                connection
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .expect("read v3 version"),
+                3
+            );
+            assert!(!connection
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM sqlite_schema
+                       WHERE type = 'table' AND name = 'mobile_pairing_checkpoint_v1'
+                     )",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("inspect v3 pairing schema"));
+        }
+
+        let (recovery_path, v4_migrated_at) = {
+            let store = MobileStore::open(&path).expect("upgrade v3 database to v4");
+            let recovery_path = PathBuf::from(
+                store
+                    .migration_recovery_path()
+                    .expect("read v4 recovery state")
+                    .expect("v3 recovery snapshot path"),
+            );
+            let snapshot = Connection::open_with_flags(
+                &recovery_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("open v3 recovery snapshot");
+            assert_eq!(
+                snapshot
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .expect("read snapshot version"),
+                3
+            );
+            assert!(!snapshot
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM sqlite_schema
+                       WHERE type = 'table' AND name = 'mobile_pairing_checkpoint_v1'
+                     )",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("inspect snapshot pairing schema"));
+            drop(snapshot);
+
+            let connection = store.connection.lock().expect("lock upgraded store");
+            assert_eq!(
+                connection
+                    .query_row("SELECT COUNT(*) FROM mobile_schema_migrations", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("count v4 migration history"),
+                4
+            );
+            assert!(connection
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM sqlite_schema
+                       WHERE type = 'table' AND name = 'mobile_pairing_checkpoint_v1'
+                     )",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("inspect v4 pairing schema"));
+            let migrated_at = connection
+                .query_row(
+                    "SELECT migrated_at FROM mobile_schema_migrations WHERE version = 4",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("read v4 migration instant");
+            drop(connection);
+            (recovery_path, migrated_at)
+        };
+
+        let reopened = MobileStore::open(&path).expect("reopen v4 database idempotently");
+        assert_eq!(
+            reopened
+                .migration_recovery_path()
+                .expect("read stable recovery path")
+                .as_deref(),
+            recovery_path.to_str()
+        );
+        let connection = reopened.connection.lock().expect("lock reopened v4 store");
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT migrated_at FROM mobile_schema_migrations WHERE version = 4",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("read stable v4 migration instant"),
+            v4_migrated_at
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM mobile_schema_migrations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("count stable migration history"),
+            4
+        );
+        drop(connection);
+        drop(reopened);
+        remove_database(&path);
+        let _ = std::fs::remove_file(recovery_path);
+    }
+
+    #[test]
+    fn schema_v4_checksum_is_the_sha256_of_the_exact_migration_ddl() {
+        use sha2::{Digest as _, Sha256};
+
+        assert_eq!(
+            format!("{:x}", Sha256::digest(PORTABLE_SCHEMA_V4_DDL.as_bytes())),
+            PORTABLE_SCHEMA_V4_CHECKSUM
+        );
+    }
+
+    #[test]
+    fn stamped_v4_pairing_schema_is_never_silently_recreated_after_drop() {
+        let path = temporary_path("v4-pairing-schema-drop");
+        {
+            let store = MobileStore::open(&path).expect("create v4 store");
+            store
+                .connection
+                .lock()
+                .expect("lock v4 store")
+                .execute("DROP TABLE mobile_pairing_checkpoint_v1", [])
+                .expect("drop pairing checkpoint table fixture");
+        }
+
+        let error = MobileStore::open(&path)
+            .err()
+            .expect("dropped pairing table must fail closed");
+        assert!(
+            error.contains("pairing") || error.contains("schema v4"),
+            "{error}"
+        );
+        let connection = Connection::open(&path).expect("inspect rejected v4 store");
+        assert!(!connection
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM sqlite_schema
+                   WHERE type = 'table' AND name = 'mobile_pairing_checkpoint_v1'
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("confirm pairing table remains absent"));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM mobile_schema_migrations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("count untouched migration history"),
+            4
+        );
+        drop(connection);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn stamped_v4_pairing_migration_checksum_tampering_fails_closed() {
+        let path = temporary_path("v4-pairing-checksum-tamper");
+        {
+            let store = MobileStore::open(&path).expect("create v4 store");
+            store
+                .connection
+                .lock()
+                .expect("lock v4 store")
+                .execute(
+                    "UPDATE mobile_schema_state
+                     SET migration_checksum = '0000000000000000000000000000000000000000000000000000000000000000'
+                     WHERE singleton = 1",
+                    [],
+                )
+                .expect("tamper v4 schema checksum fixture");
+        }
+
+        let error = MobileStore::open(&path)
+            .err()
+            .expect("tampered v4 checksum must fail closed");
+        assert!(error.contains("v4 checksum"), "{error}");
+        remove_database(&path);
     }
 
     #[test]

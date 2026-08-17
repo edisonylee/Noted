@@ -11,7 +11,8 @@
 //! complete.
 
 use crate::pairing_protocol::{
-    Environment, LibraryDataClass, PairingCrypto, PairingError, PairingMachine, RecordKind,
+    Environment, KindCapability, LibraryDataClass, PairingCrypto, PairingError, PairingMachine,
+    RecordKind,
 };
 use crate::portable::{canonical_json, is_uuid_v7};
 use crate::sync_protocol::{
@@ -25,6 +26,7 @@ use serde::de::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -351,6 +353,7 @@ pub struct AckResponse {
 /// authenticated ciphertext/signature, and authenticate responses. The core
 /// provides no default implementation and therefore cannot silently fall back
 /// to fixture cryptography.
+#[allow(clippy::result_unit_err)]
 pub trait DirectSyncCrypto: Send + Sync + 'static {
     fn verify_request_signature(
         &self,
@@ -388,6 +391,124 @@ pub struct AuthorityIdentity {
     pub library_data_class: LibraryDataClass,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrollmentAuthorizationError {
+    NotAuthorized,
+    Revoked,
+    ScopeViolation,
+    StateUnavailable,
+}
+
+/// Narrow enrollment boundary used by direct sync. The in-memory pairing
+/// machine implements it for deterministic protocol tests, while a durable
+/// implementation can authorize a device after a desktop process restart.
+pub trait DirectSyncEnrollment: Send + Sync + 'static {
+    fn require_active_device(
+        &self,
+        device_id: &str,
+        library_id: &str,
+        environment: Environment,
+        authority_generation: u64,
+    ) -> Result<(), EnrollmentAuthorizationError>;
+
+    fn require_active_device_scope(
+        &self,
+        device_id: &str,
+        library_id: &str,
+        environment: Environment,
+        authority_generation: u64,
+        scope: RecordKind,
+        require_write: bool,
+    ) -> Result<KindCapability, EnrollmentAuthorizationError>;
+
+    fn revoke_device(
+        &self,
+        device_id: &str,
+        now_ms: i64,
+    ) -> Result<(), EnrollmentAuthorizationError>;
+}
+
+impl<C: PairingCrypto> DirectSyncEnrollment for PairingMachine<C> {
+    fn require_active_device(
+        &self,
+        device_id: &str,
+        library_id: &str,
+        environment: Environment,
+        authority_generation: u64,
+    ) -> Result<(), EnrollmentAuthorizationError> {
+        PairingMachine::require_active_device(
+            self,
+            device_id,
+            library_id,
+            environment,
+            authority_generation,
+        )
+        .map_err(map_enrollment_error)
+    }
+
+    fn require_active_device_scope(
+        &self,
+        device_id: &str,
+        library_id: &str,
+        environment: Environment,
+        authority_generation: u64,
+        scope: RecordKind,
+        require_write: bool,
+    ) -> Result<KindCapability, EnrollmentAuthorizationError> {
+        PairingMachine::require_active_device_scope(
+            self,
+            device_id,
+            library_id,
+            environment,
+            authority_generation,
+            scope,
+            require_write,
+        )
+        .map_err(map_enrollment_error)
+    }
+
+    fn revoke_device(
+        &self,
+        device_id: &str,
+        now_ms: i64,
+    ) -> Result<(), EnrollmentAuthorizationError> {
+        PairingMachine::revoke_device(self, device_id, now_ms).map_err(map_enrollment_error)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactWireResponse {
+    pub status_code: u16,
+    pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedPushResponse {
+    pub receipt: TransactionReceipt,
+    /// Authority-private continuation. It is created and consumed only within
+    /// one request dispatch and is never accepted from the wire.
+    pub authority_token: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreparePushResponseOutcome {
+    Candidate(PreparedPushResponse),
+    ExactReplay(ExactWireResponse),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedAckResponse {
+    pub receipt: AckReceipt,
+    /// Authority-private continuation; see [`PreparedPushResponse`].
+    pub authority_token: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrepareAckResponseOutcome {
+    Candidate(PreparedAckResponse),
+    ExactReplay(ExactWireResponse),
+}
+
 impl From<ProtocolError> for AuthorityStoreError {
     fn from(value: ProtocolError) -> Self {
         Self::Protocol(value)
@@ -415,6 +536,120 @@ pub trait DirectSyncAuthority: Send {
         checkpoint_digest: &str,
     ) -> Result<AckReceipt, AuthorityStoreError>;
     fn revoke_device(&mut self, device_id: &str) -> Result<(), AuthorityStoreError>;
+}
+
+/// A route-capable authority must explicitly choose an exact-wire commit
+/// strategy. Durable adapters implement this trait directly. Test-only
+/// in-memory adapters opt into [`InMemoryDirectSyncAuthority`] instead, making
+/// commit-before-sign behavior visible at the type boundary.
+pub trait ExactWireDirectSyncAuthority: DirectSyncAuthority {
+    fn prepare_push_response(
+        &mut self,
+        request_id: &str,
+        request_digest: [u8; 32],
+        transaction: SignedTransaction,
+        now: u64,
+    ) -> Result<PreparePushResponseOutcome, AuthorityStoreError>;
+
+    fn finalize_push_response(
+        &mut self,
+        prepared: &PreparedPushResponse,
+        status_code: u16,
+        exact_response_bytes: &[u8],
+        now: u64,
+    ) -> Result<ExactWireResponse, AuthorityStoreError>;
+
+    fn prepare_ack_response(
+        &mut self,
+        request_id: &str,
+        request_digest: [u8; 32],
+        device_id: &str,
+        cursor: u64,
+        checkpoint_digest: &str,
+        now: u64,
+    ) -> Result<PrepareAckResponseOutcome, AuthorityStoreError>;
+
+    fn finalize_ack_response(
+        &mut self,
+        prepared: &PreparedAckResponse,
+        status_code: u16,
+        exact_response_bytes: &[u8],
+        now: u64,
+    ) -> Result<ExactWireResponse, AuthorityStoreError>;
+}
+
+/// Explicit marker for deterministic in-memory authorities that have no
+/// process-crash durability boundary. Production/durable adapters must never
+/// implement this marker; they implement [`ExactWireDirectSyncAuthority`]
+/// themselves and atomically persist semantic state with exact response bytes.
+pub trait InMemoryDirectSyncAuthority: DirectSyncAuthority {}
+
+impl<T: InMemoryDirectSyncAuthority> ExactWireDirectSyncAuthority for T {
+    fn prepare_push_response(
+        &mut self,
+        _request_id: &str,
+        _request_digest: [u8; 32],
+        transaction: SignedTransaction,
+        now: u64,
+    ) -> Result<PreparePushResponseOutcome, AuthorityStoreError> {
+        let receipt = match self.push(transaction, now)? {
+            SubmitOutcome::Terminal(receipt) | SubmitOutcome::Replay(receipt) => receipt,
+        };
+        Ok(PreparePushResponseOutcome::Candidate(
+            PreparedPushResponse {
+                receipt,
+                authority_token: Vec::new(),
+            },
+        ))
+    }
+
+    fn finalize_push_response(
+        &mut self,
+        prepared: &PreparedPushResponse,
+        status_code: u16,
+        exact_response_bytes: &[u8],
+        _now: u64,
+    ) -> Result<ExactWireResponse, AuthorityStoreError> {
+        if !prepared.authority_token.is_empty() {
+            return Err(AuthorityStoreError::StateUnavailable);
+        }
+        Ok(ExactWireResponse {
+            status_code,
+            body: exact_response_bytes.to_vec(),
+        })
+    }
+
+    fn prepare_ack_response(
+        &mut self,
+        _request_id: &str,
+        _request_digest: [u8; 32],
+        device_id: &str,
+        cursor: u64,
+        checkpoint_digest: &str,
+        _now: u64,
+    ) -> Result<PrepareAckResponseOutcome, AuthorityStoreError> {
+        let receipt = self.acknowledge(device_id, cursor, checkpoint_digest)?;
+        Ok(PrepareAckResponseOutcome::Candidate(PreparedAckResponse {
+            receipt,
+            authority_token: Vec::new(),
+        }))
+    }
+
+    fn finalize_ack_response(
+        &mut self,
+        prepared: &PreparedAckResponse,
+        status_code: u16,
+        exact_response_bytes: &[u8],
+        _now: u64,
+    ) -> Result<ExactWireResponse, AuthorityStoreError> {
+        if !prepared.authority_token.is_empty() {
+            return Err(AuthorityStoreError::StateUnavailable);
+        }
+        Ok(ExactWireResponse {
+            status_code,
+            body: exact_response_bytes.to_vec(),
+        })
+    }
 }
 
 /// In-memory M4 adapter around the deterministic convergence authority. It is
@@ -525,6 +760,8 @@ impl DirectSyncAuthority for AuthorityStateStore {
         Ok(())
     }
 }
+
+impl InMemoryDirectSyncAuthority for AuthorityStateStore {}
 
 impl AuthorityStateStore {
     fn remember_checkpoint(
@@ -669,13 +906,13 @@ impl From<AuthorityStoreError> for DirectSyncError {
     }
 }
 
-pub struct DirectSyncService<C, A, V>
+pub struct DirectSyncService<E, A, V>
 where
-    C: PairingCrypto,
-    A: DirectSyncAuthority,
+    E: DirectSyncEnrollment,
+    A: ExactWireDirectSyncAuthority,
     V: DirectSyncCrypto,
 {
-    pairing: PairingMachine<C>,
+    enrollment: E,
     authority: Mutex<A>,
     /// Linearizes authorization, mutation commit, and device revocation. A
     /// revocation therefore takes effect either wholly before or wholly after
@@ -685,14 +922,14 @@ where
     config: DirectSyncConfig,
 }
 
-impl<C, A, V> DirectSyncService<C, A, V>
+impl<E, A, V> DirectSyncService<E, A, V>
 where
-    C: PairingCrypto,
-    A: DirectSyncAuthority,
+    E: DirectSyncEnrollment,
+    A: ExactWireDirectSyncAuthority,
     V: DirectSyncCrypto,
 {
     pub fn new(
-        pairing: PairingMachine<C>,
+        enrollment: E,
         authority: A,
         crypto: V,
         config: DirectSyncConfig,
@@ -735,7 +972,7 @@ where
             return Err(DirectSyncError::InvalidConfiguration);
         }
         Ok(Self {
-            pairing,
+            enrollment,
             authority: Mutex::new(authority),
             operation_gate: Mutex::new(()),
             crypto,
@@ -763,9 +1000,9 @@ where
             .operation_gate
             .lock()
             .map_err(|_| DirectSyncError::StateUnavailable)?;
-        self.pairing
+        self.enrollment
             .revoke_device(device_id, now_ms)
-            .map_err(map_pairing_error)?;
+            .map_err(map_authorization_error)?;
         self.lock_authority()?.revoke_device(device_id)?;
         Ok(())
     }
@@ -888,6 +1125,7 @@ where
             DirectEndpoint::Push => {
                 let signed: SignedSyncRequest<PushRequest> = parse_request(&request.body)?;
                 self.validate_request(endpoint, &signed)?;
+                let request_digest = Sha256::digest(&request.body).into();
                 if signed.payload.transaction.members.is_empty()
                     || signed.payload.transaction.manifest.member_count
                         > MAX_DIRECT_TRANSACTION_MEMBERS
@@ -931,18 +1169,38 @@ where
                 }
                 self.ensure_transaction_is_pullable(&signed, &signed.payload.transaction)?;
                 let mut authority = self.lock_authority()?;
-                let outcome =
-                    authority.push(signed.payload.transaction.clone(), request.authority_now)?;
-                let receipt = match outcome {
-                    SubmitOutcome::Terminal(receipt) | SubmitOutcome::Replay(receipt) => receipt,
-                };
-                self.validate_receipt_binding(&receipt, &signed.payload.transaction, false)?;
-                self.respond(
-                    endpoint,
-                    &signed,
-                    PushResponse { receipt },
-                    limits.response_bytes,
-                )
+                match authority.prepare_push_response(
+                    &signed.request_id,
+                    request_digest,
+                    signed.payload.transaction.clone(),
+                    request.authority_now,
+                )? {
+                    PreparePushResponseOutcome::ExactReplay(response) => {
+                        exact_wire_response(response, limits.response_bytes)
+                    }
+                    PreparePushResponseOutcome::Candidate(prepared) => {
+                        self.validate_receipt_binding(
+                            &prepared.receipt,
+                            &signed.payload.transaction,
+                            false,
+                        )?;
+                        let candidate = self.respond(
+                            endpoint,
+                            &signed,
+                            PushResponse {
+                                receipt: prepared.receipt.clone(),
+                            },
+                            limits.response_bytes,
+                        )?;
+                        let finalized = authority.finalize_push_response(
+                            &prepared,
+                            candidate.status,
+                            &candidate.body,
+                            request.authority_now,
+                        )?;
+                        exact_wire_response(finalized, limits.response_bytes)
+                    }
+                }
             }
             DirectEndpoint::Pull => {
                 let signed: SignedSyncRequest<PullRequest> = parse_request(&request.body)?;
@@ -1003,28 +1261,49 @@ where
             DirectEndpoint::Ack => {
                 let signed: SignedSyncRequest<AckRequest> = parse_request(&request.body)?;
                 self.validate_request(endpoint, &signed)?;
+                let request_digest = Sha256::digest(&request.body).into();
                 self.authorize_requested_kinds(&signed, &notes_slice_record_kinds(), false)?;
                 if !is_sha256(&signed.payload.checkpoint_digest) {
                     return Err(DirectSyncError::InvalidEnvelope);
                 }
                 let mut authority = self.lock_authority()?;
-                let receipt = authority.acknowledge(
+                match authority.prepare_ack_response(
+                    &signed.request_id,
+                    request_digest,
                     &signed.device_id,
                     signed.payload.high_water_cursor,
                     &signed.payload.checkpoint_digest,
-                )?;
-                if receipt.device_id != signed.device_id
-                    || receipt.high_water_cursor != signed.payload.high_water_cursor
-                    || receipt.checkpoint_digest != signed.payload.checkpoint_digest
-                {
-                    return Err(DirectSyncError::StateUnavailable);
+                    request.authority_now,
+                )? {
+                    PrepareAckResponseOutcome::ExactReplay(response) => {
+                        exact_wire_response(response, limits.response_bytes)
+                    }
+                    PrepareAckResponseOutcome::Candidate(prepared) => {
+                        if prepared.receipt.device_id != signed.device_id
+                            || prepared.receipt.high_water_cursor
+                                != signed.payload.high_water_cursor
+                            || prepared.receipt.checkpoint_digest
+                                != signed.payload.checkpoint_digest
+                        {
+                            return Err(DirectSyncError::StateUnavailable);
+                        }
+                        let candidate = self.respond(
+                            endpoint,
+                            &signed,
+                            AckResponse {
+                                receipt: prepared.receipt.clone(),
+                            },
+                            limits.response_bytes,
+                        )?;
+                        let finalized = authority.finalize_ack_response(
+                            &prepared,
+                            candidate.status,
+                            &candidate.body,
+                            request.authority_now,
+                        )?;
+                        exact_wire_response(finalized, limits.response_bytes)
+                    }
                 }
-                self.respond(
-                    endpoint,
-                    &signed,
-                    AckResponse { receipt },
-                    limits.response_bytes,
-                )
             }
         }
     }
@@ -1075,14 +1354,14 @@ where
                 &request.signature,
             )
             .map_err(|_| DirectSyncError::RequestSignatureRejected)?;
-        self.pairing
+        self.enrollment
             .require_active_device(
                 &request.device_id,
                 &request.library_id,
                 request.environment,
                 request.authority_generation,
             )
-            .map_err(map_pairing_error)
+            .map_err(map_authorization_error)
     }
 
     fn authorize_requested_kinds<T>(
@@ -1117,7 +1396,7 @@ where
     ) -> Result<(), DirectSyncError> {
         let scope = pairing_record_kind(kind).ok_or(DirectSyncError::ScopeViolation)?;
         let capability = self
-            .pairing
+            .enrollment
             .require_active_device_scope(
                 &request.device_id,
                 &request.library_id,
@@ -1126,7 +1405,7 @@ where
                 scope,
                 require_write,
             )
-            .map_err(map_pairing_error)?;
+            .map_err(map_authorization_error)?;
         let supported_version = if require_write {
             capability.writer_version.unwrap_or(0)
         } else {
@@ -1194,8 +1473,7 @@ where
         };
 
         let end = start
-            .checked_add(request.payload.limit as usize)
-            .unwrap_or(usize::MAX)
+            .saturating_add(request.payload.limit as usize)
             .min(records.len());
         for record in records[start..end].iter().cloned() {
             page.next_after_record_id = Some(record.record_id.clone());
@@ -1537,14 +1815,41 @@ fn notes_slice_record_kinds() -> BTreeSet<String> {
         .collect()
 }
 
-fn map_pairing_error(error: PairingError) -> DirectSyncError {
+fn map_enrollment_error(error: PairingError) -> EnrollmentAuthorizationError {
     match error {
-        PairingError::DeviceRevoked => DirectSyncError::DeviceRevoked,
+        PairingError::DeviceRevoked => EnrollmentAuthorizationError::Revoked,
         PairingError::ScopeNotGranted | PairingError::CapabilityMismatch => {
-            DirectSyncError::ScopeViolation
+            EnrollmentAuthorizationError::ScopeViolation
         }
-        _ => DirectSyncError::DeviceNotAuthorized,
+        PairingError::StateUnavailable => EnrollmentAuthorizationError::StateUnavailable,
+        _ => EnrollmentAuthorizationError::NotAuthorized,
     }
+}
+
+fn map_authorization_error(error: EnrollmentAuthorizationError) -> DirectSyncError {
+    match error {
+        EnrollmentAuthorizationError::NotAuthorized => DirectSyncError::DeviceNotAuthorized,
+        EnrollmentAuthorizationError::Revoked => DirectSyncError::DeviceRevoked,
+        EnrollmentAuthorizationError::ScopeViolation => DirectSyncError::ScopeViolation,
+        EnrollmentAuthorizationError::StateUnavailable => DirectSyncError::StateUnavailable,
+    }
+}
+
+fn exact_wire_response(
+    response: ExactWireResponse,
+    max_bytes: usize,
+) -> Result<DirectResponse, DirectSyncError> {
+    if !(100..=599).contains(&response.status_code) || response.body.is_empty() {
+        return Err(DirectSyncError::StateUnavailable);
+    }
+    if response.body.len() > max_bytes {
+        return Err(DirectSyncError::ResponseTooLarge);
+    }
+    Ok(DirectResponse {
+        status: response.status_code,
+        content_type: DIRECT_SYNC_CONTENT_TYPE,
+        body: response.body,
+    })
 }
 
 fn parse_request<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DirectSyncError> {

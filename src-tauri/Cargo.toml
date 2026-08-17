@@ -14,12 +14,27 @@ edition = "2021"
 name = "tauri_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = []
+# Opt-in development surface for the iOS simulator only. The native plugin
+# separately requires DEBUG + simulator + its exact runtime gate, while the
+# physical-device branch always requests a Secure Enclave identity.
+sanitized-development-fixtures = [
+  "noted-apple-security/sanitized-development-fixtures",
+]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 hound = "3"
+# Independent, test-only implementations and RNG traits for the Decision 008
+# Rust <-> CryptoKit interoperability vectors. These dependencies are not
+# linked into production application targets.
+hpke = { version = "0.13", default-features = false, features = ["alloc", "x25519"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+rand_core = "0.9"
 
 [dependencies]
 # The iOS app keeps this common dependency set minimal. Desktop-only services
@@ -35,8 +50,17 @@ hkdf = "0.12"
 zeroize = "1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+x509-cert = { version = "0.2", default-features = false }
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
+hyper = { version = "1", default-features = false, features = ["server"] }
 tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
@@ -92,3 +116,6 @@ window-vibrancy = "0.6"
 # Native custom-scheme delivery for public-ID note links. The parser and local
 # library check remain in the Rust command boundary before navigation occurs.
 tauri-plugin-deep-link = "2"
+# Native-only Keychain, Secure Enclave, HPKE, and Data Protection boundary.
+# This plugin intentionally exposes no JavaScript commands.
+noted-apple-security = { path = "crates/noted-apple-security" }

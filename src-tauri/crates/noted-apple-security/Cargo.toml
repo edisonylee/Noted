@@ -1,0 +1,30 @@
+[package]
+name = "noted-apple-security"
+version = "0.1.0"
+description = "Noted iOS key custody and Data Protection bridge"
+edition = "2021"
+links = "noted-apple-security"
+publish = false
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[features]
+default = []
+# This feature only makes the Rust fixture entry point available. The Swift
+# implementation independently requires a DEBUG simulator build and an exact
+# runtime gate before it will create a software signing key.
+sanitized-development-fixtures = []
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[dependencies]
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", default-features = false }
+thiserror = "2"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+tauri = { version = "2", default-features = false, features = ["wry"] }

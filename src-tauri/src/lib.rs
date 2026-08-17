@@ -9,7 +9,10 @@ mod mobile;
 pub mod mobile_store;
 
 pub mod direct_sync;
+pub mod direct_sync_transport;
 pub mod mobile_deep_link;
+pub mod mobile_pairing_runtime;
+pub mod pairing_client;
 pub mod pairing_protocol;
 pub mod portable;
 pub mod sync_protocol;

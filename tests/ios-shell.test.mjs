@@ -70,6 +70,10 @@ test("mobile notes use an isolated on-device SQLite store", async () => {
   assert.match(entry, /noted-mobile\.sqlite3/);
   assert.match(store, /CREATE TABLE IF NOT EXISTS mobile_notes/);
   assert.match(store, /PRAGMA journal_mode = WAL/);
+  assert.match(store, /PRAGMA temp_store = MEMORY/);
+  assert.match(store, /MOBILE_STORE_LOCKED_ERROR/);
+  assert.match(store, /protected_data_became_unavailable/);
+  assert.match(store, /protected_data_became_available/);
   assert.equal(store.includes("sqlite_vec"), false);
 });
 
@@ -105,9 +109,17 @@ test("generated iOS app requests no desktop recorder permissions", async () => {
 
 test("iOS signing configuration is reproducible", async () => {
   const config = JSON.parse(await read("src-tauri/tauri.ios.conf.json"));
+  const info = await read("src-tauri/Info.ios.plist");
 
   assert.equal(config.identifier, "com.noted.iphone");
   assert.equal(config.bundle.iOS.developmentTeam, "MYGAYC672C");
+  assert.equal(config.bundle.iOS.minimumSystemVersion, "17.0");
+  assert.equal(config.bundle.iOS.infoPlist, "Info.ios.plist");
+  assert.match(info, /NSLocalNetworkUsageDescription/);
+  assert.match(info, /_noted-sync\._tcp/);
+  for (const forbidden of ["token", "secret", "libraryId", "deviceId", "databasePath"]) {
+    assert.equal(info.includes(forbidden), false, `${forbidden} leaked into iOS discovery metadata`);
+  }
 });
 
 test("mobile frontend bundle excludes desktop command surfaces", async () => {

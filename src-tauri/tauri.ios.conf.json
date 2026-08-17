@@ -25,7 +25,8 @@
   "bundle": {
     "iOS": {
       "developmentTeam": "MYGAYC672C",
-      "minimumSystemVersion": "17.0"
+      "minimumSystemVersion": "17.0",
+      "infoPlist": "Info.ios.plist"
     },
     "resources": [],
     "icon": [

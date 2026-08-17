@@ -24,11 +24,23 @@ const BASELINE_MIGRATION: crate::migrations::MigrationDescriptor<'static> =
         "legacy-additive-baseline",
         "92aed657051490183fd931d523bc2146522f0e6094d176da9479b0be91d61659",
     );
+const DIRECT_AUTHORITY_MIGRATION: crate::migrations::MigrationDescriptor<'static> =
+    crate::migrations::MigrationDescriptor::new(
+        crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+        "desktop-direct-authority-fixture-store",
+        "2725b90efe07a1e6703159632e20e68eea7486d67defdf10d9ae7b58690dabd0",
+    );
+const DIRECT_AUTHORITY_SCHEMA_STAMP: crate::migrations::DatabaseStamp =
+    crate::migrations::DatabaseStamp::new(
+        crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+        1,
+        crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+    );
 const DESKTOP_SCHEMA_CAPABILITIES: crate::migrations::ClientCapabilities =
     crate::migrations::ClientCapabilities::new(
-        crate::sync_journal::PORTABLE_SCHEMA_VERSION,
-        crate::sync_journal::PORTABLE_SCHEMA_VERSION,
-        crate::sync_journal::PORTABLE_SCHEMA_VERSION,
+        crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+        crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+        crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
     );
 
 const SCHEMA: &str = r#"
@@ -421,33 +433,43 @@ pub fn init(db_path: &Path) -> Result<Connection> {
         }
         crate::migrations::verify_known_migrations(
             &conn,
-            &[BASELINE_MIGRATION, crate::sync_journal::PORTABLE_MIGRATION],
+            &[
+                BASELINE_MIGRATION,
+                crate::sync_journal::PORTABLE_MIGRATION,
+                DIRECT_AUTHORITY_MIGRATION,
+            ],
         )?;
     }
 
-    let requires_portable_migration = match schema_state {
+    let requires_ordered_migration = match schema_state {
         crate::migrations::DatabaseSchemaState::Unversioned => true,
         crate::migrations::DatabaseSchemaState::Stamped(stamp) => {
-            stamp.schema_version < crate::sync_journal::PORTABLE_SCHEMA_VERSION
+            stamp.schema_version < crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION
         }
     };
-    if requires_portable_migration && database_has_active_meeting_capture(&conn)? {
+    if requires_ordered_migration && database_has_active_meeting_capture(&conn)? {
         return Err(anyhow::anyhow!(
-            "portable schema migration is deferred while a meeting capture is marked recording; finish or recover the recording with the current app before upgrading"
+            "database schema migration is deferred while a meeting capture is marked recording; finish or recover the recording with the current app before upgrading"
         ));
     }
 
     let recovery_path = match schema_state {
         crate::migrations::DatabaseSchemaState::Unversioned if database_has_user_schema(&conn)? => {
-            let recovery_path = pre_migration_recovery_path(db_path, BASELINE_SCHEMA_VERSION)?;
+            let recovery_path = pre_migration_recovery_path(
+                db_path,
+                crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+            )?;
             crate::backup::create_pre_migration_snapshot(&conn, &recovery_path)?;
             Some(recovery_path)
         }
         crate::migrations::DatabaseSchemaState::Stamped(stamp)
-            if stamp.schema_version < crate::sync_journal::PORTABLE_SCHEMA_VERSION =>
+            if stamp.schema_version
+                < crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION =>
         {
-            let recovery_path =
-                pre_migration_recovery_path(db_path, crate::sync_journal::PORTABLE_SCHEMA_VERSION)?;
+            let recovery_path = pre_migration_recovery_path(
+                db_path,
+                crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+            )?;
             crate::backup::create_pre_migration_snapshot(&conn, &recovery_path)?;
             Some(recovery_path)
         }
@@ -570,6 +592,21 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     }
     crate::sync_journal::apply_portable_migration(&mut conn)?;
     crate::sync_journal::verify_portable_schema(&conn)?;
+    crate::migrations::apply_migration(
+        &mut conn,
+        DIRECT_AUTHORITY_MIGRATION,
+        DIRECT_AUTHORITY_SCHEMA_STAMP,
+        env!("CARGO_PKG_VERSION"),
+        |transaction| {
+            crate::direct_authority_store::DirectAuthorityStore::install_schema(transaction)
+                .and_then(|_| {
+                    crate::direct_authority_store::DirectAuthorityStore::verify_schema(transaction)
+                })
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+        },
+    )?;
+    crate::direct_authority_store::DirectAuthorityStore::verify_schema(&conn)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     if let Some(path) = recovery_path {
         conn.execute(
             "INSERT INTO app_metadata(key, value)

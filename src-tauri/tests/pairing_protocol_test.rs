@@ -15,6 +15,10 @@ const DEVICE_ID: &str = "018f47a0-7b80-7000-8000-000000000003";
 const FINISH_ID: &str = "018f47a0-7b80-7000-8000-000000000004";
 const LIBRARY_ID: &str = "018f47a0-7b80-7000-8000-000000000005";
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 struct FixtureCrypto {
     counter: AtomicU64,
     fail_next_server_nonce: AtomicBool,
@@ -1145,6 +1149,52 @@ fn hpke_wire_envelopes_bind_the_encapsulated_key_and_ciphertext_atomically() {
         Sha256::digest(canonical_authenticated_hpke_envelope(&substituted)).to_vec(),
         bootstrap.envelope_digest
     );
+
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/pairing_v1_canonical.json")).unwrap();
+    assert_eq!(fixture["protocol"], PAIRING_PROTOCOL);
+    assert_eq!(fixture["suite"], PAIRING_SUITE);
+    assert_eq!(
+        fixture["challenge_info_sha256"],
+        hex(&Sha256::digest(challenge_hpke_info(&server_hello.receipt)))
+    );
+    assert_eq!(
+        fixture["challenge_exporter_context_sha256"],
+        hex(&Sha256::digest(challenge_hpke_exporter_context(
+            &server_hello.receipt
+        )))
+    );
+    assert_eq!(
+        fixture["bootstrap_info_sha256"],
+        hex(&Sha256::digest(bootstrap_hpke_info(&server_hello.receipt)))
+    );
+    assert_eq!(
+        fixture["bootstrap_exporter_context_sha256"],
+        hex(&Sha256::digest(bootstrap_hpke_exporter_context(
+            &server_hello.receipt
+        )))
+    );
+    assert_eq!(
+        fixture["challenge_encapsulated_key"],
+        hex(&server_hello.challenge.encapsulated_key)
+    );
+    assert_eq!(
+        fixture["challenge_ciphertext"],
+        hex(&server_hello.challenge.ciphertext)
+    );
+    assert_eq!(
+        fixture["bootstrap_encapsulated_key"],
+        hex(&bootstrap.sealed_bootstrap.encapsulated_key)
+    );
+    assert_eq!(
+        fixture["bootstrap_ciphertext"],
+        hex(&bootstrap.sealed_bootstrap.ciphertext)
+    );
+    assert_eq!(
+        fixture["bootstrap_envelope_digest"],
+        hex(&bootstrap.envelope_digest)
+    );
+    assert_eq!(fixture["verification_code"], begin.verification_code);
 }
 
 #[test]

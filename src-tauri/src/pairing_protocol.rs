@@ -280,6 +280,7 @@ pub enum FreshValuePurpose {
 
 /// Cryptographic and entropy operations are intentionally abstract. This
 /// state machine never treats a fixture implementation as production-ready.
+#[allow(clippy::result_unit_err)]
 pub trait PairingCrypto: Send + Sync + 'static {
     fn verify_signature(
         &self,
@@ -775,15 +776,7 @@ impl<C: PairingCrypto> PairingMachine<C> {
         );
         receipt.transcript_digest = transcript_digest.clone();
 
-        let challenge_plaintext = canonical_components(
-            "noted.direct-pairing.v1/challenge",
-            &[
-                ("receipt_id", receipt_id.as_bytes()),
-                ("transcript_digest", &transcript_digest),
-                ("library_id", receipt.library_id.as_bytes()),
-                ("device_id", receipt.device_id.as_bytes()),
-            ],
-        );
+        let challenge_plaintext = canonical_challenge_plaintext(&receipt);
         let challenge_info = challenge_hpke_info(&receipt);
         let challenge_exporter_context = challenge_hpke_exporter_context(&receipt);
         let challenge_seal = self
@@ -1381,7 +1374,7 @@ impl<C: PairingCrypto> PairingMachine<C> {
     }
 }
 
-fn validate_policy(policy: &PairingPolicy) -> Result<(), PairingError> {
+pub(crate) fn validate_policy(policy: &PairingPolicy) -> Result<(), PairingError> {
     if !is_uuid_v7(&policy.library_id) {
         return Err(PairingError::InvalidIdentifier);
     }
@@ -1396,7 +1389,7 @@ fn validate_policy(policy: &PairingPolicy) -> Result<(), PairingError> {
     validate_requested_capabilities(&policy.grantable_scopes, &policy.capabilities)
 }
 
-fn validate_invitation_shape(
+pub(crate) fn validate_invitation_shape(
     invitation: &Invitation,
     policy: &PairingPolicy,
     now_ms: i64,
@@ -1475,7 +1468,7 @@ fn validate_invitation_shape(
     Ok(())
 }
 
-fn validate_transport_evidence(
+pub(crate) fn validate_transport_evidence(
     transport: &TransportEvidence,
     expected_spki_sha256: &[u8],
 ) -> Result<(), PairingError> {
@@ -1488,7 +1481,7 @@ fn validate_transport_evidence(
     Ok(())
 }
 
-fn validate_client_hello_shape(hello: &ClientHello) -> Result<(), PairingError> {
+pub(crate) fn validate_client_hello_shape(hello: &ClientHello) -> Result<(), PairingError> {
     if !is_uuid_v7(&hello.message_id)
         || !is_uuid_v7(&hello.invitation_id)
         || !is_uuid_v7(&hello.proposed_device_id)
@@ -1526,7 +1519,7 @@ fn validate_client_hello_shape(hello: &ClientHello) -> Result<(), PairingError> 
     Ok(())
 }
 
-fn validate_client_finish_shape(finish: &ClientFinish) -> Result<(), PairingError> {
+pub(crate) fn validate_client_finish_shape(finish: &ClientFinish) -> Result<(), PairingError> {
     if !is_uuid_v7(&finish.message_id)
         || !is_uuid_v7(&finish.receipt_id)
         || !is_uuid_v7(&finish.invitation_id)
@@ -1551,7 +1544,7 @@ fn validate_client_finish_shape(finish: &ClientFinish) -> Result<(), PairingErro
     Ok(())
 }
 
-fn validate_finish_bindings(
+pub(crate) fn validate_finish_bindings(
     receipt: &EnrollmentReceipt,
     bootstrap: &BootstrapEnvelope,
     finish: &ClientFinish,
@@ -1581,7 +1574,7 @@ fn validate_finish_bindings(
     Ok(())
 }
 
-fn validate_requested_capabilities(
+pub(crate) fn validate_requested_capabilities(
     scopes: &BTreeSet<RecordKind>,
     capabilities: &BTreeMap<RecordKind, KindCapability>,
 ) -> Result<(), PairingError> {
@@ -1604,7 +1597,7 @@ fn validate_requested_capabilities(
     Ok(())
 }
 
-fn negotiate_capabilities(
+pub(crate) fn negotiate_capabilities(
     scopes: &BTreeSet<RecordKind>,
     client: &BTreeMap<RecordKind, KindCapability>,
     server: &BTreeMap<RecordKind, KindCapability>,
@@ -1716,7 +1709,7 @@ fn validate_text(value: &str, max: usize, field: &'static str) -> Result<(), Pai
     }
 }
 
-fn is_uuid_v7(value: &str) -> bool {
+pub(crate) fn is_uuid_v7(value: &str) -> bool {
     if value.len() != 36 {
         return false;
     }
@@ -1777,7 +1770,7 @@ pub fn canonical_invitation_unsigned(invitation: &Invitation) -> Vec<u8> {
     builder.finish()
 }
 
-fn canonical_invitation_signed(invitation: &Invitation) -> Vec<u8> {
+pub(crate) fn canonical_invitation_signed(invitation: &Invitation) -> Vec<u8> {
     let unsigned = canonical_invitation_unsigned(invitation);
     canonical_components(
         "noted.direct-pairing.v1/signed-invitation",
@@ -1816,7 +1809,7 @@ pub fn canonical_client_hello_unsigned(hello: &ClientHello) -> Vec<u8> {
     builder.finish()
 }
 
-fn canonical_client_hello_signed(hello: &ClientHello) -> Vec<u8> {
+pub(crate) fn canonical_client_hello_signed(hello: &ClientHello) -> Vec<u8> {
     let unsigned = canonical_client_hello_unsigned(hello);
     canonical_components(
         "noted.direct-pairing.v1/signed-client-hello",
@@ -1848,7 +1841,7 @@ pub fn canonical_client_finish_unsigned(finish: &ClientFinish) -> Vec<u8> {
     builder.finish()
 }
 
-fn canonical_client_finish_signed(finish: &ClientFinish) -> Vec<u8> {
+pub(crate) fn canonical_client_finish_signed(finish: &ClientFinish) -> Vec<u8> {
     let unsigned = canonical_client_finish_unsigned(finish);
     canonical_components(
         "noted.direct-pairing.v1/signed-client-finish",
@@ -1859,7 +1852,7 @@ fn canonical_client_finish_signed(finish: &ClientFinish) -> Vec<u8> {
     )
 }
 
-fn canonical_server_hello_unsigned(server: &ServerHello) -> Vec<u8> {
+pub(crate) fn canonical_server_hello_unsigned(server: &ServerHello) -> Vec<u8> {
     let receipt = canonical_receipt(&server.receipt);
     let challenge = canonical_authenticated_hpke_envelope(&server.challenge);
     let mut builder = CanonicalBuilder::new("noted.direct-pairing.v1/server-hello");
@@ -1873,7 +1866,7 @@ fn canonical_server_hello_unsigned(server: &ServerHello) -> Vec<u8> {
     builder.finish()
 }
 
-fn canonical_server_finish_unsigned(finish: &ServerFinish) -> Vec<u8> {
+pub(crate) fn canonical_server_finish_unsigned(finish: &ServerFinish) -> Vec<u8> {
     let receipt = canonical_receipt(&finish.receipt);
     let mut builder = CanonicalBuilder::new("noted.direct-pairing.v1/server-finish");
     builder.text("protocol", &finish.protocol);
@@ -1934,6 +1927,33 @@ pub fn canonical_authenticated_hpke_envelope(envelope: &AuthenticatedHpkeEnvelop
     )
 }
 
+/// Canonical owner-confirmation commitment persisted by the Mac authority.
+///
+/// This binds the human decision to the immutable enrollment receipt and to
+/// every byte that will be returned to the phone.  Callers must compute this
+/// value themselves from trusted, locally displayed inputs; a digest supplied
+/// by a peer is never accepted as the authority's confirmation.
+pub fn enrollment_confirmation_digest(
+    receipt: &EnrollmentReceipt,
+    approved: bool,
+    displayed_verification_code: &str,
+    displayed_scopes: &BTreeSet<RecordKind>,
+    exact_bootstrap_envelope_bytes: &[u8],
+    bootstrap_envelope_digest: &[u8],
+    exact_bootstrap_response_bytes: &[u8],
+) -> Vec<u8> {
+    let receipt = canonical_receipt(receipt);
+    let mut builder = CanonicalBuilder::new("noted.direct-pairing.v1/owner-confirmation");
+    builder.bytes("receipt", &receipt);
+    builder.text("decision", if approved { "approved" } else { "denied" });
+    builder.text("verification_code", displayed_verification_code);
+    builder.record_kinds("displayed_scopes", displayed_scopes);
+    builder.bytes("exact_bootstrap_envelope", exact_bootstrap_envelope_bytes);
+    builder.bytes("bootstrap_envelope_digest", bootstrap_envelope_digest);
+    builder.bytes("exact_bootstrap_response", exact_bootstrap_response_bytes);
+    sha256(&builder.finish())
+}
+
 pub fn challenge_hpke_info(receipt: &EnrollmentReceipt) -> Vec<u8> {
     pairing_hpke_context("noted.direct-pairing.v1/hpke/challenge/info", receipt)
 }
@@ -1942,6 +1962,18 @@ pub fn challenge_hpke_exporter_context(receipt: &EnrollmentReceipt) -> Vec<u8> {
     pairing_hpke_context(
         "noted.direct-pairing.v1/hpke/challenge/sas-exporter",
         receipt,
+    )
+}
+
+pub(crate) fn canonical_challenge_plaintext(receipt: &EnrollmentReceipt) -> Vec<u8> {
+    canonical_components(
+        "noted.direct-pairing.v1/challenge",
+        &[
+            ("receipt_id", receipt.receipt_id.as_bytes()),
+            ("transcript_digest", &receipt.transcript_digest),
+            ("library_id", receipt.library_id.as_bytes()),
+            ("device_id", receipt.device_id.as_bytes()),
+        ],
     )
 }
 
@@ -1967,7 +1999,9 @@ fn pairing_hpke_context(domain: &str, receipt: &EnrollmentReceipt) -> Vec<u8> {
     )
 }
 
-fn validate_hpke_envelope(envelope: &AuthenticatedHpkeEnvelope) -> Result<(), PairingError> {
+pub(crate) fn validate_hpke_envelope(
+    envelope: &AuthenticatedHpkeEnvelope,
+) -> Result<(), PairingError> {
     if envelope.encapsulated_key.len() != HPKE_ENCAPSULATED_KEY_BYTES
         || envelope.ciphertext.is_empty()
         || envelope
@@ -1981,7 +2015,7 @@ fn validate_hpke_envelope(envelope: &AuthenticatedHpkeEnvelope) -> Result<(), Pa
     Ok(())
 }
 
-fn pairing_transcript_digest(
+pub(crate) fn pairing_transcript_digest(
     invitation_digest: &[u8],
     client_hello_digest: &[u8],
     server_nonce: &[u8],

@@ -10,11 +10,15 @@ Implementation status: the sanitized-fixture protocol core is implemented and
 deterministically tested. It includes the bounded canonical parser, invitation
 and enrollment state machine, scope/capability enforcement, replay and
 idempotency behavior, confirmation state, authority rotation, revocation, and
-the authorization seam used by the direct-sync logical router. The tests bind
-TLS 1.3/no-0-RTT evidence and the exact SPKI pin, but there is no production
-TLS/HTTP transport, Apple-backed cryptography or key storage, durable Mac
-authority adapter, or personal-data enrollment. No pairing transport or
-production key material has shipped.
+the authorization seam used by the direct-sync logical router. An iOS-only
+native plugin implements Secure Enclave signing, ThisDeviceOnly Keychain
+identity/bootstrap storage, CryptoKit authenticated HPKE, protected-data
+notifications, and store-file hardening behind opaque handles. Rust/Swift
+golden vectors bind the canonical transcript, signatures, HPKE envelope,
+exporter, and SAS. A durable fixture Mac authority and strict pinned-TLS 1.3
+loopback transport exercise exact-wire restart/replay behavior. There is still
+no product LAN pairing/sync driver, Bonjour/manual-connect flow, production Mac
+key custody, complete mobile bootstrap/adoption, or personal-data enrollment.
 
 ## Context
 
@@ -225,29 +229,50 @@ transactions are finalized before canonical member signing bytes are exposed,
 so a native signer never signs a placeholder manifest or an ambiguous textual
 hash. Deterministic tests cover stable transcript/SAS fixtures, complete HPKE
 envelope binding, two-stage transaction signing, restart and idempotent finish,
-changed-content replay,
-simultaneous scans, expiry and attempt limits, scope/role/environment/library/
+changed-content replay, simultaneous scans, expiry and attempt limits,
+scope/role/environment/library/
 authority/pin binding, revocation, malformed inputs, and parser resource limits.
-The direct-sync logical core separately verifies the exact route set, request and
-response signatures, enrolled-device scopes, TLS/pin evidence, bounded bodies,
+The same canonical fixture is consumed by Rust and Swift golden-vector tests.
+The native iPhone plugin implements Secure Enclave P-256 signing,
+ThisDeviceOnly Keychain X25519/bootstrap custody, CryptoKit authenticated HPKE,
+and synchronous protected-data notifications without exposing private or
+decrypted key bytes to JavaScript. The iPhone store can close under the single
+store mutex when protected data becomes unavailable, fail every read/write with
+a typed locked error, and reopen through the complete verifier. Its ordered v4
+checkpoint migration binds exact protocol bytes, public identity material, and
+opaque handles; startup rejects Keychain/SQLite divergence and repairs the
+tested activation/cancellation crash windows. Existing and new SQLite, WAL,
+SHM, and migration-recovery files are hardened before the store is published.
+
+The direct-sync core verifies the exact six-route set, request and response
+signatures, enrolled-device scopes, exact TLS/SPKI evidence, bounded bodies,
 checkpoint-bound paged bootstrap, bootstrap/checkpoint consistency, replay,
-stale heads, and response limits. Transaction admission proves that every
-accepted transaction can later fit in a pull response, and revocation is
+stale heads, and response limits. The durable fixture authority persists
+invitation, receipt, enrollment, counter, revocation, generation, cursor, and
+checkpoint state. Its exact-wire coordinator commits signed responses before
+returning them and replays identical bytes after restart. Revocation is
 serialized with in-flight requests so a completed write linearizes either
-before revocation or is rejected after it. The pairing coordinator is not
-cloneable around that revocation gate.
+before revocation or is rejected after it. The strict TLS 1.3 adapter disables
+0-RTT and resumption and is loopback-only; it is not yet a product LAN service.
 
 This checkpoint does not relax the fixture-only gate. Before personal data is
 eligible, the production implementation still needs:
 
-- CryptoKit/Secure Enclave and ThisDeviceOnly Keychain adapters for the roles
-  defined above, plus the required cross-language signature/HPKE/SAS vectors;
-- a real pinned TLS 1.3 client/server adapter with 0-RTT disabled and no
-  plaintext fallback;
-- durable Mac storage and atomic transitions for invitations, receipts, device
-  registry, counters, revocation, authority generation, and restart recovery;
+- a product pairing/sync network driver around the pinned-TLS adapters,
+  including Bonjour discovery and manual connect, with no protocol messages or
+  key material crossing JavaScript;
+- a complete authenticated bootstrap package and native-only key path that
+  validates public library/default-scope/authority/purge metadata, adopts the
+  staging mobile replica, and activates its sync enrollment atomically;
+- native record encryption/decryption plus an end-to-end sanitized Notes
+  bootstrap and incremental push/pull; the current pairing runtime activates
+  the device identity but not the mobile data plane;
+- production Mac key custody/signing and structural ownership that prevents
+  pairing, sync, and revocation from being instantiated around different
+  authority gates;
 - physical-device Data Protection, locked-device, reinstall, backup, and key-loss
-  probes; and
+  probes, including verification of native callbacks and complete-protection/
+  backup-exclusion attributes on SQLite, WAL, SHM, and recovery files; and
 - external cryptographic and implementation review followed by an end-to-end
   sanitized physical-device run.
 

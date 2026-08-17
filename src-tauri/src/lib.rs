@@ -6,6 +6,7 @@ pub mod db;
 pub mod entities;
 pub mod gcal;
 pub mod hosted;
+mod managed_files;
 pub mod mcp;
 pub mod meeting;
 pub mod ollama;
@@ -13,6 +14,7 @@ pub mod phone;
 pub mod pipeline;
 pub mod provider;
 pub mod release_profile;
+pub mod reminders;
 pub mod system_settings;
 pub mod themes;
 pub mod voice;
@@ -79,6 +81,20 @@ async fn system_settings_set(
 ) -> Result<system_settings::SystemSettings, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     system_settings::set_time_zone(&dir, &time_zone).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reminder_settings_get() -> Result<reminders::ReminderSettings, String> {
+    Ok(reminders::get())
+}
+
+#[tauri::command]
+async fn reminder_settings_set(
+    app: tauri::AppHandle,
+    settings: reminders::ReminderSettings,
+) -> Result<reminders::ReminderSettings, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    reminders::update(&dir, settings).map_err(|e| e.to_string())
 }
 
 fn agent_helper_command() -> Result<String, String> {
@@ -429,19 +445,12 @@ async fn load_image(app: tauri::AppHandle, path: String) -> Result<StoredImagePa
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
-        .join("images")
-        .canonicalize()
-        .map_err(|_| "Image storage is unavailable".to_string())?;
-    let requested = std::path::PathBuf::from(&path)
-        .canonicalize()
-        .map_err(|_| "Image could not be found".to_string())?;
-    if !requested.starts_with(&images_dir) {
-        return Err("Image is outside Noted's managed storage".into());
-    }
-    let metadata = requested.metadata().map_err(|e| e.to_string())?;
-    if metadata.len() > MAX_STORED_IMAGE_BYTES as u64 {
-        return Err("Image is larger than 25 MB".into());
-    }
+        .join("images");
+    let requested = managed_files::resolve_existing_file(
+        &images_dir,
+        std::path::Path::new(&path),
+        MAX_STORED_IMAGE_BYTES as u64,
+    )?;
     let ext = requested
         .extension()
         .and_then(|value| value.to_str())
@@ -2119,17 +2128,30 @@ fn phone_info(app: tauri::AppHandle) -> Value {
     json!({ "url": state.url, "lan_url": state.lan_url, "token": state.token, "port": state.port })
 }
 
-/// Read an inbox image (from a phone upload) as base64 for the vision pipeline.
+/// Read an inbox image (from the retired phone uploader) as base64 for the
+/// vision pipeline. The path must resolve beneath app_data/inbox.
 #[tauri::command]
-async fn read_inbox_image(path: String) -> Result<Value, String> {
+async fn read_inbox_image(app: tauri::AppHandle, path: String) -> Result<Value, String> {
     use base64::Engine;
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    let ext = std::path::Path::new(&path)
+
+    let inbox_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("inbox");
+    let requested = managed_files::resolve_existing_file(
+        &inbox_dir,
+        std::path::Path::new(&path),
+        MAX_STORED_IMAGE_BYTES as u64,
+    )?;
+    let ext = requested
         .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("jpg")
-        .to_string();
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    stored_image_mime(&ext).ok_or_else(|| "Unsupported image format".to_string())?;
+    let bytes = std::fs::read(&requested).map_err(|e| e.to_string())?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Ok(json!({ "base64": b64, "ext": ext }))
 }
 
@@ -4730,6 +4752,7 @@ async fn process_pending_inner(app: &tauri::AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -4785,8 +4808,10 @@ pub fn run() {
             // historical one-on-ones; calendar secrets still remain in the
             // Keychain and only the normalized account emails are consulted.
             gcal::init(&dir);
+            reminders::init(&dir);
             let conn = db::init(&dir.join("noted.db"))?;
             app.manage(Db(Mutex::new(conn)));
+            reminders::spawn(app.handle().clone());
             // Vendor-neutral local agent access. The broker remains bound to a
             // user-only Unix socket so Settings can enable it without restarting;
             // policy still fails closed while Agent Access is disabled.
@@ -4898,51 +4923,16 @@ pub fn run() {
                 });
             });
 
-            if release_profile::phone_lan() {
-                // Phone capture: tiny LAN upload server gated by a random token.
-                let inbox = dir.join("inbox");
-                std::fs::create_dir_all(&inbox)?;
-                // Stable token + stable hostname so a phone's "Add to Home Screen"
-                // icon keeps working across launches (and DHCP IP changes).
-                let token = phone::load_or_make_token(&dir);
-                let ip = local_ip_address::local_ip()
-                    .map(|i| i.to_string())
-                    .unwrap_or_else(|_| "localhost".to_string());
-                let host = phone::local_hostname().map(|h| format!("{h}.local"));
-                // Cert SANs: the .local name (primary), the LAN IP, and localhost.
-                let mut sans = vec![ip.clone(), "localhost".to_string()];
-                if let Some(h) = &host {
-                    sans.insert(0, h.clone());
-                }
-                if let Some((server, port)) = phone::bind_https(&dir, &sans, 8787) {
-                    // Prefer the stable .local name; fall back to the raw IP.
-                    let host_for_url = host.clone().unwrap_or_else(|| ip.clone());
-                    let url = format!("https://{host_for_url}:{port}/?t={token}");
-                    let lan_url = format!("https://{ip}:{port}/?t={token}");
-                    println!("[noted] phone access ready (full app): {url}");
-                    app.manage(phone::PhoneState {
-                        url,
-                        lan_url,
-                        token: token.clone(),
-                        port,
-                    });
-                    phone::serve(server, app.handle().clone(), inbox, token);
-                } else {
-                    app.manage(phone::PhoneState {
-                        url: String::new(),
-                        lan_url: String::new(),
-                        token,
-                        port: 0,
-                    });
-                }
-            } else {
-                app.manage(phone::PhoneState {
-                    url: String::new(),
-                    lan_url: String::new(),
-                    token: String::new(),
-                    port: 0,
-                });
-            }
+            // The legacy LAN/PWA bridge is quarantined while the native iPhone
+            // companion is built. Keep an empty state for the dormant local
+            // phone_info command, but never bind a listener or create/log a
+            // bearer-token URL from application startup.
+            app.manage(phone::PhoneState {
+                url: String::new(),
+                lan_url: String::new(),
+                token: String::new(),
+                port: 0,
+            });
 
             // Auto recaps: catch up missing completed-period recaps on launch, then
             // re-check hourly so a day/week rolling over while open gets recapped.
@@ -4980,6 +4970,8 @@ pub fn run() {
             theme_state,
             system_settings_get,
             system_settings_set,
+            reminder_settings_get,
+            reminder_settings_set,
             theme_list,
             theme_save,
             theme_activate,

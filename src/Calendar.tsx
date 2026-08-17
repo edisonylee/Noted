@@ -26,6 +26,7 @@ import {
 } from "./api";
 import { dayDiff, easternDay, easternMinutes, formatDay } from "./day";
 import { joinUrl } from "./joinUrl";
+import { openExternalUrl } from "./openExternalUrl";
 
 const HOUR_PX_MAX = 48; // grid scale ceiling: one hour of the day
 // The default visible window is the working day, 8 AM – 9 PM. It's a FIXED
@@ -1040,6 +1041,10 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
               href={joinUrl(sel.ev.meet_link, sel.ev.account)}
               target="_blank"
               rel="noreferrer"
+              onClick={(event) => {
+                event.preventDefault();
+                openExternalUrl(joinUrl(sel.ev.meet_link!, sel.ev.account));
+              }}
             >
               <Video size={13} /> Join meeting
             </a>

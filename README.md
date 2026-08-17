@@ -28,7 +28,10 @@ Noted supports three complete inference profiles: **Noted Hosted** requires no m
 - **Recaps & trends** — auto-generated day/week recaps and per-category trends.
 - **Chat** — ask questions over your own knowledge base with a local model.
 - **Themes** — search 50 bundled visual systems, import a `DESIGN.md`, or ask the local assistant for a style. Imports are validated data-only packs; no paid MCP or cloud model is required.
-- **Phone access** — a token-gated LAN HTTPS server serves the full app (or a lightweight capture page) to your phone, installable as a PWA, with every desktop command bridged over HTTP.
+- **iPhone companion (in development)** — the target is a native, offline-capable
+  iPhone app with encrypted sync while the Mac retains model processing. The old
+  LAN/PWA remote view is disabled and is not a shipped phone product. See the
+  [implementation plan](docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md).
 
 ## Tech stack
 
@@ -37,7 +40,8 @@ Noted supports three complete inference profiles: **Noted Hosted** requires no m
 - **Storage / search:** `rusqlite` (bundled SQLite) + `sqlite-vec` for vector search
 - **Local models (via Ollama):** `qwen2.5:7b-instruct` (text), `qwen2.5vl:7b` (vision), `nomic-embed-text` (embeddings, 768-dim)
 - **Speech-to-text:** `whisper-rs` (whisper.cpp), in-process and offline
-- **LAN server:** `tiny_http` over self-signed TLS (`rcgen`) — a secure context is required for phone mic/camera
+- **Dormant legacy phone bridge:** `tiny_http` over self-signed TLS (`rcgen`);
+  disabled in every release profile while the native iPhone companion is built
 - **Optional cloud (Balanced mode):** Google Gemini (`gemini-2.5-flash` / `gemini-2.5-flash-lite`)
 - **Bring your own keys:** OpenAI, Gemini, Anthropic, Groq speech, Noted Hosted, and HTTPS/loopback OpenAI-compatible endpoints. Intelligence, vision, 768-dimensional embeddings, and transcription are configured independently.
 
@@ -88,7 +92,9 @@ Use standard Noted as the canonical local app. Do not run it alongside `tauri de
 - **Balanced mode (Gemini):** open Settings, switch to *Balanced*, and paste a Gemini API key. Only OCR/extract calls go to Gemini; chat and embeddings stay local. The connection badge confirms the key is live.
 - **Use my API keys:** open Settings → Models, select each provider and model, review the routing summary, then save. Credentials go to macOS Keychain. Anthropic must be paired with another embedding and transcription provider. Changing the embedding provider asks before rebuilding semantic search from your preserved notes.
 - **Google Calendar:** in Settings, connect your Google account (OAuth with PKCE). Today can then push the day's schedule one-way into a dedicated "noted" calendar.
-- **Phone access:** open the phone panel in the app to get a QR code / URL and token; your phone joins over the LAN and runs the full client.
+- **iPhone companion:** not yet shipped. The legacy QR/LAN remote view remains
+  disabled; implementation follows the
+  [mobile companion plan](docs/MOBILE_COMPANION_IMPLEMENTATION_PLAN.md).
 - **Themes:** open Settings → Themes to search 50 bundled presets. You can also paste or upload a `DESIGN.md`; the local text model creates a safe preview before you apply it. See [`THEMES.md`](THEMES.md) for the pack contract.
 
 ## Tests
@@ -116,7 +122,7 @@ src-tauri/      Rust backend
     meeting/      meeting recorder (capture, transcription, diarization, video, summaries)
     analytics.rs  recaps + trends aggregation
     gcal.rs       Google Calendar sync (multi-account)
-    phone.rs      LAN HTTPS server + RPC bridge
+    phone.rs      dormant legacy LAN HTTPS server + RPC bridge
 ```
 
 ## Privacy

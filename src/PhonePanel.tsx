@@ -31,14 +31,14 @@ export function PhonePanel({ onClose }: { onClose: () => void }) {
         <button className="modal-close" onClick={onClose}>
           ✕
         </button>
-        <h3>Use noted on your phone</h3>
+        <h3>Legacy phone preview</h3>
         {err && <div className="error">{err}</div>}
         {info && info.url ? (
           <>
             <p className="muted">
-              On the same wifi, scan with your phone’s camera to open the full app. You only do this
-              once — then <strong>Share → Add to Home Screen</strong> installs noted as an app icon
-              you can tap any time. The link stays the same across restarts.
+              This developer-only LAN preview mirrors the Mac and is not the offline iPhone
+              companion. Keep the Mac open and on the same Wi-Fi, then scan the code to inspect the
+              web client.
             </p>
             {qr && <img className="qr" src={qr} alt="scan to open noted on your phone" />}
             <code className="phone-url">{info.url}</code>
@@ -49,7 +49,8 @@ export function PhonePanel({ onClose }: { onClose: () => void }) {
             )}
             <p className="muted phone-cert-note">
               Your phone will warn that the connection isn’t private (it’s a self-signed
-              certificate on your own machine) — tap through to continue. One time only.
+              certificate on your own machine). The certificate may need to be trusted again after
+              the Mac’s network address changes.
             </p>
           </>
         ) : info ? (

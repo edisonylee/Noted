@@ -20,6 +20,7 @@ test("alpha bundle exposes the intended product", async () => {
   for (const deferred of [
     "Noted Hosted",
     "Capture from your phone",
+    "Legacy phone preview",
     "Detect speakers",
     "Record the meeting window as video",
     "Hosted Parakeet",

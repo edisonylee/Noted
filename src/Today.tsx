@@ -29,6 +29,7 @@ import {
 import { fileToImg, type Img } from "./image";
 import { easternDay, easternMinutes, formatDay } from "./day";
 import { joinUrl } from "./joinUrl";
+import { openExternalUrl } from "./openExternalUrl";
 import {
   buildScheduleGrid,
   isCurrentInterval,
@@ -1742,6 +1743,10 @@ export function TodayView({
                                 href={meetingUrl}
                                 target="_blank"
                                 rel="noreferrer"
+                                onClick={(event) => {
+                                  event.preventDefault();
+                                  openExternalUrl(meetingUrl);
+                                }}
                                 aria-label={`Join ${e.task}`}
                               />
                             )}
@@ -2305,6 +2310,10 @@ export function TodayView({
                         href={meetingUrl}
                         target="_blank"
                         rel="noreferrer"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          openExternalUrl(meetingUrl);
+                        }}
                         aria-label={`Join ${event.task}`}
                       />
                     )}
@@ -2603,7 +2612,11 @@ export function TodayView({
                         href={meetingUrl}
                         target="_blank"
                         rel="noreferrer"
-                        onClick={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          openExternalUrl(meetingUrl);
+                        }}
                         aria-label={`Join ${block.task}, ${range}`}
                         title="Join meeting"
                       >

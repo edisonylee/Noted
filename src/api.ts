@@ -1,10 +1,9 @@
 import { convertFileSrc, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import type { ThemeModePreference, ThemePack } from "./themes/types";
 
-// noted runs in two places: the desktop Tauri shell, and a phone browser that
-// loads the same UI over the LAN HTTPS server (see src-tauri/src/phone.rs).
-// On desktop we use Tauri's IPC; in the browser we POST to /api/<cmd> with the
-// access token from the launch URL (?t=…), cached so it survives reloads.
+// Product builds run inside a Tauri shell and use its IPC boundary. The retired
+// LAN browser bridge must not be revived here: it exposed a desktop-sized RPC
+// surface and persisted bearer credentials in URLs and browser storage.
 export const isDesktop =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -14,17 +13,8 @@ export function localFileUrl(path: string | null | undefined): string | null {
   return isDesktop && path ? convertFileSrc(path) : null;
 }
 
-function webToken(): string {
-  const fromUrl = new URLSearchParams(window.location.search).get("t");
-  if (fromUrl) {
-    localStorage.setItem("noted_token", fromUrl);
-    return fromUrl;
-  }
-  return localStorage.getItem("noted_token") ?? "";
-}
-
-// Thrown when the server rejects our token (403) — the app catches this to show
-// a friendly "re-scan the QR" state instead of a raw "forbidden".
+// Retained temporarily for the dormant legacy phone UI's error boundary. New
+// native mobile code must model sync/enrollment state instead of URL tokens.
 export class TokenError extends Error {
   constructor() {
     super("Connection expired — re-scan the QR code shown in noted on your Mac.");
@@ -32,10 +22,8 @@ export class TokenError extends Error {
   }
 }
 
-// Thrown when the Mac server is simply unreachable (connection refused / network
-// drop) — typically while it's restarting mid-rebuild. Distinct from TokenError:
-// the token is fine, the server just isn't up yet, so the app waits and retries
-// instead of asking the user to re-pair.
+// A plain browser build has no product transport. Desktop and future native iOS
+// shells use Tauri IPC; sync availability will be modeled separately on iOS.
 export class OfflineError extends Error {
   constructor() {
     super("Reconnecting to your Mac…");
@@ -45,28 +33,7 @@ export class OfflineError extends Error {
 
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (isDesktop) return tauriInvoke<T>(cmd, args as Record<string, unknown>);
-  let res: Response;
-  try {
-    res = await fetch(`/api/${cmd}?t=${encodeURIComponent(webToken())}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(args ?? {}),
-    });
-  } catch {
-    // fetch rejects (TypeError) on connection refused / DNS / TLS / network drop:
-    // the server is unreachable, not refusing us. Surface as offline so the app
-    // shows a "reconnecting" state and polls, rather than a hard error.
-    throw new OfflineError();
-  }
-  if (res.status === 403) {
-    // Stale/empty token — drop it so a relaunch from the (tokened) home-screen
-    // icon re-captures a fresh one from the URL.
-    localStorage.removeItem("noted_token");
-    throw new TokenError();
-  }
-  if (!res.ok) throw new Error((await res.text()) || `HTTP ${res.status}`);
-  const text = await res.text();
-  return (text ? JSON.parse(text) : undefined) as T;
+  throw new OfflineError();
 }
 
 // One extracted observation within a note (a category + its structured data).
@@ -771,6 +738,11 @@ export type SystemSettings = {
   systemTimeZone: string;
 };
 
+export type ReminderSettings = {
+  enabled: boolean;
+  lead_minutes: number;
+};
+
 export type StoredImagePayload = {
   dataBase64: string;
   mimeType: string;
@@ -822,6 +794,9 @@ export const api = {
   systemSettingsGet: () => invoke<SystemSettings>("system_settings_get"),
   systemSettingsSet: (timeZone: string) =>
     invoke<SystemSettings>("system_settings_set", { timeZone }),
+  reminderSettingsGet: () => invoke<ReminderSettings>("reminder_settings_get"),
+  reminderSettingsSet: (settings: ReminderSettings) =>
+    invoke<ReminderSettings>("reminder_settings_set", { settings }),
   categorize: (text: string) => invoke<Envelope>("categorize_note", { text }),
   categorizePhoto: (imageBase64: string) =>
     invoke<Envelope>("categorize_photo", { imageBase64 }),

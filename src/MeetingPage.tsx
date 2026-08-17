@@ -29,6 +29,7 @@ import {
 import { listen } from "./events";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { joinUrl } from "./joinUrl";
+import { openExternalUrl } from "./openExternalUrl";
 import {
   api,
   isDesktop,
@@ -1355,7 +1356,16 @@ export function MeetingPage({
         </div>
         <span className="spacer" />
         {meetLink && (
-          <a className="btn ghost" href={meetLink} target="_blank" rel="noreferrer">
+          <a
+            className="btn ghost"
+            href={meetLink}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(event) => {
+              event.preventDefault();
+              openExternalUrl(meetLink);
+            }}
+          >
             <Video size={15} /> Join
           </a>
         )}

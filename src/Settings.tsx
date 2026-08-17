@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { appDataDir, join } from "@tauri-apps/api/path";
+import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { X, Check, ChevronDown, ChevronUp, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, CalendarDays, Download, Mic, AudioLines, Plus, RefreshCw, Trash2, FolderPlus, FolderOpen, Laptop, Gauge, Cloud, KeyRound, Palette, Boxes, BookType, MessageCircle, Bot, Copy, ShieldCheck } from "lucide-react";
-import { api, isDesktop, type AgentAccessStatus, type AgentClientSetup, type AgentContextReceipt, type BrainVaultStatus, type ByokConfig, type CloudProvider, type GcalStatus, type MeetingFilingBackfillPreview, type MeetingFilingRule, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type NoteFolderInfo, type ProviderId, type ProviderMode, type ProviderSettings } from "./api";
+import { X, Check, ChevronDown, ChevronUp, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, CalendarDays, Download, Mic, AudioLines, Plus, RefreshCw, Trash2, FolderPlus, FolderOpen, Laptop, Gauge, Cloud, KeyRound, Palette, Boxes, BookType, MessageCircle, Bot, Copy, ShieldCheck, BellRing } from "lucide-react";
+import { api, isDesktop, type AgentAccessStatus, type AgentClientSetup, type AgentContextReceipt, type BrainVaultStatus, type ByokConfig, type CloudProvider, type GcalStatus, type MeetingFilingBackfillPreview, type MeetingFilingRule, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type NoteFolderInfo, type ProviderId, type ProviderMode, type ProviderSettings, type ReminderSettings } from "./api";
 import { ThemesSettings } from "./ThemesSettings";
 import { TranscriptVocabularySettings } from "./TranscriptVocabularySettings";
 import { releaseProfile } from "./releaseProfile";
@@ -74,6 +75,10 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   const [clientSecret, setClientSecret] = useState("");
   const [gcalBusy, setGcalBusy] = useState<"" | "saving" | "connecting">("");
   const [gcalMsg, setGcalMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const [reminders, setReminders] = useState<ReminderSettings | null>(null);
+  const [reminderPermission, setReminderPermission] = useState<boolean | null>(null);
+  const [reminderBusy, setReminderBusy] = useState(false);
+  const [reminderMsg, setReminderMsg] = useState<string | null>(null);
   const [noteFolders, setNoteFolders] = useState<NoteFolderInfo[]>([]);
   const [meetingFilingRules, setMeetingFilingRules] = useState<MeetingFilingRule[]>([]);
   const [meetingFilingLoaded, setMeetingFilingLoaded] = useState(false);
@@ -315,6 +320,10 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
       );
     }).catch(() => {});
     api.gcalAuthStatus().then(setGcal);
+    if (isDesktop) {
+      api.reminderSettingsGet().then(setReminders).catch(() => {});
+      isPermissionGranted().then(setReminderPermission).catch(() => setReminderPermission(false));
+    }
     Promise.all([api.listNoteFolders(), api.meetingFilingRules()])
       .then(([folders, rules]) => {
         setNoteFolders(folders);
@@ -344,6 +353,55 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function saveReminderSettings(next: ReminderSettings) {
+    setReminderBusy(true);
+    setReminderMsg(null);
+    try {
+      if (next.enabled && !reminderPermission) {
+        const permission = await requestPermission();
+        const granted = permission === "granted";
+        setReminderPermission(granted);
+        if (!granted) {
+          setReminderMsg("Notifications are blocked. Allow Noted in macOS System Settings → Notifications, then try again.");
+          return;
+        }
+      }
+      setReminders(await api.reminderSettingsSet(next));
+      setReminderMsg(next.enabled ? "Audible reminders are on." : "Reminders are off.");
+    } catch (error) {
+      setReminderMsg(String(error));
+    } finally {
+      setReminderBusy(false);
+    }
+  }
+
+  async function testReminder() {
+    if (!reminders) return;
+    setReminderBusy(true);
+    setReminderMsg(null);
+    try {
+      let granted = reminderPermission === true;
+      if (!granted) {
+        granted = (await requestPermission()) === "granted";
+        setReminderPermission(granted);
+      }
+      if (!granted) {
+        setReminderMsg("Notifications are blocked in macOS System Settings.");
+        return;
+      }
+      sendNotification({
+        title: "Noted reminder",
+        body: "Your meeting and plan reminders will sound like this.",
+        sound: "Ping",
+      });
+      setReminderMsg("Test reminder sent.");
+    } catch (error) {
+      setReminderMsg(String(error));
+    } finally {
+      setReminderBusy(false);
+    }
+  }
 
   async function toggleAgentAccess(enabled: boolean) {
     setAgentBusy("toggle");
@@ -816,7 +874,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
     { id: "assistant", label: "Assistant", description: "Chat and keyboard shortcut", icon: MessageCircle },
     ...(isDesktop ? [{ id: "agents" as const, label: "Agent Access", description: "Permissioned MCP connections", icon: Bot }] : []),
     { id: "themes", label: "Appearance", description: "Theme and color mode", icon: Palette },
-    { id: "calendar", label: "Calendar", description: "Accounts and meeting filing", icon: CalendarDays },
+    { id: "calendar", label: "Calendar", description: "Reminders, accounts, and filing", icon: CalendarDays },
     { id: "vaults", label: "Vaults", description: "Obsidian connections", icon: Boxes },
     { id: "meetings", label: "Meetings", description: "Recording and meeting notes", icon: AudioLines },
     { id: "vocabulary", label: "Vocabulary", description: "Recognition and corrections", icon: BookType },
@@ -1418,13 +1476,76 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
 
         {section === "calendar" && (
           <>
-        <h3>Google Calendar</h3>
+        <h3>Calendar</h3>
         <p className="settings-sub">
-          Bring work and personal calendars into one view. Choose one account for one-way schedule
-          sync into a dedicated “noted” calendar; your existing calendars are never changed.
+          Get an audible heads-up for what is next, and bring work and personal calendars into one view.
         </p>
 
         <div className="settings-fields">
+          {isDesktop && (
+            <section className="settings-group">
+              <header className="settings-group-head">
+                <h4>Upcoming reminders</h4>
+                <p>One native Mac notification for each timed meeting or plan. All-day items stay quiet.</p>
+              </header>
+              <label className="vault-auto reminder-toggle">
+                <input
+                  type="checkbox"
+                  checked={reminders?.enabled ?? false}
+                  onChange={(event) => {
+                    if (!reminders) return;
+                    void saveReminderSettings({ ...reminders, enabled: event.target.checked });
+                  }}
+                  disabled={!reminders || reminderBusy}
+                />
+                <span>
+                  Notification sound
+                  <em>
+                    Alerts include Google Calendar events and timed plans in your Noted daily schedule.
+                    They respect Focus and the notification settings on this Mac.
+                  </em>
+                </span>
+              </label>
+              <div className="reminder-controls">
+                <label className="field reminder-lead">
+                  <span className="field-label">Notify me before</span>
+                  <select
+                    value={reminders?.lead_minutes ?? 10}
+                    onChange={(event) => {
+                      if (!reminders) return;
+                      void saveReminderSettings({ ...reminders, lead_minutes: Number(event.target.value) });
+                    }}
+                    disabled={!reminders || reminderBusy}
+                  >
+                    {[5, 10, 15, 30, 60].map((minutes) => (
+                      <option key={minutes} value={minutes}>{minutes} minutes</option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  className="ghost-btn reminder-test"
+                  onClick={() => void testReminder()}
+                  disabled={!reminders || reminderBusy}
+                >
+                  {reminderBusy ? <Loader2 size={14} className="spin" /> : <BellRing size={14} />}
+                  Play test
+                </button>
+              </div>
+              {reminderMsg && <span className="field-hint" role="status">{reminderMsg}</span>}
+              {reminders?.enabled && reminderPermission === false && !reminderMsg && (
+                <span className="conn-detail" role="status">
+                  Reminders are enabled, but macOS notifications are currently blocked for Noted.
+                </span>
+              )}
+            </section>
+          )}
+
+          <section className="settings-group calendar-connection-settings">
+            <header className="settings-group-head">
+              <h4>Google Calendar</h4>
+              <p>Connect accounts without changing your existing calendars.</p>
+            </header>
           {gcalMsg && (
             <div className={gcalMsg.kind === "err" ? "conn-detail" : "field-hint"}>{gcalMsg.text}</div>
           )}
@@ -1701,6 +1822,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               "Add another account"
             )}
           </button>
+          </section>
         </div>
 
           </>

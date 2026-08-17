@@ -14,7 +14,7 @@ repository. It is not a second copy of the application.
 ## Deferred
 
 - Noted Hosted inference, billing, customer keys, quotas, and service operations
-- Phone/LAN access
+- Native iPhone companion; the retired LAN/PWA bridge stays disabled
 - Remote-participant diarization and speaker naming
 - Meeting window video capture
 - Windows and other platforms

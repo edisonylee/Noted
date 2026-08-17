@@ -1,5 +1,7 @@
-// Phone access: a small LAN server so your phone can use noted while your
-// computer does the work. Two roles:
+// Dormant legacy phone bridge. Application startup deliberately cannot bind
+// this server while the native iPhone companion is being built. The retained
+// implementation exists only to support a bounded migration/audit and must not
+// be treated as a product command surface. Its historical roles were:
 //   GET  /            -> the FULL noted web app (same UI as desktop), served
 //                        from the app's bundled assets (or proxied from the
 //                        Vite dev server during `tauri dev`).
@@ -10,13 +12,16 @@
 //
 // It runs over HTTPS (self-signed cert): mobile browsers only grant microphone
 // and camera access in a "secure context", so voice capture needs TLS. Every
-// /api and /upload call is gated by a random token shown in the desktop app.
+// /api and /upload call was gated by a random token shown in the desktop app.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tiny_http::Method;
+
+const MAX_LEGACY_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+const MAX_LEGACY_API_BODY_BYTES: usize = 1024 * 1024;
 
 /// Connection info surfaced to the UI (urls contain the token).
 pub struct PhoneState {
@@ -183,11 +188,19 @@ fn handle_request(app: &AppHandle, inbox: &Path, token: &str, mut req: tiny_http
             return;
         }
         let ext = content_type_ext(&req);
-        let mut bytes = Vec::new();
-        if req.as_reader().read_to_end(&mut bytes).is_err() || bytes.is_empty() {
-            let _ = req.respond(tiny_http::Response::from_string("bad").with_status_code(400));
-            return;
-        }
+        let bytes = match read_body_limited(req.as_reader(), MAX_LEGACY_UPLOAD_BYTES) {
+            Ok(bytes) if !bytes.is_empty() => bytes,
+            Ok(_) | Err(BodyReadError::Io) => {
+                let _ = req.respond(tiny_http::Response::from_string("bad").with_status_code(400));
+                return;
+            }
+            Err(BodyReadError::TooLarge) => {
+                let _ = req.respond(
+                    tiny_http::Response::from_string("payload too large").with_status_code(413),
+                );
+                return;
+            }
+        };
         match save_and_notify(app, inbox, &bytes, &ext) {
             Ok(_) => {
                 let _ = req.respond(tiny_http::Response::from_string("ok"));
@@ -199,7 +212,8 @@ fn handle_request(app: &AppHandle, inbox: &Path, token: &str, mut req: tiny_http
         return;
     }
 
-    // POST /api/<command> — the full RPC bridge for the web client.
+    // POST /api/<command> — retained diagnostic route. The allowlist below is
+    // the effective boundary; the historical dispatcher is not product API.
     if method == Method::Post && path.starts_with("/api/") {
         if !query_token_ok(&url, token) {
             let _ =
@@ -207,9 +221,35 @@ fn handle_request(app: &AppHandle, inbox: &Path, token: &str, mut req: tiny_http
             return;
         }
         let cmd = path.trim_start_matches("/api/").to_string();
-        let mut body = Vec::new();
-        let _ = req.as_reader().read_to_end(&mut body);
-        let args: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        if !legacy_phone_command_is_allowed(&cmd) {
+            let _ = req.respond(
+                tiny_http::Response::from_string("legacy phone command disabled")
+                    .with_status_code(410),
+            );
+            return;
+        }
+        let body = match read_body_limited(req.as_reader(), MAX_LEGACY_API_BODY_BYTES) {
+            Ok(body) => body,
+            Err(BodyReadError::TooLarge) => {
+                let _ = req.respond(
+                    tiny_http::Response::from_string("payload too large").with_status_code(413),
+                );
+                return;
+            }
+            Err(BodyReadError::Io) => {
+                let _ = req.respond(tiny_http::Response::from_string("bad").with_status_code(400));
+                return;
+            }
+        };
+        let args: Value = match serde_json::from_slice(&body) {
+            Ok(args) => args,
+            Err(_) => {
+                let _ = req.respond(
+                    tiny_http::Response::from_string("invalid json").with_status_code(400),
+                );
+                return;
+            }
+        };
         match tauri::async_runtime::block_on(handle_api(app, &cmd, &args)) {
             Ok(v) => {
                 let _ = req.respond(json_response(&v));
@@ -225,9 +265,34 @@ fn handle_request(app: &AppHandle, inbox: &Path, token: &str, mut req: tiny_http
     serve_static(app, &path, req);
 }
 
-/// Dispatch one HTTP RPC to the matching Tauri command. The argument keys mirror
-/// exactly what the frontend passes to `invoke(...)`, so the desktop and web
-/// transports stay byte-for-byte compatible.
+#[derive(Debug, Eq, PartialEq)]
+enum BodyReadError {
+    Io,
+    TooLarge,
+}
+
+fn read_body_limited(
+    reader: &mut dyn std::io::Read,
+    limit: usize,
+) -> Result<Vec<u8>, BodyReadError> {
+    let mut bytes = Vec::new();
+    let mut limited = std::io::Read::take(reader, (limit as u64).saturating_add(1));
+    std::io::Read::read_to_end(&mut limited, &mut bytes).map_err(|_| BodyReadError::Io)?;
+    if bytes.len() > limit {
+        return Err(BodyReadError::TooLarge);
+    }
+    Ok(bytes)
+}
+
+/// The retained bridge is diagnostic-only. Keep the allowlist explicit and
+/// small instead of comparing it with the desktop command registry.
+fn legacy_phone_command_is_allowed(command: &str) -> bool {
+    matches!(command, "health")
+}
+
+/// Historical dispatcher retained temporarily for migration auditing. Its caller
+/// must enforce `legacy_phone_command_is_allowed`; the native companion will use
+/// a separate typed sync/job boundary rather than this desktop command mirror.
 async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, String> {
     let a = app.clone();
     match cmd {
@@ -336,6 +401,17 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
             let entity_id = b.get("entityId").and_then(|v| v.as_i64());
             crate::chat(a, sarg(b, "question"), history, oarg(b, "scope"), entity_id).await
         }
+        "reminder_settings_get" => {
+            serde_json::to_value(crate::reminders::get()).map_err(|error| error.to_string())
+        }
+        "reminder_settings_set" => {
+            let settings =
+                serde_json::from_value(varg(b, "settings")).map_err(|error| error.to_string())?;
+            let dir = a.path().app_data_dir().map_err(|error| error.to_string())?;
+            crate::reminders::update(&dir, settings)
+                .and_then(|value| serde_json::to_value(value).map_err(Into::into))
+                .map_err(|error| error.to_string())
+        }
         "create_category" => crate::create_category(a, sarg(b, "name"), sarg(b, "description"))
             .await
             .map(|n| json!(n)),
@@ -355,7 +431,7 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "list_recaps" => crate::list_recaps(a).await,
         "export_db" => crate::export_db(a).await.map(|s| json!(s)),
         "phone_info" => Ok(crate::phone_info(a)),
-        "read_inbox_image" => crate::read_inbox_image(sarg(b, "path")).await,
+        "read_inbox_image" => crate::read_inbox_image(a, sarg(b, "path")).await,
         "voice_status" => Ok(crate::voice_status(a)),
         "download_voice_model" => crate::download_voice_model(a).await.map(|ok| json!(ok)),
         "transcribe" => crate::transcribe(a, sarg(b, "audioB64"), iarg(b, "sampleRate") as u32)
@@ -658,15 +734,12 @@ fn oarg(b: &Value, k: &str) -> Option<String> {
 
 // ── static assets: bundled SPA in release, Vite proxy in dev ────────────────
 fn serve_static(app: &AppHandle, path: &str, req: tiny_http::Request) {
-    // Serve the PWA manifest dynamically so its start_url carries the access
-    // token. Without this, an installed iOS home-screen icon launches at "/"
-    // with no token — and iOS standalone apps have their own empty localStorage,
-    // so every /api call would 403. Baking the (persistent) token into start_url
-    // means the installed app launches authenticated and stays that way.
+    // The public manifest must never contain a bearer token. The legacy bridge
+    // is not an installable phone product, and authentication material does not
+    // belong in URLs, browser history, logs, or unauthenticated static routes.
     if path == "/manifest.webmanifest" {
-        let token = app.state::<PhoneState>().token.clone();
         let _ = req.respond(
-            tiny_http::Response::from_string(manifest_json(&token))
+            tiny_http::Response::from_string(manifest_json())
                 .with_header(header("Content-Type", "application/manifest+json")),
         );
         return;
@@ -696,7 +769,7 @@ fn serve_static(app: &AppHandle, path: &str, req: tiny_http::Request) {
         return;
     }
 
-    // 2) Dev fallback: proxy the Vite dev server so the phone works in `tauri dev`.
+    // 2) Historical dev fallback. Application startup no longer exposes it.
     let target = format!("http://localhost:1420/{rel}");
     let fetched = tauri::async_runtime::block_on(async {
         let r = reqwest::get(&target).await.ok()?;
@@ -726,13 +799,12 @@ fn serve_static(app: &AppHandle, path: &str, req: tiny_http::Request) {
     }
 }
 
-// PWA manifest with the token baked into start_url (see serve_static).
-fn manifest_json(token: &str) -> String {
+fn manifest_json() -> String {
     json!({
         "name": "noted",
         "short_name": "noted",
-        "description": "Your personal log — capture, search, and ask.",
-        "start_url": format!("/?t={token}"),
+        "description": "Your personal log — capture and review.",
+        "start_url": "/",
         "scope": "/",
         "display": "standalone",
         "background_color": "#0e0f13",
@@ -843,3 +915,52 @@ const PAGE: &str = r#"<!doctype html><html><head>
     e.target.value='';
   });
 </script></body></html>"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn public_manifest_never_contains_a_session_secret() {
+        let secret = "sentinel-phone-session-secret";
+        let manifest = manifest_json();
+        let parsed: Value = serde_json::from_str(&manifest).unwrap();
+
+        assert_eq!(parsed["start_url"], "/");
+        assert!(!manifest.contains(secret));
+        assert!(!manifest.contains("?t="));
+    }
+
+    #[test]
+    fn legacy_api_allows_health_only() {
+        assert!(legacy_phone_command_is_allowed("health"));
+        for sensitive in [
+            "export_db",
+            "read_inbox_image",
+            "note_delete_forever",
+            "meeting_delete_forever",
+            "set_provider_settings",
+            "gcal_set_client",
+            "brain_add_vault",
+            "agent_access_set_policy",
+        ] {
+            assert!(
+                !legacy_phone_command_is_allowed(sensitive),
+                "sensitive legacy command remained reachable: {sensitive}"
+            );
+        }
+    }
+
+    #[test]
+    fn body_reader_accepts_the_limit_and_rejects_one_byte_more() {
+        let mut exact = Cursor::new(vec![7_u8; 16]);
+        assert_eq!(read_body_limited(&mut exact, 16).unwrap().len(), 16);
+
+        let mut oversized = Cursor::new(vec![7_u8; 17]);
+        assert_eq!(
+            read_body_limited(&mut oversized, 16),
+            Err(BodyReadError::TooLarge)
+        );
+    }
+}

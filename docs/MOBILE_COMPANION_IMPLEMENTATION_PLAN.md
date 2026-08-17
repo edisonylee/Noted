@@ -1161,6 +1161,10 @@ capability manifest, and mobile schema that does not require vec0. Physical-devi
 tests must prove rusqlite/FTS, migrations, Tauri plugins, and every retained Rust
 dependency compile and run on the selected minimum iOS version.
 
+The selected minimum is iOS 17.0. This is encoded in the source Tauri iOS
+configuration because the accepted pairing suite depends on CryptoKit HPKE;
+generated Xcode project files are not the authority for this setting.
+
 Share to Noted is a native Share Extension, not a browser shortcut. It requires
 an App Group durable inbox, extension-safe and least-privilege Keychain access,
 strict item/byte limits, handoff receipts, and crash-safe import by the main app.
@@ -1458,6 +1462,14 @@ operations. The phone outbox uses the same encrypted-byte ceiling, including
 AEAD overhead, so locally accepted batches remain sendable. These are logical
 cores and test seams, not a production network service. Fixture cryptography is
 deliberately unable to enroll a personal library.
+
+The production-facing crypto seams now make the HPKE sender operation atomic:
+one sender context produces its encapsulated key, ciphertext, and exporter;
+signatures and digests bind the complete envelope. The SAS uses the frozen RFC
+5869 HKDF-SHA256 construction, and sync mutations expose canonical signing bytes
+only after their aggregate manifest is final. This removes two blockers that
+fixture hashes had previously hidden, while leaving the personal-data gate
+closed pending Apple-backed implementations and cross-language vectors.
 
 The following work still blocks the M4 gate and any personal-data sync:
 

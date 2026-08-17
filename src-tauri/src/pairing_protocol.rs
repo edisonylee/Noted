@@ -7,6 +7,7 @@
 //! cryptographic review and cross-language vectors required by Decision 008 are
 //! complete.
 
+use hkdf::Hkdf;
 use serde::de::{
     DeserializeOwned, DeserializeSeed, Error as DeError, MapAccess, SeqAccess, Visitor,
 };
@@ -16,6 +17,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroizing;
 
 pub const PAIRING_PROTOCOL: &str = "noted.direct-pairing.v1";
 pub const PAIRING_SUITE: &str = "tls13+p256-p1363+auth-hpke-x25519-hkdfsha256-aes256gcm";
@@ -36,6 +38,8 @@ const NONCE_BYTES: usize = 32;
 const DIGEST_BYTES: usize = 32;
 const P256_PUBLIC_KEY_BYTES: usize = 65;
 const X25519_PUBLIC_KEY_BYTES: usize = 32;
+pub const HPKE_ENCAPSULATED_KEY_BYTES: usize = 32;
+pub const HPKE_EXPORTER_SECRET_BYTES: usize = 32;
 const P1363_SIGNATURE_BYTES: usize = 64;
 const MAX_SEALED_BYTES: usize = 4 * 1024;
 
@@ -156,7 +160,7 @@ pub struct ServerHello {
     pub suite: String,
     pub server_nonce: Vec<u8>,
     pub receipt: EnrollmentReceipt,
-    pub challenge_ciphertext: Vec<u8>,
+    pub challenge: AuthenticatedHpkeEnvelope,
     pub sender_role: PairingRole,
     pub recipient_role: PairingRole,
     pub proof_signature: Vec<u8>,
@@ -174,8 +178,30 @@ pub struct BeginEnrollment {
 pub struct BootstrapEnvelope {
     pub protocol: String,
     pub receipt_id: String,
+    pub sealed_bootstrap: AuthenticatedHpkeEnvelope,
+    pub envelope_digest: Vec<u8>,
+}
+
+/// The complete wire output of one authenticated HPKE sender context.
+///
+/// `encapsulated_key` is required to initialize the recipient context; it is
+/// signed (for the challenge) or digested (for bootstrap) together with the
+/// ciphertext so neither component can be substituted independently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthenticatedHpkeEnvelope {
+    pub encapsulated_key: Vec<u8>,
     pub ciphertext: Vec<u8>,
-    pub ciphertext_digest: Vec<u8>,
+}
+
+/// Atomic output from a single authenticated HPKE sender context.
+///
+/// A production adapter must create the envelope and export this secret from
+/// the same sender instance. Keeping them in one return value prevents the
+/// state machine from accidentally constructing two unrelated contexts.
+pub struct AuthenticatedHpkeSeal {
+    pub envelope: AuthenticatedHpkeEnvelope,
+    pub exporter_secret: Zeroizing<[u8; HPKE_EXPORTER_SECRET_BYTES]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,7 +219,7 @@ pub struct ClientFinish {
     pub sender_role: PairingRole,
     pub recipient_role: PairingRole,
     pub transcript_digest: Vec<u8>,
-    pub ciphertext_digest: Vec<u8>,
+    pub bootstrap_envelope_digest: Vec<u8>,
     pub proof_signature: Vec<u8>,
 }
 
@@ -269,16 +295,11 @@ pub trait PairingCrypto: Send + Sync + 'static {
         &self,
         sender_key: LocalHpkeKey,
         recipient_public_key: &[u8],
+        info: &[u8],
         associated_data: &[u8],
         plaintext: &[u8],
-    ) -> Result<Vec<u8>, ()>;
-
-    fn exporter_secret(
-        &self,
-        sender_key: LocalHpkeKey,
-        recipient_public_key: &[u8],
-        transcript_digest: &[u8],
-    ) -> Result<Vec<u8>, ()>;
+        exporter_context: &[u8],
+    ) -> Result<AuthenticatedHpkeSeal, ()>;
 
     fn fresh_bytes(&self, purpose: FreshValuePurpose, length: usize) -> Result<Vec<u8>, ()>;
 
@@ -763,26 +784,34 @@ impl<C: PairingCrypto> PairingMachine<C> {
                 ("device_id", receipt.device_id.as_bytes()),
             ],
         );
-        let challenge_ciphertext = self
+        let challenge_info = challenge_hpke_info(&receipt);
+        let challenge_exporter_context = challenge_hpke_exporter_context(&receipt);
+        let challenge_seal = self
             .crypto
             .seal_authenticated(
                 LocalHpkeKey::MacPairing,
                 &hello.client_hpke_public_key,
+                &challenge_info,
                 &transcript_digest,
                 &challenge_plaintext,
+                &challenge_exporter_context,
             )
             .map_err(|_| PairingError::CryptoUnavailable)?;
-        if challenge_ciphertext.is_empty() || challenge_ciphertext.len() > MAX_SEALED_BYTES {
+        if validate_hpke_envelope(&challenge_seal.envelope).is_err() {
             record_failed_attempt(ledger, &hello.invitation_id);
             return Err(PairingError::CryptoUnavailable);
         }
+        let AuthenticatedHpkeSeal {
+            envelope: challenge,
+            exporter_secret,
+        } = challenge_seal;
 
         let mut server_hello = ServerHello {
             protocol: PAIRING_PROTOCOL.to_owned(),
             suite: PAIRING_SUITE.to_owned(),
             server_nonce,
             receipt: receipt.clone(),
-            challenge_ciphertext,
+            challenge,
             sender_role: PairingRole::MacAuthority,
             recipient_role: PairingRole::IphoneCompanion,
             proof_signature: Vec::new(),
@@ -800,19 +829,8 @@ impl<C: PairingCrypto> PairingMachine<C> {
         }
         let server_hello_bytes =
             serde_json::to_vec(&server_hello).map_err(|_| PairingError::StateUnavailable)?;
-        let exporter_secret = self
-            .crypto
-            .exporter_secret(
-                LocalHpkeKey::MacPairing,
-                &hello.client_hpke_public_key,
-                &transcript_digest,
-            )
-            .map_err(|_| PairingError::CryptoUnavailable)?;
-        if exporter_secret.len() < DIGEST_BYTES {
-            record_failed_attempt(ledger, &hello.invitation_id);
-            return Err(PairingError::CryptoUnavailable);
-        }
-        let verification_code = derive_verification_code(&exporter_secret, &transcript_digest);
+        let verification_code =
+            derive_verification_code(exporter_secret.as_ref(), &transcript_digest);
         let begin = BeginEnrollment {
             receipt_id: receipt_id.clone(),
             server_hello_bytes,
@@ -962,23 +980,29 @@ impl<C: PairingCrypto> PairingMachine<C> {
         })
         .map_err(|_| PairingError::StateUnavailable)?;
         let associated_data = canonical_receipt(&receipt_snapshot.receipt);
-        let ciphertext = self
+        let bootstrap_info = bootstrap_hpke_info(&receipt_snapshot.receipt);
+        let bootstrap_exporter_context = bootstrap_hpke_exporter_context(&receipt_snapshot.receipt);
+        let bootstrap_seal = self
             .crypto
             .seal_authenticated(
                 LocalHpkeKey::MacPairing,
                 &receipt_snapshot.client_hpke_public_key,
+                &bootstrap_info,
                 &associated_data,
                 &plaintext,
+                &bootstrap_exporter_context,
             )
             .map_err(|_| PairingError::CryptoUnavailable)?;
-        if ciphertext.is_empty() || ciphertext.len() > MAX_SEALED_BYTES {
+        if validate_hpke_envelope(&bootstrap_seal.envelope).is_err() {
             return Err(PairingError::CryptoUnavailable);
         }
+        let sealed_bootstrap = bootstrap_seal.envelope;
+        let envelope_digest = sha256(&canonical_authenticated_hpke_envelope(&sealed_bootstrap));
         let bootstrap = BootstrapEnvelope {
             protocol: PAIRING_PROTOCOL.to_owned(),
             receipt_id: receipt_id.to_owned(),
-            ciphertext_digest: sha256(&ciphertext),
-            ciphertext,
+            sealed_bootstrap,
+            envelope_digest,
         };
         let receipt = ledger.receipts.get_mut(receipt_id).expect("receipt exists");
         receipt.bootstrap = Some(bootstrap.clone());
@@ -1511,7 +1535,11 @@ fn validate_client_finish_shape(finish: &ClientFinish) -> Result<(), PairingErro
         return Err(PairingError::InvalidIdentifier);
     }
     exact_len(&finish.transcript_digest, DIGEST_BYTES, "transcript_digest")?;
-    exact_len(&finish.ciphertext_digest, DIGEST_BYTES, "ciphertext_digest")?;
+    exact_len(
+        &finish.bootstrap_envelope_digest,
+        DIGEST_BYTES,
+        "bootstrap_envelope_digest",
+    )?;
     exact_len(
         &finish.proof_signature,
         P1363_SIGNATURE_BYTES,
@@ -1546,7 +1574,7 @@ fn validate_finish_bindings(
         || finish.authority_generation != receipt.authority_generation
         || finish.environment != receipt.environment
         || finish.transcript_digest != receipt.transcript_digest
-        || finish.ciphertext_digest != bootstrap.ciphertext_digest
+        || finish.bootstrap_envelope_digest != bootstrap.envelope_digest
     {
         return Err(PairingError::BindingMismatch("finish transcript"));
     }
@@ -1813,7 +1841,10 @@ pub fn canonical_client_finish_unsigned(finish: &ClientFinish) -> Vec<u8> {
     builder.text("sender_role", role_name(finish.sender_role));
     builder.text("recipient_role", role_name(finish.recipient_role));
     builder.bytes("transcript_digest", &finish.transcript_digest);
-    builder.bytes("ciphertext_digest", &finish.ciphertext_digest);
+    builder.bytes(
+        "bootstrap_envelope_digest",
+        &finish.bootstrap_envelope_digest,
+    );
     builder.finish()
 }
 
@@ -1830,12 +1861,13 @@ fn canonical_client_finish_signed(finish: &ClientFinish) -> Vec<u8> {
 
 fn canonical_server_hello_unsigned(server: &ServerHello) -> Vec<u8> {
     let receipt = canonical_receipt(&server.receipt);
+    let challenge = canonical_authenticated_hpke_envelope(&server.challenge);
     let mut builder = CanonicalBuilder::new("noted.direct-pairing.v1/server-hello");
     builder.text("protocol", &server.protocol);
     builder.text("suite", &server.suite);
     builder.bytes("server_nonce", &server.server_nonce);
     builder.bytes("receipt", &receipt);
-    builder.bytes("challenge_ciphertext", &server.challenge_ciphertext);
+    builder.bytes("challenge", &challenge);
     builder.text("sender_role", role_name(server.sender_role));
     builder.text("recipient_role", role_name(server.recipient_role));
     builder.finish()
@@ -1889,6 +1921,66 @@ pub fn canonical_receipt(receipt: &EnrollmentReceipt) -> Vec<u8> {
     builder.finish()
 }
 
+/// Canonical representation committed by the bootstrap digest and by the
+/// signed server hello. The HPKE encapsulated key must be bound together with
+/// the ciphertext because the recipient needs both to reconstruct its context.
+pub fn canonical_authenticated_hpke_envelope(envelope: &AuthenticatedHpkeEnvelope) -> Vec<u8> {
+    canonical_components(
+        "noted.direct-pairing.v1/authenticated-hpke-envelope",
+        &[
+            ("encapsulated_key", &envelope.encapsulated_key),
+            ("ciphertext", &envelope.ciphertext),
+        ],
+    )
+}
+
+pub fn challenge_hpke_info(receipt: &EnrollmentReceipt) -> Vec<u8> {
+    pairing_hpke_context("noted.direct-pairing.v1/hpke/challenge/info", receipt)
+}
+
+pub fn challenge_hpke_exporter_context(receipt: &EnrollmentReceipt) -> Vec<u8> {
+    pairing_hpke_context(
+        "noted.direct-pairing.v1/hpke/challenge/sas-exporter",
+        receipt,
+    )
+}
+
+pub fn bootstrap_hpke_info(receipt: &EnrollmentReceipt) -> Vec<u8> {
+    pairing_hpke_context("noted.direct-pairing.v1/hpke/bootstrap/info", receipt)
+}
+
+pub fn bootstrap_hpke_exporter_context(receipt: &EnrollmentReceipt) -> Vec<u8> {
+    pairing_hpke_context("noted.direct-pairing.v1/hpke/bootstrap/exporter", receipt)
+}
+
+fn pairing_hpke_context(domain: &str, receipt: &EnrollmentReceipt) -> Vec<u8> {
+    canonical_components(
+        domain,
+        &[
+            ("protocol", PAIRING_PROTOCOL.as_bytes()),
+            ("suite", PAIRING_SUITE.as_bytes()),
+            ("receipt_id", receipt.receipt_id.as_bytes()),
+            ("library_id", receipt.library_id.as_bytes()),
+            ("device_id", receipt.device_id.as_bytes()),
+            ("transcript_digest", &receipt.transcript_digest),
+        ],
+    )
+}
+
+fn validate_hpke_envelope(envelope: &AuthenticatedHpkeEnvelope) -> Result<(), PairingError> {
+    if envelope.encapsulated_key.len() != HPKE_ENCAPSULATED_KEY_BYTES
+        || envelope.ciphertext.is_empty()
+        || envelope
+            .encapsulated_key
+            .len()
+            .checked_add(envelope.ciphertext.len())
+            .is_none_or(|size| size > MAX_SEALED_BYTES)
+    {
+        return Err(PairingError::InvalidField("authenticated_hpke_envelope"));
+    }
+    Ok(())
+}
+
 fn pairing_transcript_digest(
     invitation_digest: &[u8],
     client_hello_digest: &[u8],
@@ -1907,21 +1999,30 @@ fn pairing_transcript_digest(
     ))
 }
 
-/// Deterministic, domain-separated fixture derivation. A production provider
-/// must replace this with the reviewed HKDF-SHA256 exporter construction and
-/// match cross-language golden vectors before the fixture-only gate is removed.
+/// RFC 5869 HKDF-SHA256 derivation for the eight-digit short authentication
+/// string. The HPKE exporter is IKM, the transcript digest is the salt, and a
+/// domain-separated counter is the expand info. Rejection sampling avoids
+/// modulo bias when mapping a 64-bit candidate into `00000000..99999999`.
 pub fn derive_verification_code(exporter_secret: &[u8], transcript_digest: &[u8]) -> String {
-    let digest = sha256(&canonical_components(
-        "noted.direct-pairing.v1/sas",
-        &[
-            ("exporter_secret", exporter_secret),
-            ("transcript_digest", transcript_digest),
-        ],
-    ));
-    let value =
-        u64::from_be_bytes(digest[..8].try_into().expect("eight-byte digest prefix")) % 100_000_000;
-    let digits = format!("{value:08}");
-    format!("{} {}", &digits[..4], &digits[4..])
+    const MODULUS: u64 = 100_000_000;
+    const ACCEPT_BELOW: u64 = u64::MAX - (u64::MAX % MODULUS);
+
+    let hkdf = Hkdf::<Sha256>::new(Some(transcript_digest), exporter_secret);
+    for attempt in 0_u32..=u32::MAX {
+        let info = canonical_components(
+            "noted.direct-pairing.v1/sas-hkdf-info",
+            &[("attempt", &attempt.to_be_bytes())],
+        );
+        let mut output = [0_u8; 8];
+        hkdf.expand(&info, &mut output)
+            .expect("eight-byte HKDF output is always valid");
+        let candidate = u64::from_be_bytes(output);
+        if candidate < ACCEPT_BELOW {
+            let digits = format!("{:08}", candidate % MODULUS);
+            return format!("{} {}", &digits[..4], &digits[4..]);
+        }
+    }
+    unreachable!("a 64-bit rejection sampler cannot exhaust every HKDF counter")
 }
 
 fn sha256(bytes: &[u8]) -> Vec<u8> {

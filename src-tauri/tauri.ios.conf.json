@@ -24,7 +24,8 @@
   },
   "bundle": {
     "iOS": {
-      "developmentTeam": "MYGAYC672C"
+      "developmentTeam": "MYGAYC672C",
+      "minimumSystemVersion": "17.0"
     },
     "resources": [],
     "icon": [

@@ -118,9 +118,12 @@ keeps the pairing sheet open.
    Mac proof-of-possession signature. The iPhone authenticates the HPKE sender
    with the invitation's Mac HPKE public key.
 4. Both sides derive an eight-digit verification string from the authenticated
-   HPKE exporter secret and the complete transcript digest, using HKDF-SHA256
-   with the label `noted.direct-pairing.v1/sas`. The code is displayed as
-   `1234 5678`; it is never accepted automatically.
+   HPKE exporter secret produced by that same sender context and the complete
+   transcript digest. RFC 5869 HKDF-SHA256 uses the exporter as IKM, the
+   transcript digest as salt, and the domain-separated
+   `noted.direct-pairing.v1/sas-hkdf-info` counter as expand info. An unbiased
+   64-bit rejection sampler maps the output to eight decimal digits. The code
+   is displayed as `1234 5678`; it is never accepted automatically.
 5. The user confirms that both devices show the same code and intended scopes.
    Either rejection cancels the invitation. Codes are compared by the user, not
    sent back as authentication values.
@@ -128,7 +131,8 @@ keeps the pairing sheet open.
    bootstrap key package. The package is authenticated to the transcript,
    receipt ID, library ID, device ID, scope IDs, and authority generation.
 7. The iPhone validates and stores the key package, then signs `ClientFinish`
-   over the receipt and ciphertext digest.
+   over the receipt and a canonical digest binding both the HPKE encapsulated
+   key and ciphertext.
 8. The Mac verifies `ClientFinish` and atomically marks the device active. Its
    signed `ServerFinish` is the enrollment receipt. The iPhone becomes paired
    only after verifying it; an interrupted pending enrollment is safe to retry
@@ -214,8 +218,14 @@ offer pending-branch export before device reset or revocation.
 ### Current checkpoint
 
 The implemented state machine intentionally accepts only the
-`sanitized_fixture` library data class. Deterministic tests cover stable
-transcript/SAS fixtures, restart and idempotent finish, changed-content replay,
+`sanitized_fixture` library data class. Its HPKE provider contract now returns
+the encapsulated key, ciphertext, and exporter from one sender operation;
+challenge signatures and bootstrap digests bind the complete envelope. Sync
+transactions are finalized before canonical member signing bytes are exposed,
+so a native signer never signs a placeholder manifest or an ambiguous textual
+hash. Deterministic tests cover stable transcript/SAS fixtures, complete HPKE
+envelope binding, two-stage transaction signing, restart and idempotent finish,
+changed-content replay,
 simultaneous scans, expiry and attempt limits, scope/role/environment/library/
 authority/pin binding, revocation, malformed inputs, and parser resource limits.
 The direct-sync logical core separately verifies the exact route set, request and

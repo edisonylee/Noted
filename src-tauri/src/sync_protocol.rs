@@ -6,7 +6,7 @@
 //! authority policy pure makes duplicate, reorder, crash, and conflict behavior
 //! identical on the paired Mac and a future opaque relay.
 
-use crate::portable::{canonical_sha256, is_uuid, is_uuid_v7};
+use crate::portable::{canonical_json, canonical_sha256, is_uuid, is_uuid_v7};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -201,9 +201,6 @@ pub struct MutationDraft {
     pub proposed_revision: u64,
     pub version_id: String,
     pub ciphertext: Vec<u8>,
-    /// Authenticated by the transport adapter. The convergence core binds the
-    /// exact bytes to the mutation ID but does not implement signature crypto.
-    pub signature: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,14 +260,21 @@ impl MutationEnvelope {
         }))
     }
 
-    /// Bytes that a signing adapter authenticates after the aggregate manifest
-    /// has been attached. The signature itself is excluded.
-    pub fn signing_digest(&self) -> String {
+    /// Exact canonical bytes authenticated after the aggregate manifest has
+    /// been attached. Signing bytes, rather than a textual hex digest, keeps
+    /// hashing behavior explicit across CryptoKit and Rust implementations.
+    pub fn signing_bytes(&self) -> Vec<u8> {
         let mut unsigned = self.clone();
         unsigned.signature.clear();
-        canonical_sha256(
-            &serde_json::to_value(unsigned).expect("envelope serialization cannot fail"),
-        )
+        canonical_json(&json!({
+            "domain": "noted.sync.v1/mutation",
+            "mutation": unsigned,
+        }))
+        .into_bytes()
+    }
+
+    pub fn signing_digest(&self) -> String {
+        sha256_bytes(&self.signing_bytes())
     }
 
     /// Exact signed-envelope binding used for mutation-ID replay checks.
@@ -308,8 +312,25 @@ pub struct SignedTransaction {
     pub members: Vec<MutationEnvelope>,
 }
 
-impl SignedTransaction {
-    pub fn assemble(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationSigningInput {
+    pub mutation_id: String,
+    pub member_index: u32,
+    pub canonical_bytes: Vec<u8>,
+}
+
+/// A transaction whose final manifest is frozen but whose member signatures
+/// have not yet been attached. This makes the signable bytes available to a
+/// native key provider without permitting signatures over a placeholder
+/// manifest digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedTransaction {
+    manifest: TransactionManifest,
+    members: Vec<MutationEnvelope>,
+}
+
+impl PreparedTransaction {
+    pub fn prepare(
         header: TransactionHeader,
         drafts: Vec<MutationDraft>,
         expires_at: u64,
@@ -345,7 +366,7 @@ impl SignedTransaction {
                 key_epoch: header.key_epoch,
                 ciphertext: draft.ciphertext,
                 ciphertext_hash,
-                signature: draft.signature,
+                signature: Vec::new(),
             });
         }
         let byte_total = members.iter().try_fold(0_u64, |total, member| {
@@ -375,6 +396,46 @@ impl SignedTransaction {
             member.transaction_manifest_digest = manifest_digest.clone();
         }
         Ok(Self { manifest, members })
+    }
+
+    pub fn signing_inputs(&self) -> Vec<MutationSigningInput> {
+        self.members
+            .iter()
+            .map(|member| MutationSigningInput {
+                mutation_id: member.mutation_id.clone(),
+                member_index: member.transaction_member_index,
+                canonical_bytes: member.signing_bytes(),
+            })
+            .collect()
+    }
+
+    pub fn attach_signatures(
+        mut self,
+        signatures: Vec<Vec<u8>>,
+    ) -> Result<SignedTransaction, ProtocolError> {
+        if signatures.len() != self.members.len() {
+            return Err(ProtocolError::IncompleteTransaction);
+        }
+        for (member, signature) in self.members.iter_mut().zip(signatures) {
+            if signature.is_empty() || signature.len() > MAX_SIGNATURE_BYTES {
+                return Err(ProtocolError::MalformedEnvelope);
+            }
+            member.signature = signature;
+        }
+        Ok(SignedTransaction {
+            manifest: self.manifest,
+            members: self.members,
+        })
+    }
+}
+
+impl SignedTransaction {
+    pub fn prepare(
+        header: TransactionHeader,
+        drafts: Vec<MutationDraft>,
+        expires_at: u64,
+    ) -> Result<PreparedTransaction, ProtocolError> {
+        PreparedTransaction::prepare(header, drafts, expires_at)
     }
 
     pub fn signed_digest(&self) -> String {
@@ -2096,7 +2157,7 @@ mod tests {
         version_id: String,
         body: &str,
     ) -> SignedTransaction {
-        SignedTransaction::assemble(
+        SignedTransaction::prepare(
             TransactionHeader {
                 protocol_version: 1,
                 library_id: library_id.to_string(),
@@ -2117,10 +2178,11 @@ mod tests {
                 proposed_revision: base_revision + 1,
                 version_id,
                 ciphertext: body.as_bytes().to_vec(),
-                signature: vec![0x51; 64],
             }],
             NOW + 100,
         )
+        .unwrap()
+        .attach_signatures(vec![vec![0x51; 64]])
         .unwrap()
     }
 
@@ -2188,10 +2250,64 @@ mod tests {
     }
 
     #[test]
+    fn transaction_signatures_are_attached_only_after_the_final_manifest_is_frozen() {
+        let prepared = SignedTransaction::prepare(
+            TransactionHeader {
+                protocol_version: 1,
+                library_id: id(1),
+                transaction_id: id(2),
+                device_id: id(3),
+                device_transaction_counter: 1,
+                authority_generation: 3,
+                purge_generation: 2,
+                key_epoch: 1,
+            },
+            vec![MutationDraft {
+                mutation_id: id(4),
+                record_id: id(5),
+                record_kind: "note".to_string(),
+                record_schema_version: 1,
+                base_head_revision: 0,
+                base_head_version_id: None,
+                proposed_revision: 1,
+                version_id: id(6),
+                ciphertext: b"ciphertext".to_vec(),
+            }],
+            NOW + 100,
+        )
+        .unwrap();
+
+        let inputs = prepared.signing_inputs();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].mutation_id, id(4));
+        assert_eq!(inputs[0].member_index, 0);
+        let signable: serde_json::Value =
+            serde_json::from_slice(&inputs[0].canonical_bytes).unwrap();
+        assert_eq!(
+            signable["mutation"]["transaction_manifest_digest"],
+            prepared.manifest.digest()
+        );
+        assert_eq!(signable["mutation"]["signature"], json!([]));
+
+        assert_eq!(
+            prepared.clone().attach_signatures(Vec::new()),
+            Err(ProtocolError::IncompleteTransaction)
+        );
+        assert_eq!(
+            prepared.clone().attach_signatures(vec![Vec::new()]),
+            Err(ProtocolError::MalformedEnvelope)
+        );
+
+        let signed = prepared.attach_signatures(vec![vec![0x44; 64]]).unwrap();
+        assert_eq!(signed.members[0].signature, vec![0x44; 64]);
+        assert_eq!(signed.members[0].signing_bytes(), inputs[0].canonical_bytes);
+    }
+
+    #[test]
     fn transaction_manifest_is_order_independent_but_complete_and_digest_bound() {
         let library = id(1);
         let device = id(2);
-        let mut transaction = SignedTransaction::assemble(
+        let mut transaction = SignedTransaction::prepare(
             TransactionHeader {
                 protocol_version: 1,
                 library_id: library,
@@ -2213,7 +2329,6 @@ mod tests {
                     proposed_revision: 1,
                     version_id: id(6),
                     ciphertext: b"first".to_vec(),
-                    signature: vec![1; 64],
                 },
                 MutationDraft {
                     mutation_id: id(7),
@@ -2225,11 +2340,12 @@ mod tests {
                     proposed_revision: 1,
                     version_id: id(9),
                     ciphertext: b"second".to_vec(),
-                    signature: vec![2; 64],
                 },
             ],
             NOW + 100,
         )
+        .unwrap()
+        .attach_signatures(vec![vec![1; 64], vec![2; 64]])
         .unwrap();
         let capabilities =
             negotiate_capabilities(&notes_capability(2, 2), &notes_capability(2, 2)).unwrap();
@@ -2273,7 +2389,7 @@ mod tests {
         let library = id(10);
         let device = id(11);
         let mut authority = authority(&library, &[&device]);
-        let transaction = SignedTransaction::assemble(
+        let transaction = SignedTransaction::prepare(
             TransactionHeader {
                 protocol_version: SYNC_PROTOCOL_VERSION,
                 library_id: library.clone(),
@@ -2295,7 +2411,6 @@ mod tests {
                     proposed_revision: 1,
                     version_id: id(15),
                     ciphertext: b"first ciphertext".to_vec(),
-                    signature: vec![0x31; 64],
                 },
                 MutationDraft {
                     mutation_id: id(16),
@@ -2307,11 +2422,12 @@ mod tests {
                     proposed_revision: 1,
                     version_id: id(18),
                     ciphertext: b"second ciphertext".to_vec(),
-                    signature: vec![0x32; 64],
                 },
             ],
             NOW + 100,
         )
+        .unwrap()
+        .attach_signatures(vec![vec![0x31; 64], vec![0x32; 64]])
         .unwrap();
         terminal_receipt(authority.submit_transaction(transaction, NOW).unwrap());
         let accepted = accepted_change_at(&authority, 1);

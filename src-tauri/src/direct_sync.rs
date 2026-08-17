@@ -13,7 +13,7 @@
 use crate::pairing_protocol::{
     Environment, LibraryDataClass, PairingCrypto, PairingError, PairingMachine, RecordKind,
 };
-use crate::portable::{canonical_sha256, is_uuid_v7};
+use crate::portable::{canonical_json, is_uuid_v7};
 use crate::sync_protocol::{
     negotiate_capabilities, AuthorityState, BootstrapRecord, BootstrapSnapshot, ChangePage,
     MutationEnvelope, NegotiatedCapabilities, ProtocolCapabilities, ProtocolError,
@@ -356,7 +356,7 @@ pub trait DirectSyncCrypto: Send + Sync + 'static {
         &self,
         endpoint: DirectEndpoint,
         device_id: &str,
-        signing_digest: &str,
+        signing_bytes: &[u8],
         signature: &[u8],
     ) -> Result<(), ()>;
 
@@ -369,7 +369,7 @@ pub trait DirectSyncCrypto: Send + Sync + 'static {
     fn authenticate_response(
         &self,
         endpoint: DirectEndpoint,
-        signing_digest: &str,
+        signing_bytes: &[u8],
     ) -> Result<Vec<u8>, ()>;
 }
 
@@ -1066,9 +1066,14 @@ where
         {
             return Err(DirectSyncError::DeviceNotAuthorized);
         }
-        let digest = request_signing_digest(endpoint, request)?;
+        let signing_bytes = request_signing_bytes(endpoint, request)?;
         self.crypto
-            .verify_request_signature(endpoint, &request.device_id, &digest, &request.signature)
+            .verify_request_signature(
+                endpoint,
+                &request.device_id,
+                &signing_bytes,
+                &request.signature,
+            )
             .map_err(|_| DirectSyncError::RequestSignatureRejected)?;
         self.pairing
             .require_active_device(
@@ -1489,10 +1494,10 @@ where
             payload,
             signature: Vec::new(),
         };
-        let digest = response_signing_digest(endpoint, &response)?;
+        let signing_bytes = response_signing_bytes(endpoint, &response)?;
         response.signature = self
             .crypto
-            .authenticate_response(endpoint, &digest)
+            .authenticate_response(endpoint, &signing_bytes)
             .map_err(|_| DirectSyncError::StateUnavailable)?;
         if response.signature.is_empty() || response.signature.len() > MAX_DIRECT_SIGNATURE_BYTES {
             return Err(DirectSyncError::StateUnavailable);
@@ -1711,37 +1716,39 @@ fn is_json_content_type(content_type: Option<&str>) -> bool {
     )
 }
 
-pub fn request_signing_digest<T: Serialize>(
+pub fn request_signing_bytes<T: Serialize>(
     endpoint: DirectEndpoint,
     request: &SignedSyncRequest<T>,
-) -> Result<String, DirectSyncError> {
+) -> Result<Vec<u8>, DirectSyncError> {
     let mut value = serde_json::to_value(request).map_err(|_| DirectSyncError::InvalidEnvelope)?;
     value
         .as_object_mut()
         .ok_or(DirectSyncError::InvalidEnvelope)?
         .insert("signature".to_owned(), json!([]));
-    Ok(canonical_sha256(&json!({
+    Ok(canonical_json(&json!({
         "domain": "noted.direct-sync.v1/request",
         "endpoint": endpoint.path(),
         "request": value,
-    })))
+    }))
+    .into_bytes())
 }
 
-pub fn response_signing_digest<T: Serialize>(
+pub fn response_signing_bytes<T: Serialize>(
     endpoint: DirectEndpoint,
     response: &SignedSyncResponse<T>,
-) -> Result<String, DirectSyncError> {
+) -> Result<Vec<u8>, DirectSyncError> {
     let mut value =
         serde_json::to_value(response).map_err(|_| DirectSyncError::StateUnavailable)?;
     value
         .as_object_mut()
         .ok_or(DirectSyncError::StateUnavailable)?
         .insert("signature".to_owned(), json!([]));
-    Ok(canonical_sha256(&json!({
+    Ok(canonical_json(&json!({
         "domain": "noted.direct-sync.v1/response",
         "endpoint": endpoint.path(),
         "response": value,
-    })))
+    }))
+    .into_bytes())
 }
 
 fn unsigned_response_size<RequestPayload: Serialize, ResponsePayload: Serialize>(

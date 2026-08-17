@@ -86,28 +86,41 @@ impl PairingCrypto for FixtureCrypto {
         &self,
         _sender_key: LocalHpkeKey,
         recipient_public_key: &[u8],
+        info: &[u8],
         associated_data: &[u8],
         plaintext: &[u8],
-    ) -> Result<Vec<u8>, ()> {
-        let mut hasher = Sha256::new();
-        hasher.update(b"noted.fixture/auth-seal");
-        hasher.update(recipient_public_key);
-        hasher.update(associated_data);
-        hasher.update(plaintext);
-        Ok(hasher.finalize().to_vec())
-    }
+        exporter_context: &[u8],
+    ) -> Result<AuthenticatedHpkeSeal, ()> {
+        let mut encapsulated_hasher = Sha256::new();
+        encapsulated_hasher.update(b"noted.fixture/auth-seal/encapsulated-key");
+        encapsulated_hasher.update(recipient_public_key);
+        encapsulated_hasher.update(info);
+        let encapsulated_key: [u8; HPKE_ENCAPSULATED_KEY_BYTES] =
+            encapsulated_hasher.finalize().into();
 
-    fn exporter_secret(
-        &self,
-        _sender_key: LocalHpkeKey,
-        recipient_public_key: &[u8],
-        transcript_digest: &[u8],
-    ) -> Result<Vec<u8>, ()> {
-        let mut hasher = Sha256::new();
-        hasher.update(b"noted.fixture/exporter");
-        hasher.update(recipient_public_key);
-        hasher.update(transcript_digest);
-        Ok(hasher.finalize().to_vec())
+        let mut ciphertext_hasher = Sha256::new();
+        ciphertext_hasher.update(b"noted.fixture/auth-seal/ciphertext");
+        ciphertext_hasher.update(encapsulated_key);
+        ciphertext_hasher.update(recipient_public_key);
+        ciphertext_hasher.update(info);
+        ciphertext_hasher.update(associated_data);
+        ciphertext_hasher.update(plaintext);
+        let ciphertext = ciphertext_hasher.finalize().to_vec();
+
+        let mut exporter_hasher = Sha256::new();
+        exporter_hasher.update(b"noted.fixture/auth-seal/exporter");
+        exporter_hasher.update(encapsulated_key);
+        exporter_hasher.update(&ciphertext);
+        exporter_hasher.update(exporter_context);
+        let exporter_secret: [u8; HPKE_EXPORTER_SECRET_BYTES] = exporter_hasher.finalize().into();
+
+        Ok(AuthenticatedHpkeSeal {
+            envelope: AuthenticatedHpkeEnvelope {
+                encapsulated_key: encapsulated_key.to_vec(),
+                ciphertext,
+            },
+            exporter_secret: zeroize::Zeroizing::new(exporter_secret),
+        })
     }
 
     fn fresh_bytes(&self, purpose: FreshValuePurpose, length: usize) -> Result<Vec<u8>, ()> {
@@ -270,7 +283,7 @@ fn finish_for(begin: &BeginEnrollment, bootstrap: &BootstrapEnvelope) -> ClientF
         sender_role: PairingRole::IphoneCompanion,
         recipient_role: PairingRole::MacAuthority,
         transcript_digest: receipt.transcript_digest,
-        ciphertext_digest: bootstrap.ciphertext_digest.clone(),
+        bootstrap_envelope_digest: bootstrap.envelope_digest.clone(),
         proof_signature: Vec::new(),
     };
     finish.proof_signature = FixtureCrypto::signature(
@@ -772,8 +785,11 @@ fn confirmation_mismatch_cancels_and_finish_requires_confirmation() {
     let placeholder_bootstrap = BootstrapEnvelope {
         protocol: PAIRING_PROTOCOL.to_owned(),
         receipt_id: begin.receipt_id.clone(),
-        ciphertext: vec![1],
-        ciphertext_digest: vec![0; 32],
+        sealed_bootstrap: AuthenticatedHpkeEnvelope {
+            encapsulated_key: vec![1; HPKE_ENCAPSULATED_KEY_BYTES],
+            ciphertext: vec![1],
+        },
+        envelope_digest: vec![0; 32],
     };
     let finish = finish_for(&begin, &placeholder_bootstrap);
     assert_eq!(
@@ -1090,6 +1106,48 @@ fn malformed_payloads_do_not_consume_attempts() {
 }
 
 #[test]
+fn hpke_wire_envelopes_bind_the_encapsulated_key_and_ciphertext_atomically() {
+    let machine = PairingMachine::new_fixture_only(FixtureCrypto::default(), policy()).unwrap();
+    let (_invitation, _hello, _hello_bytes, begin) = register_and_begin(&machine);
+    let server_hello: ServerHello = serde_json::from_slice(&begin.server_hello_bytes).unwrap();
+
+    assert_eq!(
+        server_hello.challenge.encapsulated_key.len(),
+        HPKE_ENCAPSULATED_KEY_BYTES
+    );
+    assert!(!server_hello.challenge.ciphertext.is_empty());
+
+    let bootstrap = machine
+        .confirm_user(
+            &begin.receipt_id,
+            &begin.verification_code,
+            &server_hello.receipt.granted_scopes,
+            true,
+            NOW + 2_000,
+        )
+        .unwrap();
+    assert_eq!(
+        bootstrap.sealed_bootstrap.encapsulated_key.len(),
+        HPKE_ENCAPSULATED_KEY_BYTES
+    );
+    assert_eq!(
+        bootstrap.envelope_digest,
+        Sha256::digest(canonical_authenticated_hpke_envelope(
+            &bootstrap.sealed_bootstrap
+        ))
+        .to_vec()
+    );
+    assert_ne!(server_hello.challenge, bootstrap.sealed_bootstrap);
+
+    let mut substituted = bootstrap.sealed_bootstrap.clone();
+    substituted.encapsulated_key[0] ^= 1;
+    assert_ne!(
+        Sha256::digest(canonical_authenticated_hpke_envelope(&substituted)).to_vec(),
+        bootstrap.envelope_digest
+    );
+}
+
+#[test]
 fn canonical_transcript_and_sas_fixture_are_stable() {
     let invitation = invitation(LibraryDataClass::SanitizedFixture);
     let hello = hello(&invitation, HELLO_ID, DEVICE_ID);
@@ -1105,5 +1163,5 @@ fn canonical_transcript_and_sas_fixture_are_stable() {
         format!("{hello_digest:x}"),
         "1846adbad4ad800cfd286ca0ddecf0d8fae0d8e8b6354b7dec4f1cee9a3de11d"
     );
-    assert_eq!(code, "0678 7045");
+    assert_eq!(code, "9250 3210");
 }

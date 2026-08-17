@@ -7,10 +7,11 @@ use std::sync::{Arc, Barrier, Mutex};
 use tauri_app_lib::direct_sync::*;
 use tauri_app_lib::pairing_protocol::{
     canonical_client_finish_unsigned, canonical_client_hello_unsigned,
-    canonical_invitation_unsigned, invitation_nonce_proof, ClientFinish, ClientHello, Environment,
-    FreshValuePurpose, Invitation, KindCapability, LibraryDataClass, LocalHpkeKey, LocalSigningKey,
-    PairingCrypto, PairingMachine, PairingPolicy, PairingRole, RecordKind as PairingRecordKind,
-    ServerHello, TransportEvidence, PAIRING_PROTOCOL, PAIRING_SUITE,
+    canonical_invitation_unsigned, invitation_nonce_proof, AuthenticatedHpkeEnvelope,
+    AuthenticatedHpkeSeal, ClientFinish, ClientHello, Environment, FreshValuePurpose, Invitation,
+    KindCapability, LibraryDataClass, LocalHpkeKey, LocalSigningKey, PairingCrypto, PairingMachine,
+    PairingPolicy, PairingRole, RecordKind as PairingRecordKind, ServerHello, TransportEvidence,
+    HPKE_ENCAPSULATED_KEY_BYTES, HPKE_EXPORTER_SECRET_BYTES, PAIRING_PROTOCOL, PAIRING_SUITE,
 };
 use tauri_app_lib::sync_protocol::{
     AuthorityState, MutationDraft, ProtocolCapabilities, ReceiptDisposition, RecordKindCapability,
@@ -100,26 +101,39 @@ impl PairingCrypto for FixturePairingCrypto {
         &self,
         _sender_key: LocalHpkeKey,
         recipient_public_key: &[u8],
+        info: &[u8],
         associated_data: &[u8],
         plaintext: &[u8],
-    ) -> Result<Vec<u8>, ()> {
-        let mut bytes = b"fixture-seal".to_vec();
-        bytes.extend_from_slice(recipient_public_key);
-        bytes.extend_from_slice(associated_data);
-        bytes.extend_from_slice(plaintext);
-        Ok(sha256(&bytes))
-    }
+        exporter_context: &[u8],
+    ) -> Result<AuthenticatedHpkeSeal, ()> {
+        let mut encapsulated_bytes = b"fixture-seal/encapsulated-key".to_vec();
+        encapsulated_bytes.extend_from_slice(recipient_public_key);
+        encapsulated_bytes.extend_from_slice(info);
+        let encapsulated_key: [u8; HPKE_ENCAPSULATED_KEY_BYTES] =
+            sha256(&encapsulated_bytes).try_into().unwrap();
 
-    fn exporter_secret(
-        &self,
-        _sender_key: LocalHpkeKey,
-        recipient_public_key: &[u8],
-        transcript_digest: &[u8],
-    ) -> Result<Vec<u8>, ()> {
-        let mut bytes = b"fixture-exporter".to_vec();
-        bytes.extend_from_slice(recipient_public_key);
-        bytes.extend_from_slice(transcript_digest);
-        Ok(sha256(&bytes))
+        let mut ciphertext_bytes = b"fixture-seal/ciphertext".to_vec();
+        ciphertext_bytes.extend_from_slice(&encapsulated_key);
+        ciphertext_bytes.extend_from_slice(recipient_public_key);
+        ciphertext_bytes.extend_from_slice(info);
+        ciphertext_bytes.extend_from_slice(associated_data);
+        ciphertext_bytes.extend_from_slice(plaintext);
+        let ciphertext = sha256(&ciphertext_bytes);
+
+        let mut exporter_bytes = b"fixture-seal/exporter".to_vec();
+        exporter_bytes.extend_from_slice(&encapsulated_key);
+        exporter_bytes.extend_from_slice(&ciphertext);
+        exporter_bytes.extend_from_slice(exporter_context);
+        let exporter_secret: [u8; HPKE_EXPORTER_SECRET_BYTES] =
+            sha256(&exporter_bytes).try_into().unwrap();
+
+        Ok(AuthenticatedHpkeSeal {
+            envelope: AuthenticatedHpkeEnvelope {
+                encapsulated_key: encapsulated_key.to_vec(),
+                ciphertext,
+            },
+            exporter_secret: zeroize::Zeroizing::new(exporter_secret),
+        })
     }
 
     fn fresh_bytes(&self, purpose: FreshValuePurpose, length: usize) -> Result<Vec<u8>, ()> {
@@ -266,7 +280,7 @@ fn active_pairing() -> PairingMachine<FixturePairingCrypto> {
         sender_role: PairingRole::IphoneCompanion,
         recipient_role: PairingRole::MacAuthority,
         transcript_digest: receipt.transcript_digest,
-        ciphertext_digest: bootstrap.ciphertext_digest,
+        bootstrap_envelope_digest: bootstrap.envelope_digest,
         proof_signature: Vec::new(),
     };
     finish.proof_signature = fixture_signature(
@@ -312,20 +326,28 @@ impl FixtureDirectCrypto {
     fn request_signature(
         endpoint: DirectEndpoint,
         device_id: &str,
-        signing_digest: &str,
+        signing_bytes: &[u8],
     ) -> Vec<u8> {
         let mut bytes = b"noted.direct-sync.fixture/request".to_vec();
         bytes.extend_from_slice(endpoint.path().as_bytes());
         bytes.extend_from_slice(device_id.as_bytes());
-        bytes.extend_from_slice(signing_digest.as_bytes());
+        bytes.extend_from_slice(signing_bytes);
         let digest = sha256(&bytes);
         [digest.as_slice(), digest.as_slice()].concat()
     }
 
-    fn response_signature(endpoint: DirectEndpoint, signing_digest: &str) -> Vec<u8> {
+    fn response_signature(endpoint: DirectEndpoint, signing_bytes: &[u8]) -> Vec<u8> {
         let mut bytes = b"noted.direct-sync.fixture/response".to_vec();
         bytes.extend_from_slice(endpoint.path().as_bytes());
-        bytes.extend_from_slice(signing_digest.as_bytes());
+        bytes.extend_from_slice(signing_bytes);
+        let digest = sha256(&bytes);
+        [digest.as_slice(), digest.as_slice()].concat()
+    }
+
+    fn mutation_signature(device_id: &str, signing_bytes: &[u8]) -> Vec<u8> {
+        let mut bytes = b"noted.direct-sync.fixture/mutation".to_vec();
+        bytes.extend_from_slice(device_id.as_bytes());
+        bytes.extend_from_slice(signing_bytes);
         let digest = sha256(&bytes);
         [digest.as_slice(), digest.as_slice()].concat()
     }
@@ -336,10 +358,10 @@ impl DirectSyncCrypto for FixtureDirectCrypto {
         &self,
         endpoint: DirectEndpoint,
         device_id: &str,
-        signing_digest: &str,
+        signing_bytes: &[u8],
         signature: &[u8],
     ) -> Result<(), ()> {
-        (signature == Self::request_signature(endpoint, device_id, signing_digest))
+        (signature == Self::request_signature(endpoint, device_id, signing_bytes))
             .then_some(())
             .ok_or(())
     }
@@ -351,7 +373,7 @@ impl DirectSyncCrypto for FixtureDirectCrypto {
     ) -> Result<(), ()> {
         if device_id != mutation.device_id
             || !mutation.ciphertext.starts_with(b"fixture:")
-            || mutation.signature != [0xaa]
+            || mutation.signature != Self::mutation_signature(device_id, &mutation.signing_bytes())
         {
             return Err(());
         }
@@ -365,9 +387,9 @@ impl DirectSyncCrypto for FixtureDirectCrypto {
     fn authenticate_response(
         &self,
         endpoint: DirectEndpoint,
-        signing_digest: &str,
+        signing_bytes: &[u8],
     ) -> Result<Vec<u8>, ()> {
-        Ok(Self::response_signature(endpoint, signing_digest))
+        Ok(Self::response_signature(endpoint, signing_bytes))
     }
 }
 
@@ -513,9 +535,9 @@ fn sign_request<T: Serialize>(
     endpoint: DirectEndpoint,
     mut request: SignedSyncRequest<T>,
 ) -> SignedSyncRequest<T> {
-    let digest = request_signing_digest(endpoint, &request).unwrap();
+    let signing_bytes = request_signing_bytes(endpoint, &request).unwrap();
     request.signature =
-        FixtureDirectCrypto::request_signature(endpoint, &request.device_id, &digest);
+        FixtureDirectCrypto::request_signature(endpoint, &request.device_id, &signing_bytes);
     request
 }
 
@@ -575,10 +597,10 @@ fn response_payload<T: DeserializeOwned + Serialize>(
     assert_eq!(signed.library_id, LIBRARY_ID);
     assert_eq!(signed.device_id, DEVICE_ID);
     assert_eq!(signed.authority_generation, 7);
-    let digest = response_signing_digest(endpoint, &signed).unwrap();
+    let signing_bytes = response_signing_bytes(endpoint, &signed).unwrap();
     assert_eq!(
         signed.signature,
-        FixtureDirectCrypto::response_signature(endpoint, &digest)
+        FixtureDirectCrypto::response_signature(endpoint, &signing_bytes)
     );
     signed.payload
 }
@@ -596,7 +618,7 @@ fn transaction(
     transaction_number: u64,
     drafts: Vec<(&str, u64, Option<String>, u64, Vec<u8>)>,
 ) -> SignedTransaction {
-    SignedTransaction::assemble(
+    let prepared = SignedTransaction::prepare(
         TransactionHeader {
             protocol_version: 1,
             library_id: LIBRARY_ID.to_owned(),
@@ -621,13 +643,18 @@ fn transaction(
                     proposed_revision: proposed,
                     version_id: id(50_000 + transaction_number * 10 + index as u64),
                     ciphertext,
-                    signature: vec![0xaa],
                 },
             )
             .collect(),
         NOW + 1_000,
     )
-    .unwrap()
+    .unwrap();
+    let signatures = prepared
+        .signing_inputs()
+        .into_iter()
+        .map(|input| FixtureDirectCrypto::mutation_signature(device_id, &input.canonical_bytes))
+        .collect();
+    prepared.attach_signatures(signatures).unwrap()
 }
 
 fn single_record_transaction(
@@ -1145,6 +1172,8 @@ fn duplicate_push_is_byte_identical_reordered_members_accept_and_stale_head_conf
     let manifest_digest = stale.manifest.digest();
     for member in &mut stale.members {
         member.transaction_manifest_digest = manifest_digest.clone();
+        member.signature =
+            FixtureDirectCrypto::mutation_signature(DEVICE_ID, &member.signing_bytes());
     }
     let stale_request =
         signed_request(DirectEndpoint::Push, 12, PushRequest { transaction: stale });

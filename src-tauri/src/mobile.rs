@@ -39,16 +39,16 @@ fn create_mobile_note(
 #[tauri::command]
 fn update_mobile_note(
     store: State<'_, MobileStore>,
-    id: i64,
+    record_id: String,
     title: String,
     body: String,
 ) -> Result<MobileNote, String> {
-    store.update(id, &title, &body)
+    store.update(&record_id, &title, &body)
 }
 
 #[tauri::command]
-fn delete_mobile_note(store: State<'_, MobileStore>, id: i64) -> Result<(), String> {
-    store.delete(id)
+fn delete_mobile_note(store: State<'_, MobileStore>, record_id: String) -> Result<(), String> {
+    store.delete(&record_id)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

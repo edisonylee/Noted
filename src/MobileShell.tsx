@@ -3,15 +3,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import "./MobileShell.css";
 
 type MobileNote = {
-  id: number;
+  recordId: string;
   title: string;
   body: string;
-  created_at: number;
-  updated_at: number;
+  createdAt: number;
+  updatedAt: number;
 };
 
 type NoteDraft = {
-  id: number | null;
+  recordId: string | null;
   title: string;
   body: string;
 };
@@ -94,8 +94,8 @@ function NoteEditor({
   const editorRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
-    if (draft.id === null) titleRef.current?.focus();
-  }, [draft.id]);
+    if (draft.recordId === null) titleRef.current?.focus();
+  }, [draft.recordId]);
 
   useEffect(() => {
     const viewport = window.visualViewport;
@@ -121,7 +121,7 @@ function NoteEditor({
           <BackIcon />
         </button>
         <div className="note-editor__actions">
-          {draft.id !== null && (
+          {draft.recordId !== null && (
             <button className="icon-action icon-action--danger" type="button" onClick={onDelete} disabled={busy} aria-label="Delete note">
               <TrashIcon />
             </button>
@@ -208,10 +208,10 @@ export function MobileShell() {
     setError(null);
     try {
       const payload = { title: noteTitle(draft), body: draft.body };
-      if (draft.id === null) {
+      if (draft.recordId === null) {
         await invoke("create_mobile_note", payload);
       } else {
-        await invoke("update_mobile_note", { ...payload, id: draft.id });
+        await invoke("update_mobile_note", { ...payload, recordId: draft.recordId });
       }
       await refresh();
       setDraft(null);
@@ -223,13 +223,13 @@ export function MobileShell() {
   }
 
   async function deleteDraft() {
-    if (!draft?.id) return;
+    if (!draft?.recordId) return;
     if (!window.confirm(`Delete “${noteTitle(draft)}”?`)) return;
 
     setBusy(true);
     setError(null);
     try {
-      await invoke("delete_mobile_note", { id: draft.id });
+      await invoke("delete_mobile_note", { recordId: draft.recordId });
       await refresh();
       setDraft(null);
     } catch (reason) {
@@ -263,7 +263,7 @@ export function MobileShell() {
         <button
           className="compose-action"
           type="button"
-          onClick={() => setDraft({ id: null, title: "", body: "" })}
+          onClick={() => setDraft({ recordId: null, title: "", body: "" })}
           aria-label="Create note"
         >
           <ComposeIcon />
@@ -294,7 +294,7 @@ export function MobileShell() {
           <h2>{query ? "No matching notes" : "A clear page"}</h2>
           <p>{query ? "Try a different word or phrase." : "Write something here. It stays on this iPhone."}</p>
           {!query && (
-            <button type="button" onClick={() => setDraft({ id: null, title: "", body: "" })}>
+            <button type="button" onClick={() => setDraft({ recordId: null, title: "", body: "" })}>
               Create your first note
             </button>
           )}
@@ -305,10 +305,10 @@ export function MobileShell() {
             <button
               className="note-row"
               type="button"
-              key={note.id}
-              onClick={() => setDraft({ id: note.id, title: note.title, body: note.body })}
+              key={note.recordId}
+              onClick={() => setDraft({ recordId: note.recordId, title: note.title, body: note.body })}
             >
-              <span className="note-row__time">{formatUpdated(note.updated_at)}</span>
+              <span className="note-row__time">{formatUpdated(note.updatedAt)}</span>
               <span className="note-row__content">
                 <strong>{note.title}</strong>
                 <span>{notePreview(note)}</span>

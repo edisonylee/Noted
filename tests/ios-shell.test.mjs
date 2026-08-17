@@ -45,6 +45,20 @@ test("mobile notes use an isolated on-device SQLite store", async () => {
   assert.equal(store.includes("sqlite_vec"), false);
 });
 
+test("mobile note commands expose stable record IDs instead of SQLite row IDs", async () => {
+  const entry = await read("src-tauri/src/mobile.rs");
+  const store = await read("src-tauri/src/mobile_store.rs");
+  const shell = await read("src/MobileShell.tsx");
+
+  assert.match(entry, /record_id: String/);
+  assert.doesNotMatch(entry, /\bid: i64\b/);
+  assert.match(store, /pub record_id: String/);
+  assert.match(store, /serde\(rename_all = "camelCase"\)/);
+  assert.match(shell, /recordId: string/);
+  assert.match(shell, /\{ recordId: draft\.recordId \}/);
+  assert.doesNotMatch(shell, /\bid: number\b/);
+});
+
 test("desktop native dependencies are target-gated away from iOS", async () => {
   const manifest = await read("src-tauri/Cargo.toml");
   const desktopTable = manifest.indexOf("[target.'cfg(not(target_os = \"ios\"))'.dependencies]");

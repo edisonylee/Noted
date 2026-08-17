@@ -2,6 +2,7 @@
 
 pub mod analytics;
 pub mod approval_broker;
+pub mod backup;
 pub mod brain;
 pub mod context_pass;
 pub mod db;
@@ -2101,25 +2102,24 @@ async fn backfill_entities(app: tauri::AppHandle) -> Result<i64, String> {
     Ok(added)
 }
 
-/// One-click backup: checkpoint the WAL and copy the DB to a timestamped file
-/// on the Desktop. Returns the destination path.
+/// One-click plaintext, database-only backup on the Desktop. This intentionally
+/// includes sensitive rows and omits referenced media; it is not an encrypted or
+/// complete recovery archive. Returns the validated snapshot path.
 #[tauri::command]
 async fn export_db(app: tauri::AppHandle) -> Result<String, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let db_path = dir.join("noted.db");
-    {
-        let state = app.state::<Db>();
-        let conn = state.0.lock().unwrap();
-        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
-    }
     let home = std::env::var("HOME").map_err(|e| e.to_string())?;
     let mut dest_dir = std::path::PathBuf::from(&home).join("Desktop");
     if !dest_dir.exists() {
         dest_dir = std::path::PathBuf::from(&home);
     }
-    let ts = now_local().format("%Y%m%d-%H%M%S");
+    let ts = now_local().format("%Y%m%d-%H%M%S-%6f");
     let dest = dest_dir.join(format!("noted-backup-{ts}.db"));
-    std::fs::copy(&db_path, &dest).map_err(|e| e.to_string())?;
+
+    // Keep the one application writer locked through VACUUM INTO, independent
+    // validation, fsync, and publication so no app write can race the snapshot.
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    backup::create_database_snapshot(&conn, &dest).map_err(|e| e.to_string())?;
     Ok(dest.to_string_lossy().to_string())
 }
 

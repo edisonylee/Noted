@@ -20,6 +20,8 @@ test("iOS backend exports only local notes and health commands", async () => {
     "create_mobile_note",
     "update_mobile_note",
     "delete_mobile_note",
+    "export_mobile_notes",
+    "restore_mobile_notes_export",
   ]) {
     assert.match(mobile, new RegExp(`\\b${command}\\b`));
   }

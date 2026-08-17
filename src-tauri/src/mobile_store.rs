@@ -4,9 +4,9 @@ use crate::portable::{
     RecordLifecycle, RecordScope, ScopeClass,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -14,11 +14,17 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const PORTABLE_SCHEMA_VERSION: i64 = 1;
-const PORTABLE_SCHEMA_CHECKSUM: &str =
+const PORTABLE_SCHEMA_VERSION: i64 = 2;
+const PORTABLE_SCHEMA_V1_CHECKSUM: &str =
     "d6d8377525aa80d91e9e7cb22d4eff4da5cf7998abc8968a5457c1fc86e84b7b";
-const PORTABLE_MIGRATION_NAME: &str = "iphone-notes-portability";
+const PORTABLE_SCHEMA_V2_CHECKSUM: &str =
+    "838992191ee7053706d16154b41f08b1e041526101d496d1d762848a614b8e45";
+const PORTABLE_MIGRATION_V1_NAME: &str = "iphone-notes-portability";
+const PORTABLE_MIGRATION_V2_NAME: &str = "iphone-note-lifecycle-and-transaction-groups";
 const MOBILE_APPLICATION_ID: i64 = 0x4e4f_5449; // ASCII `NOTI`.
+const MOBILE_NOTES_EXPORT_FORMAT: &str = "noted.mobile-notes.export.v1";
+const MOBILE_NOTES_EXPORT_VERSION: u32 = 1;
+const MAX_MOBILE_NOTES_EXPORT_BYTES: usize = 256 * 1024 * 1024;
 static RECOVERY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -29,6 +35,102 @@ pub struct MobileNote {
     pub body: String,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MobileNotesExportEnvelope {
+    format: String,
+    format_version: u32,
+    payload: MobileNotesExportPayload,
+    payload_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MobileNotesExportPayload {
+    replica: MobileReplicaExport,
+    notes: Vec<MobileNoteExport>,
+    outbox: Vec<MobileOutboxExport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MobileReplicaExport {
+    library_id: String,
+    device_id: String,
+    install_id: String,
+    default_scope_id: String,
+    library_state: String,
+    next_transaction_counter: i64,
+    created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MobileNoteExport {
+    library_id: String,
+    record_id: String,
+    record_kind: String,
+    record_schema_version: i64,
+    title: String,
+    body: String,
+    created_at: i64,
+    updated_at: i64,
+    accepted_revision: i64,
+    accepted_version_id: Option<String>,
+    accepted_content_hash: Option<String>,
+    working_revision: i64,
+    working_branch_id: String,
+    working_version_id: String,
+    working_base_revision: i64,
+    pending_mutation_id: String,
+    sync_state: String,
+    lifecycle_state: String,
+    trashed_at: Option<i64>,
+    tombstoned_at: Option<i64>,
+    canonical_hash: String,
+    authority: String,
+    scope: String,
+    scope_id: String,
+    scope_class: String,
+    sensitivity: String,
+    provenance: serde_json::Value,
+    origin_device_id: String,
+    last_modified_device_id: String,
+    origin_install_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MobileOutboxExport {
+    mutation_id: String,
+    transaction_id: String,
+    device_transaction_counter: i64,
+    transaction_member_index: i64,
+    transaction_member_count: i64,
+    library_id: String,
+    device_id: String,
+    install_id: String,
+    scope_id: String,
+    scope_class: String,
+    record_id: String,
+    record_kind: String,
+    operation: String,
+    base_revision: i64,
+    base_version_id: Option<String>,
+    proposed_revision: i64,
+    local_revision: i64,
+    branch_id: String,
+    version_id: String,
+    canonical_hash: String,
+    payload: serde_json::Value,
+    state: String,
+    eligible_for_sync: bool,
+    superseded_at: Option<i64>,
+    attempts: i64,
+    created_at: i64,
+    acknowledged_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +152,8 @@ struct PortableState {
     accepted_content_hash: Option<String>,
     created_at: i64,
     lifecycle_state: String,
+    trashed_at: Option<i64>,
+    authority: String,
     provenance_json: String,
     scope_id: String,
     scope_class: String,
@@ -69,15 +173,22 @@ struct Mutation<'a> {
     base_version_id: Option<&'a str>,
     accepted_content_hash: Option<&'a str>,
     mutation_id: &'a str,
-    transaction_id: &'a str,
     canonical_hash: &'a str,
     lifecycle_state: &'a str,
+    trashed_at: Option<i64>,
     tombstoned_at: Option<i64>,
     created_at: i64,
     updated_at: i64,
     provenance_json: &'a str,
     scope_id: &'a str,
     scope_class: &'a str,
+}
+
+#[derive(Debug)]
+struct OutboxTransaction {
+    transaction_id: String,
+    device_transaction_counter: i64,
+    member_count: i64,
 }
 
 #[derive(Serialize)]
@@ -124,6 +235,8 @@ impl MobileStore {
             .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
             .map_err(|error| error.to_string())?;
         migrate_portable_notes(&mut connection, recovery_path.as_deref())?;
+        ensure_mobile_search_schema(&mut connection)?;
+        verify_mobile_search_schema(&connection)?;
 
         Ok(Self {
             connection: Mutex::new(connection),
@@ -159,19 +272,46 @@ impl MobileStore {
 
         if let Some(query) = trimmed {
             let pattern = format!("%{}%", escape_like(query));
+            let fts_query = mobile_fts_query(query);
+            if fts_query.is_none() {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT record_id, title, body, created_at, updated_at
+                         FROM mobile_notes
+                         WHERE lifecycle_state = 'active'
+                           AND deleted_at IS NULL
+                           AND (title LIKE ?1 ESCAPE '\\' COLLATE NOCASE
+                             OR body LIKE ?1 ESCAPE '\\' COLLATE NOCASE)
+                         ORDER BY updated_at DESC, id DESC",
+                    )
+                    .map_err(|error| error.to_string())?;
+                let rows = statement
+                    .query_map([pattern], note_from_row)
+                    .map_err(|error| error.to_string())?;
+                return rows
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| error.to_string());
+            }
             let mut statement = connection
                 .prepare(
-                    "SELECT record_id, title, body, created_at, updated_at
-                     FROM mobile_notes
-                     WHERE lifecycle_state = 'active'
-                       AND deleted_at IS NULL
-                       AND (title LIKE ?1 ESCAPE '\\' COLLATE NOCASE
-                         OR body LIKE ?1 ESCAPE '\\' COLLATE NOCASE)
-                     ORDER BY updated_at DESC, id DESC",
+                    "SELECT notes.record_id, notes.title, notes.body,
+                            notes.created_at, notes.updated_at
+                     FROM mobile_notes_fts
+                     JOIN mobile_notes AS notes
+                       ON notes.record_id = mobile_notes_fts.record_id
+                     WHERE mobile_notes_fts MATCH ?1
+                       AND notes.lifecycle_state = 'active'
+                       AND notes.deleted_at IS NULL
+                       AND (notes.title LIKE ?2 ESCAPE '\\' COLLATE NOCASE
+                         OR notes.body LIKE ?2 ESCAPE '\\' COLLATE NOCASE)
+                     ORDER BY notes.updated_at DESC, notes.id DESC",
                 )
                 .map_err(|error| error.to_string())?;
             let rows = statement
-                .query_map([pattern], note_from_row)
+                .query_map(
+                    params![fts_query.expect("checked above"), pattern],
+                    note_from_row,
+                )
                 .map_err(|error| error.to_string())?;
             return rows
                 .collect::<Result<Vec<_>, _>>()
@@ -207,7 +347,7 @@ impl MobileStore {
         let working_branch_id = new_uuid_v7();
         let working_version_id = new_uuid_v7();
         let mutation_id = new_uuid_v7();
-        let transaction_id = new_uuid_v7();
+        let outbox_transaction = begin_outbox_transaction(&transaction, 1)?;
         let title = title.trim();
         let canonical_hash = note_content_hash(title, body);
         let provenance_json = r#"{"source":"iphone_native"}"#;
@@ -254,6 +394,8 @@ impl MobileStore {
         enqueue_mutation(
             &transaction,
             &identity,
+            &outbox_transaction,
+            0,
             Mutation {
                 operation: "create",
                 record_id: &record_id,
@@ -267,9 +409,9 @@ impl MobileStore {
                 base_version_id: None,
                 accepted_content_hash: None,
                 mutation_id: &mutation_id,
-                transaction_id: &transaction_id,
                 canonical_hash: &canonical_hash,
                 lifecycle_state: "active",
+                trashed_at: None,
                 tombstoned_at: None,
                 created_at: timestamp,
                 updated_at: timestamp,
@@ -304,11 +446,12 @@ impl MobileStore {
         let state = portable_state(&transaction, record_id)?
             .filter(|state| state.lifecycle_state == "active")
             .ok_or_else(|| format!("note {record_id} does not exist"))?;
+        ensure_noted_authority(&state)?;
         let timestamp = next_timestamp(&transaction)?;
         let working_revision = state.working_revision.saturating_add(1);
         let working_version_id = new_uuid_v7();
         let mutation_id = new_uuid_v7();
-        let transaction_id = new_uuid_v7();
+        let outbox_transaction = begin_outbox_transaction(&transaction, 1)?;
         let title = title.trim();
         let canonical_hash = note_content_hash(title, body);
 
@@ -346,6 +489,8 @@ impl MobileStore {
         enqueue_mutation(
             &transaction,
             &identity,
+            &outbox_transaction,
+            0,
             Mutation {
                 operation: "update",
                 record_id: &state.record_id,
@@ -359,9 +504,9 @@ impl MobileStore {
                 base_version_id: state.accepted_version_id.as_deref(),
                 accepted_content_hash: state.accepted_content_hash.as_deref(),
                 mutation_id: &mutation_id,
-                transaction_id: &transaction_id,
                 canonical_hash: &canonical_hash,
                 lifecycle_state: "active",
+                trashed_at: None,
                 tombstoned_at: None,
                 created_at: state.created_at,
                 updated_at: timestamp,
@@ -384,7 +529,7 @@ impl MobileStore {
     }
 
     pub fn delete(&self, record_id: &str) -> Result<(), String> {
-        self.set_lifecycle(record_id, "tombstone", "tombstone")
+        self.set_lifecycle(record_id, "trash", "trash")
     }
 
     #[allow(dead_code)]
@@ -402,6 +547,129 @@ impl MobileStore {
                 note_from_row,
             )
             .map_err(|error| error.to_string())
+    }
+
+    /// Permanently removes the record's content from normal product surfaces
+    /// while retaining its portable tombstone. No row is physically deleted.
+    #[allow(dead_code)]
+    pub fn tombstone(&self, record_id: &str) -> Result<(), String> {
+        self.set_lifecycle(record_id, "tombstone", "tombstone")
+    }
+
+    /// Recreates the disposable full-text index from authoritative note rows.
+    /// This never changes a portable record, revision, or outbox mutation.
+    #[allow(dead_code)]
+    pub fn rebuild_search_index(&self) -> Result<(), String> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        rebuild_mobile_search_schema(&mut connection)?;
+        verify_mobile_search_schema(&connection)
+    }
+
+    /// Produces a deterministic, checksummed JSON backup containing portable
+    /// UUID references only. SQLite row IDs and local filesystem paths are not
+    /// part of this format.
+    #[allow(dead_code)]
+    pub fn export_notes(&self) -> Result<String, String> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        verify_current_mobile_schema(&connection)?;
+        verify_mobile_search_schema(&connection)?;
+        let payload = read_mobile_notes_export(&connection)?;
+        validate_mobile_notes_export(&payload)?;
+        let payload_value = serde_json::to_value(&payload).map_err(|error| error.to_string())?;
+        serde_json::to_string_pretty(&MobileNotesExportEnvelope {
+            format: MOBILE_NOTES_EXPORT_FORMAT.to_string(),
+            format_version: MOBILE_NOTES_EXPORT_VERSION,
+            payload,
+            payload_sha256: canonical_sha256(&payload_value),
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    /// Restores an export into an empty initialized store. Portable record
+    /// identity is retained, while this installation keeps its newly generated
+    /// device identity and requires explicit re-enrollment before sync.
+    #[allow(dead_code)]
+    pub fn restore_notes_export(&self, export_json: &str) -> Result<usize, String> {
+        if export_json.len() > MAX_MOBILE_NOTES_EXPORT_BYTES {
+            return Err("mobile notes export exceeds the restore size limit".to_string());
+        }
+        let envelope: MobileNotesExportEnvelope = serde_json::from_str(export_json)
+            .map_err(|error| format!("invalid mobile notes export: {error}"))?;
+        if envelope.format != MOBILE_NOTES_EXPORT_FORMAT
+            || envelope.format_version != MOBILE_NOTES_EXPORT_VERSION
+        {
+            return Err("unsupported mobile notes export format".to_string());
+        }
+        let payload_value =
+            serde_json::to_value(&envelope.payload).map_err(|error| error.to_string())?;
+        if !is_sha256(&envelope.payload_sha256)
+            || canonical_sha256(&payload_value) != envelope.payload_sha256
+        {
+            return Err("mobile notes export payload checksum does not match".to_string());
+        }
+        validate_mobile_notes_export(&envelope.payload)?;
+
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| "mobile note store lock was poisoned".to_string())?;
+        verify_current_mobile_schema(&connection)?;
+        verify_mobile_search_schema(&connection)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let occupied: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM mobile_notes)
+                     OR EXISTS(SELECT 1 FROM mobile_note_outbox)",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if occupied {
+            return Err(
+                "mobile notes restore requires an empty store and will not overwrite existing records"
+                    .to_string(),
+            );
+        }
+        let fresh_replica = replica_identity(&transaction)?;
+        let restored_at = envelope
+            .payload
+            .notes
+            .iter()
+            .map(|note| note.updated_at)
+            .chain(envelope.payload.outbox.iter().flat_map(|outbox| {
+                [
+                    Some(outbox.created_at),
+                    outbox.superseded_at,
+                    outbox.acknowledged_at,
+                ]
+                .into_iter()
+                .flatten()
+            }))
+            .max()
+            .unwrap_or(0)
+            .max(now_millis()?);
+        write_mobile_notes_export(
+            &transaction,
+            &envelope.payload,
+            &fresh_replica.device_id,
+            &fresh_replica.install_id,
+            restored_at,
+        )?;
+        validate_replica_identity(&replica_identity(&transaction)?)?;
+        validate_portable_notes(&transaction)?;
+        validate_outbox_transaction_groups(&transaction)?;
+        validate_restored_export_links(&transaction)?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        verify_mobile_search_schema(&connection)?;
+        Ok(envelope.payload.notes.len())
     }
 
     /// Attach an unpaired phone's staging records to the library and default
@@ -455,6 +723,7 @@ impl MobileStore {
                    UNION ALL
                    SELECT 1 FROM mobile_note_outbox
                    WHERE state IN ('sending', 'acknowledged', 'conflict')
+                      OR attempts > 0
                       OR acknowledged_at IS NOT NULL
                  )",
                 [],
@@ -479,6 +748,7 @@ impl MobileStore {
             working_branch_id: String,
             canonical_hash: String,
             lifecycle_state: String,
+            trashed_at: Option<i64>,
             tombstoned_at: Option<i64>,
             provenance_json: String,
             scope_id: String,
@@ -490,7 +760,7 @@ impl MobileStore {
                 .prepare(
                     "SELECT id, record_id, title, body, created_at, updated_at,
                             working_revision, working_branch_id, canonical_hash, lifecycle_state,
-                            tombstoned_at, provenance_json, scope_id, scope_class
+                            trashed_at, tombstoned_at, provenance_json, scope_id, scope_class
                      FROM mobile_notes ORDER BY id",
                 )
                 .map_err(|error| error.to_string())?;
@@ -507,10 +777,11 @@ impl MobileStore {
                         working_branch_id: row.get(7)?,
                         canonical_hash: row.get(8)?,
                         lifecycle_state: row.get(9)?,
-                        tombstoned_at: row.get(10)?,
-                        provenance_json: row.get(11)?,
-                        scope_id: row.get(12)?,
-                        scope_class: row.get(13)?,
+                        trashed_at: row.get(10)?,
+                        tombstoned_at: row.get(11)?,
+                        provenance_json: row.get(12)?,
+                        scope_id: row.get(13)?,
+                        scope_class: row.get(14)?,
                     })
                 })
                 .map_err(|error| error.to_string())?;
@@ -541,7 +812,12 @@ impl MobileStore {
             .map_err(|error| error.to_string())?;
         let paired_identity = replica_identity(&transaction)?;
 
-        for note in &notes {
+        let outbox_transaction = if notes.is_empty() {
+            None
+        } else {
+            Some(begin_outbox_transaction(&transaction, notes.len())?)
+        };
+        for (member_index, note) in notes.iter().enumerate() {
             let scope_id = if note.scope_id == staging_identity.default_scope_id {
                 mac_default_scope_id
             } else {
@@ -550,7 +826,6 @@ impl MobileStore {
             let working_revision = note.working_revision.saturating_add(1);
             let working_version_id = new_uuid_v7();
             let mutation_id = new_uuid_v7();
-            let transaction_id = new_uuid_v7();
             transaction
                 .execute(
                     "UPDATE mobile_notes
@@ -578,6 +853,11 @@ impl MobileStore {
             enqueue_mutation(
                 &transaction,
                 &paired_identity,
+                outbox_transaction
+                    .as_ref()
+                    .expect("non-empty adoption has an outbox transaction"),
+                i64::try_from(member_index)
+                    .map_err(|_| "outbox transaction has too many members".to_string())?,
                 Mutation {
                     operation: "create",
                     record_id: &note.record_id,
@@ -591,9 +871,9 @@ impl MobileStore {
                     base_version_id: None,
                     accepted_content_hash: None,
                     mutation_id: &mutation_id,
-                    transaction_id: &transaction_id,
                     canonical_hash: &note.canonical_hash,
                     lifecycle_state: &note.lifecycle_state,
+                    trashed_at: note.trashed_at,
                     tombstoned_at: note.tombstoned_at,
                     created_at: note.created_at,
                     updated_at: note.updated_at,
@@ -627,10 +907,12 @@ impl MobileStore {
         }
         let state = portable_state(&transaction, record_id)?
             .ok_or_else(|| format!("note {record_id} does not exist"))?;
-        let expected_state = if lifecycle == "active" {
-            "tombstone"
-        } else {
-            "active"
+        ensure_noted_authority(&state)?;
+        let expected_state = match lifecycle {
+            "trash" => "active",
+            "active" => "trash",
+            "tombstone" => "trash",
+            state => return Err(format!("unsupported mobile note lifecycle {state}")),
         };
         if state.lifecycle_state != expected_state {
             return Err(format!("note {record_id} does not exist"));
@@ -647,8 +929,19 @@ impl MobileStore {
         let working_revision = state.working_revision.saturating_add(1);
         let working_version_id = new_uuid_v7();
         let mutation_id = new_uuid_v7();
-        let transaction_id = new_uuid_v7();
-        let tombstoned_at = (lifecycle == "tombstone").then_some(timestamp);
+        let outbox_transaction = begin_outbox_transaction(&transaction, 1)?;
+        let (trashed_at, tombstoned_at) =
+            match lifecycle {
+                "active" => (None, None),
+                "trash" => (Some(timestamp), None),
+                "tombstone" => (
+                    Some(state.trashed_at.ok_or_else(|| {
+                        format!("note {record_id} is missing its trash timestamp")
+                    })?),
+                    Some(timestamp),
+                ),
+                _ => unreachable!("lifecycle was validated above"),
+            };
         let canonical_hash = note_content_hash(&title, &body);
 
         let changed = transaction
@@ -657,19 +950,21 @@ impl MobileStore {
                  SET updated_at = ?1,
                      deleted_at = ?2,
                      lifecycle_state = ?3,
-                     tombstoned_at = ?2,
-                     working_revision = ?4,
-                     working_version_id = ?5,
+                     trashed_at = ?2,
+                     tombstoned_at = ?4,
+                     working_revision = ?5,
+                     working_version_id = ?6,
                      working_base_revision = accepted_revision,
-                     pending_mutation_id = ?6,
+                     pending_mutation_id = ?7,
                      sync_state = 'pending',
-                     canonical_hash = ?7,
-                     last_modified_device_id = ?8
-                 WHERE record_id = ?9 AND lifecycle_state = ?10",
+                     canonical_hash = ?8,
+                     last_modified_device_id = ?9
+                 WHERE record_id = ?10 AND lifecycle_state = ?11",
                 params![
                     timestamp,
-                    tombstoned_at,
+                    trashed_at,
                     lifecycle,
+                    tombstoned_at,
                     working_revision,
                     working_version_id,
                     mutation_id,
@@ -687,6 +982,8 @@ impl MobileStore {
         enqueue_mutation(
             &transaction,
             &identity,
+            &outbox_transaction,
+            0,
             Mutation {
                 operation,
                 record_id: &state.record_id,
@@ -700,9 +997,9 @@ impl MobileStore {
                 base_version_id: state.accepted_version_id.as_deref(),
                 accepted_content_hash: state.accepted_content_hash.as_deref(),
                 mutation_id: &mutation_id,
-                transaction_id: &transaction_id,
                 canonical_hash: &canonical_hash,
                 lifecycle_state: lifecycle,
+                trashed_at,
                 tombstoned_at,
                 created_at: state.created_at,
                 updated_at: timestamp,
@@ -713,6 +1010,807 @@ impl MobileStore {
         )?;
         transaction.commit().map_err(|error| error.to_string())
     }
+}
+
+fn ensure_mobile_search_schema(connection: &mut Connection) -> Result<(), String> {
+    let has_index: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sqlite_schema
+               WHERE type = 'table' AND name = 'mobile_notes_fts'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    create_mobile_search_objects(&transaction)?;
+    if !has_index {
+        populate_mobile_search_index(&transaction)?;
+    }
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+fn rebuild_mobile_search_schema(connection: &mut Connection) -> Result<(), String> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS mobile_notes_fts_insert;
+             DROP TRIGGER IF EXISTS mobile_notes_fts_update;
+             DROP TRIGGER IF EXISTS mobile_notes_fts_delete;
+             DROP TABLE IF EXISTS mobile_notes_fts;",
+        )
+        .map_err(|error| error.to_string())?;
+    create_mobile_search_objects(&transaction)?;
+    populate_mobile_search_index(&transaction)?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+fn create_mobile_search_objects(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS mobile_notes_fts USING fts5(
+               record_id UNINDEXED,
+               title,
+               body,
+               tokenize = 'unicode61 remove_diacritics 2'
+             );
+             CREATE TRIGGER IF NOT EXISTS mobile_notes_fts_insert
+             AFTER INSERT ON mobile_notes
+             WHEN NEW.lifecycle_state = 'active' AND NEW.deleted_at IS NULL
+             BEGIN
+               INSERT INTO mobile_notes_fts(record_id, title, body)
+               VALUES (NEW.record_id, NEW.title, NEW.body);
+             END;
+             CREATE TRIGGER IF NOT EXISTS mobile_notes_fts_update
+             AFTER UPDATE OF record_id, title, body, lifecycle_state, deleted_at ON mobile_notes
+             BEGIN
+               DELETE FROM mobile_notes_fts WHERE record_id = OLD.record_id;
+               INSERT INTO mobile_notes_fts(record_id, title, body)
+               SELECT NEW.record_id, NEW.title, NEW.body
+               WHERE NEW.lifecycle_state = 'active' AND NEW.deleted_at IS NULL;
+             END;
+             CREATE TRIGGER IF NOT EXISTS mobile_notes_fts_delete
+             AFTER DELETE ON mobile_notes
+             BEGIN
+               DELETE FROM mobile_notes_fts WHERE record_id = OLD.record_id;
+             END;",
+        )
+        .map_err(|error| format!("create mobile full-text search index: {error}"))
+}
+
+fn populate_mobile_search_index(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO mobile_notes_fts(record_id, title, body)
+             SELECT record_id, title, body
+             FROM mobile_notes
+             WHERE lifecycle_state = 'active' AND deleted_at IS NULL
+             ORDER BY record_id",
+            [],
+        )
+        .map(|_| ())
+        .map_err(|error| format!("populate mobile full-text search index: {error}"))
+}
+
+fn verify_mobile_search_schema(connection: &Connection) -> Result<(), String> {
+    let table_sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema
+             WHERE type = 'table' AND name = 'mobile_notes_fts'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if table_sql
+        .as_deref()
+        .is_none_or(|sql| !sql.to_ascii_lowercase().contains("using fts5"))
+    {
+        return Err("mobile full-text search index is missing or invalid".to_string());
+    }
+    let trigger_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'trigger'
+               AND name IN (
+                 'mobile_notes_fts_insert',
+                 'mobile_notes_fts_update',
+                 'mobile_notes_fts_delete'
+               )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if trigger_count != 3 {
+        return Err("mobile full-text search maintenance triggers are missing".to_string());
+    }
+    let divergence: i64 = connection
+        .query_row(
+            "SELECT
+               (SELECT COUNT(*) FROM (
+                  SELECT record_id, title, body FROM mobile_notes_fts
+                  EXCEPT
+                  SELECT record_id, title, body FROM mobile_notes
+                  WHERE lifecycle_state = 'active' AND deleted_at IS NULL
+                ))
+               +
+               (SELECT COUNT(*) FROM (
+                  SELECT record_id, title, body FROM mobile_notes
+                  WHERE lifecycle_state = 'active' AND deleted_at IS NULL
+                  EXCEPT
+                  SELECT record_id, title, body FROM mobile_notes_fts
+                ))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let duplicate_records: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM (
+               SELECT record_id FROM mobile_notes_fts
+               GROUP BY record_id HAVING COUNT(*) != 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if divergence != 0 || duplicate_records != 0 {
+        return Err("mobile full-text search index diverged from active notes".to_string());
+    }
+    Ok(())
+}
+
+fn read_mobile_notes_export(connection: &Connection) -> Result<MobileNotesExportPayload, String> {
+    let replica = connection
+        .query_row(
+            "SELECT library_id, device_id, install_id, default_scope_id,
+                    library_state, next_transaction_counter, created_at
+             FROM mobile_replica WHERE singleton = 1",
+            [],
+            |row| {
+                Ok(MobileReplicaExport {
+                    library_id: row.get(0)?,
+                    device_id: row.get(1)?,
+                    install_id: row.get(2)?,
+                    default_scope_id: row.get(3)?,
+                    library_state: row.get(4)?,
+                    next_transaction_counter: row.get(5)?,
+                    created_at: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    let notes = connection
+        .prepare(
+            "SELECT library_id, record_id, record_kind, record_schema_version,
+                    title, body, created_at, updated_at,
+                    accepted_revision, accepted_version_id, accepted_content_hash,
+                    working_revision, working_branch_id, working_version_id,
+                    working_base_revision, pending_mutation_id, sync_state,
+                    lifecycle_state, trashed_at, tombstoned_at, canonical_hash,
+                    authority, scope, scope_id, scope_class, sensitivity,
+                    provenance_json, origin_device_id, last_modified_device_id,
+                    origin_install_id
+             FROM mobile_notes ORDER BY record_id",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    let provenance_json: String = row.get(26)?;
+                    Ok(MobileNoteExport {
+                        library_id: row.get(0)?,
+                        record_id: row.get(1)?,
+                        record_kind: row.get(2)?,
+                        record_schema_version: row.get(3)?,
+                        title: row.get(4)?,
+                        body: row.get(5)?,
+                        created_at: row.get(6)?,
+                        updated_at: row.get(7)?,
+                        accepted_revision: row.get(8)?,
+                        accepted_version_id: row.get(9)?,
+                        accepted_content_hash: row.get(10)?,
+                        working_revision: row.get(11)?,
+                        working_branch_id: row.get(12)?,
+                        working_version_id: row.get(13)?,
+                        working_base_revision: row.get(14)?,
+                        pending_mutation_id: row.get(15)?,
+                        sync_state: row.get(16)?,
+                        lifecycle_state: row.get(17)?,
+                        trashed_at: row.get(18)?,
+                        tombstoned_at: row.get(19)?,
+                        canonical_hash: row.get(20)?,
+                        authority: row.get(21)?,
+                        scope: row.get(22)?,
+                        scope_id: row.get(23)?,
+                        scope_class: row.get(24)?,
+                        sensitivity: row.get(25)?,
+                        provenance: serde_json::from_str(&provenance_json)
+                            .unwrap_or(serde_json::Value::Null),
+                        origin_device_id: row.get(27)?,
+                        last_modified_device_id: row.get(28)?,
+                        origin_install_id: row.get(29)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|error| error.to_string())?;
+    let outbox = connection
+        .prepare(
+            "SELECT mutation_id, transaction_id, device_transaction_counter,
+                    transaction_member_index, transaction_member_count,
+                    library_id, device_id, install_id, scope_id, scope_class,
+                    record_id, record_kind, operation, base_revision,
+                    base_version_id, proposed_revision, local_revision,
+                    branch_id, version_id, canonical_hash, payload_json,
+                    state, eligible_for_sync, superseded_at, attempts,
+                    created_at, acknowledged_at
+             FROM mobile_note_outbox
+             ORDER BY device_transaction_counter, transaction_member_index, mutation_id",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    let payload_json: String = row.get(20)?;
+                    Ok(MobileOutboxExport {
+                        mutation_id: row.get(0)?,
+                        transaction_id: row.get(1)?,
+                        device_transaction_counter: row.get(2)?,
+                        transaction_member_index: row.get(3)?,
+                        transaction_member_count: row.get(4)?,
+                        library_id: row.get(5)?,
+                        device_id: row.get(6)?,
+                        install_id: row.get(7)?,
+                        scope_id: row.get(8)?,
+                        scope_class: row.get(9)?,
+                        record_id: row.get(10)?,
+                        record_kind: row.get(11)?,
+                        operation: row.get(12)?,
+                        base_revision: row.get(13)?,
+                        base_version_id: row.get(14)?,
+                        proposed_revision: row.get(15)?,
+                        local_revision: row.get(16)?,
+                        branch_id: row.get(17)?,
+                        version_id: row.get(18)?,
+                        canonical_hash: row.get(19)?,
+                        payload: serde_json::from_str(&payload_json)
+                            .unwrap_or(serde_json::Value::Null),
+                        state: row.get(21)?,
+                        eligible_for_sync: row.get::<_, i64>(22)? != 0,
+                        superseded_at: row.get(23)?,
+                        attempts: row.get(24)?,
+                        created_at: row.get(25)?,
+                        acknowledged_at: row.get(26)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(MobileNotesExportPayload {
+        replica,
+        notes,
+        outbox,
+    })
+}
+
+fn write_mobile_notes_export(
+    transaction: &Transaction<'_>,
+    payload: &MobileNotesExportPayload,
+    restored_device_id: &str,
+    restored_install_id: &str,
+    restored_at: i64,
+) -> Result<(), String> {
+    transaction
+        .execute("DELETE FROM mobile_replica WHERE singleton = 1", [])
+        .map_err(|error| error.to_string())?;
+    let replica = &payload.replica;
+    transaction
+        .execute(
+            "INSERT INTO mobile_replica (
+               singleton, library_id, device_id, install_id, default_scope_id,
+               library_state, next_transaction_counter, created_at
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                replica.library_id,
+                restored_device_id,
+                restored_install_id,
+                replica.default_scope_id,
+                "local_staging",
+                1_i64,
+                restored_at,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    for note in &payload.notes {
+        let provenance_json =
+            serde_json::to_string(&note.provenance).map_err(|error| error.to_string())?;
+        let deleted_at = match note.lifecycle_state.as_str() {
+            "active" => None,
+            "trash" | "tombstone" => note.trashed_at,
+            _ => return Err("mobile notes export contains an invalid lifecycle".to_string()),
+        };
+        transaction
+            .execute(
+                "INSERT INTO mobile_notes (
+                   title, body, created_at, updated_at, deleted_at,
+                   library_id, record_id, record_kind, record_schema_version,
+                   accepted_revision, accepted_version_id, accepted_content_hash,
+                   working_revision, working_branch_id, working_version_id,
+                   working_base_revision, pending_mutation_id, sync_state,
+                   lifecycle_state, trashed_at, tombstoned_at, canonical_hash,
+                   authority, scope, scope_id, scope_class, sensitivity,
+                   provenance_json, origin_device_id, last_modified_device_id,
+                   origin_install_id
+                 ) VALUES (
+                   ?1, ?2, ?3, ?4, ?5,
+                   ?6, ?7, ?8, ?9,
+                   ?10, ?11, ?12,
+                   ?13, ?14, ?15,
+                   ?16, ?17, ?18,
+                   ?19, ?20, ?21, ?22,
+                   ?23, ?24, ?25, ?26, ?27,
+                   ?28, ?29, ?30, ?31
+                 )",
+                params![
+                    note.title,
+                    note.body,
+                    note.created_at,
+                    note.updated_at,
+                    deleted_at,
+                    note.library_id,
+                    note.record_id,
+                    note.record_kind,
+                    note.record_schema_version,
+                    note.accepted_revision,
+                    note.accepted_version_id,
+                    note.accepted_content_hash,
+                    note.working_revision,
+                    note.working_branch_id,
+                    note.working_version_id,
+                    note.working_base_revision,
+                    note.pending_mutation_id,
+                    "restore_pending",
+                    note.lifecycle_state,
+                    note.trashed_at,
+                    note.tombstoned_at,
+                    note.canonical_hash,
+                    note.authority,
+                    note.scope,
+                    note.scope_id,
+                    note.scope_class,
+                    note.sensitivity,
+                    provenance_json,
+                    note.origin_device_id,
+                    note.last_modified_device_id,
+                    note.origin_install_id,
+                ],
+            )
+            .map_err(|error| format!("restore mobile note {}: {error}", note.record_id))?;
+    }
+    for outbox in &payload.outbox {
+        let payload_json =
+            serde_json::to_string(&outbox.payload).map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO mobile_note_outbox (
+                   mutation_id, transaction_id, device_transaction_counter,
+                   transaction_member_index, transaction_member_count,
+                   library_id, device_id, install_id, scope_id, scope_class,
+                   record_id, record_kind, operation, base_revision,
+                   base_version_id, proposed_revision, local_revision,
+                   branch_id, version_id, canonical_hash, payload_json,
+                   state, eligible_for_sync, superseded_at, attempts,
+                   created_at, acknowledged_at
+                 ) VALUES (
+                   ?1, ?2, ?3, ?4, ?5,
+                   ?6, ?7, ?8, ?9, ?10,
+                   ?11, ?12, ?13, ?14,
+                   ?15, ?16, ?17,
+                   ?18, ?19, ?20, ?21,
+                   ?22, ?23, ?24, ?25,
+                   ?26, ?27
+                 )",
+                params![
+                    outbox.mutation_id,
+                    outbox.transaction_id,
+                    outbox.device_transaction_counter,
+                    outbox.transaction_member_index,
+                    outbox.transaction_member_count,
+                    outbox.library_id,
+                    outbox.device_id,
+                    outbox.install_id,
+                    outbox.scope_id,
+                    outbox.scope_class,
+                    outbox.record_id,
+                    outbox.record_kind,
+                    outbox.operation,
+                    outbox.base_revision,
+                    outbox.base_version_id,
+                    outbox.proposed_revision,
+                    outbox.local_revision,
+                    outbox.branch_id,
+                    outbox.version_id,
+                    outbox.canonical_hash,
+                    payload_json,
+                    "superseded",
+                    0_i64,
+                    Some(restored_at),
+                    outbox.attempts,
+                    outbox.created_at,
+                    outbox.acknowledged_at,
+                ],
+            )
+            .map_err(|error| format!("restore mobile outbox mutation: {error}"))?;
+    }
+    Ok(())
+}
+
+fn validate_mobile_notes_export(payload: &MobileNotesExportPayload) -> Result<(), String> {
+    let replica = &payload.replica;
+    for (label, value) in [
+        ("libraryId", replica.library_id.as_str()),
+        ("deviceId", replica.device_id.as_str()),
+        ("installId", replica.install_id.as_str()),
+        ("defaultScopeId", replica.default_scope_id.as_str()),
+    ] {
+        if !is_uuid(value) {
+            return Err(format!(
+                "mobile notes export {label} is not a canonical UUID"
+            ));
+        }
+    }
+    if !matches!(replica.library_state.as_str(), "local_staging" | "paired")
+        || replica.next_transaction_counter <= 0
+        || replica.created_at < 0
+    {
+        return Err("mobile notes export replica state is invalid".to_string());
+    }
+
+    let mut record_ids = BTreeSet::new();
+    for note in &payload.notes {
+        if !record_ids.insert(note.record_id.as_str()) {
+            return Err(format!(
+                "mobile notes export repeats record {}",
+                note.record_id
+            ));
+        }
+        validate_mobile_note_export(note, replica)?;
+    }
+
+    let note_by_id = payload
+        .notes
+        .iter()
+        .map(|note| (note.record_id.as_str(), note))
+        .collect::<BTreeMap<_, _>>();
+    let mut mutation_ids = BTreeSet::new();
+    let mut eligible_counts = BTreeMap::<&str, usize>::new();
+    let mut max_transaction_counter = 0_i64;
+    for outbox in &payload.outbox {
+        if !mutation_ids.insert(outbox.mutation_id.as_str()) {
+            return Err("mobile notes export repeats an outbox mutation UUID".to_string());
+        }
+        let note = note_by_id.get(outbox.record_id.as_str()).ok_or_else(|| {
+            format!(
+                "mobile notes export mutation references missing record {}",
+                outbox.record_id
+            )
+        })?;
+        validate_mobile_outbox_export(outbox, replica)?;
+        if outbox.eligible_for_sync {
+            *eligible_counts
+                .entry(outbox.record_id.as_str())
+                .or_default() += 1;
+            if outbox.mutation_id != note.pending_mutation_id
+                || outbox.local_revision != note.working_revision
+                || outbox.branch_id != note.working_branch_id
+                || outbox.version_id != note.working_version_id
+                || outbox.canonical_hash != note.canonical_hash
+                || outbox.library_id != note.library_id
+                || outbox.scope_id != note.scope_id
+                || outbox.scope_class != note.scope_class
+            {
+                return Err(format!(
+                    "mobile notes export current mutation does not match record {}",
+                    note.record_id
+                ));
+            }
+        }
+        if outbox.device_id == replica.device_id {
+            max_transaction_counter =
+                max_transaction_counter.max(outbox.device_transaction_counter);
+        }
+    }
+    if eligible_counts.values().any(|count| *count != 1) {
+        return Err("mobile notes export has competing eligible record branches".to_string());
+    }
+    for note in &payload.notes {
+        if note.sync_state == "pending"
+            && eligible_counts.get(note.record_id.as_str()).copied() != Some(1)
+        {
+            return Err(format!(
+                "mobile notes export pending record {} has no eligible mutation",
+                note.record_id
+            ));
+        }
+    }
+    if replica.next_transaction_counter <= max_transaction_counter {
+        return Err(
+            "mobile notes export transaction counter would reuse an existing value".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_mobile_note_export(
+    note: &MobileNoteExport,
+    replica: &MobileReplicaExport,
+) -> Result<(), String> {
+    if note.library_id != replica.library_id
+        || note.record_kind != "note"
+        || note.record_schema_version != 1
+        || !is_uuid_v7(&note.record_id)
+        || !is_uuid(&note.working_branch_id)
+        || !is_uuid(&note.working_version_id)
+        || !is_uuid(&note.pending_mutation_id)
+        || !is_uuid(&note.scope_id)
+        || !is_uuid(&note.origin_device_id)
+        || !is_uuid(&note.last_modified_device_id)
+        || !is_uuid(&note.origin_install_id)
+    {
+        return Err(format!(
+            "mobile notes export record {} has invalid portable identity",
+            note.record_id
+        ));
+    }
+    if note.created_at < 0
+        || note.updated_at < note.created_at
+        || note.working_revision <= 0
+        || note.working_base_revision != note.accepted_revision
+        || !matches!(
+            note.sync_state.as_str(),
+            "pending" | "sending" | "acknowledged" | "conflict" | "clean" | "restore_pending"
+        )
+        || !matches!(note.authority.as_str(), "noted" | "external" | "derived")
+        || !matches!(note.scope_class.as_str(), "work" | "personal" | "unknown")
+        || !matches!(
+            note.sensitivity.as_str(),
+            "standard" | "sensitive" | "restricted"
+        )
+        || note.scope.trim().is_empty()
+        || !note.provenance.is_object()
+        || !is_sha256(&note.canonical_hash)
+        || note.canonical_hash != note_content_hash(&note.title, &note.body)
+    {
+        return Err(format!(
+            "mobile notes export record {} has invalid portable state",
+            note.record_id
+        ));
+    }
+    match (
+        note.accepted_revision,
+        note.accepted_version_id.as_deref(),
+        note.accepted_content_hash.as_deref(),
+    ) {
+        (0, None, None) => {}
+        (revision, Some(version_id), Some(content_hash))
+            if revision > 0 && is_uuid(version_id) && is_sha256(content_hash) => {}
+        _ => {
+            return Err(format!(
+                "mobile notes export record {} has an incoherent accepted head",
+                note.record_id
+            ))
+        }
+    }
+    let lifecycle_ok = match note.lifecycle_state.as_str() {
+        "active" => note.trashed_at.is_none() && note.tombstoned_at.is_none(),
+        "trash" => {
+            note.trashed_at
+                .is_some_and(|trashed_at| trashed_at >= note.created_at)
+                && note.tombstoned_at.is_none()
+        }
+        "tombstone" => match (note.trashed_at, note.tombstoned_at) {
+            (Some(trashed_at), Some(tombstoned_at)) => {
+                trashed_at >= note.created_at && tombstoned_at >= trashed_at
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    if !lifecycle_ok {
+        return Err(format!(
+            "mobile notes export record {} has an invalid lifecycle",
+            note.record_id
+        ));
+    }
+    Ok(())
+}
+
+fn validate_mobile_outbox_export(
+    outbox: &MobileOutboxExport,
+    replica: &MobileReplicaExport,
+) -> Result<(), String> {
+    if !is_uuid(&outbox.mutation_id)
+        || !is_uuid(&outbox.transaction_id)
+        || !is_uuid(&outbox.library_id)
+        || !is_uuid(&outbox.device_id)
+        || !is_uuid(&outbox.install_id)
+        || !is_uuid(&outbox.scope_id)
+        || !is_uuid_v7(&outbox.record_id)
+        || !is_uuid(&outbox.branch_id)
+        || !is_uuid(&outbox.version_id)
+        || outbox
+            .base_version_id
+            .as_deref()
+            .is_some_and(|id| !is_uuid(id))
+        || outbox.record_kind != "note"
+        || !matches!(outbox.scope_class.as_str(), "work" | "personal" | "unknown")
+        || !matches!(
+            outbox.operation.as_str(),
+            "create" | "update" | "trash" | "tombstone" | "restore"
+        )
+        || !matches!(
+            outbox.state.as_str(),
+            "pending" | "superseded" | "sending" | "acknowledged" | "conflict"
+        )
+        || outbox.device_transaction_counter <= 0
+        || outbox.transaction_member_index < 0
+        || outbox.transaction_member_count <= 0
+        || outbox.transaction_member_index >= outbox.transaction_member_count
+        || outbox.base_revision < 0
+        || outbox.proposed_revision <= 0
+        || outbox.local_revision <= 0
+        || !is_sha256(&outbox.canonical_hash)
+        || outbox.attempts < 0
+        || outbox.created_at < 0
+        || outbox
+            .superseded_at
+            .is_some_and(|timestamp| timestamp < outbox.created_at)
+        || outbox
+            .acknowledged_at
+            .is_some_and(|timestamp| timestamp < outbox.created_at)
+    {
+        return Err(format!(
+            "mobile notes export mutation {} is invalid",
+            outbox.mutation_id
+        ));
+    }
+    if outbox.eligible_for_sync
+        && (outbox.library_id != replica.library_id
+            || outbox.device_id != replica.device_id
+            || outbox.install_id != replica.install_id)
+    {
+        return Err(format!(
+            "mobile notes export current mutation {} does not belong to its replica",
+            outbox.mutation_id
+        ));
+    }
+    if outbox.base_revision == 0 && outbox.base_version_id.is_some()
+        || outbox.base_revision > 0 && outbox.base_version_id.is_none()
+    {
+        return Err(format!(
+            "mobile notes export mutation {} has an incoherent base head",
+            outbox.mutation_id
+        ));
+    }
+    validate_export_mutation_payload(outbox)
+}
+
+fn validate_export_mutation_payload(outbox: &MobileOutboxExport) -> Result<(), String> {
+    let payload = outbox.payload.as_object().ok_or_else(|| {
+        format!(
+            "mobile notes export mutation {} payload is not an object",
+            outbox.mutation_id
+        )
+    })?;
+    let proposed = payload
+        .get("proposed_record")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "mobile notes export mutation is missing proposed_record".to_string())?;
+    let branch = proposed
+        .get("local_branch")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "mobile notes export mutation is missing local_branch".to_string())?;
+    let content = proposed
+        .get("content")
+        .ok_or_else(|| "mobile notes export mutation is missing content".to_string())?;
+    let expected_updated_at = rfc3339_from_millis(outbox.created_at);
+    let valid = payload
+        .get("mutation_contract_version")
+        .and_then(serde_json::Value::as_str)
+        == Some("noted.mobile-note-mutation.shadow.v1")
+        && payload.get("operation").and_then(serde_json::Value::as_str)
+            == Some(outbox.operation.as_str())
+        && payload
+            .get("proposed_revision")
+            .and_then(serde_json::Value::as_i64)
+            == Some(outbox.proposed_revision)
+        && proposed
+            .get("proposal_contract_version")
+            .and_then(serde_json::Value::as_str)
+            == Some("noted.proposed-record.v1")
+        && proposed
+            .get("library_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(outbox.library_id.as_str())
+        && proposed
+            .get("record_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(outbox.record_id.as_str())
+        && proposed.get("kind").and_then(serde_json::Value::as_str) == Some("note")
+        && proposed
+            .get("record_schema_version")
+            .and_then(serde_json::Value::as_i64)
+            == Some(1)
+        && proposed
+            .get("content_hash")
+            .and_then(serde_json::Value::as_str)
+            == Some(outbox.canonical_hash.as_str())
+        && canonical_sha256(content) == outbox.canonical_hash
+        && proposed
+            .get("updated_at")
+            .and_then(serde_json::Value::as_str)
+            == Some(expected_updated_at.as_str())
+        && proposed
+            .get("scope")
+            .and_then(|scope| scope.get("scope_id"))
+            .and_then(serde_json::Value::as_str)
+            == Some(outbox.scope_id.as_str())
+        && branch.get("branch_id").and_then(serde_json::Value::as_str)
+            == Some(outbox.branch_id.as_str())
+        && branch
+            .get("working_version_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(outbox.version_id.as_str())
+        && branch
+            .get("base_revision")
+            .and_then(serde_json::Value::as_i64)
+            == Some(outbox.base_revision)
+        && branch
+            .get("local_revision")
+            .and_then(serde_json::Value::as_i64)
+            == Some(outbox.local_revision)
+        && branch
+            .get("content_hash")
+            .and_then(serde_json::Value::as_str)
+            == Some(outbox.canonical_hash.as_str());
+    if !valid {
+        return Err(format!(
+            "mobile notes export mutation {} payload does not match its portable envelope",
+            outbox.mutation_id
+        ));
+    }
+    Ok(())
+}
+
+fn validate_restored_export_links(connection: &Connection) -> Result<(), String> {
+    let invalid_current_mutations: i64 = connection
+        .query_row(
+            "SELECT COUNT(*)
+             FROM mobile_note_outbox AS outbox
+             LEFT JOIN mobile_notes AS notes ON notes.record_id = outbox.record_id
+             WHERE notes.record_id IS NULL
+                OR (outbox.eligible_for_sync = 1 AND (
+                     notes.pending_mutation_id != outbox.mutation_id
+                  OR notes.working_revision != outbox.local_revision
+                  OR notes.working_branch_id != outbox.branch_id
+                  OR notes.working_version_id != outbox.version_id
+                  OR notes.canonical_hash != outbox.canonical_hash
+                  OR notes.library_id != outbox.library_id
+                  OR notes.scope_id != outbox.scope_id
+                  OR notes.scope_class != outbox.scope_class
+                ))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if invalid_current_mutations != 0 {
+        return Err("restored mobile notes contain invalid outbox references".to_string());
+    }
+    Ok(())
 }
 
 fn prepare_mobile_migration_recovery(
@@ -742,7 +1840,10 @@ fn prepare_mobile_migration_recovery(
     if user_version < 0 {
         return Err("mobile database schema version cannot be negative".to_string());
     }
-    if user_version == PORTABLE_SCHEMA_VERSION || database_path == Path::new(":memory:") {
+    if user_version == 1 {
+        verify_mobile_schema_v1(connection)?;
+    }
+    if database_path == Path::new(":memory:") {
         return Ok(None);
     }
 
@@ -909,6 +2010,19 @@ fn migrate_portable_notes(
     connection: &mut Connection,
     recovery_path: Option<&Path>,
 ) -> Result<(), String> {
+    migrate_portable_notes_to_version(connection, recovery_path, PORTABLE_SCHEMA_VERSION)
+}
+
+fn migrate_portable_notes_to_version(
+    connection: &mut Connection,
+    recovery_path: Option<&Path>,
+    target_version: i64,
+) -> Result<(), String> {
+    if !matches!(target_version, 1 | PORTABLE_SCHEMA_VERSION) {
+        return Err(format!(
+            "unsupported mobile migration target {target_version}"
+        ));
+    }
     let user_version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(|error| error.to_string())?;
@@ -922,6 +2036,14 @@ fn migrate_portable_notes(
     }
     if user_version < 0 {
         return Err("mobile database schema version cannot be negative".to_string());
+    }
+    if user_version == 1 {
+        verify_mobile_schema_v1(connection)?;
+        migrate_mobile_schema_v2(connection, recovery_path)?;
+        return verify_current_mobile_schema(connection);
+    }
+    if user_version != 0 {
+        return Err(format!("unsupported mobile database schema {user_version}"));
     }
 
     let transaction = connection
@@ -1062,7 +2184,7 @@ fn migrate_portable_notes(
     validate_replica_identity(&identity)?;
 
     backfill_portable_notes(&transaction, &identity)?;
-    validate_portable_notes(&transaction)?;
+    validate_portable_notes_v1(&transaction)?;
     transaction
         .execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_mobile_notes_record_id
@@ -1078,9 +2200,9 @@ fn migrate_portable_notes(
                (version, name, checksum, migrated_at, product_version)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
-                PORTABLE_SCHEMA_VERSION,
-                PORTABLE_MIGRATION_NAME,
-                PORTABLE_SCHEMA_CHECKSUM,
+                1,
+                PORTABLE_MIGRATION_V1_NAME,
+                PORTABLE_SCHEMA_V1_CHECKSUM,
                 migration_time,
                 env!("CARGO_PKG_VERSION"),
             ],
@@ -1094,8 +2216,8 @@ fn migrate_portable_notes(
                migration_recovery_path
              ) VALUES (1, ?1, ?1, ?1, ?2, ?3, ?4, ?5)",
             params![
-                PORTABLE_SCHEMA_VERSION,
-                PORTABLE_SCHEMA_CHECKSUM,
+                1,
+                PORTABLE_SCHEMA_V1_CHECKSUM,
                 migration_time,
                 env!("CARGO_PKG_VERSION"),
                 recovery_path,
@@ -1106,9 +2228,14 @@ fn migrate_portable_notes(
         .pragma_update(None, "application_id", MOBILE_APPLICATION_ID)
         .map_err(|error| error.to_string())?;
     transaction
-        .pragma_update(None, "user_version", PORTABLE_SCHEMA_VERSION)
+        .pragma_update(None, "user_version", 1)
         .map_err(|error| error.to_string())?;
-    transaction.commit().map_err(|error| error.to_string())
+    transaction.commit().map_err(|error| error.to_string())?;
+    if target_version == 1 {
+        return verify_mobile_schema_v1(connection);
+    }
+    migrate_mobile_schema_v2(connection, None)?;
+    verify_current_mobile_schema(connection)
 }
 
 fn legacy_staging_identity(
@@ -1158,7 +2285,229 @@ fn legacy_staging_identity(
     Ok((library_id, scope_id))
 }
 
+fn verify_mobile_schema_v1(connection: &Connection) -> Result<(), String> {
+    let user_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if user_version != 1 {
+        return Err(format!(
+            "mobile schema v1 verifier received user_version {user_version}"
+        ));
+    }
+    let application_id: i64 = connection
+        .pragma_query_value(None, "application_id", |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if application_id != MOBILE_APPLICATION_ID {
+        return Err(format!(
+            "mobile database is missing the expected application_id {MOBILE_APPLICATION_ID:#010x}"
+        ));
+    }
+    let state = connection
+        .query_row(
+            "SELECT schema_version, min_reader_version, min_writer_version,
+                    migration_checksum
+             FROM mobile_schema_state WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .map_err(|error| format!("mobile database compatibility stamp is invalid: {error}"))?;
+    if state.0 != 1 || state.1 != 1 || state.2 != 1 {
+        return Err("mobile schema v1 compatibility floor is invalid".to_string());
+    }
+    if state.3 != PORTABLE_SCHEMA_V1_CHECKSUM {
+        return Err("mobile schema v1 checksum does not match this binary".to_string());
+    }
+    let history = connection
+        .query_row(
+            "SELECT name, checksum FROM mobile_schema_migrations WHERE version = 1",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(|error| format!("mobile migration v1 history is invalid: {error}"))?;
+    if history.0 != PORTABLE_MIGRATION_V1_NAME || history.1 != PORTABLE_SCHEMA_V1_CHECKSUM {
+        return Err("mobile migration v1 history does not match this binary".to_string());
+    }
+    let history_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM mobile_schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| error.to_string())?;
+    if history_count != 1 {
+        return Err("mobile migration v1 history is not contiguous".to_string());
+    }
+    verify_migration_history_guards(connection)?;
+    verify_mobile_database_integrity(connection)?;
+    let identity = replica_identity(connection)?;
+    validate_replica_identity(&identity)?;
+    validate_portable_notes_v1(connection)?;
+    let duplicate_eligible: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM (
+               SELECT record_id FROM mobile_note_outbox
+               WHERE eligible_for_sync = 1
+               GROUP BY record_id HAVING COUNT(*) > 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if duplicate_eligible != 0 {
+        return Err("mobile outbox v1 has competing eligible branches".to_string());
+    }
+    Ok(())
+}
+
+fn migrate_mobile_schema_v2(
+    connection: &mut Connection,
+    recovery_path: Option<&Path>,
+) -> Result<(), String> {
+    verify_mobile_schema_v1(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    ensure_columns(&transaction, "mobile_notes", &[("trashed_at", "INTEGER")])?;
+
+    // V1 had one destructive-looking delete transition. Preserve those rows as
+    // tombstones, reconstructing the required prior trash instant from the
+    // legacy deletion instant. No content row is physically removed.
+    transaction
+        .execute_batch(
+            "UPDATE mobile_notes
+             SET lifecycle_state = 'active', deleted_at = NULL,
+                 trashed_at = NULL, tombstoned_at = NULL
+             WHERE lifecycle_state = 'active';
+             UPDATE mobile_notes
+             SET lifecycle_state = 'tombstone',
+                 trashed_at = MAX(created_at, COALESCE(deleted_at, tombstoned_at, updated_at)),
+                 tombstoned_at = MAX(created_at, COALESCE(tombstoned_at, deleted_at, updated_at)),
+                 deleted_at = MAX(created_at, COALESCE(deleted_at, tombstoned_at, updated_at))
+             WHERE lifecycle_state = 'tombstone' OR deleted_at IS NOT NULL;",
+        )
+        .map_err(|error| error.to_string())?;
+
+    transaction
+        .execute_batch(
+            "CREATE TABLE mobile_note_outbox_v2 (
+               local_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+               mutation_id TEXT NOT NULL UNIQUE,
+               transaction_id TEXT NOT NULL,
+               device_transaction_counter INTEGER NOT NULL,
+               transaction_member_index INTEGER NOT NULL CHECK (transaction_member_index >= 0),
+               transaction_member_count INTEGER NOT NULL CHECK (transaction_member_count > 0),
+               library_id TEXT NOT NULL,
+               device_id TEXT NOT NULL,
+               install_id TEXT NOT NULL,
+               scope_id TEXT NOT NULL,
+               scope_class TEXT NOT NULL,
+               record_id TEXT NOT NULL,
+               record_kind TEXT NOT NULL DEFAULT 'note',
+               operation TEXT NOT NULL CHECK (operation IN ('create', 'update', 'trash', 'tombstone', 'restore')),
+               base_revision INTEGER NOT NULL,
+               base_version_id TEXT,
+               proposed_revision INTEGER NOT NULL,
+               local_revision INTEGER NOT NULL,
+               branch_id TEXT NOT NULL,
+               version_id TEXT NOT NULL,
+               canonical_hash TEXT NOT NULL,
+               payload_json TEXT NOT NULL,
+               state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'superseded', 'sending', 'acknowledged', 'conflict')),
+               eligible_for_sync INTEGER NOT NULL DEFAULT 1,
+               superseded_at INTEGER,
+               attempts INTEGER NOT NULL DEFAULT 0,
+               created_at INTEGER NOT NULL,
+               acknowledged_at INTEGER,
+               CHECK (transaction_member_index < transaction_member_count),
+               UNIQUE(transaction_id, transaction_member_index),
+               UNIQUE(device_id, device_transaction_counter, transaction_member_index),
+               UNIQUE(record_id, local_revision)
+             );
+             INSERT INTO mobile_note_outbox_v2 (
+               local_sequence, mutation_id, transaction_id, device_transaction_counter,
+               transaction_member_index, transaction_member_count,
+               library_id, device_id, install_id, scope_id, scope_class,
+               record_id, record_kind, operation, base_revision, base_version_id,
+               proposed_revision, local_revision, branch_id, version_id,
+               canonical_hash, payload_json, state, eligible_for_sync,
+               superseded_at, attempts, created_at, acknowledged_at
+             )
+             SELECT local_sequence, mutation_id, transaction_id, device_transaction_counter,
+                    0, 1,
+                    library_id, device_id, install_id, scope_id, scope_class,
+                    record_id, record_kind, operation, base_revision, base_version_id,
+                    proposed_revision, local_revision, branch_id, version_id,
+                    canonical_hash, payload_json, state, eligible_for_sync,
+                    superseded_at, attempts, created_at, acknowledged_at
+             FROM mobile_note_outbox ORDER BY local_sequence;
+             DROP TABLE mobile_note_outbox;
+             ALTER TABLE mobile_note_outbox_v2 RENAME TO mobile_note_outbox;
+             CREATE INDEX idx_mobile_note_outbox_pending
+               ON mobile_note_outbox(state, local_sequence);
+             CREATE INDEX idx_mobile_note_outbox_record
+               ON mobile_note_outbox(record_id, local_revision);",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let migration_time = now_millis()?;
+    let inserted_history = transaction
+        .execute(
+            "INSERT INTO mobile_schema_migrations
+               (version, name, checksum, migrated_at, product_version)
+             VALUES (2, ?1, ?2, ?3, ?4)",
+            params![
+                PORTABLE_MIGRATION_V2_NAME,
+                PORTABLE_SCHEMA_V2_CHECKSUM,
+                migration_time,
+                env!("CARGO_PKG_VERSION"),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if inserted_history != 1 {
+        return Err("mobile schema v2 could not append its migration history".to_string());
+    }
+    let updated_state = transaction
+        .execute(
+            "UPDATE mobile_schema_state
+             SET schema_version = 2,
+                 min_reader_version = 2,
+                 min_writer_version = 2,
+                 migration_checksum = ?1,
+                 migrated_at = ?2,
+                 product_version = ?3,
+                 migration_recovery_path = COALESCE(?4, migration_recovery_path)
+             WHERE singleton = 1 AND schema_version = 1",
+            params![
+                PORTABLE_SCHEMA_V2_CHECKSUM,
+                migration_time,
+                env!("CARGO_PKG_VERSION"),
+                recovery_path.map(|path| path.to_string_lossy().into_owned()),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if updated_state != 1 {
+        return Err("mobile schema v2 could not advance its compatibility stamp".to_string());
+    }
+    transaction
+        .pragma_update(None, "user_version", 2)
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
 fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
+    let user_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if user_version != PORTABLE_SCHEMA_VERSION {
+        return Err(format!(
+            "mobile schema verifier expected user_version {PORTABLE_SCHEMA_VERSION}, found {user_version}"
+        ));
+    }
     let application_id: i64 = connection
         .pragma_query_value(None, "application_id", |row| row.get(0))
         .map_err(|error| error.to_string())?;
@@ -1190,31 +2539,41 @@ fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
             state.0
         ));
     }
-    if state.1 > PORTABLE_SCHEMA_VERSION {
+    if state.1 != PORTABLE_SCHEMA_VERSION {
         return Err(format!(
-            "mobile database requires reader protocol {} but this app supports {PORTABLE_SCHEMA_VERSION}",
+            "mobile database reader protocol floor {} does not match schema {PORTABLE_SCHEMA_VERSION}",
             state.1
         ));
     }
-    if state.2 > PORTABLE_SCHEMA_VERSION {
+    if state.2 != PORTABLE_SCHEMA_VERSION {
         return Err(format!(
-            "mobile database requires writer protocol {} but this app supports {PORTABLE_SCHEMA_VERSION}",
+            "mobile database writer protocol floor {} does not match schema {PORTABLE_SCHEMA_VERSION}",
             state.2
         ));
     }
-    if state.3 != PORTABLE_SCHEMA_CHECKSUM {
+    if state.3 != PORTABLE_SCHEMA_V2_CHECKSUM {
         return Err("mobile schema-state checksum does not match this binary".to_string());
     }
 
-    let history = connection
+    let history_v1 = connection
         .query_row(
-            "SELECT name, checksum FROM mobile_schema_migrations WHERE version = ?1",
-            [PORTABLE_SCHEMA_VERSION],
+            "SELECT name, checksum FROM mobile_schema_migrations WHERE version = 1",
+            [],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
-        .map_err(|error| format!("mobile migration history is invalid: {error}"))?;
-    if history.0 != PORTABLE_MIGRATION_NAME || history.1 != PORTABLE_SCHEMA_CHECKSUM {
-        return Err("mobile migration history does not match this binary".to_string());
+        .map_err(|error| format!("mobile migration v1 history is invalid: {error}"))?;
+    if history_v1.0 != PORTABLE_MIGRATION_V1_NAME || history_v1.1 != PORTABLE_SCHEMA_V1_CHECKSUM {
+        return Err("mobile migration v1 history does not match this binary".to_string());
+    }
+    let history_v2 = connection
+        .query_row(
+            "SELECT name, checksum FROM mobile_schema_migrations WHERE version = 2",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(|error| format!("mobile migration v2 history is invalid: {error}"))?;
+    if history_v2.0 != PORTABLE_MIGRATION_V2_NAME || history_v2.1 != PORTABLE_SCHEMA_V2_CHECKSUM {
+        return Err("mobile migration v2 history does not match this binary".to_string());
     }
     let history_count: i64 = connection
         .query_row("SELECT COUNT(*) FROM mobile_schema_migrations", [], |row| {
@@ -1224,7 +2583,55 @@ fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
     if history_count != PORTABLE_SCHEMA_VERSION {
         return Err("mobile migration history is not contiguous".to_string());
     }
+    verify_migration_history_guards(connection)?;
 
+    verify_mobile_database_integrity(connection)?;
+
+    let required_v2_columns: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('mobile_note_outbox')
+             WHERE name IN ('transaction_member_index', 'transaction_member_count')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let has_trashed_at: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pragma_table_info('mobile_notes') WHERE name = 'trashed_at'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if required_v2_columns != 2 || !has_trashed_at {
+        return Err(
+            "mobile schema v2 is missing required lifecycle or transaction columns".to_string(),
+        );
+    }
+
+    let identity = replica_identity(connection)?;
+    validate_replica_identity(&identity)?;
+    validate_portable_notes(connection)?;
+    let duplicate_eligible: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM (
+               SELECT record_id FROM mobile_note_outbox
+               WHERE eligible_for_sync = 1
+               GROUP BY record_id HAVING COUNT(*) > 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if duplicate_eligible != 0 {
+        return Err("mobile outbox has competing eligible branches".to_string());
+    }
+    validate_outbox_transaction_groups(connection)?;
+    Ok(())
+}
+
+fn verify_mobile_database_integrity(connection: &Connection) -> Result<(), String> {
     let quick_check = connection
         .prepare("PRAGMA quick_check")
         .and_then(|mut statement| {
@@ -1247,22 +2654,56 @@ fn verify_current_mobile_schema(connection: &Connection) -> Result<(), String> {
         return Err("mobile database foreign_key_check failed".to_string());
     }
 
-    let identity = replica_identity(connection)?;
-    validate_replica_identity(&identity)?;
-    validate_portable_notes(connection)?;
-    let duplicate_eligible: i64 = connection
+    Ok(())
+}
+
+fn verify_migration_history_guards(connection: &Connection) -> Result<(), String> {
+    let guard_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'trigger'
+               AND name IN (
+                 'mobile_schema_migrations_no_update',
+                 'mobile_schema_migrations_no_delete'
+               )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if guard_count != 2 {
+        return Err("mobile migration history append-only guards are missing".to_string());
+    }
+    Ok(())
+}
+
+fn validate_outbox_transaction_groups(connection: &Connection) -> Result<(), String> {
+    let invalid_groups: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM (
-               SELECT record_id FROM mobile_note_outbox
-               WHERE eligible_for_sync = 1
-               GROUP BY record_id HAVING COUNT(*) > 1
+               SELECT transaction_id
+               FROM mobile_note_outbox
+               GROUP BY transaction_id
+               HAVING COUNT(*) != MAX(transaction_member_count)
+                  OR MIN(transaction_member_count) != MAX(transaction_member_count)
+                  OR MIN(transaction_member_index) != 0
+                  OR MAX(transaction_member_index) != MAX(transaction_member_count) - 1
+                  OR COUNT(DISTINCT transaction_member_index) != COUNT(*)
+                  OR MIN(device_transaction_counter) != MAX(device_transaction_counter)
+                  OR MIN(device_id) != MAX(device_id)
+                  OR MIN(library_id) != MAX(library_id)
+                  OR MIN(install_id) != MAX(install_id)
+                  OR MIN(state) != MAX(state)
+                  OR MIN(eligible_for_sync) != MAX(eligible_for_sync)
+                  OR MIN(attempts) != MAX(attempts)
              )",
             [],
             |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
-    if duplicate_eligible != 0 {
-        return Err("mobile outbox has competing eligible branches".to_string());
+    if invalid_groups != 0 {
+        return Err(format!(
+            "mobile outbox contains {invalid_groups} incomplete or incoherent transaction groups"
+        ));
     }
     Ok(())
 }
@@ -1398,6 +2839,8 @@ fn backfill_portable_notes(
         provenance_json: Option<String>,
         scope_id: Option<String>,
         scope_class: Option<String>,
+        lifecycle_state: Option<String>,
+        tombstoned_at: Option<i64>,
     }
 
     let rows = {
@@ -1407,7 +2850,8 @@ fn backfill_portable_notes(
                         record_id, accepted_revision, accepted_version_id,
                         accepted_content_hash, working_revision, working_branch_id,
                         working_version_id, pending_mutation_id, canonical_hash,
-                        provenance_json, scope_id, scope_class
+                        provenance_json, scope_id, scope_class,
+                        lifecycle_state, tombstoned_at
                  FROM mobile_notes ORDER BY id",
             )
             .map_err(|error| error.to_string())?;
@@ -1432,6 +2876,8 @@ fn backfill_portable_notes(
                     provenance_json: row.get(15)?,
                     scope_id: row.get(16)?,
                     scope_class: row.get(17)?,
+                    lifecycle_state: row.get(18)?,
+                    tombstoned_at: row.get(19)?,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -1459,11 +2905,19 @@ fn backfill_portable_notes(
             .unwrap_or_else(|| r#"{"source":"iphone_prototype_migration"}"#.to_string());
         let scope_id = nonempty(row.scope_id).unwrap_or_else(|| identity.default_scope_id.clone());
         let scope_class = nonempty(row.scope_class).unwrap_or_else(|| "personal".to_string());
-        let lifecycle_state = if row.deleted_at.is_some() {
-            "tombstone"
-        } else {
-            "active"
-        };
+        let was_deleted = row.deleted_at.is_some()
+            || row.tombstoned_at.is_some()
+            || matches!(
+                row.lifecycle_state.as_deref(),
+                Some("deleted" | "trash" | "tombstone")
+            );
+        let lifecycle_state = if was_deleted { "tombstone" } else { "active" };
+        let legacy_tombstone_time = was_deleted.then(|| {
+            row.deleted_at
+                .or(row.tombstoned_at)
+                .unwrap_or(row.updated_at)
+                .max(row.created_at)
+        });
 
         transaction
             .execute(
@@ -1479,22 +2933,20 @@ fn backfill_portable_notes(
                    working_base_revision = COALESCE(working_base_revision, ?3),
                    pending_mutation_id = ?7,
                    sync_state = COALESCE(NULLIF(sync_state, ''), 'pending'),
-                   lifecycle_state = COALESCE(NULLIF(lifecycle_state, ''), ?8),
-                   tombstoned_at = CASE
-                     WHEN ?8 = 'tombstone' THEN COALESCE(tombstoned_at, deleted_at)
-                     ELSE NULL
-                   END,
-                   canonical_hash = ?9,
+                   lifecycle_state = ?8,
+                   deleted_at = ?9,
+                   tombstoned_at = ?9,
+                   canonical_hash = ?10,
                    authority = COALESCE(NULLIF(authority, ''), 'noted'),
                    scope = COALESCE(NULLIF(scope, ''), 'personal'),
-                   scope_id = ?10,
-                   scope_class = ?11,
+                   scope_id = ?11,
+                   scope_class = ?12,
                    sensitivity = COALESCE(NULLIF(sensitivity, ''), 'standard'),
-                   provenance_json = ?12,
-                   origin_device_id = COALESCE(NULLIF(origin_device_id, ''), ?13),
-                   last_modified_device_id = COALESCE(NULLIF(last_modified_device_id, ''), ?13),
-                   origin_install_id = COALESCE(NULLIF(origin_install_id, ''), ?14)
-                 WHERE id = ?15",
+                   provenance_json = ?13,
+                   origin_device_id = COALESCE(NULLIF(origin_device_id, ''), ?14),
+                   last_modified_device_id = COALESCE(NULLIF(last_modified_device_id, ''), ?14),
+                   origin_install_id = COALESCE(NULLIF(origin_install_id, ''), ?15)
+                 WHERE id = ?16",
                 params![
                     identity.library_id,
                     record_id,
@@ -1504,6 +2956,7 @@ fn backfill_portable_notes(
                     working_version_id,
                     pending_mutation_id,
                     lifecycle_state,
+                    legacy_tombstone_time,
                     canonical_hash,
                     scope_id,
                     scope_class,
@@ -1525,10 +2978,12 @@ fn backfill_portable_notes(
             )
             .map_err(|error| error.to_string())?;
         if !has_outbox {
-            let transaction_id = new_uuid_v7();
+            let outbox_transaction = begin_outbox_transaction(transaction, 1)?;
             enqueue_mutation(
                 transaction,
                 identity,
+                &outbox_transaction,
+                0,
                 Mutation {
                     operation: "create",
                     record_id: &record_id,
@@ -1542,10 +2997,10 @@ fn backfill_portable_notes(
                     base_version_id: row.accepted_version_id.as_deref(),
                     accepted_content_hash: row.accepted_content_hash.as_deref(),
                     mutation_id: &pending_mutation_id,
-                    transaction_id: &transaction_id,
                     canonical_hash: &canonical_hash,
                     lifecycle_state,
-                    tombstoned_at: row.deleted_at,
+                    trashed_at: legacy_tombstone_time,
+                    tombstoned_at: legacy_tombstone_time,
                     created_at: row.created_at,
                     updated_at: row.updated_at,
                     provenance_json: &provenance_json,
@@ -1571,7 +3026,7 @@ fn backfill_portable_notes(
     Ok(())
 }
 
-fn validate_portable_notes(connection: &Connection) -> Result<(), String> {
+fn validate_portable_notes_v1(connection: &Connection) -> Result<(), String> {
     let invalid: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM mobile_notes
@@ -1593,7 +3048,11 @@ fn validate_portable_notes(connection: &Connection) -> Result<(), String> {
                 OR provenance_json IS NULL OR provenance_json = ''
                 OR origin_device_id IS NULL OR origin_device_id = ''
                 OR last_modified_device_id IS NULL OR last_modified_device_id = ''
-                OR origin_install_id IS NULL OR origin_install_id = ''",
+                OR origin_install_id IS NULL OR origin_install_id = ''
+                OR (lifecycle_state = 'active' AND
+                    (deleted_at IS NOT NULL OR tombstoned_at IS NOT NULL))
+                OR (lifecycle_state = 'tombstone' AND
+                    (deleted_at IS NULL OR tombstoned_at IS NULL))",
             [],
             |row| row.get(0),
         )
@@ -1603,6 +3062,54 @@ fn validate_portable_notes(connection: &Connection) -> Result<(), String> {
             "portable mobile note migration left {invalid} invalid rows"
         ));
     }
+    validate_portable_identifiers(connection)
+}
+
+fn validate_portable_notes(connection: &Connection) -> Result<(), String> {
+    let invalid: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM mobile_notes
+             WHERE library_id IS NULL OR library_id = ''
+                OR record_id IS NULL OR record_id = ''
+                OR record_kind != 'note'
+                OR record_schema_version IS NULL
+                OR accepted_revision IS NULL OR accepted_revision < 0
+                OR working_revision IS NULL OR working_revision < 1
+                OR working_branch_id IS NULL OR working_branch_id = ''
+                OR working_version_id IS NULL OR working_version_id = ''
+                OR pending_mutation_id IS NULL OR pending_mutation_id = ''
+                OR sync_state IS NULL OR sync_state = ''
+                OR lifecycle_state NOT IN ('active', 'trash', 'tombstone')
+                OR canonical_hash IS NULL OR length(canonical_hash) != 64
+                OR authority IS NULL OR authority = ''
+                OR scope_id IS NULL OR scope_id = ''
+                OR scope_class NOT IN ('work', 'personal', 'unknown')
+                OR provenance_json IS NULL OR provenance_json = ''
+                OR origin_device_id IS NULL OR origin_device_id = ''
+                OR last_modified_device_id IS NULL OR last_modified_device_id = ''
+                OR origin_install_id IS NULL OR origin_install_id = ''
+                OR (lifecycle_state = 'active' AND
+                    (deleted_at IS NOT NULL OR trashed_at IS NOT NULL OR tombstoned_at IS NOT NULL))
+                OR (lifecycle_state = 'trash' AND
+                    (deleted_at IS NULL OR trashed_at IS NULL OR tombstoned_at IS NOT NULL
+                     OR deleted_at != trashed_at OR trashed_at < created_at))
+                OR (lifecycle_state = 'tombstone' AND
+                    (deleted_at IS NULL OR trashed_at IS NULL OR tombstoned_at IS NULL
+                     OR deleted_at != trashed_at OR trashed_at < created_at
+                     OR tombstoned_at < trashed_at))",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if invalid != 0 {
+        return Err(format!(
+            "portable mobile note migration left {invalid} invalid rows"
+        ));
+    }
+    validate_portable_identifiers(connection)
+}
+
+fn validate_portable_identifiers(connection: &Connection) -> Result<(), String> {
     let mut statement = connection
         .prepare(
             "SELECT record_id, scope_id, working_branch_id, working_version_id FROM mobile_notes",
@@ -1679,7 +3186,8 @@ fn portable_state(
         .query_row(
             "SELECT record_id, accepted_revision, accepted_version_id,
                     accepted_content_hash, working_revision, working_branch_id,
-                    created_at, lifecycle_state, provenance_json, scope_id, scope_class
+                    created_at, lifecycle_state, trashed_at,
+                    authority, provenance_json, scope_id, scope_class
              FROM mobile_notes WHERE record_id = ?1",
             [record_id],
             |row| {
@@ -1692,9 +3200,11 @@ fn portable_state(
                     working_branch_id: row.get(5)?,
                     created_at: row.get(6)?,
                     lifecycle_state: row.get(7)?,
-                    provenance_json: row.get(8)?,
-                    scope_id: row.get(9)?,
-                    scope_class: row.get(10)?,
+                    trashed_at: row.get(8)?,
+                    authority: row.get(9)?,
+                    provenance_json: row.get(10)?,
+                    scope_id: row.get(11)?,
+                    scope_class: row.get(12)?,
                 })
             },
         )
@@ -1702,11 +3212,26 @@ fn portable_state(
         .map_err(|error| error.to_string())
 }
 
-fn enqueue_mutation(
+fn ensure_noted_authority(state: &PortableState) -> Result<(), String> {
+    if state.authority == "noted" {
+        Ok(())
+    } else {
+        Err(format!(
+            "note {} is owned by an external authority and is read-only on iPhone",
+            state.record_id
+        ))
+    }
+}
+
+fn begin_outbox_transaction(
     transaction: &Transaction<'_>,
-    identity: &ReplicaIdentity,
-    mutation: Mutation<'_>,
-) -> Result<(), String> {
+    member_count: usize,
+) -> Result<OutboxTransaction, String> {
+    let member_count = i64::try_from(member_count)
+        .map_err(|_| "outbox transaction has too many members".to_string())?;
+    if member_count <= 0 {
+        return Err("outbox transaction must contain at least one member".to_string());
+    }
     let device_transaction_counter: i64 = transaction
         .query_row(
             "SELECT next_transaction_counter FROM mobile_replica WHERE singleton = 1",
@@ -1714,6 +3239,9 @@ fn enqueue_mutation(
             |row| row.get(0),
         )
         .map_err(|error| error.to_string())?;
+    if device_transaction_counter <= 0 {
+        return Err("mobile replica transaction counter is invalid".to_string());
+    }
     transaction
         .execute(
             "UPDATE mobile_replica
@@ -1722,23 +3250,75 @@ fn enqueue_mutation(
             [],
         )
         .map_err(|error| error.to_string())?;
+    Ok(OutboxTransaction {
+        transaction_id: new_uuid_v7(),
+        device_transaction_counter,
+        member_count,
+    })
+}
+
+fn enqueue_mutation(
+    transaction: &Transaction<'_>,
+    identity: &ReplicaIdentity,
+    outbox_transaction: &OutboxTransaction,
+    member_index: i64,
+    mutation: Mutation<'_>,
+) -> Result<(), String> {
+    if member_index < 0 || member_index >= outbox_transaction.member_count {
+        return Err("outbox transaction member index is out of range".to_string());
+    }
+    let has_transaction_members: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pragma_table_info('mobile_note_outbox')
+               WHERE name = 'transaction_member_index'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let has_grouped_pending_state: bool = if has_transaction_members {
+        transaction
+            .query_row(
+                "SELECT EXISTS(
+               SELECT 1 FROM mobile_note_outbox
+               WHERE record_id = ?1
+                 AND eligible_for_sync = 1
+                 AND transaction_member_count > 1
+             )",
+                [mutation.record_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?
+    } else {
+        false
+    };
+    if has_grouped_pending_state {
+        return Err(
+            "a pending grouped transaction must be synchronized before this record changes"
+                .to_string(),
+        );
+    }
 
     let provenance = serde_json::from_str(mutation.provenance_json)
         .unwrap_or_else(|_| serde_json::json!({ "source": "unknown" }));
-    let lifecycle_time = mutation.tombstoned_at.map(rfc3339_from_millis);
+    let trashed_at = mutation.trashed_at.map(rfc3339_from_millis);
+    let tombstoned_at = mutation.tombstoned_at.map(rfc3339_from_millis);
     let lifecycle = match mutation.lifecycle_state {
         "active" => RecordLifecycle {
             state: LifecycleState::Active,
             trashed_at: None,
             tombstoned_at: None,
         },
+        "trash" => RecordLifecycle {
+            state: LifecycleState::Trash,
+            trashed_at,
+            tombstoned_at: None,
+        },
         "tombstone" => RecordLifecycle {
             state: LifecycleState::Tombstone,
-            // The prototype's delete command is a single transition. Retain
-            // that fact as both lifecycle instants until a separate Trash UI
-            // introduces a two-step transition.
-            trashed_at: lifecycle_time.clone(),
-            tombstoned_at: lifecycle_time,
+            trashed_at,
+            tombstoned_at,
         },
         state => return Err(format!("unsupported mobile note lifecycle {state}")),
     };
@@ -1818,48 +3398,99 @@ fn enqueue_mutation(
         )
         .map_err(|error| error.to_string())?;
 
-    transaction
-        .execute(
-            "INSERT INTO mobile_note_outbox (
-               mutation_id, transaction_id, device_transaction_counter,
-               library_id, device_id, install_id, scope_id, scope_class,
-               record_id, record_kind,
-               operation, base_revision, base_version_id, proposed_revision,
-               local_revision, branch_id, version_id, canonical_hash,
-               payload_json, state, eligible_for_sync, attempts,
-               created_at, acknowledged_at
-             ) VALUES (
-               ?1, ?2, ?3,
-               ?4, ?5, ?6, ?7, ?8,
-               ?9, 'note',
-               ?10, ?11, ?12, ?13,
-               ?14, ?15, ?16, ?17,
-               ?18, 'pending', 1, 0,
-               ?19, NULL
-             )",
-            params![
-                mutation.mutation_id,
-                mutation.transaction_id,
-                device_transaction_counter,
-                identity.library_id,
-                identity.device_id,
-                identity.install_id,
-                mutation.scope_id,
-                mutation.scope_class,
-                mutation.record_id,
-                mutation.operation,
-                mutation.base_revision,
-                mutation.base_version_id,
-                mutation.proposed_revision,
-                mutation.local_revision,
-                mutation.branch_id,
-                mutation.version_id,
-                mutation.canonical_hash,
-                payload_json,
-                mutation.updated_at,
-            ],
-        )
-        .map_err(|error| error.to_string())?;
+    if has_transaction_members {
+        transaction
+            .execute(
+                "INSERT INTO mobile_note_outbox (
+                   mutation_id, transaction_id, device_transaction_counter,
+                   transaction_member_index, transaction_member_count,
+                   library_id, device_id, install_id, scope_id, scope_class,
+                   record_id, record_kind,
+                   operation, base_revision, base_version_id, proposed_revision,
+                   local_revision, branch_id, version_id, canonical_hash,
+                   payload_json, state, eligible_for_sync, attempts,
+                   created_at, acknowledged_at
+                 ) VALUES (
+                   ?1, ?2, ?3, ?4, ?5,
+                   ?6, ?7, ?8, ?9, ?10,
+                   ?11, 'note',
+                   ?12, ?13, ?14, ?15,
+                   ?16, ?17, ?18, ?19,
+                   ?20, 'pending', 1, 0,
+                   ?21, NULL
+                 )",
+                params![
+                    mutation.mutation_id,
+                    outbox_transaction.transaction_id,
+                    outbox_transaction.device_transaction_counter,
+                    member_index,
+                    outbox_transaction.member_count,
+                    identity.library_id,
+                    identity.device_id,
+                    identity.install_id,
+                    mutation.scope_id,
+                    mutation.scope_class,
+                    mutation.record_id,
+                    mutation.operation,
+                    mutation.base_revision,
+                    mutation.base_version_id,
+                    mutation.proposed_revision,
+                    mutation.local_revision,
+                    mutation.branch_id,
+                    mutation.version_id,
+                    mutation.canonical_hash,
+                    payload_json,
+                    mutation.updated_at,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    } else {
+        if outbox_transaction.member_count != 1 || member_index != 0 {
+            return Err("mobile schema v1 cannot store grouped outbox transactions".to_string());
+        }
+        transaction
+            .execute(
+                "INSERT INTO mobile_note_outbox (
+                   mutation_id, transaction_id, device_transaction_counter,
+                   library_id, device_id, install_id, scope_id, scope_class,
+                   record_id, record_kind,
+                   operation, base_revision, base_version_id, proposed_revision,
+                   local_revision, branch_id, version_id, canonical_hash,
+                   payload_json, state, eligible_for_sync, attempts,
+                   created_at, acknowledged_at
+                 ) VALUES (
+                   ?1, ?2, ?3,
+                   ?4, ?5, ?6, ?7, ?8,
+                   ?9, 'note',
+                   ?10, ?11, ?12, ?13,
+                   ?14, ?15, ?16, ?17,
+                   ?18, 'pending', 1, 0,
+                   ?19, NULL
+                 )",
+                params![
+                    mutation.mutation_id,
+                    outbox_transaction.transaction_id,
+                    outbox_transaction.device_transaction_counter,
+                    identity.library_id,
+                    identity.device_id,
+                    identity.install_id,
+                    mutation.scope_id,
+                    mutation.scope_class,
+                    mutation.record_id,
+                    mutation.operation,
+                    mutation.base_revision,
+                    mutation.base_version_id,
+                    mutation.proposed_revision,
+                    mutation.local_revision,
+                    mutation.branch_id,
+                    mutation.version_id,
+                    mutation.canonical_hash,
+                    payload_json,
+                    mutation.updated_at,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -1878,6 +3509,23 @@ fn escape_like(value: &str) -> String {
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+fn mobile_fts_query(value: &str) -> Option<String> {
+    let terms = value
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .take(32)
+        .map(|term| format!("\"{}\"*", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+    (!terms.is_empty()).then(|| terms.join(" "))
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn nonempty(value: Option<String>) -> Option<String> {
@@ -2002,18 +3650,131 @@ mod tests {
 
         store.delete(&second.record_id).expect("delete second");
         assert_eq!(store.list(None).expect("list").len(), 1);
-        let (deleted_at, lifecycle): (Option<i64>, String) = store
+        let (deleted_at, lifecycle, trashed_at, tombstoned_at): (
+            Option<i64>,
+            String,
+            Option<i64>,
+            Option<i64>,
+        ) = store
             .connection
             .lock()
             .expect("lock store")
             .query_row(
-                "SELECT deleted_at, lifecycle_state FROM mobile_notes WHERE record_id = ?1",
+                "SELECT deleted_at, lifecycle_state, trashed_at, tombstoned_at
+                 FROM mobile_notes WHERE record_id = ?1",
                 [&second.record_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
-            .expect("read tombstone");
+            .expect("read trash state");
         assert!(deleted_at.is_some());
-        assert_eq!(lifecycle, "tombstone");
+        assert_eq!(lifecycle, "trash");
+        assert_eq!(trashed_at, deleted_at);
+        assert_eq!(tombstoned_at, None);
+    }
+
+    #[test]
+    fn trash_restore_and_tombstone_are_distinct_non_destructive_transitions() {
+        let store = store();
+        let note = store
+            .create("Keep the row", "portable content")
+            .expect("create note");
+
+        store.delete(&note.record_id).expect("move note to trash");
+        {
+            let connection = store.connection.lock().expect("lock trashed store");
+            let state: (String, Option<i64>, Option<i64>, Option<i64>, i64) = connection
+                .query_row(
+                    "SELECT lifecycle_state, deleted_at, trashed_at, tombstoned_at,
+                            COUNT(*) OVER ()
+                     FROM mobile_notes WHERE record_id = ?1",
+                    [&note.record_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .expect("read trash state");
+            assert_eq!(state.0, "trash");
+            assert_eq!(state.1, state.2);
+            assert!(state.2.is_some());
+            assert_eq!(state.3, None);
+            assert_eq!(state.4, 1);
+
+            let payload_json: String = connection
+                .query_row(
+                    "SELECT payload_json FROM mobile_note_outbox
+                     WHERE eligible_for_sync = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read trash payload");
+            let payload: serde_json::Value =
+                serde_json::from_str(&payload_json).expect("parse trash payload");
+            assert_eq!(payload["operation"], "trash");
+            assert_eq!(payload["proposed_record"]["lifecycle"]["state"], "trash");
+            assert!(payload["proposed_record"]["lifecycle"]["trashed_at"].is_string());
+            assert!(payload["proposed_record"]["lifecycle"]
+                .get("tombstoned_at")
+                .is_none());
+        }
+
+        store.restore(&note.record_id).expect("restore from trash");
+        store.delete(&note.record_id).expect("trash again");
+        store
+            .tombstone(&note.record_id)
+            .expect("finalize tombstone");
+
+        let connection = store.connection.lock().expect("lock tombstoned store");
+        let state: (String, String, String, i64, i64, i64) = connection
+            .query_row(
+                "SELECT title, body, lifecycle_state, deleted_at, trashed_at, tombstoned_at
+                 FROM mobile_notes WHERE record_id = ?1",
+                [&note.record_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("tombstone row must remain");
+        assert_eq!(state.0, "Keep the row");
+        assert_eq!(state.1, "portable content");
+        assert_eq!(state.2, "tombstone");
+        assert_eq!(state.3, state.4);
+        assert!(state.5 >= state.4);
+        let payload_json: String = connection
+            .query_row(
+                "SELECT payload_json FROM mobile_note_outbox WHERE eligible_for_sync = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read tombstone payload");
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload_json).expect("parse tombstone payload");
+        assert_eq!(payload["operation"], "tombstone");
+        assert_eq!(
+            payload["proposed_record"]["lifecycle"]["state"],
+            "tombstone"
+        );
+        assert!(payload["proposed_record"]["lifecycle"]["trashed_at"].is_string());
+        assert!(payload["proposed_record"]["lifecycle"]["tombstoned_at"].is_string());
+        drop(connection);
+
+        assert!(store.list(None).expect("list active notes").is_empty());
+        assert!(store
+            .restore(&note.record_id)
+            .expect_err("tombstones cannot be restored")
+            .contains("does not exist"));
     }
 
     #[test]
@@ -2030,6 +3791,322 @@ mod tests {
             .list(Some("100_"))
             .expect("escaped underscore")
             .is_empty());
+    }
+
+    #[test]
+    fn full_text_search_tracks_lifecycle_and_rebuilds_without_canonical_changes() {
+        let store = store();
+        let active = store
+            .create("Meteor launch", "Call mission control")
+            .expect("create searchable note");
+        let hidden = store
+            .create("Comet archive", "Hidden orbit details")
+            .expect("create lifecycle note");
+
+        assert_eq!(store.list(Some("mission")).expect("search body").len(), 1);
+        store.delete(&hidden.record_id).expect("trash hidden note");
+        assert!(store
+            .list(Some("orbit"))
+            .expect("search excludes trash")
+            .is_empty());
+        store
+            .restore(&hidden.record_id)
+            .expect("restore hidden note");
+        assert_eq!(
+            store
+                .list(Some("orbit"))
+                .expect("search restored note")
+                .len(),
+            1
+        );
+        store
+            .update(&active.record_id, "Meteor launch", "Contact ground station")
+            .expect("update indexed note");
+        assert!(store
+            .list(Some("mission"))
+            .expect("old indexed text removed")
+            .is_empty());
+        assert_eq!(
+            store
+                .list(Some("ground"))
+                .expect("new indexed text appears")
+                .len(),
+            1
+        );
+        store.delete(&hidden.record_id).expect("trash hidden again");
+        store
+            .tombstone(&hidden.record_id)
+            .expect("tombstone hidden note");
+        assert!(store
+            .list(Some("orbit"))
+            .expect("search excludes tombstone")
+            .is_empty());
+
+        let before = store.export_notes().expect("export before rebuild");
+        {
+            let connection = store.connection.lock().expect("lock search store");
+            connection
+                .execute_batch(
+                    "DROP TRIGGER mobile_notes_fts_insert;
+                     DROP TRIGGER mobile_notes_fts_update;
+                     DROP TRIGGER mobile_notes_fts_delete;
+                     DROP TABLE mobile_notes_fts;",
+                )
+                .expect("drop derived search objects");
+        }
+        store.rebuild_search_index().expect("rebuild search index");
+        let after = store.export_notes().expect("export after rebuild");
+        assert_eq!(
+            after, before,
+            "search rebuild changed canonical mobile state"
+        );
+        assert_eq!(
+            store
+                .list(Some("ground"))
+                .expect("search after rebuild")
+                .len(),
+            1
+        );
+        assert!(store
+            .list(Some("orbit"))
+            .expect("tombstone remains excluded after rebuild")
+            .is_empty());
+    }
+
+    #[test]
+    fn opening_schema_v2_recreates_a_missing_search_cache() {
+        let path = temporary_path("fts-reopen");
+        let before = {
+            let store = MobileStore::open(&path).expect("open search database");
+            store
+                .create("Rebuildable", "authoritative content")
+                .expect("create source note");
+            store.export_notes().expect("export source state")
+        };
+        {
+            let connection = Connection::open(&path).expect("open raw schema v2 database");
+            connection
+                .execute_batch(
+                    "DROP TRIGGER mobile_notes_fts_insert;
+                     DROP TRIGGER mobile_notes_fts_update;
+                     DROP TRIGGER mobile_notes_fts_delete;
+                     DROP TABLE mobile_notes_fts;",
+                )
+                .expect("drop search cache");
+        }
+
+        let reopened = MobileStore::open(&path).expect("reopen and recreate search cache");
+        assert_eq!(
+            reopened.export_notes().expect("export recreated state"),
+            before
+        );
+        assert_eq!(
+            reopened
+                .list(Some("authoritative"))
+                .expect("search rebuilt content")
+                .len(),
+            1
+        );
+        remove_database(&path);
+    }
+
+    #[test]
+    fn notes_export_restores_portable_state_but_rotates_device_identity() {
+        let source = store();
+        let first = source
+            .create("Portable", "first revision")
+            .expect("create first export note");
+        source
+            .update(&first.record_id, "Portable revised", "second revision")
+            .expect("revise export note");
+        let trashed = source
+            .create("Trash", "restorable content")
+            .expect("create trash export note");
+        source
+            .delete(&trashed.record_id)
+            .expect("trash export note");
+        let tombstoned = source
+            .create("Tombstone", "retained tombstone content")
+            .expect("create tombstone export note");
+        source
+            .delete(&tombstoned.record_id)
+            .expect("trash before tombstone");
+        source
+            .tombstone(&tombstoned.record_id)
+            .expect("tombstone export note");
+        let library_id = new_uuid_v7();
+        let scope_id = new_uuid_v7();
+        assert_eq!(
+            source
+                .adopt_staging_library(&library_id, &scope_id)
+                .expect("adopt paired library before export"),
+            3
+        );
+
+        let export = source.export_notes().expect("export portable notes");
+        let decoded: serde_json::Value =
+            serde_json::from_str(&export).expect("parse exported JSON");
+        let source_envelope: MobileNotesExportEnvelope =
+            serde_json::from_str(&export).expect("decode source export");
+        assert_eq!(decoded["format"], MOBILE_NOTES_EXPORT_FORMAT);
+        assert_eq!(decoded["formatVersion"], MOBILE_NOTES_EXPORT_VERSION);
+        assert_eq!(source_envelope.payload.replica.library_state, "paired");
+        assert!(decoded["payload"]["notes"]
+            .as_array()
+            .expect("export notes array")
+            .iter()
+            .all(|note| note.get("id").is_none() && note.get("path").is_none()));
+        assert!(decoded.get("migrationRecoveryPath").is_none());
+
+        let restored = store();
+        assert_eq!(
+            restored
+                .restore_notes_export(&export)
+                .expect("restore portable notes"),
+            3
+        );
+        let restored_export = restored.export_notes().expect("re-export restored notes");
+        let mut restored_envelope: MobileNotesExportEnvelope =
+            serde_json::from_str(&restored_export).expect("decode restored export");
+        assert_eq!(
+            restored_envelope.payload.replica.library_id,
+            source_envelope.payload.replica.library_id
+        );
+        assert_eq!(
+            restored_envelope.payload.replica.default_scope_id,
+            source_envelope.payload.replica.default_scope_id
+        );
+        assert_ne!(
+            restored_envelope.payload.replica.device_id,
+            source_envelope.payload.replica.device_id
+        );
+        assert_ne!(
+            restored_envelope.payload.replica.install_id,
+            source_envelope.payload.replica.install_id
+        );
+        assert_eq!(
+            restored_envelope.payload.replica.library_state,
+            "local_staging"
+        );
+        assert_eq!(
+            restored_envelope.payload.replica.next_transaction_counter,
+            1
+        );
+
+        for (restored_note, source_note) in restored_envelope
+            .payload
+            .notes
+            .iter_mut()
+            .zip(source_envelope.payload.notes.iter())
+        {
+            assert_eq!(restored_note.sync_state, "restore_pending");
+            restored_note.sync_state.clone_from(&source_note.sync_state);
+        }
+        assert_eq!(
+            restored_envelope.payload.notes, source_envelope.payload.notes,
+            "restore changed record IDs, revisions, branches, lifecycle, hashes, or organization"
+        );
+        for (restored_outbox, source_outbox) in restored_envelope
+            .payload
+            .outbox
+            .iter_mut()
+            .zip(source_envelope.payload.outbox.iter())
+        {
+            assert_eq!(restored_outbox.state, "superseded");
+            assert!(!restored_outbox.eligible_for_sync);
+            assert!(restored_outbox.superseded_at.is_some());
+            restored_outbox.state.clone_from(&source_outbox.state);
+            restored_outbox.eligible_for_sync = source_outbox.eligible_for_sync;
+            restored_outbox.superseded_at = source_outbox.superseded_at;
+        }
+        assert_eq!(
+            restored_envelope.payload.outbox, source_envelope.payload.outbox,
+            "restore changed stable mutation IDs or branch/version history"
+        );
+        {
+            let connection = restored.connection.lock().expect("lock restored store");
+            let restored_identity = replica_identity(&connection).expect("restored identity");
+            let sendable_old_identity: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM mobile_note_outbox
+                     WHERE eligible_for_sync = 1
+                        OR device_id = ?1
+                        OR install_id = ?2",
+                    params![restored_identity.device_id, restored_identity.install_id],
+                    |row| row.get(0),
+                )
+                .expect("verify quarantined outbox identity");
+            assert_eq!(sendable_old_identity, 0);
+            assert_eq!(restored_identity.library_state, "local_staging");
+        }
+        assert_eq!(
+            restored
+                .list(Some("second revision"))
+                .expect("search restored active note")
+                .len(),
+            1
+        );
+        assert!(restored
+            .list(Some("restorable"))
+            .expect("trash excluded after restore")
+            .is_empty());
+        assert!(restored
+            .list(Some("retained tombstone"))
+            .expect("tombstone excluded after restore")
+            .is_empty());
+        assert!(restored
+            .restore_notes_export(&export)
+            .expect_err("a populated store must not be overwritten")
+            .contains("will not overwrite"));
+    }
+
+    #[test]
+    fn notes_restore_rejects_checksum_and_semantic_tampering_atomically() {
+        let source = store();
+        source
+            .create("Untampered", "canonical content")
+            .expect("create source note");
+        let export = source.export_notes().expect("export source notes");
+        let mut tampered: serde_json::Value =
+            serde_json::from_str(&export).expect("parse source export");
+        tampered["payload"]["notes"][0]["body"] =
+            serde_json::Value::String("changed after export".to_string());
+
+        let target = store();
+        let checksum_error = target
+            .restore_notes_export(
+                &serde_json::to_string(&tampered).expect("serialize checksum tamper"),
+            )
+            .expect_err("checksum tamper must fail");
+        assert!(checksum_error.contains("checksum"), "{checksum_error}");
+        assert!(target
+            .list(None)
+            .expect("empty after checksum failure")
+            .is_empty());
+
+        tampered["payloadSha256"] =
+            serde_json::Value::String(canonical_sha256(&tampered["payload"]));
+        let semantic_error = target
+            .restore_notes_export(
+                &serde_json::to_string(&tampered).expect("serialize semantic tamper"),
+            )
+            .expect_err("rechecksummed semantic tamper must fail");
+        assert!(
+            semantic_error.contains("invalid portable state"),
+            "{semantic_error}"
+        );
+        assert!(target
+            .list(None)
+            .expect("empty after semantic failure")
+            .is_empty());
+        let connection = target.connection.lock().expect("lock untouched target");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM mobile_note_outbox", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("count untouched outbox"),
+            0
+        );
     }
 
     #[test]
@@ -2089,7 +4166,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .expect("count migration history"),
-            1
+            PORTABLE_SCHEMA_VERSION
         );
         drop(connection);
         drop(reopened);
@@ -2246,6 +4323,141 @@ mod tests {
     }
 
     #[test]
+    fn schema_v1_upgrades_in_order_with_an_exact_verified_recovery_snapshot() {
+        let path = temporary_path("v1-to-v2");
+        {
+            let mut connection = Connection::open(&path).expect("open v1 fixture database");
+            connection
+                .execute_batch(
+                    "CREATE TABLE mobile_notes (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       title TEXT NOT NULL,
+                       body TEXT NOT NULL,
+                       created_at INTEGER NOT NULL,
+                       updated_at INTEGER NOT NULL,
+                       deleted_at INTEGER
+                     );
+                     INSERT INTO mobile_notes
+                       (title, body, created_at, updated_at, deleted_at)
+                     VALUES ('V1 tombstone', 'preserve it', 100, 200, 300);",
+                )
+                .expect("seed pre-v1 row");
+            migrate_portable_notes_to_version(&mut connection, None, 1)
+                .expect("construct the exact v1 schema");
+            assert_eq!(
+                connection
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .expect("read v1 version"),
+                1
+            );
+            assert!(!connection
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM pragma_table_info('mobile_note_outbox')
+                       WHERE name = 'transaction_member_index'
+                     )",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("inspect v1 outbox"));
+        }
+
+        let store = MobileStore::open(&path).expect("upgrade v1 database to v2");
+        let recovery_path = PathBuf::from(
+            store
+                .migration_recovery_path()
+                .expect("read v2 recovery state")
+                .expect("v1 recovery snapshot path"),
+        );
+        let snapshot =
+            Connection::open_with_flags(&recovery_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("open v1 recovery snapshot");
+        assert_eq!(
+            snapshot
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .expect("read snapshot version"),
+            1
+        );
+        assert_eq!(
+            snapshot
+                .query_row(
+                    "SELECT name, checksum FROM mobile_schema_migrations WHERE version = 1",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .expect("read v1 migration stamp"),
+            (
+                PORTABLE_MIGRATION_V1_NAME.to_string(),
+                PORTABLE_SCHEMA_V1_CHECKSUM.to_string()
+            )
+        );
+        assert_eq!(
+            snapshot
+                .query_row(
+                    "SELECT lifecycle_state, deleted_at, tombstoned_at FROM mobile_notes",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .expect("read v1 tombstone"),
+            ("tombstone".to_string(), 300, 300)
+        );
+        assert!(!snapshot
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM pragma_table_info('mobile_notes') WHERE name = 'trashed_at'
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .expect("inspect snapshot lifecycle schema"));
+        drop(snapshot);
+
+        let connection = store.connection.lock().expect("lock upgraded store");
+        assert_eq!(
+            connection
+                .prepare("SELECT version, checksum FROM mobile_schema_migrations ORDER BY version")
+                .expect("prepare ordered history")
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })
+                .expect("query ordered history")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect ordered history"),
+            vec![
+                (1, PORTABLE_SCHEMA_V1_CHECKSUM.to_string()),
+                (2, PORTABLE_SCHEMA_V2_CHECKSUM.to_string())
+            ]
+        );
+        let lifecycle: (String, i64, i64) = connection
+            .query_row(
+                "SELECT lifecycle_state, trashed_at, tombstoned_at FROM mobile_notes",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read upgraded lifecycle");
+        assert_eq!(lifecycle, ("tombstone".to_string(), 300, 300));
+        let members: (i64, i64) = connection
+            .query_row(
+                "SELECT transaction_member_index, transaction_member_count
+                 FROM mobile_note_outbox",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read upgraded singleton transaction");
+        assert_eq!(members, (0, 1));
+        drop(connection);
+        drop(store);
+        remove_database(&path);
+        let _ = std::fs::remove_file(recovery_path);
+    }
+
+    #[test]
     fn restoring_pre_migration_snapshot_recreates_stable_library_scope_and_record_ids() {
         let path = temporary_path("restore-determinism");
         {
@@ -2334,8 +4546,8 @@ mod tests {
                 .is_err());
             connection
                 .execute(
-                    "UPDATE mobile_schema_state SET min_writer_version = 2 WHERE singleton = 1",
-                    [],
+                    "UPDATE mobile_schema_state SET min_writer_version = ?1 WHERE singleton = 1",
+                    [PORTABLE_SCHEMA_VERSION + 1],
                 )
                 .expect("raise writer floor fixture");
         }
@@ -2354,7 +4566,7 @@ mod tests {
         store
             .update(&note.record_id, "Draft", "two")
             .expect("update note");
-        store.delete(&note.record_id).expect("tombstone note");
+        store.delete(&note.record_id).expect("trash note");
         let restored = store.restore(&note.record_id).expect("restore note");
         assert_eq!(restored.body, "two");
 
@@ -2395,7 +4607,7 @@ mod tests {
             vec![
                 ("create".to_string(), 1, 0, 1),
                 ("update".to_string(), 2, 0, 1),
-                ("tombstone".to_string(), 3, 0, 1),
+                ("trash".to_string(), 3, 0, 1),
                 ("restore".to_string(), 4, 0, 1),
             ]
         );
@@ -2428,7 +4640,7 @@ mod tests {
             vec![
                 ("create".to_string(), "superseded".to_string(), 0),
                 ("update".to_string(), "superseded".to_string(), 0),
-                ("tombstone".to_string(), "superseded".to_string(), 0),
+                ("trash".to_string(), "superseded".to_string(), 0),
                 ("restore".to_string(), "pending".to_string(), 1),
             ]
         );
@@ -2592,6 +4804,38 @@ mod tests {
                     mac_scope_id
                 );
             }
+            let transaction_members = connection
+                .prepare(
+                    "SELECT transaction_id, device_transaction_counter,
+                            transaction_member_index, transaction_member_count
+                     FROM mobile_note_outbox
+                     WHERE eligible_for_sync = 1
+                     ORDER BY transaction_member_index",
+                )
+                .expect("prepare adoption transaction members")
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })
+                .expect("query adoption transaction members")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect adoption transaction members");
+            assert_eq!(transaction_members.len(), 2);
+            assert_eq!(transaction_members[0].0, transaction_members[1].0);
+            assert_eq!(transaction_members[0].1, transaction_members[1].1);
+            assert_eq!(
+                transaction_members
+                    .iter()
+                    .map(|member| (member.2, member.3))
+                    .collect::<Vec<_>>(),
+                vec![(0, 2), (1, 2)]
+            );
+            validate_outbox_transaction_groups(&connection)
+                .expect("adoption transaction must be complete");
         }
 
         assert_eq!(
@@ -2617,40 +4861,59 @@ mod tests {
     #[test]
     fn staging_adoption_rolls_back_if_new_create_cannot_enter_outbox() {
         let store = store();
-        let note = store.create("Staged", "preserve me").expect("create note");
-        let (staging_library_id, record_id) = {
+        let first = store
+            .create("First staged", "preserve me")
+            .expect("create first note");
+        let second = store
+            .create("Second staged", "preserve me too")
+            .expect("create second note");
+        let staging_library_id = {
             let connection = store.connection.lock().expect("lock staging store");
             let identity = replica_identity(&connection).expect("staging identity");
-            let record_id = note.record_id.clone();
             connection
                 .execute_batch(
                     "CREATE TRIGGER fail_adoption_outbox
                      BEFORE INSERT ON mobile_note_outbox
+                     WHEN NEW.transaction_member_index = 1
                      BEGIN
-                       SELECT RAISE(ABORT, 'injected adoption failure');
+                       SELECT RAISE(ABORT, 'injected second-member adoption failure');
                      END;",
                 )
                 .expect("create adoption failure trigger");
-            (identity.library_id, record_id)
+            identity.library_id
         };
 
         let error = store
             .adopt_staging_library(&new_uuid_v7(), &new_uuid_v7())
             .expect_err("adoption should fail atomically");
-        assert!(error.contains("injected adoption failure"));
+        assert!(error.contains("injected second-member adoption failure"));
         let connection = store.connection.lock().expect("lock rolled-back store");
         let identity = replica_identity(&connection).expect("rolled-back identity");
         assert_eq!(identity.library_id, staging_library_id);
         assert_eq!(identity.library_state, "local_staging");
-        let state: (String, String, i64) = connection
-            .query_row(
+        let states = connection
+            .prepare(
                 "SELECT record_id, library_id, working_revision
-                 FROM mobile_notes WHERE record_id = ?1",
-                [&note.record_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                 FROM mobile_notes ORDER BY id",
             )
-            .expect("read rolled-back note");
-        assert_eq!(state, (record_id, staging_library_id, 1));
+            .expect("prepare rolled-back notes")
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .expect("query rolled-back notes")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect rolled-back notes");
+        assert_eq!(
+            states,
+            vec![
+                (first.record_id, staging_library_id.clone(), 1),
+                (second.record_id, staging_library_id, 1),
+            ]
+        );
         let outbox: (i64, i64) = connection
             .query_row(
                 "SELECT COUNT(*), SUM(eligible_for_sync) FROM mobile_note_outbox",
@@ -2658,7 +4921,17 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("read rolled-back outbox");
-        assert_eq!(outbox, (1, 1));
+        assert_eq!(outbox, (2, 2));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT next_transaction_counter FROM mobile_replica WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("read rolled-back transaction counter"),
+            3
+        );
     }
 
     #[test]
@@ -2689,6 +4962,73 @@ mod tests {
         let connection = store.connection.lock().expect("lock unchanged store");
         let identity = replica_identity(&connection).expect("read unchanged identity");
         assert_eq!(identity.library_state, "local_staging");
+    }
+
+    #[test]
+    fn staging_adoption_is_forbidden_after_a_transport_attempt() {
+        let store = store();
+        store
+            .create("Attempted", "not safe to re-home")
+            .expect("create note");
+        {
+            let connection = store.connection.lock().expect("lock staging store");
+            connection
+                .execute(
+                    "UPDATE mobile_note_outbox SET attempts = 1 WHERE eligible_for_sync = 1",
+                    [],
+                )
+                .expect("simulate transport attempt");
+        }
+
+        let error = store
+            .adopt_staging_library(&new_uuid_v7(), &new_uuid_v7())
+            .expect_err("attempted transport must prevent identity reassignment");
+        assert!(error.contains("forbidden"), "{error}");
+    }
+
+    #[test]
+    fn externally_authoritative_notes_are_read_only_on_iphone() {
+        let store = store();
+        let note = store
+            .create("Mirror", "owned elsewhere")
+            .expect("create note");
+        {
+            let connection = store.connection.lock().expect("lock mobile store");
+            connection
+                .execute(
+                    "UPDATE mobile_notes
+                     SET authority = 'external', provenance_json = '{\"source\":\"brain\"}'
+                     WHERE record_id = ?1",
+                    [&note.record_id],
+                )
+                .expect("turn note into external mirror fixture");
+        }
+
+        let update_error = store
+            .update(&note.record_id, "Changed", "must not persist")
+            .expect_err("external mirror update must fail");
+        assert!(update_error.contains("read-only"), "{update_error}");
+        let delete_error = store
+            .delete(&note.record_id)
+            .expect_err("external mirror delete must fail");
+        assert!(delete_error.contains("read-only"), "{delete_error}");
+
+        let connection = store.connection.lock().expect("lock unchanged store");
+        let state: (String, String, i64) = connection
+            .query_row(
+                "SELECT title, lifecycle_state, working_revision
+                 FROM mobile_notes WHERE record_id = ?1",
+                [&note.record_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read unchanged mirror");
+        assert_eq!(state, ("Mirror".to_string(), "active".to_string(), 1));
+        let outbox_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM mobile_note_outbox", [], |row| {
+                row.get(0)
+            })
+            .expect("count unchanged outbox");
+        assert_eq!(outbox_count, 1);
     }
 
     #[test]

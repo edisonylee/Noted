@@ -1,7 +1,8 @@
 # Noted mobile companion implementation plan
 
 Status: M0 direction accepted; M1 checkpoint complete; M2 native shell and
-local-only Notes proven on physical hardware; M3 portability is next; no sync
+local-only Notes proven on physical hardware; the M3 portability implementation
+checkpoint is complete; M4 sanitized-fixture protocol work is underway; no sync
 has shipped
 
 Date: 2026-08-14
@@ -1382,6 +1383,16 @@ Rollback:
 
 **Purpose:** prove safe migration and portable identity on one bounded record
 family before converting the library horizontally.
+
+Status: implementation checkpoint complete. Desktop and iPhone Notes now have
+ordered schema history, UUID-backed portable state, accepted heads and local
+branches, atomic shadow journals/outboxes, non-destructive lifecycle, rebuildable
+FTS, path-free media manifests, and verified export/restore. Migration recovery,
+WAL-active snapshots, authority enforcement, writer floors, failure rollback,
+and sanitized fixture reopening are covered by deterministic tests. The release
+gate remains held for the physical-device security/lifecycle probes from M2 and
+an accepted recorder-load measurement; no transport or personal-data sync is
+enabled by this checkpoint.
 
 Deliverables:
 

@@ -107,6 +107,66 @@ pub enum SchemaAccess {
     ReadWrite,
 }
 
+/// Lossless read/write support for one portable record kind. Schema access is
+/// negotiated first; this finer-grained capability prevents a client that can
+/// open the database from rewriting a newer record shape and dropping fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordKindCapability<'a> {
+    pub kind: &'a str,
+    pub max_read_schema_version: u32,
+    pub max_write_schema_version: u32,
+}
+
+impl<'a> RecordKindCapability<'a> {
+    pub const fn new(
+        kind: &'a str,
+        max_read_schema_version: u32,
+        max_write_schema_version: u32,
+    ) -> Self {
+        Self {
+            kind,
+            max_read_schema_version,
+            max_write_schema_version,
+        }
+    }
+}
+
+/// Refines database-level access for one concrete portable record.
+///
+/// A readable but not losslessly writable record is deliberately read-only.
+/// Unknown kinds, invalid versions, duplicate capability declarations, and
+/// records newer than the reader capability are rejected.
+pub fn negotiate_record_kind(
+    schema_access: SchemaAccess,
+    record_kind: &str,
+    record_schema_version: u32,
+    capabilities: &[RecordKindCapability<'_>],
+) -> SchemaAccess {
+    if schema_access == SchemaAccess::Reject
+        || record_kind.trim().is_empty()
+        || record_schema_version == 0
+    {
+        return SchemaAccess::Reject;
+    }
+
+    let mut matching = capabilities
+        .iter()
+        .filter(|capability| capability.kind == record_kind && !capability.kind.trim().is_empty());
+    let Some(capability) = matching.next() else {
+        return SchemaAccess::Reject;
+    };
+    if matching.next().is_some() || capability.max_read_schema_version < record_schema_version {
+        return SchemaAccess::Reject;
+    }
+    if schema_access == SchemaAccess::ReadOnly
+        || capability.max_write_schema_version < record_schema_version
+    {
+        SchemaAccess::ReadOnly
+    } else {
+        SchemaAccess::ReadWrite
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseSchemaState {
     Unversioned,
@@ -132,14 +192,21 @@ pub fn inspect_database(conn: &Connection) -> Result<DatabaseSchemaState> {
         |row| row.get(0),
     )?;
     if !has_history {
+        let user_version = user_version(conn)?;
+        let metadata_markers = compatibility_metadata_marker_count(conn)?;
+        if application_id != 0 || user_version != 0 || metadata_markers != 0 {
+            bail!(
+                "database has partial migration state: application_id={application_id:#010x}, user_version={user_version}, compatibility metadata markers={metadata_markers}, but schema_migrations is missing"
+            );
+        }
         return Ok(DatabaseSchemaState::Unversioned);
     }
     if application_id == 0 {
         bail!("versioned database is missing the Noted application_id");
     }
-    Ok(DatabaseSchemaState::Stamped(read_database_stamp_from(
-        conn,
-    )?))
+    let stamp = read_database_stamp_from(conn)?;
+    verify_stamp_history_alignment(conn, stamp)?;
+    Ok(DatabaseSchemaState::Stamped(stamp))
 }
 
 /// Computes the strongest access a client can safely have to a stamped DB.
@@ -246,7 +313,7 @@ where
     tx.execute_batch(TRACKING_SCHEMA)
         .context("initialize schema migration tracking")?;
     verify_or_claim_application_id(&tx)?;
-    verify_contiguous_history(&tx)?;
+    let current_stamp = verify_tracking_state_before_migration(&tx)?;
 
     if let Some((existing_name, existing_checksum)) = migration_identity(&tx, migration.version)? {
         if existing_checksum != migration.checksum {
@@ -266,7 +333,12 @@ where
             );
         }
 
-        let current_stamp = read_database_stamp_from(&tx)?;
+        let current_stamp = current_stamp.ok_or_else(|| {
+            anyhow::anyhow!(
+                "migration {} is recorded without a database compatibility stamp",
+                migration.version
+            )
+        })?;
         if current_stamp.schema_version < migration.version {
             bail!(
                 "migration {} is recorded ahead of database schema stamp {}",
@@ -306,6 +378,7 @@ where
         ),
     )?;
     write_database_stamp(&tx, stamp, product_version)?;
+    verify_stamp_history_alignment(&tx, stamp)?;
     tx.commit().context("commit schema migration transaction")?;
     Ok(MigrationOutcome::Applied)
 }
@@ -313,25 +386,45 @@ where
 /// Reads and validates the compatibility stamp from a Noted database.
 pub fn read_database_stamp(conn: &Connection) -> Result<DatabaseStamp> {
     verify_application_id(conn)?;
-    read_database_stamp_from(conn)
+    let stamp = read_database_stamp_from(conn)?;
+    verify_stamp_history_alignment(conn, stamp)?;
+    Ok(stamp)
 }
 
 /// Verifies the immutable identity of all migrations this binary knows about.
-/// Newer database rows are left to [`negotiate_schema`] to reject based on the
-/// supported schema ceiling.
+/// The expected list may include future migrations, but it must describe every
+/// row at or below the database stamp. This rejects an otherwise-contiguous
+/// extra history row instead of trusting unknown migration identity.
 pub fn verify_known_migrations(
     conn: &Connection,
     expected: &[MigrationDescriptor<'_>],
 ) -> Result<()> {
     verify_application_id(conn)?;
-    let stamp = read_database_stamp_from(conn)?;
-    verify_contiguous_history(conn)?;
+    let stamp = read_database_stamp(conn)?;
 
-    for migration in expected {
+    for (index, migration) in expected.iter().enumerate() {
         migration.validate()?;
-        if migration.version > stamp.schema_version {
-            continue;
+        if expected[..index]
+            .iter()
+            .any(|prior| prior.version == migration.version)
+        {
+            bail!(
+                "expected migration list contains duplicate version {}",
+                migration.version
+            );
         }
+    }
+
+    for version in 1..=stamp.schema_version {
+        let Some(migration) = expected
+            .iter()
+            .find(|migration| migration.version == version)
+        else {
+            bail!(
+                "database schema {} contains migration {version}, but this binary has no matching descriptor",
+                stamp.schema_version
+            );
+        };
         let Some((name, checksum)) = migration_identity(conn, migration.version)? else {
             bail!(
                 "database schema {} is missing migration {} ({})",
@@ -388,6 +481,11 @@ fn application_id(conn: &Connection) -> Result<u32> {
     u32::try_from(value).context("SQLite application_id is outside the supported range")
 }
 
+fn user_version(conn: &Connection) -> Result<u32> {
+    let value: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    u32::try_from(value).context("SQLite user_version is outside the supported range")
+}
+
 fn enforce_next_version(conn: &Connection, version: u32) -> Result<()> {
     let latest: Option<u32> = conn
         .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
@@ -410,10 +508,11 @@ fn enforce_next_version(conn: &Connection, version: u32) -> Result<()> {
     Ok(())
 }
 
-fn verify_contiguous_history(conn: &Connection) -> Result<()> {
+fn verify_contiguous_history(conn: &Connection) -> Result<Option<u32>> {
     let mut statement = conn.prepare("SELECT version FROM schema_migrations ORDER BY version")?;
     let mut rows = statement.query([])?;
     let mut expected = 1_u32;
+    let mut latest = None;
     while let Some(row) = rows.next()? {
         let stored = u32::try_from(row.get::<_, i64>(0)?)
             .context("stored migration version is outside the supported range")?;
@@ -422,11 +521,122 @@ fn verify_contiguous_history(conn: &Connection) -> Result<()> {
                 "schema migration history has a gap: expected version {expected}, found {stored}"
             );
         }
+        latest = Some(stored);
         expected = expected
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("migration version space is exhausted"))?;
     }
+    Ok(latest)
+}
+
+fn verify_tracking_state_before_migration(conn: &Connection) -> Result<Option<DatabaseStamp>> {
+    let history_tip = verify_contiguous_history(conn)?;
+    if history_tip.is_none() {
+        let user_version = user_version(conn)?;
+        let metadata_markers = compatibility_metadata_marker_count(conn)?;
+        if user_version != 0 || metadata_markers != 0 {
+            bail!(
+                "database has partial migration state before the first migration: user_version={user_version}, compatibility metadata markers={metadata_markers}"
+            );
+        }
+        return Ok(None);
+    }
+
+    let stamp = read_database_stamp_from(conn)?;
+    verify_stamp_history_alignment_with_tip(conn, stamp, history_tip)?;
+    Ok(Some(stamp))
+}
+
+fn verify_stamp_history_alignment(conn: &Connection, stamp: DatabaseStamp) -> Result<()> {
+    let history_tip = verify_contiguous_history(conn)?;
+    verify_stamp_history_alignment_with_tip(conn, stamp, history_tip)
+}
+
+fn verify_stamp_history_alignment_with_tip(
+    conn: &Connection,
+    stamp: DatabaseStamp,
+    history_tip: Option<u32>,
+) -> Result<()> {
+    stamp.validate()?;
+    let Some(history_tip) = history_tip else {
+        bail!(
+            "database schema stamp {} has no migration history",
+            stamp.schema_version
+        );
+    };
+    if history_tip < stamp.schema_version {
+        bail!(
+            "schema migration history is behind database schema stamp {}: latest migration is {history_tip}",
+            stamp.schema_version
+        );
+    }
+    if history_tip > stamp.schema_version {
+        bail!(
+            "schema migration history is ahead of database schema stamp {}: latest migration is {history_tip}",
+            stamp.schema_version
+        );
+    }
+
+    let pragma_version = user_version(conn)?;
+    if pragma_version != stamp.schema_version {
+        bail!(
+            "SQLite user_version {pragma_version} does not match database schema stamp {}",
+            stamp.schema_version
+        );
+    }
+
+    let metadata_product_version: String = conn
+        .query_row(
+            "SELECT value FROM app_metadata WHERE key = ?1",
+            [PRODUCT_VERSION_KEY],
+            |row| row.get(0),
+        )
+        .with_context(|| {
+            format!("database is missing compatibility metadata '{PRODUCT_VERSION_KEY}'")
+        })?;
+    if metadata_product_version.trim().is_empty() {
+        bail!("database schema product version must not be empty");
+    }
+    let history_product_version: String = conn.query_row(
+        "SELECT product_version FROM schema_migrations WHERE version = ?1",
+        [i64::from(history_tip)],
+        |row| row.get(0),
+    )?;
+    if history_product_version != metadata_product_version {
+        bail!(
+            "schema product version '{}' does not match latest migration product version '{}'",
+            metadata_product_version,
+            history_product_version
+        );
+    }
     Ok(())
+}
+
+fn compatibility_metadata_marker_count(conn: &Connection) -> Result<u32> {
+    let has_metadata: bool = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sqlite_schema
+           WHERE type = 'table' AND name = 'app_metadata'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_metadata {
+        return Ok(0);
+    }
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM app_metadata
+         WHERE key IN (?1, ?2, ?3, ?4)",
+        (
+            SCHEMA_VERSION_KEY,
+            MIN_READER_VERSION_KEY,
+            MIN_WRITER_VERSION_KEY,
+            PRODUCT_VERSION_KEY,
+        ),
+        |row| row.get(0),
+    )?;
+    u32::try_from(count)
+        .context("compatibility metadata marker count is outside the supported range")
 }
 
 fn migration_identity(conn: &Connection, version: u32) -> Result<Option<(String, String)>> {

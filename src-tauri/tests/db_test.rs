@@ -119,7 +119,14 @@ fn note_titles_and_bodies_are_user_editable() {
         .unwrap();
     db::insert_embedding(&conn, note_id, &vec![0.1; 768]).unwrap();
 
-    db::update_note(&conn, note_id, "A title I chose", "A body I rewrote.").unwrap();
+    db::update_note(
+        &conn,
+        note_id,
+        "A title I chose",
+        "A body I rewrote.",
+        "2026-08-16T12:00:00Z",
+    )
+    .unwrap();
 
     let notes = db::list_notes(&conn).unwrap();
     assert_eq!(notes[0].title, "A title I chose");

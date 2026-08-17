@@ -1256,7 +1256,7 @@ fn backfill_apply_rejects_a_new_manual_filing_and_preserves_it() {
 }
 
 #[test]
-fn deleting_a_destination_disables_its_rule_and_clears_automatic_routes() {
+fn deleting_a_destination_fails_closed_without_changing_rules_or_routes() {
     let (path, conn) = test_db("deleted_destination");
     let work = folder_id(&conn, "Work");
     let destination = db::create_note_folder(
@@ -1290,14 +1290,31 @@ fn deleting_a_destination_disables_its_rule_and_clears_automatic_routes() {
         "matched"
     );
 
-    db::delete_note_folder(&conn, destination).unwrap();
+    let before_rule = store::meeting_filing_rules(&conn).unwrap().remove(0);
+    let before_meeting = store::get_meeting(&conn, meeting_id).unwrap();
+    let error = db::delete_note_folder(&conn, destination)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("folder deletion is unavailable"));
     let rule = store::meeting_filing_rules(&conn).unwrap().remove(0);
-    assert!(!rule.enabled);
-    assert_eq!(rule.folder_id, None);
+    assert_eq!(rule.enabled, before_rule.enabled);
+    assert_eq!(rule.folder_id, before_rule.folder_id);
     let meeting = store::get_meeting(&conn, meeting_id).unwrap();
-    assert_eq!(meeting["route_status"], "needs_filing");
-    assert_eq!(meeting["route_folder_id"], serde_json::Value::Null);
-    assert_eq!(meeting["route_via"], "destination_missing");
+    assert_eq!(meeting["route_status"], before_meeting["route_status"]);
+    assert_eq!(
+        meeting["route_folder_id"],
+        before_meeting["route_folder_id"]
+    );
+    assert_eq!(meeting["route_via"], before_meeting["route_via"]);
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM note_folders WHERE id = ?1",
+            [destination],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
 
     drop(conn);
     let _ = std::fs::remove_file(path);

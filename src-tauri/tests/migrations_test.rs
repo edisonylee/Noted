@@ -3,9 +3,10 @@ mod migrations;
 
 use anyhow::anyhow;
 use migrations::{
-    apply_migration, inspect_database, negotiate_schema, read_database_stamp,
-    stamp_converged_schema, verify_known_migrations, ClientCapabilities, DatabaseSchemaState,
-    DatabaseStamp, MigrationDescriptor, MigrationOutcome, SchemaAccess, NOTED_APPLICATION_ID,
+    apply_migration, inspect_database, negotiate_record_kind, negotiate_schema,
+    read_database_stamp, stamp_converged_schema, verify_known_migrations, ClientCapabilities,
+    DatabaseSchemaState, DatabaseStamp, MigrationDescriptor, MigrationOutcome,
+    RecordKindCapability, SchemaAccess, NOTED_APPLICATION_ID,
 };
 use rusqlite::{Connection, OptionalExtension};
 
@@ -94,6 +95,141 @@ fn detects_rewritten_migration_history() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("checksum mismatch"), "{error}");
+
+    let renamed = MigrationDescriptor::new(1, "renamed-baseline", BASELINE.checksum);
+    let error = verify_known_migrations(&conn, &[renamed])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("name mismatch"), "{error}");
+}
+
+#[test]
+fn stamped_version_history_and_pragma_must_align_exactly() {
+    let mut user_version_ahead = Connection::open_in_memory().unwrap();
+    stamp_converged_schema(
+        &mut user_version_ahead,
+        BASELINE,
+        DatabaseStamp::new(1, 1, 1),
+        "0.1.0",
+    )
+    .unwrap();
+    user_version_ahead
+        .pragma_update(None, "user_version", 2)
+        .unwrap();
+    let error = inspect_database(&user_version_ahead)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("user_version 2"), "{error}");
+
+    let mut history_ahead = Connection::open_in_memory().unwrap();
+    stamp_converged_schema(
+        &mut history_ahead,
+        BASELINE,
+        DatabaseStamp::new(1, 1, 1),
+        "0.1.0",
+    )
+    .unwrap();
+    history_ahead
+        .execute(
+            "INSERT INTO schema_migrations
+             (version, name, checksum, applied_at, product_version)
+             VALUES (2, 'uncommitted-v2', 'uncommitted-v2', 'now', '0.2.0')",
+            [],
+        )
+        .unwrap();
+    let error = inspect_database(&history_ahead).unwrap_err().to_string();
+    assert!(error.contains("history is ahead"), "{error}");
+
+    let mut stamp_ahead = Connection::open_in_memory().unwrap();
+    stamp_converged_schema(
+        &mut stamp_ahead,
+        BASELINE,
+        DatabaseStamp::new(1, 1, 1),
+        "0.1.0",
+    )
+    .unwrap();
+    stamp_ahead
+        .execute(
+            "UPDATE app_metadata SET value = '2' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    stamp_ahead.pragma_update(None, "user_version", 2).unwrap();
+    let error = inspect_database(&stamp_ahead).unwrap_err().to_string();
+    assert!(error.contains("history is behind"), "{error}");
+
+    let mut history_gap = Connection::open_in_memory().unwrap();
+    stamp_converged_schema(
+        &mut history_gap,
+        BASELINE,
+        DatabaseStamp::new(1, 1, 1),
+        "0.1.0",
+    )
+    .unwrap();
+    history_gap
+        .execute(
+            "INSERT INTO schema_migrations
+             (version, name, checksum, applied_at, product_version)
+             VALUES (3, 'skipped-v2', 'skipped-v2', 'now', '0.3.0')",
+            [],
+        )
+        .unwrap();
+    let error = inspect_database(&history_gap).unwrap_err().to_string();
+    assert!(error.contains("history has a gap"), "{error}");
+}
+
+#[test]
+fn partial_or_unknown_migration_state_is_rejected() {
+    let partial = Connection::open_in_memory().unwrap();
+    partial
+        .execute_batch(
+            "CREATE TABLE app_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO app_metadata VALUES ('schema_version', '1');",
+        )
+        .unwrap();
+    let error = inspect_database(&partial).unwrap_err().to_string();
+    assert!(error.contains("partial migration state"), "{error}");
+
+    let mut conn = Connection::open_in_memory().unwrap();
+    stamp_converged_schema(&mut conn, BASELINE, DatabaseStamp::new(1, 1, 1), "0.1.0").unwrap();
+    let v2 = MigrationDescriptor::new(2, "portable-records", "portable-v2");
+    apply_migration(&mut conn, v2, DatabaseStamp::new(2, 1, 2), "0.2.0", |_| {
+        Ok(())
+    })
+    .unwrap();
+    let error = verify_known_migrations(&conn, &[BASELINE])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("no matching descriptor"), "{error}");
+}
+
+#[test]
+fn per_kind_capability_never_grants_a_lossy_write() {
+    let capabilities = [
+        RecordKindCapability::new("note", 2, 1),
+        RecordKindCapability::new("folder", 1, 1),
+    ];
+
+    assert_eq!(
+        negotiate_record_kind(SchemaAccess::ReadWrite, "note", 1, &capabilities),
+        SchemaAccess::ReadWrite
+    );
+    assert_eq!(
+        negotiate_record_kind(SchemaAccess::ReadWrite, "note", 2, &capabilities),
+        SchemaAccess::ReadOnly
+    );
+    assert_eq!(
+        negotiate_record_kind(SchemaAccess::ReadWrite, "note", 3, &capabilities),
+        SchemaAccess::Reject
+    );
+    assert_eq!(
+        negotiate_record_kind(SchemaAccess::ReadOnly, "folder", 1, &capabilities),
+        SchemaAccess::ReadOnly
+    );
+    assert_eq!(
+        negotiate_record_kind(SchemaAccess::ReadWrite, "meeting", 1, &capabilities),
+        SchemaAccess::Reject
+    );
 }
 
 #[test]

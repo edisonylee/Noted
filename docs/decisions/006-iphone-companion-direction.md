@@ -8,8 +8,11 @@ Owners: product, mobile, data architecture, and security
 
 Implementation status: M0 accepted; the M1 quarantine checkpoint is implemented;
 the M2 native shell, simulator build, signed physical-device installation, and
-local-only Notes persistence are proven. M2 platform-security/lifecycle probes
-remain; M3 portability is next. No synchronized mobile data model has shipped.
+local-only Notes persistence are proven. The M3 portability implementation
+checkpoint is complete with deterministic migration, rollback, journal, FTS,
+and export/restore evidence. Physical platform-security/lifecycle probes and a
+recorder-load measurement remain release gates; M4 uses sanitized fixtures only.
+No synchronized transport has shipped.
 
 ## Context
 

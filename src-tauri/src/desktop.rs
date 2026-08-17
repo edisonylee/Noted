@@ -19,6 +19,7 @@ pub mod pipeline;
 pub mod provider;
 pub mod release_profile;
 pub mod reminders;
+pub mod sync_journal;
 pub mod system_settings;
 pub mod themes;
 pub mod voice;
@@ -964,7 +965,9 @@ async fn note_restore(app: tauri::AppHandle, note_id: i64) -> Result<(), String>
     let embed_text = {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
-        if !db::restore_note(&conn, note_id).map_err(|e| e.to_string())? {
+        if !db::restore_note(&conn, note_id, &chrono::Utc::now().to_rfc3339())
+            .map_err(|e| e.to_string())?
+        {
             return Err("Note is not in Trash".into());
         }
         db::note_embed_text(&conn, note_id).map_err(|e| e.to_string())?
@@ -984,36 +987,9 @@ async fn note_restore(app: tauri::AppHandle, note_id: i64) -> Result<(), String>
 
 #[tauri::command]
 async fn note_delete_forever(app: tauri::AppHandle, note_id: i64) -> Result<(), String> {
-    let images_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("images");
     let state = app.state::<Db>();
     let mut conn = state.0.lock().unwrap();
-    let deleted = db::delete_note_forever(&mut conn, note_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Move the note to Trash before deleting it permanently".to_string())?;
-    drop(conn);
-
-    if let Some(image_path) = deleted.image_path {
-        let image_path = std::path::PathBuf::from(image_path);
-        if image_path.exists() {
-            match (images_dir.canonicalize(), image_path.canonicalize()) {
-                (Ok(images_dir), Ok(image_path)) if image_path.starts_with(&images_dir) => {
-                    if let Err(error) = std::fs::remove_file(&image_path) {
-                        eprintln!(
-                            "[noted] permanently deleted note {note_id}, but retained image cleanup failed: {error}"
-                        );
-                    }
-                }
-                _ => eprintln!(
-                    "[noted] permanently deleted note {note_id}, but retained an image outside the managed images directory"
-                ),
-            }
-        }
-    }
-    Ok(())
+    db::delete_note_forever(&mut conn, note_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1026,7 +1002,14 @@ async fn update_note(
     let embed_text = {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
-        db::update_note(&conn, note_id, &title, &raw_text).map_err(|e| e.to_string())?;
+        db::update_note(
+            &conn,
+            note_id,
+            &title,
+            &raw_text,
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .map_err(|e| e.to_string())?;
         db::note_embed_text(&conn, note_id).map_err(|e| e.to_string())?
     };
     if let Ok(v) = ollama::embed(&embed_text).await {
@@ -1073,8 +1056,9 @@ async fn rename_note_folder(
     name: String,
 ) -> Result<(), String> {
     let state = app.state::<Db>();
+    let now = chrono::Utc::now().to_rfc3339();
     let conn = state.0.lock().unwrap();
-    db::rename_note_folder(&conn, folder_id, &name).map_err(|e| e.to_string())
+    db::rename_note_folder(&conn, folder_id, &name, &now).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1085,8 +1069,10 @@ async fn move_note_folder(
     before_id: Option<i64>,
 ) -> Result<(), String> {
     let state = app.state::<Db>();
+    let now = chrono::Utc::now().to_rfc3339();
     let conn = state.0.lock().unwrap();
-    db::move_note_folder(&conn, folder_id, parent_id, before_id).map_err(|e| e.to_string())
+    db::move_note_folder(&conn, folder_id, parent_id, before_id, &now)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1972,7 +1958,9 @@ async fn update_entry(app: tauri::AppHandle, entry_id: i64, data: Value) -> Resu
     }
     let (note_id, text) = {
         let conn = state.0.lock().unwrap();
-        let note_id = db::update_entry_data(&conn, entry_id, &data).map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let note_id =
+            db::update_entry_data(&conn, entry_id, &data, &now).map_err(|e| e.to_string())?;
         let text = db::note_embed_text(&conn, note_id).map_err(|e| e.to_string())?;
         (note_id, text)
     };

@@ -51,6 +51,19 @@ fn delete_mobile_note(store: State<'_, MobileStore>, record_id: String) -> Resul
     store.delete(&record_id)
 }
 
+#[tauri::command]
+fn export_mobile_notes(store: State<'_, MobileStore>) -> Result<String, String> {
+    store.export_notes()
+}
+
+#[tauri::command]
+fn restore_mobile_notes_export(
+    store: State<'_, MobileStore>,
+    export_json: String,
+) -> Result<usize, String> {
+    store.restore_notes_export(&export_json)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -67,7 +80,9 @@ pub fn run() {
             list_mobile_notes,
             create_mobile_note,
             update_mobile_note,
-            delete_mobile_note
+            delete_mobile_note,
+            export_mobile_notes,
+            restore_mobile_notes_export
         ])
         .run(tauri::generate_context!())
         .expect("error while running Noted on iOS");

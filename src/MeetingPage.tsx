@@ -11,6 +11,7 @@ import {
   Copy,
   Download,
   FileDown,
+  Folder,
   Loader,
   Mic,
   Pause,
@@ -39,6 +40,7 @@ import {
   type MeetingSegment,
   type MeetingSpeaker,
   type MeetingTemplate,
+  type NoteFolderInfo,
   type PersonProfile,
   type RangeEvent,
 } from "./api";
@@ -339,6 +341,7 @@ function ConversationDynamics({
 }
 
 type Tab = "notes" | "transcript" | "video" | number; // number = summary index
+const EMPTY_NOTE_FOLDERS: NoteFolderInfo[] = [];
 
 function transcriptionModelLabel(engine: string | null, model: string | null): string {
   if (!engine || !model) return "transcription model not recorded";
@@ -351,17 +354,50 @@ function transcriptionModelLabel(engine: string | null, model: string | null): s
   return `transcribed with ${engine} ${model}`;
 }
 
+function meetingFolderPath(folderId: number, folders: NoteFolderInfo[]): string {
+  const names: string[] = [];
+  const seen = new Set<number>();
+  let current = folders.find((folder) => folder.id === folderId);
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    names.unshift(current.name);
+    current = current.parent_id == null
+      ? undefined
+      : folders.find((folder) => folder.id === current!.parent_id);
+  }
+  const folder = folders.find((candidate) => candidate.id === folderId);
+  if (folder?.kind === "space") names.push("Inbox");
+  return names.join(" / ");
+}
+
+function meetingFolderSpaceId(folderId: number, folders: NoteFolderInfo[]): number | null {
+  const seen = new Set<number>();
+  let current = folders.find((folder) => folder.id === folderId);
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    if (current.parent_id == null) return current.kind === "space" ? current.id : null;
+    current = folders.find((folder) => folder.id === current!.parent_id);
+  }
+  return null;
+}
+
+function displayMeetingFolderPath(path: string): string {
+  return path.split(" / ").join(" › ");
+}
+
 export function MeetingPage({
   id,
   event,
   onBack,
   onStarted,
+  onTitleChanged,
   focusSegmentId,
 }: {
   id: number | null; // null = pre-meeting page for a calendar event
   event?: Partial<RangeEvent> | null;
   onBack: () => void;
   onStarted?: (id: number) => void;
+  onTitleChanged?: (id: number, title: string) => void;
   focusSegmentId?: number;
 }) {
   const [detail, setDetail] = useState<MeetingDetail | null>(null);
@@ -398,6 +434,12 @@ export function MeetingPage({
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [titleSaving, setTitleSaving] = useState(false);
+  const [folders, setFolders] = useState<NoteFolderInfo[] | null>(null);
+  const [folderPickerOpen, setFolderPickerOpen] = useState(false);
+  const [folderQuery, setFolderQuery] = useState("");
+  const [folderLoadError, setFolderLoadError] = useState(false);
+  const [filingSaving, setFilingSaving] = useState(false);
+  const [filingStatus, setFilingStatus] = useState<string | null>(null);
   const [editingSummary, setEditingSummary] = useState<number | null>(null);
   const [summaryDraft, setSummaryDraft] = useState("");
   const [summarySaving, setSummarySaving] = useState(false);
@@ -409,6 +451,9 @@ export function MeetingPage({
   const copyTimer = useRef<number | null>(null);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const speakerInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const folderPickerRef = useRef<HTMLDivElement>(null);
+  const folderSearchRef = useRef<HTMLInputElement>(null);
+  const filingStatusTimer = useRef<number | null>(null);
   const initialTabSelectedFor = useRef<number | null>(null);
   const loadedNotesFor = useRef<number | undefined>(undefined);
 
@@ -459,6 +504,15 @@ export function MeetingPage({
   useEffect(() => {
     api.meetingTemplates().then(setTemplates).catch(() => {});
     api.listPeople().then(setPeople).catch(() => {});
+    api.listNoteFolders()
+      .then((items) => {
+        setFolders(items);
+        setFolderLoadError(false);
+      })
+      .catch(() => {
+        setFolders([]);
+        setFolderLoadError(true);
+      });
   }, []);
 
   useEffect(() => {
@@ -466,6 +520,9 @@ export function MeetingPage({
     setSpeakerEditorOpen(false);
     setSpeakerDrafts({});
     setSpeakerSaveMessage(null);
+    setFolderPickerOpen(false);
+    setFolderQuery("");
+    setFilingStatus(null);
   }, [focusSegmentId, id]);
 
   useEffect(() => {
@@ -479,8 +536,28 @@ export function MeetingPage({
   useEffect(() => {
     return () => {
       if (copyTimer.current) window.clearTimeout(copyTimer.current);
+      if (filingStatusTimer.current) window.clearTimeout(filingStatusTimer.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (!folderPickerOpen) return;
+    folderSearchRef.current?.focus();
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if (!folderPickerRef.current?.contains(event.target as Node)) {
+        setFolderPickerOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setFolderPickerOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [folderPickerOpen]);
 
   // A meeting switch starts a fresh copilot session. Insights are deliberately
   // ephemeral: they are prompts for the moment, not another source of notes.
@@ -707,11 +784,61 @@ export function MeetingPage({
     try {
       await api.meetingSetTitle(id, next);
       setDetail((current) => (current ? { ...current, title: next } : current));
+      onTitleChanged?.(id, next);
       setEditingTitle(false);
     } catch (e) {
       setError(String(e));
     } finally {
       setTitleSaving(false);
+    }
+  };
+
+  const folderItems = folders ?? EMPTY_NOTE_FOLDERS;
+  const destinationPath = detail?.route_folder_id != null
+    ? meetingFolderPath(detail.route_folder_id, folderItems)
+    : detail?.filing_context
+      ? `${detail.filing_context === "work" ? "Work" : "Personal"} / Inbox`
+      : "Choose a folder";
+  const folderSections = useMemo(() => {
+    const normalizedQuery = folderQuery.trim().toLocaleLowerCase();
+    return folderItems
+      .filter((folder) => folder.kind === "space" && folder.parent_id == null)
+      .map((space) => ({
+        space,
+        folders: folderItems
+          .filter((folder) => meetingFolderSpaceId(folder.id, folderItems) === space.id)
+          .map((folder) => ({ folder, path: meetingFolderPath(folder.id, folderItems) }))
+          .filter(({ path }) => !normalizedQuery || path.toLocaleLowerCase().includes(normalizedQuery)),
+      }))
+      .filter((section) => section.folders.length > 0);
+  }, [folderItems, folderQuery]);
+
+  const chooseDestination = async (folder: NoteFolderInfo, path: string) => {
+    if (id == null || filingSaving) return;
+    setFilingSaving(true);
+    setError(null);
+    try {
+      await api.meetingSetFilingDestination(id, folder.id);
+      const spaceId = meetingFolderSpaceId(folder.id, folderItems);
+      const space = folderItems.find((candidate) => candidate.id === spaceId);
+      const context = space?.name.toLocaleLowerCase() === "personal" ? "personal" : "work";
+      setDetail((current) => current ? {
+        ...current,
+        route_folder_id: folder.id,
+        route_email: null,
+        route_via: "manual",
+        route_status: "manual",
+        filing_context: context,
+      } : current);
+      setFolderPickerOpen(false);
+      setFolderQuery("");
+      setFilingStatus(`Filed in ${displayMeetingFolderPath(path)}`);
+      if (filingStatusTimer.current) window.clearTimeout(filingStatusTimer.current);
+      filingStatusTimer.current = window.setTimeout(() => setFilingStatus(null), 2600);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setFilingSaving(false);
     }
   };
 
@@ -1308,7 +1435,7 @@ export function MeetingPage({
             ) : (
               <h2>{title}</h2>
             )}
-            {id != null && !recording && !summarizing &&
+            {id != null && !summarizing &&
               (editingTitle ? (
                 <span className="meeting-inline-actions">
                   <button onClick={() => setEditingTitle(false)} disabled={titleSaving}>
@@ -1352,7 +1479,81 @@ export function MeetingPage({
                 {transcriptionModelLabel(detail.asr_engine, detail.asr_model)}
               </span>
             )}
+            {id != null && detail && !detail.trashed_at && (
+              <div className="meeting-destination" ref={folderPickerRef}>
+                <button
+                  type="button"
+                  className="meeting-destination-button"
+                  onClick={() => setFolderPickerOpen((open) => !open)}
+                  disabled={filingSaving || summarizing}
+                  aria-expanded={folderPickerOpen}
+                  aria-haspopup="dialog"
+                  aria-label={`Change meeting folder. Filed in ${destinationPath}`}
+                  title={`Filed in ${destinationPath}`}
+                >
+                  {filingSaving ? <Loader size={12} className="spin" /> : <Folder size={12} />}
+                  <span>{displayMeetingFolderPath(destinationPath)}</span>
+                  <ChevronDown size={12} aria-hidden="true" />
+                </button>
+                {folderPickerOpen && (
+                  <div
+                    className="meeting-destination-popover"
+                    role="dialog"
+                    aria-label="Choose meeting folder"
+                    aria-busy={filingSaving}
+                  >
+                    <div className="meeting-folder-search">
+                      <Search size={14} aria-hidden="true" />
+                      <input
+                        ref={folderSearchRef}
+                        value={folderQuery}
+                        onChange={(event) => setFolderQuery(event.target.value)}
+                        placeholder="Search folders"
+                        aria-label="Search folders"
+                      />
+                    </div>
+                    <div className="meeting-folder-list">
+                      {folders == null ? (
+                        <p className="meeting-folder-empty">Loading folders…</p>
+                      ) : folderLoadError ? (
+                        <p className="meeting-folder-empty">Folders could not be loaded.</p>
+                      ) : folderSections.length === 0 ? (
+                        <p className="meeting-folder-empty">No folders match “{folderQuery.trim()}”.</p>
+                      ) : (
+                        folderSections.map(({ space, folders: options }) => (
+                          <section className="meeting-folder-section" key={space.id}>
+                            <h3>{space.name}</h3>
+                            {options.map(({ folder, path }) => {
+                              const selected = folder.id === detail.route_folder_id;
+                              const parentPath = path.split(" / ").slice(0, -1).join(" › ");
+                              return (
+                                <button
+                                  type="button"
+                                  className={selected ? "selected" : ""}
+                                  key={folder.id}
+                                  onClick={() => void chooseDestination(folder, path)}
+                                  disabled={filingSaving}
+                                  aria-current={selected ? "true" : undefined}
+                                >
+                                  <Folder size={14} aria-hidden="true" />
+                                  <span>
+                                    <strong>{folder.kind === "space" ? "Inbox" : folder.name}</strong>
+                                    {parentPath && <small>{parentPath}</small>}
+                                  </span>
+                                  {selected && <Check size={14} aria-label="Current folder" />}
+                                </button>
+                              );
+                            })}
+                          </section>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
+          {filingStatus && <span className="sr-only" role="status">{filingStatus}</span>}
         </div>
         <span className="spacer" />
         {meetLink && (

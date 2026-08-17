@@ -967,7 +967,8 @@ pub async fn run(
             .iter()
             .map(|n| json!({ "name": n, "type": "person" }))
             .collect();
-        let route_folder_id = (meeting["route_status"].as_str() == Some("matched"))
+        let route_status = meeting["route_status"].as_str();
+        let route_folder_id = matches!(route_status, Some("matched" | "manual"))
             .then(|| meeting["route_folder_id"].as_i64())
             .flatten();
         // An exact approved meeting rule owns context as well as destination.
@@ -999,7 +1000,9 @@ pub async fn run(
             "entities": entities,
             "filing_context": filing_context,
             "folder_id": route_folder_id,
-            "filing_source": route_folder_id.map(|_| "rule"),
+            "filing_source": route_folder_id.map(|_| {
+                if route_status == Some("manual") { "manual" } else { "rule" }
+            }),
         });
         match serde_json::from_value::<crate::SaveArgs>(save_json) {
             Ok(args) => match crate::save_entry(app.clone(), args).await {

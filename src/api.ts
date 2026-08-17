@@ -1075,6 +1075,8 @@ export const api = {
     invoke<void>("meeting_set_notes", { id, notes, notesDocumentJson }),
   meetingSetTitle: (id: number, title: string) =>
     invoke<void>("meeting_set_title", { id, title }),
+  meetingSetFilingDestination: (id: number, folderId: number) =>
+    invoke<void>("meeting_set_filing_destination", { id, folderId }),
   meetingSetSummary: (id: number, summaryId: number, contentMd: string) =>
     invoke<void>("meeting_set_summary", { id, summaryId, contentMd }),
   meetingSummarize: (id: number, template?: string) =>

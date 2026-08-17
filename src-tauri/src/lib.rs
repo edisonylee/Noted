@@ -2815,6 +2815,18 @@ async fn meeting_set_title(app: tauri::AppHandle, id: i64, title: String) -> Res
 }
 
 #[tauri::command]
+async fn meeting_set_filing_destination(
+    app: tauri::AppHandle,
+    id: i64,
+    folder_id: i64,
+) -> Result<(), String> {
+    let state = app.state::<Db>();
+    let now = chrono::Utc::now().to_rfc3339();
+    let conn = state.0.lock().unwrap();
+    meeting::store::set_filing_destination(&conn, id, folder_id, &now).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn meeting_set_summary(
     app: tauri::AppHandle,
     id: i64,
@@ -5055,6 +5067,7 @@ pub fn run() {
             meeting_get,
             meeting_set_notes,
             meeting_set_title,
+            meeting_set_filing_destination,
             meeting_set_summary,
             meeting_summarize,
             meeting_templates,

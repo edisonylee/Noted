@@ -31,11 +31,10 @@ import { easternDay, easternMinutes, formatDay } from "./day";
 import { joinUrl } from "./joinUrl";
 import { openExternalUrl } from "./openExternalUrl";
 import {
+  buildAdaptiveScheduleScale,
   buildScheduleGrid,
   isCurrentInterval,
-  scheduleEndFromResizeDelta,
-  scheduleMinuteFromGridOffset,
-  scheduleStartFromResizeDelta,
+  snapScheduleMinute,
 } from "./scheduleLayout";
 import { DocumentEditor } from "./editor/DocumentEditor";
 import {
@@ -71,7 +70,7 @@ type GridResizeState = {
   initialEnd: number;
   currentStart: number;
   currentEnd: number;
-  originClientY: number;
+  originMinute: number;
   pointerId: number;
 };
 
@@ -1974,27 +1973,35 @@ export function TodayView({
 
   // ---- Agenda ----
   const nowMin = easternMinutes(now);
-  const scheduleHourPx = 44;
   const scheduleGridPad = 16;
   const displayBlocks = reconcileScheduleBlocks(blocks, calEvents ?? []);
-  const grid = buildScheduleGrid(displayBlocks, { pixelsPerHour: scheduleHourPx });
+  const grid = buildScheduleGrid(displayBlocks);
   const gridStepMinutes = 15;
-  const gridMinEventHeight = 40;
+  const gridMinEventHeight = 48;
+  const gridEventGap = 8;
+  const scheduleScale = buildAdaptiveScheduleScale(grid.items, {
+    gridStart: grid.start,
+    gridEnd: grid.end,
+    minEventHeightPx: gridMinEventHeight,
+    eventGapPx: gridEventGap,
+  });
 
   const clampGridStart = (minute: number) =>
     Math.min(Math.max(grid.start, minute), Math.max(grid.start, grid.end - 60));
 
   const minuteAtGridY = (clientY: number, rectTop: number) =>
     clampGridStart(
-      scheduleMinuteFromGridOffset(clientY - rectTop - scheduleGridPad, {
-        gridStart: grid.start,
-        pixelsPerHour: scheduleHourPx,
-        stepMinutes: gridStepMinutes,
-      }),
+      snapScheduleMinute(
+        scheduleScale.yToMinute(clientY - rectTop - scheduleGridPad),
+        gridStepMinutes,
+      ),
     );
 
   const paintedEventHeight = (start: number, end: number) =>
-    Math.max(gridMinEventHeight, ((end - start) / 60) * scheduleHourPx - 3);
+    Math.max(
+      gridMinEventHeight,
+      scheduleScale.minuteToY(end) - scheduleScale.minuteToY(start) - 3,
+    );
 
   const beginGridDraftAt = (start: number) => {
     if (rowBusy || editIdx != null || gridResize) return;
@@ -2155,6 +2162,13 @@ export function TodayView({
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
+    const gridTop = timeGridRef.current?.getBoundingClientRect().top;
+    const originMinute =
+      gridTop == null
+        ? edge === "start"
+          ? start
+          : end
+        : scheduleScale.yToMinute(event.clientY - gridTop - scheduleGridPad);
     setSelectedIdx(index);
     setGridCursorMinute(null);
     setGridResize({
@@ -2164,7 +2178,7 @@ export function TodayView({
       initialEnd: end,
       currentStart: start,
       currentEnd: end,
-      originClientY: event.clientY,
+      originMinute,
       pointerId: event.pointerId,
     });
   };
@@ -2173,29 +2187,29 @@ export function TodayView({
     if (!gridResize || event.pointerId !== gridResize.pointerId) return;
     event.preventDefault();
     event.stopPropagation();
-    const delta = event.clientY - gridResize.originClientY;
+    const gridTop = timeGridRef.current?.getBoundingClientRect().top;
+    if (gridTop == null) return;
+    const pointerMinute = scheduleScale.yToMinute(event.clientY - gridTop - scheduleGridPad);
+    const deltaMinutes = snapScheduleMinute(
+      pointerMinute - gridResize.originMinute,
+      gridStepMinutes,
+    );
     if (gridResize.edge === "start") {
-      const currentStart = scheduleStartFromResizeDelta(
-        gridResize.initialStart,
-        gridResize.initialEnd,
-        delta,
-        {
-          pixelsPerHour: scheduleHourPx,
-          stepMinutes: gridStepMinutes,
-          minStart: grid.start,
-        },
+      const currentStart = Math.max(
+        grid.start,
+        Math.min(
+          gridResize.initialEnd - gridStepMinutes,
+          gridResize.initialStart + deltaMinutes,
+        ),
       );
       setGridResize({ ...gridResize, currentStart });
     } else {
-      const currentEnd = scheduleEndFromResizeDelta(
-        gridResize.initialStart,
-        gridResize.initialEnd,
-        delta,
-        {
-          pixelsPerHour: scheduleHourPx,
-          stepMinutes: gridStepMinutes,
-          maxEnd: grid.end,
-        },
+      const currentEnd = Math.min(
+        grid.end,
+        Math.max(
+          gridResize.initialStart + gridStepMinutes,
+          gridResize.initialEnd + deltaMinutes,
+        ),
       );
       setGridResize({ ...gridResize, currentEnd });
     }
@@ -2354,20 +2368,39 @@ export function TodayView({
         )}
         <div
           className="today-time-grid"
-          style={{ height: `${grid.heightPx + scheduleGridPad * 2}px` }}
+          style={{ height: `${scheduleScale.heightPx + scheduleGridPad * 2}px` }}
           role="region"
-          aria-label="Daily schedule, proportional time grid"
+          aria-label="Daily schedule, adaptive time grid"
         >
           <div className="today-grid-hours" aria-hidden="true">
-            {grid.hourMarks.map((minute) => (
+            {scheduleScale.marks.map((mark) => (
               <div
-                className="today-grid-hour"
-                key={minute}
-                style={{ top: `${scheduleGridPad + ((minute - grid.start) / 60) * scheduleHourPx}px` }}
+                className={`today-grid-hour${mark.major ? " major" : " half"}`}
+                key={mark.minute}
+                style={{ top: `${scheduleGridPad + mark.topPx}px` }}
               >
-                <span>{fmtTime(minToStr(minute)).replace(":00", "")}</span>
+                <span>{fmtTime(minToStr(mark.minute)).replace(":00", "")}</span>
               </div>
             ))}
+            {scheduleScale.bands
+              .filter((band) => band.compressed)
+              .map((band) => (
+                <div
+                  className="today-grid-gap"
+                  key={`gap-${band.start}-${band.end}`}
+                  style={{
+                    top: `${scheduleGridPad + band.topPx}px`,
+                    height: `${band.heightPx}px`,
+                  }}
+                >
+                  <span className="today-grid-gap-copy">
+                    <span>{fmtRange(minToStr(band.start), minToStr(band.end))}</span>
+                    {band.end - band.start >= 120 && (
+                      <strong>Free time · {fmtDur(band.end - band.start)}</strong>
+                    )}
+                  </span>
+                </div>
+              ))}
           </div>
           <div
             ref={timeGridRef}
@@ -2385,12 +2418,21 @@ export function TodayView({
                 Click any time to add an event
               </div>
             )}
+            {isToday && nowMin >= grid.start && nowMin <= grid.end && (
+              <div
+                className="today-grid-now-line"
+                aria-hidden="true"
+                style={{ top: `${scheduleGridPad + scheduleScale.minuteToY(nowMin)}px` }}
+              >
+                <span>{fmtTime(minToStr(nowMin))}</span>
+              </div>
+            )}
             {gridCursorMinute != null && !gridDraft && (
               <div
                 className="today-grid-cursor"
                 aria-hidden="true"
                 style={{
-                  top: `${scheduleGridPad + ((gridCursorMinute - grid.start) / 60) * scheduleHourPx}px`,
+                  top: `${scheduleGridPad + scheduleScale.minuteToY(gridCursorMinute)}px`,
                 }}
               >
                 <span>{fmtTime(minToStr(gridCursorMinute))}</span>
@@ -2400,7 +2442,7 @@ export function TodayView({
               <div
                 className="today-grid-event today-grid-draft selected"
                 style={{
-                  top: `${scheduleGridPad + ((draftStart - grid.start) / 60) * scheduleHourPx}px`,
+                  top: `${scheduleGridPad + scheduleScale.minuteToY(draftStart)}px`,
                   height: `${paintedEventHeight(draftStart, draftEnd)}px`,
                   left: 0,
                   width: "100%",
@@ -2526,7 +2568,7 @@ export function TodayView({
                   <div
                     className="today-grid-edit"
                     key={`grid-edit-${idx}`}
-                    style={{ top: `${scheduleGridPad + item.topPx}px` }}
+                    style={{ top: `${scheduleGridPad + scheduleScale.minuteToY(item.start)}px` }}
                   >
                     <ScheduleRowForm
                       init={block}
@@ -2545,7 +2587,7 @@ export function TodayView({
               const previewEnd = gridResize?.index === idx ? gridResize.currentEnd : item.end;
               const previewHeight = paintedEventHeight(previewStart, previewEnd);
               const previewDuration = previewEnd - previewStart;
-              const compact = previewHeight < 52;
+              const compact = previewDuration <= 30 || previewHeight < 52;
               const range = fmtRange(minToStr(previewStart), minToStr(previewEnd));
               const selected = selectedIdx === idx;
               const laneGap = 4;
@@ -2563,7 +2605,7 @@ export function TodayView({
                     (gridResize?.index === idx ? " resizing" : "")
                   }
                   style={{
-                    top: `${scheduleGridPad + ((previewStart - grid.start) / 60) * scheduleHourPx}px`,
+                    top: `${scheduleGridPad + scheduleScale.minuteToY(previewStart)}px`,
                     height: `${previewHeight}px`,
                     left: `calc(${left}% + ${laneOffset}px)`,
                     width: `calc(${width}% - ${laneReduction}px)`,

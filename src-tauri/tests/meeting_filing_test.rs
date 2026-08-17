@@ -647,6 +647,75 @@ fn first_summary_files_to_saved_route_and_manual_filing_is_permanent() {
 }
 
 #[test]
+fn live_destination_is_manual_and_survives_the_first_note_link() {
+    let (path, conn) = test_db("live_manual_destination");
+    let health = folder_id(&conn, "Health");
+    let meeting_id = store::create_meeting(
+        &conn,
+        "Weekly reflection",
+        None,
+        None,
+        "2026-08-06T12:00:00Z",
+    )
+    .unwrap();
+
+    store::set_filing_destination(&conn, meeting_id, health, "2026-08-06T12:01:00Z").unwrap();
+    let meeting = store::get_meeting(&conn, meeting_id).unwrap();
+    assert_eq!(meeting["route_folder_id"], health);
+    assert_eq!(meeting["route_status"], "manual");
+    assert_eq!(meeting["route_via"], "manual");
+    assert_eq!(meeting["filing_context"], "personal");
+
+    let note_id = note(&conn, "Weekly reflection");
+    db::file_note(&conn, note_id, Some(health), "2026-08-06T12:02:00Z").unwrap();
+    store::set_note_id_and_apply_route(&conn, meeting_id, note_id, "2026-08-06T12:03:00Z").unwrap();
+
+    let filing: (i64, String) = conn
+        .query_row(
+            "SELECT folder_id, source FROM note_folder_items WHERE note_id = ?1",
+            [note_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(filing, (health, "manual".into()));
+    let meeting = store::get_meeting(&conn, meeting_id).unwrap();
+    assert_eq!(meeting["route_folder_id"], health);
+    assert_eq!(meeting["route_status"], "manual");
+
+    drop(conn);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn completed_meeting_destination_moves_its_linked_note() {
+    let (path, conn) = test_db("completed_manual_destination");
+    let baro = folder_id(&conn, "Baro");
+    let health = folder_id(&conn, "Health");
+    let meeting_id =
+        store::create_meeting(&conn, "Planning", None, None, "2026-08-06T12:00:00Z").unwrap();
+    let note_id = note(&conn, "Planning");
+    db::file_note(&conn, note_id, Some(baro), "2026-08-06T12:01:00Z").unwrap();
+    store::set_note_id(&conn, meeting_id, note_id).unwrap();
+
+    store::set_filing_destination(&conn, meeting_id, health, "2026-08-06T12:02:00Z").unwrap();
+
+    let filing: (i64, String) = conn
+        .query_row(
+            "SELECT folder_id, source FROM note_folder_items WHERE note_id = ?1",
+            [note_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(filing, (health, "manual".into()));
+    let meeting = store::get_meeting(&conn, meeting_id).unwrap();
+    assert_eq!(meeting["route_folder_id"], health);
+    assert_eq!(meeting["filing_context"], "personal");
+
+    drop(conn);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn identity_route_supersedes_context_inbox_and_sets_work_provenance() {
     let (path, conn) = test_db("context_to_identity");
     let baro = folder_id(&conn, "Baro");

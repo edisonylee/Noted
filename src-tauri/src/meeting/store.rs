@@ -787,6 +787,33 @@ pub fn set_title(conn: &Connection, id: i64, title: &str) -> Result<Option<i64>>
     Ok(note_id)
 }
 
+/// Make a meeting's destination an explicit, sticky choice. Before the first
+/// summary exists, the route lives on the meeting and is consumed when its
+/// library note is created. Afterwards, move that linked note through the
+/// normal filing transition so history, context, and provenance stay aligned.
+pub fn set_filing_destination(conn: &Connection, id: i64, folder_id: i64, now: &str) -> Result<()> {
+    let filing_context = crate::db::note_folder_context(conn, folder_id)?;
+    let note_id = conn
+        .query_row("SELECT note_id FROM meetings WHERE id = ?1", [id], |row| {
+            row.get::<_, Option<i64>>(0)
+        })
+        .optional()?
+        .ok_or_else(|| anyhow!("meeting not found"))?;
+
+    if let Some(note_id) = note_id {
+        crate::db::file_note(conn, note_id, Some(folder_id), now)?;
+        return Ok(());
+    }
+
+    conn.execute(
+        "UPDATE meetings SET filing_context = ?2, route_folder_id = ?3,
+                route_email = NULL, route_via = 'manual', route_status = 'manual',
+                route_updated_at = ?4 WHERE id = ?1",
+        rusqlite::params![id, filing_context, folder_id, now],
+    )?;
+    Ok(())
+}
+
 pub fn set_audio_paths(
     conn: &Connection,
     id: i64,

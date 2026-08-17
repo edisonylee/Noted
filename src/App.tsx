@@ -1069,6 +1069,11 @@ export default function App() {
             event={meetingOpen.event}
             onBack={() => setMeetingOpen(null)}
             onStarted={(id) => setMeetingOpen({ id })}
+            onTitleChanged={(meetingId, title) => {
+              setRecMeeting((current) =>
+                current?.id === meetingId ? { ...current, title } : current
+              );
+            }}
           />
         ) : view === "today" ? (
           <div className="schedule-page">

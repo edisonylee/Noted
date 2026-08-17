@@ -507,6 +507,11 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "meeting_set_title" => crate::meeting_set_title(a, iarg(b, "id"), sarg(b, "title"))
             .await
             .map(|_| Value::Null),
+        "meeting_set_filing_destination" => {
+            crate::meeting_set_filing_destination(a, iarg(b, "id"), iarg(b, "folderId"))
+                .await
+                .map(|_| Value::Null)
+        }
         "meeting_set_summary" => {
             crate::meeting_set_summary(a, iarg(b, "id"), iarg(b, "summaryId"), sarg(b, "contentMd"))
                 .await

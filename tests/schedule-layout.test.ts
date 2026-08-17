@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   assignOverlapLanes,
+  buildAdaptiveScheduleScale,
   buildScheduleGrid,
   computeEventGeometry,
   isCurrentInterval,
@@ -45,7 +46,7 @@ describe("schedule overlap lanes", () => {
     expect(lanes.map((event) => event.lane)).toEqual([0, 1, 1]);
   });
 
-  test("accounts for the painted minimum height", () => {
+  test("keeps close but non-overlapping events full width", () => {
     const events: ScheduleInterval[] = [
       { index: 0, start: 720, end: 735 },
       { index: 1, start: 750, end: 765 },
@@ -56,8 +57,49 @@ describe("schedule overlap lanes", () => {
       minHeightPx: 34,
       gapPx: 2,
     });
-    expect(geometry.map((event) => event.lane)).toEqual([0, 1]);
+    expect(geometry.map((event) => ({ lane: event.lane, laneCount: event.laneCount }))).toEqual([
+      { lane: 0, laneCount: 1 },
+      { lane: 0, laneCount: 1 },
+    ]);
     expect(geometry[0].heightPx).toBe(34);
+  });
+});
+
+describe("adaptive schedule scale", () => {
+  const blocks = [
+    { task: "Stand-up", start: "08:00", end: "08:15" },
+    { task: "One-on-one", start: "09:00", end: "09:15" },
+    { task: "Check-in", start: "09:45", end: "10:00" },
+    { task: "Review", start: "10:00", end: "10:15" },
+    { task: "Team event", start: "14:30", end: "17:30" },
+    { task: "Gym", start: "17:00", end: "18:30" },
+  ];
+
+  test("expands busy clusters, compresses long gaps, and stays reversible", () => {
+    const grid = buildScheduleGrid(blocks);
+    const scale = buildAdaptiveScheduleScale(grid.items, {
+      gridStart: grid.start,
+      gridEnd: grid.end,
+      minEventHeightPx: 48,
+      eventGapPx: 8,
+    });
+
+    expect(scale.minuteToY(10 * 60) - scale.minuteToY(9 * 60 + 45)).toBeGreaterThanOrEqual(56);
+    const middayGap = scale.bands.find(
+      (band) => band.compressed && band.start >= 10 * 60 && band.end <= 15 * 60,
+    );
+    expect(middayGap).toBeDefined();
+    expect(middayGap!.heightPx).toBeLessThan(((middayGap!.end - middayGap!.start) / 60) * 44);
+
+    for (const minute of [6 * 60, 8 * 60, 9 * 60 + 45, 13 * 60, 18 * 60 + 30, 24 * 60]) {
+      expect(scale.yToMinute(scale.minuteToY(minute))).toBeCloseTo(minute, 6);
+    }
+  });
+
+  test("uses columns only for real overlaps", () => {
+    const grid = buildScheduleGrid(blocks);
+    expect(grid.items.slice(0, 4).every((item) => item.laneCount === 1)).toBe(true);
+    expect(grid.items.slice(4).map((item) => item.laneCount)).toEqual([2, 2]);
   });
 });
 

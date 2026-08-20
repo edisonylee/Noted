@@ -1687,6 +1687,28 @@ textarea.json.bad { border-color: var(--bad); }
 .modal-close { position: absolute; top: 14px; right: 14px; }
 .qr { width: 216px; height: 216px; border-radius: var(--r-md); margin: 18px 0 14px; background: #fff; padding: 10px; border: var(--border-width, 1px) solid var(--line); }
 .phone-url { display: block; font-size: 12px; color: var(--muted); word-break: break-all; background: var(--surface-2); border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm); padding: 9px; }
+.phone-pairing-modal { width: min(560px, calc(100vw - 48px)); max-width: 560px; text-align: left; }
+.phone-pairing-modal .modal-close svg { width: 18px; height: 18px; }
+.phone-pairing-modal__title { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.phone-pairing-modal__title > span { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; color: var(--accent); background: var(--accent-soft); }
+.phone-pairing-modal__title p { margin: 0 0 3px; color: var(--accent); font-size: 10px; font-weight: 650; letter-spacing: 0.13em; }
+.phone-pairing-modal__title h3 { font-size: 22px; }
+.phone-pairing-code { display: grid; grid-template-columns: 230px 1fr; align-items: center; gap: 22px; margin: 18px 0; }
+.phone-pairing-code .qr { box-sizing: border-box; width: 230px; height: 230px; margin: 0; }
+.phone-pairing-code > div { display: flex; align-items: flex-start; flex-direction: column; gap: 8px; }
+.phone-pairing-code > div > svg { color: var(--accent); }
+.phone-pairing-code > div span { color: var(--muted); font-size: 13px; line-height: 1.45; }
+.phone-pairing-code > div button { display: inline-flex; align-items: center; gap: 7px; margin-top: 8px; }
+.phone-pairing-code > div button svg { width: 16px; height: 16px; }
+.phone-confirmation { display: flex; align-items: center; padding: 18px; flex-direction: column; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface-2); }
+.phone-confirmation > svg { color: var(--accent); }
+.phone-confirmation p { margin: 10px 0 5px; color: var(--muted); }
+.phone-confirmation > strong { font-size: 42px; letter-spacing: 0.14em; }
+.phone-confirmation small { margin-top: 6px; color: var(--muted); }
+.phone-confirmation > div { display: flex; gap: 10px; margin-top: 18px; }
+.phone-confirmation > div button { min-height: 40px; padding: 0 16px; }
+.phone-confirmation > div button.primary { display: inline-flex; align-items: center; gap: 7px; color: white; background: var(--accent); }
+.phone-confirmation > div button svg { width: 16px; height: 16px; }
 .phone-fallback { font-size: 11.5px; margin-top: 12px; }
 .phone-fallback code { word-break: break-all; color: var(--ink-soft); }
 .phone-cert-note { font-size: 11.5px; margin-top: 12px; color: var(--faint); }

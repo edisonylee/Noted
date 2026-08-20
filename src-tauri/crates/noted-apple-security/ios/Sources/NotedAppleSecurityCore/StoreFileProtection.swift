@@ -170,10 +170,12 @@ public enum StoreFileProtection {
     } catch {
       throw NotedSecurityError.fileProtectionFailed(url.path)
     }
-    guard attributes[.protectionKey] as? FileProtectionType == .complete else {
-      violations.append("protection:\(url.path)")
-      return
-    }
+    #if !targetEnvironment(simulator)
+      guard attributes[.protectionKey] as? FileProtectionType == .complete else {
+        violations.append("protection:\(url.path)")
+        return
+      }
+    #endif
     do {
       let values = try url.resourceValues(forKeys: [.isExcludedFromBackupKey])
       if values.isExcludedFromBackup != true {

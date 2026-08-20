@@ -5,6 +5,7 @@ import {
   MOBILE_DEEP_LINK_ERROR_EVENT,
   MOBILE_OPEN_NOTE_EVENT,
 } from "./mobileDeepLinks";
+import { DesktopMatchedMobile } from "./DesktopMatchedMobile";
 import "./MobileShell.css";
 
 export { MOBILE_OPEN_NOTE_EVENT } from "./mobileDeepLinks";
@@ -293,7 +294,7 @@ export function createMobileNotesClient(invokeCommand: InvokeCommand): MobileNot
   };
 }
 
-const mobileNotesClient = createMobileNotesClient((command, args) => invoke(command, args));
+export const mobileNotesClient = createMobileNotesClient((command, args) => invoke(command, args));
 
 function noteTitle(draft: Pick<NoteDraft, "title" | "body">) {
   const explicitTitle = draft.title.trim();
@@ -777,7 +778,7 @@ function NoteEditor({
   );
 }
 
-export function MobileShell({ client = mobileNotesClient }: { client?: MobileNotesClient } = {}) {
+export function LegacyMobileShell({ client = mobileNotesClient }: { client?: MobileNotesClient } = {}) {
   const [workspace, setWorkspace] = useState<MobileWorkspace>(EMPTY_WORKSPACE);
   const [location, setLocation] = useState<LibraryLocation>({ kind: "inbox" });
   const [query, setQuery] = useState("");
@@ -1165,4 +1166,8 @@ export function MobileShell({ client = mobileNotesClient }: { client?: MobileNot
       )}
     </main>
   );
+}
+
+export function MobileShell({ client = mobileNotesClient }: { client?: MobileNotesClient } = {}) {
+  return <DesktopMatchedMobile client={client} />;
 }

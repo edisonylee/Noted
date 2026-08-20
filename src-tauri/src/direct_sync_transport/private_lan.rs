@@ -7,12 +7,21 @@
 //! P-256 SPKI pin always comes from the activation profile.
 
 use super::client::{authority_header, build_client_config, collect_response};
-use super::{DirectSyncTransportError, FixtureTransportPolicy, HTTP_1_1_ALPN};
+use super::{
+    DirectSyncTransportError, FixtureTransportPolicy, PairingEndpoint, PairingTransportResponse,
+    HTTP_1_1_ALPN,
+};
+use crate::direct_pairing_delivery::{
+    MAX_BOOTSTRAP_POLL_REQUEST_BYTES, MAX_BOOTSTRAP_POLL_RESPONSE_BYTES,
+};
 use crate::direct_sync::{
     DirectEndpoint, DirectResponse, DirectSyncLimits, DIRECT_SYNC_CONTENT_TYPE,
 };
 use crate::mobile_sync_runtime::{
     ActiveSyncProfile, DirectSyncPostFuture, MobileSyncRuntimeError, VerifiedDirectSyncSession,
+};
+use crate::pairing_protocol::{
+    Environment, Invitation, LibraryDataClass, MAX_PAIRING_MESSAGE_BYTES,
 };
 use bytes::Bytes;
 use http_body_util::Full;
@@ -175,6 +184,140 @@ pub struct PrivateLanDirectSyncSession {
     last_authenticated_address: Arc<Mutex<Option<SocketAddr>>>,
 }
 
+/// Pinned private-LAN session used before activation. Its sole TLS authority
+/// is the signed invitation already verified by the pairing client; Bonjour
+/// and manual input can contribute only numeric address candidates.
+#[derive(Clone)]
+pub struct PrivateLanPairingSession {
+    candidates: Arc<[PrivateLanEndpointCandidate]>,
+    tls_config: Arc<ClientConfig>,
+    last_authenticated_address: Arc<Mutex<Option<SocketAddr>>>,
+}
+
+impl PrivateLanPairingSession {
+    pub fn from_authenticated_invitation(
+        invitation: &Invitation,
+        candidates: impl IntoIterator<Item = PrivateLanEndpointCandidate>,
+    ) -> Result<Self, PrivateLanSessionError> {
+        if invitation.environment != Environment::Development
+            || invitation.library_data_class != LibraryDataClass::SanitizedFixture
+            || invitation.tls_spki_sha256.len() != 32
+        {
+            return Err(PrivateLanSessionError::InvalidAuthenticatedActivation);
+        }
+        let pin: [u8; 32] = invitation
+            .tls_spki_sha256
+            .clone()
+            .try_into()
+            .map_err(|_| PrivateLanSessionError::InvalidAuthenticatedActivation)?;
+        let policy = FixtureTransportPolicy::new_fixture_only(pin, DirectSyncLimits::default())?;
+        Ok(Self {
+            candidates: validate_candidate_set(candidates)?.into(),
+            tls_config: Arc::new(build_client_config(&policy)?),
+            last_authenticated_address: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    pub async fn post_exact(
+        &self,
+        endpoint: PairingEndpoint,
+        body: Vec<u8>,
+    ) -> Result<PairingTransportResponse, PrivateLanSessionError> {
+        let (request_limit, response_limit) = match endpoint {
+            PairingEndpoint::Bootstrap => (
+                MAX_BOOTSTRAP_POLL_REQUEST_BYTES,
+                MAX_BOOTSTRAP_POLL_RESPONSE_BYTES,
+            ),
+            PairingEndpoint::ClientHello | PairingEndpoint::ClientFinish => {
+                (MAX_PAIRING_MESSAGE_BYTES, MAX_PAIRING_MESSAGE_BYTES)
+            }
+        };
+        if body.is_empty() {
+            return Err(PrivateLanSessionError::InvalidHttpFraming);
+        }
+        if body.len() > request_limit {
+            return Err(PrivateLanSessionError::RequestTooLarge);
+        }
+
+        let (address, tls) = timeout(
+            CANDIDATE_SELECTION_TIMEOUT,
+            connect_authenticated(
+                &self.candidates,
+                &self.tls_config,
+                &self.last_authenticated_address,
+            ),
+        )
+        .await
+        .map_err(|_| PrivateLanSessionError::TimedOut)??;
+        remember_authenticated_address(&self.last_authenticated_address, address);
+
+        let io = TokioIo::new(tls);
+        let (mut sender, connection) = timeout(
+            HTTP_HANDSHAKE_TIMEOUT,
+            hyper::client::conn::http1::handshake(io),
+        )
+        .await
+        .map_err(|_| PrivateLanSessionError::TimedOut)?
+        .map_err(|_| PrivateLanSessionError::ConnectionFailed)?;
+        let _connection_guard = AbortOnDrop(tokio::spawn(async move {
+            let _ = connection.await;
+        }));
+        let request = Request::builder()
+            .method("POST")
+            .uri(endpoint.path())
+            .header("host", authority_header(address))
+            .header(CONTENT_TYPE, DIRECT_SYNC_CONTENT_TYPE)
+            .header(CONTENT_LENGTH, body.len().to_string())
+            .header(CONNECTION, "close")
+            .body(Full::new(Bytes::from(body)))
+            .map_err(|_| PrivateLanSessionError::InvalidHttpFraming)?;
+        let deadline = Instant::now() + SMALL_ENDPOINT_TIMEOUT;
+        let response = timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            sender.send_request(request),
+        )
+        .await
+        .map_err(|_| PrivateLanSessionError::TimedOut)?
+        .map_err(|_| PrivateLanSessionError::ConnectionFailed)?;
+        drop(sender);
+        let response = timeout(
+            deadline.saturating_duration_since(Instant::now()),
+            collect_response(response, response_limit),
+        )
+        .await
+        .map_err(|_| PrivateLanSessionError::TimedOut)?
+        .map_err(PrivateLanSessionError::from)?;
+        Ok(PairingTransportResponse {
+            status: response.status,
+            body: response.body,
+        })
+    }
+
+    #[cfg(test)]
+    fn from_loopback_fixture_for_test(
+        invitation: &Invitation,
+        address: SocketAddr,
+    ) -> Result<Self, PrivateLanSessionError> {
+        let candidate = PrivateLanEndpointCandidate::loopback_fixture(address)?;
+        if invitation.environment != Environment::Development
+            || invitation.library_data_class != LibraryDataClass::SanitizedFixture
+        {
+            return Err(PrivateLanSessionError::InvalidAuthenticatedActivation);
+        }
+        let pin: [u8; 32] = invitation
+            .tls_spki_sha256
+            .clone()
+            .try_into()
+            .map_err(|_| PrivateLanSessionError::InvalidAuthenticatedActivation)?;
+        let policy = FixtureTransportPolicy::new_fixture_only(pin, DirectSyncLimits::default())?;
+        Ok(Self {
+            candidates: vec![candidate].into(),
+            tls_config: Arc::new(build_client_config(&policy)?),
+            last_authenticated_address: Arc::new(Mutex::new(None)),
+        })
+    }
+}
+
 impl PrivateLanDirectSyncSession {
     /// Construct a session from the durable, authenticated activation profile.
     /// The caller cannot supply or override a pin through discovery metadata.
@@ -262,48 +405,15 @@ impl PrivateLanDirectSyncSession {
     async fn connect_authenticated(
         &self,
     ) -> Result<(SocketAddr, TlsStream<TcpStream>), PrivateLanSessionError> {
-        let mut saw_tcp_connection = false;
-        let mut saw_tls_failure = false;
-        for address in self.ordered_addresses() {
-            let tcp = match timeout(CONNECT_TIMEOUT, TcpStream::connect(address)).await {
-                Ok(Ok(tcp)) => {
-                    saw_tcp_connection = true;
-                    tcp
-                }
-                Ok(Err(_)) | Err(_) => continue,
-            };
-            let server_name = ServerName::IpAddress(address.ip().into());
-            let tls = match timeout(
-                TLS_HANDSHAKE_TIMEOUT,
-                TlsConnector::from(Arc::clone(&self.tls_config)).connect(server_name, tcp),
-            )
-            .await
-            {
-                Ok(Ok(tls)) => tls,
-                Ok(Err(_)) => {
-                    saw_tls_failure = true;
-                    continue;
-                }
-                Err(_) => continue,
-            };
-            let connection = tls.get_ref().1;
-            if connection.protocol_version() != Some(ProtocolVersion::TLSv1_3)
-                || connection.alpn_protocol() != Some(HTTP_1_1_ALPN)
-                || connection.is_early_data_accepted()
-            {
-                saw_tls_failure = true;
-                continue;
-            }
-            return Ok((address, tls));
-        }
-
-        if saw_tls_failure || saw_tcp_connection {
-            Err(PrivateLanSessionError::SecureTransportFailed)
-        } else {
-            Err(PrivateLanSessionError::ConnectionFailed)
-        }
+        connect_authenticated(
+            &self.candidates,
+            &self.tls_config,
+            &self.last_authenticated_address,
+        )
+        .await
     }
 
+    #[cfg(test)]
     fn ordered_addresses(&self) -> Vec<SocketAddr> {
         let remembered = self
             .last_authenticated_address
@@ -324,9 +434,7 @@ impl PrivateLanDirectSyncSession {
     }
 
     fn remember_authenticated_address(&self, address: SocketAddr) {
-        if let Ok(mut remembered) = self.last_authenticated_address.lock() {
-            *remembered = Some(address);
-        }
+        remember_authenticated_address(&self.last_authenticated_address, address);
     }
 
     /// Construct the production pinned-TLS session against the loopback-only
@@ -363,6 +471,77 @@ impl PrivateLanDirectSyncSession {
             tls_config,
             last_authenticated_address: Arc::new(Mutex::new(None)),
         })
+    }
+}
+
+async fn connect_authenticated(
+    candidates: &[PrivateLanEndpointCandidate],
+    tls_config: &Arc<ClientConfig>,
+    last_authenticated_address: &Mutex<Option<SocketAddr>>,
+) -> Result<(SocketAddr, TlsStream<TcpStream>), PrivateLanSessionError> {
+    let remembered = last_authenticated_address
+        .lock()
+        .ok()
+        .and_then(|guard| *guard);
+    let mut addresses = Vec::with_capacity(candidates.len());
+    if let Some(address) = remembered {
+        addresses.push(address);
+    }
+    addresses.extend(
+        candidates
+            .iter()
+            .map(|candidate| candidate.address)
+            .filter(|address| Some(*address) != remembered),
+    );
+
+    let mut saw_tcp_connection = false;
+    let mut saw_tls_failure = false;
+    for address in addresses {
+        let tcp = match timeout(CONNECT_TIMEOUT, TcpStream::connect(address)).await {
+            Ok(Ok(tcp)) => {
+                saw_tcp_connection = true;
+                tcp
+            }
+            Ok(Err(_)) | Err(_) => continue,
+        };
+        let server_name = ServerName::IpAddress(address.ip().into());
+        let tls = match timeout(
+            TLS_HANDSHAKE_TIMEOUT,
+            TlsConnector::from(Arc::clone(tls_config)).connect(server_name, tcp),
+        )
+        .await
+        {
+            Ok(Ok(tls)) => tls,
+            Ok(Err(_)) => {
+                saw_tls_failure = true;
+                continue;
+            }
+            Err(_) => continue,
+        };
+        let connection = tls.get_ref().1;
+        if connection.protocol_version() != Some(ProtocolVersion::TLSv1_3)
+            || connection.alpn_protocol() != Some(HTTP_1_1_ALPN)
+            || connection.is_early_data_accepted()
+        {
+            saw_tls_failure = true;
+            continue;
+        }
+        return Ok((address, tls));
+    }
+
+    if saw_tls_failure || saw_tcp_connection {
+        Err(PrivateLanSessionError::SecureTransportFailed)
+    } else {
+        Err(PrivateLanSessionError::ConnectionFailed)
+    }
+}
+
+fn remember_authenticated_address(
+    last_authenticated_address: &Mutex<Option<SocketAddr>>,
+    address: SocketAddr,
+) {
+    if let Ok(mut remembered) = last_authenticated_address.lock() {
+        *remembered = Some(address);
     }
 }
 
@@ -480,9 +659,13 @@ mod tests {
     use super::*;
     use crate::direct_sync::{DirectRequest, DirectSyncLimits};
     use crate::direct_sync_transport::{
-        DirectSyncRequestHandler, FixtureLoopbackServer, FixtureTlsIdentity,
+        DirectSyncRequestHandler, FixtureAuthorityRequestHandler, FixtureLoopbackServer,
+        FixtureTlsIdentity, PairingTransportRequest,
     };
-    use crate::pairing_protocol::{Environment, KindCapability, LibraryDataClass, RecordKind};
+    use crate::pairing_protocol::{
+        Environment, Invitation, KindCapability, LibraryDataClass, PairingRole, RecordKind,
+        PAIRING_PROTOCOL, PAIRING_SUITE,
+    };
     use std::collections::{BTreeMap, BTreeSet};
     use std::net::{Ipv4Addr, SocketAddrV4, SocketAddrV6};
 
@@ -495,6 +678,40 @@ mod tests {
                 content_type: DIRECT_SYNC_CONTENT_TYPE,
                 body: request.body,
             }
+        }
+    }
+
+    impl FixtureAuthorityRequestHandler for EchoHandler {
+        fn handle_pairing(&self, request: PairingTransportRequest) -> PairingTransportResponse {
+            PairingTransportResponse {
+                status: 202,
+                body: request.body,
+            }
+        }
+    }
+
+    fn invitation(pin: [u8; 32]) -> Invitation {
+        Invitation {
+            protocol: PAIRING_PROTOCOL.to_owned(),
+            suite: PAIRING_SUITE.to_owned(),
+            invitation_id: "018f47f2-8ee8-7a28-91eb-9b3f2619e076".to_owned(),
+            invitation_nonce: vec![1; 32],
+            authority_signing_public_key: vec![4; 65],
+            mac_pairing_signing_public_key: vec![4; 65],
+            mac_pairing_hpke_public_key: vec![5; 32],
+            tls_spki_sha256: pin.to_vec(),
+            library_id: "018f47f2-8ee8-7a28-91eb-9b3f2619e072".to_owned(),
+            authority_generation: 1,
+            scope_ceiling: [RecordKind::Note, RecordKind::Category, RecordKind::Folder]
+                .into_iter()
+                .collect(),
+            created_at_ms: 1_700_000_000_000,
+            expires_at_ms: 1_700_000_600_000,
+            environment: Environment::Development,
+            authority_role: PairingRole::MacAuthority,
+            intended_client_role: PairingRole::IphoneCompanion,
+            library_data_class: LibraryDataClass::SanitizedFixture,
+            authority_signature: vec![6; 64],
         }
     }
 
@@ -555,6 +772,57 @@ mod tests {
         )
         .unwrap();
         (server, session, pin)
+    }
+
+    #[tokio::test]
+    async fn pairing_session_uses_invitation_pin_and_only_fixed_pairing_routes() {
+        let identity = FixtureTlsIdentity::generate().unwrap();
+        let pin = identity.spki_sha256();
+        let policy =
+            FixtureTransportPolicy::new_fixture_only(pin, DirectSyncLimits::default()).unwrap();
+        let server = FixtureLoopbackServer::spawn_authority_fixture_only(
+            Arc::new(EchoHandler),
+            identity,
+            policy,
+        )
+        .await
+        .unwrap();
+        let session = PrivateLanPairingSession::from_loopback_fixture_for_test(
+            &invitation(pin),
+            server.local_addr(),
+        )
+        .unwrap();
+        for endpoint in [
+            PairingEndpoint::ClientHello,
+            PairingEndpoint::Bootstrap,
+            PairingEndpoint::ClientFinish,
+        ] {
+            let response = session
+                .post_exact(endpoint, br#"{"wire":true}"#.to_vec())
+                .await
+                .unwrap();
+            assert_eq!(response.status, 202);
+            assert_eq!(response.body, br#"{"wire":true}"#);
+        }
+        server.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn pairing_session_rejects_non_fixture_invitation_and_wrong_pin_shape() {
+        let candidate =
+            PrivateLanEndpointCandidate::parse_manual_numeric("10.0.0.8:43123").unwrap();
+        let mut personal = invitation([9; 32]);
+        personal.library_data_class = LibraryDataClass::Personal;
+        assert!(matches!(
+            PrivateLanPairingSession::from_authenticated_invitation(&personal, [candidate]),
+            Err(PrivateLanSessionError::InvalidAuthenticatedActivation)
+        ));
+        let mut bad_pin = invitation([9; 32]);
+        bad_pin.tls_spki_sha256.pop();
+        assert!(matches!(
+            PrivateLanPairingSession::from_authenticated_invitation(&bad_pin, [candidate]),
+            Err(PrivateLanSessionError::InvalidAuthenticatedActivation)
+        ));
     }
 
     #[test]

@@ -28,7 +28,7 @@ use std::fmt;
 pub use client::FixtureDirectSyncClient;
 pub use private_lan::{
     PrivateLanCandidateSource, PrivateLanDirectSyncSession, PrivateLanEndpointCandidate,
-    PrivateLanSessionError,
+    PrivateLanPairingSession, PrivateLanSessionError,
 };
 
 #[cfg(all(target_os = "macos", feature = "sanitized-development-fixtures"))]
@@ -137,7 +137,6 @@ pub trait DirectSyncRequestHandler: Send + Sync + 'static {
 /// The only pairing routes the shared fixture authority listener can expose.
 /// Keeping this closed enum beside the transport prevents the listener from
 /// becoming a generic desktop command bridge.
-#[cfg(not(target_os = "ios"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PairingEndpoint {
     ClientHello,
@@ -145,7 +144,6 @@ pub enum PairingEndpoint {
     ClientFinish,
 }
 
-#[cfg(not(target_os = "ios"))]
 impl PairingEndpoint {
     pub const CLIENT_HELLO_PATH: &'static str = "/pairing/v1/client-hello";
     pub const CLIENT_FINISH_PATH: &'static str = "/pairing/v1/client-finish";
@@ -169,7 +167,6 @@ pub struct PairingTransportRequest {
     pub transport: TransportEvidence,
 }
 
-#[cfg(not(target_os = "ios"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingTransportResponse {
     pub status: u16,

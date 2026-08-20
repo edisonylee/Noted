@@ -1547,7 +1547,14 @@ receives or supplies a certificate pin, credential, protocol message, route, or
 response body. The driver runs the bounded six-route Notes orchestrator and
 refreshes the protected local workspace after success. The generated app plist
 now carries the same local-network purpose and `_noted-sync._tcp` declaration as
-the source-owned iOS configuration.
+the source-owned iOS configuration. A separate pre-activation pairing session
+now pins TLS exclusively to the signed invitation, accepts the same bounded
+numeric address candidates, and can reach only ClientHello, bootstrap poll, and
+ClientFinish with their protocol-specific request/response ceilings. It rejects
+personal-data invitations and malformed pins before connecting. The remaining
+pairing driver work is native invitation acquisition, durable bootstrap-poll
+orchestration, and product confirmation UI; protocol bodies still cannot pass
+through JavaScript.
 
 Authenticated revocation is now a single durable phone-store transition. It
 records immutable evidence, marks the enrollment and sync profile revoked,

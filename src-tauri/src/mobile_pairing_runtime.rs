@@ -295,6 +295,10 @@ fn activation_ack_matches(
 #[cfg(target_os = "ios")]
 mod ios {
     use super::*;
+    use crate::direct_pairing_delivery::{
+        parse_and_verify_poll_response, sign_poll_request, BootstrapDeliveryBinding,
+        BootstrapDeliveryVerifier, BootstrapPollDisposition, IphoneBootstrapPollSigner,
+    };
     use crate::mobile_store::{MobilePairingActivation, MobileStore};
     use crate::pairing_client::{
         ClientFreshValuePurpose, ClientPublicIdentity, OpenedPairingChallenge, PairingActivation,
@@ -477,6 +481,41 @@ mod ios {
                 return Err("discarded native identity cannot perform pairing".to_string());
             }
             Ok(Self { app, identity })
+        }
+    }
+
+    struct ApplePollCrypto<'a> {
+        app: &'a AppHandle<Wry>,
+        identity: &'a PublicIdentity,
+    }
+
+    impl IphoneBootstrapPollSigner for ApplePollCrypto<'_> {
+        fn sign_iphone_poll(&self, message: &[u8]) -> Result<[u8; 64], ()> {
+            self.app
+                .apple_security()
+                .sign(&self.identity.handle, message)
+                .map_err(|_| ())?
+                .try_into()
+                .map_err(|_| ())
+        }
+    }
+
+    impl BootstrapDeliveryVerifier for ApplePollCrypto<'_> {
+        fn verify_p256_p1363(
+            &self,
+            _signer_role: PairingRole,
+            public_key: &[u8; 65],
+            message: &[u8],
+            signature: &[u8; 64],
+        ) -> Result<(), ()> {
+            match self
+                .app
+                .apple_security()
+                .verify_p256_signature(public_key, message, signature)
+            {
+                Ok(true) => Ok(()),
+                _ => Err(()),
+            }
         }
     }
 
@@ -837,6 +876,61 @@ mod ios {
             "native bootstrap and exact ClientFinish are durable",
             Some(outgoing),
         )
+    }
+
+    pub fn create_bootstrap_poll(
+        app: &AppHandle<Wry>,
+        store: &MobileStore,
+    ) -> Result<Vec<u8>, String> {
+        let (row, identity, _) = load_runtime(app, store)?;
+        if row.client.state != PairingClientState::AwaitingBootstrap {
+            return Err("pairing is not waiting for Mac approval".to_string());
+        }
+        let binding = poll_binding(&row.client)?;
+        let signer = ApplePollCrypto {
+            app,
+            identity: &identity,
+        };
+        sign_poll_request(
+            &binding,
+            app.apple_security()
+                .fresh_uuid_v7()
+                .map_err(|error| error.to_string())?,
+            &signer,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    pub fn accept_bootstrap_poll_response(
+        app: &AppHandle<Wry>,
+        store: &MobileStore,
+        exact_request_bytes: &[u8],
+        exact_response_bytes: &[u8],
+        transport: &TransportEvidence,
+    ) -> Result<Option<FixturePairingStatus>, String> {
+        let (row, identity, _) = load_runtime(app, store)?;
+        let binding = poll_binding(&row.client)?;
+        let verifier = ApplePollCrypto {
+            app,
+            identity: &identity,
+        };
+        let response = parse_and_verify_poll_response(
+            exact_response_bytes,
+            exact_request_bytes,
+            &binding,
+            &verifier,
+        )
+        .map_err(|error| error.to_string())?;
+        match response.disposition {
+            BootstrapPollDisposition::Pending { .. } => Ok(None),
+            BootstrapPollDisposition::Ready {
+                exact_bootstrap_envelope,
+                ..
+            } => accept_bootstrap(app, store, &exact_bootstrap_envelope, transport).map(Some),
+            BootstrapPollDisposition::Rejected { reason } => {
+                Err(format!("Mac rejected pairing: {reason:?}"))
+            }
+        }
     }
 
     pub fn accept_server_finish(
@@ -1318,6 +1412,44 @@ mod ios {
         })
     }
 
+    fn poll_binding(
+        checkpoint: &crate::pairing_client::PairingClientCheckpoint,
+    ) -> Result<BootstrapDeliveryBinding, String> {
+        let invitation: crate::pairing_protocol::Invitation =
+            serde_json::from_slice(&checkpoint.invitation_bytes)
+                .map_err(|error| format!("decode durable invitation: {error}"))?;
+        let server: crate::pairing_protocol::ServerHello = serde_json::from_slice(
+            checkpoint
+                .server_hello_bytes
+                .as_deref()
+                .ok_or_else(|| "durable ServerHello is unavailable".to_string())?,
+        )
+        .map_err(|error| format!("decode durable ServerHello: {error}"))?;
+        Ok(BootstrapDeliveryBinding {
+            receipt_id: server.receipt.receipt_id,
+            device_id: checkpoint.identity.device_id.clone(),
+            transcript_digest: server
+                .receipt
+                .transcript_digest
+                .try_into()
+                .map_err(|_| "durable transcript digest is invalid".to_string())?,
+            tls_spki_sha256: invitation
+                .tls_spki_sha256
+                .try_into()
+                .map_err(|_| "durable TLS pin is invalid".to_string())?,
+            iphone_signing_public_key: checkpoint
+                .identity
+                .signing_public_key
+                .clone()
+                .try_into()
+                .map_err(|_| "durable phone signing key is invalid".to_string())?,
+            mac_pairing_signing_public_key: invitation
+                .mac_pairing_signing_public_key
+                .try_into()
+                .map_err(|_| "durable Mac signing key is invalid".to_string())?,
+        })
+    }
+
     fn status_without_client(plan: PairingRecoveryPlan) -> FixturePairingStatus {
         FixturePairingStatus {
             state: match plan.action {
@@ -1353,9 +1485,9 @@ mod ios {
 pub(crate) use ios::bootstrap_metadata_from_apple;
 #[cfg(target_os = "ios")]
 pub use ios::{
-    accept_bootstrap, accept_server_finish, accept_server_hello, begin_fixture_pairing,
-    confirm_fixture_pairing, discard_fixture_pairing, recover_fixture_pairing,
-    FixturePairingStatus,
+    accept_bootstrap, accept_bootstrap_poll_response, accept_server_finish, accept_server_hello,
+    begin_fixture_pairing, confirm_fixture_pairing, create_bootstrap_poll, discard_fixture_pairing,
+    recover_fixture_pairing, FixturePairingStatus,
 };
 
 #[cfg(test)]

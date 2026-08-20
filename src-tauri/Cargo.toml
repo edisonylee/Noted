@@ -20,6 +20,9 @@ default = []
 # separately requires DEBUG + simulator + its exact runtime gate, while the
 # physical-device branch always requests a Secure Enclave identity.
 sanitized-development-fixtures = [
+  "dep:hpke",
+  "dep:p256",
+  "dep:rand_core",
   "noted-apple-security/sanitized-development-fixtures",
 ]
 
@@ -48,6 +51,9 @@ rand = "0.8"
 sha2 = "0.10"
 hkdf = "0.12"
 zeroize = "1"
+hpke = { version = "0.13", default-features = false, features = ["alloc", "x25519"], optional = true }
+p256 = { version = "0.13", features = ["ecdsa"], optional = true }
+rand_core = { version = "0.9", features = ["os_rng"], optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 bytes = "1"

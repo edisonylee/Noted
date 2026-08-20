@@ -1,13 +1,16 @@
 use crate::direct_sync::DirectSyncLimits;
-use crate::direct_sync_transport::{PrivateLanDirectSyncSession, PrivateLanEndpointCandidate};
+use crate::direct_sync_transport::{
+    PairingEndpoint, PrivateLanDirectSyncSession, PrivateLanEndpointCandidate,
+    PrivateLanPairingSession,
+};
 use crate::mobile_deep_link::MobileDeepLink;
 use crate::mobile_notes_sync::{MobileNotesSyncOrchestrator, MobileNotesSyncReport};
 use crate::mobile_pairing_runtime::{
-    accept_bootstrap, accept_server_finish, accept_server_hello, begin_fixture_pairing,
-    bootstrap_metadata_from_apple, checkpoint_after_completed_discard, confirm_fixture_pairing,
-    discard_fixture_pairing, recover_fixture_pairing, FixturePairingStatus,
-    NativeBootstrapSnapshot, NativeIdentitySnapshot, NativePairingLifecycle,
-    NativeSigningKeyBacking,
+    accept_bootstrap, accept_bootstrap_poll_response, accept_server_finish, accept_server_hello,
+    begin_fixture_pairing, bootstrap_metadata_from_apple, checkpoint_after_completed_discard,
+    confirm_fixture_pairing, create_bootstrap_poll, discard_fixture_pairing,
+    recover_fixture_pairing, FixturePairingStatus, NativeBootstrapSnapshot, NativeIdentitySnapshot,
+    NativePairingLifecycle, NativeSigningKeyBacking,
 };
 use crate::mobile_store::{
     MobileNote, MobileNotesWorkspace, MobileStore, MobileStoreHealth, MobileWorkspaceNote,
@@ -17,7 +20,7 @@ use crate::mobile_sync_native::AppleMobileSyncCrypto;
 use crate::mobile_sync_runtime::ExactRequestJournal;
 use crate::mobile_sync_store_adapter::MobileStoreExactRequestJournal;
 use crate::pairing_client::PairingClientState;
-use crate::pairing_protocol::TransportEvidence;
+use crate::pairing_protocol::{Invitation, TransportEvidence};
 use noted_apple_security::{
     AppleSecurity, AppleSecurityExt, IdentityHandle, IdentityInventory, IdentityLifecycle,
     ProtectedDataEvent, ProtectedDataState, SigningKeyBacking, StoreProtectionReport,
@@ -1174,6 +1177,110 @@ async fn mobile_sync_now(
     Ok(report)
 }
 
+fn private_lan_candidates(
+    app: &AppHandle<Wry>,
+    manual_address: Option<String>,
+) -> Result<Vec<PrivateLanEndpointCandidate>, String> {
+    if let Some(address) = manual_address {
+        return Ok(vec![PrivateLanEndpointCandidate::parse_manual_numeric(
+            &address,
+        )
+        .map_err(|error| error.to_string())?]);
+    }
+    app.apple_security()
+        .discover_private_lan_endpoints(1_500)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|hint| {
+            let address = hint
+                .parse()
+                .map_err(|_| "native Bonjour returned a non-numeric endpoint".to_string())?;
+            PrivateLanEndpointCandidate::from_bonjour_address_hint(address)
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+/// Perform the pre-activation pinned-TLS ClientHello exchange entirely in
+/// native Rust. JavaScript receives only the confirmation display model.
+#[tauri::command]
+async fn mobile_pairing_connect_fixture(
+    app: AppHandle<Wry>,
+    store: State<'_, ProtectedMobileStore>,
+    invitation_json: String,
+    manual_address: Option<String>,
+) -> Result<FixturePairingStatus, String> {
+    let _direct_sync = store.direct_sync.lock().await;
+    store.with_ready_store(|store| store.health().map(|_| ()))?;
+    let invitation: Invitation = serde_json::from_str(&invitation_json)
+        .map_err(|error| format!("invalid pairing invitation: {error}"))?;
+    let candidates = private_lan_candidates(&app, manual_address)?;
+    let session = PrivateLanPairingSession::from_authenticated_invitation(&invitation, candidates)
+        .map_err(|error| error.to_string())?;
+    let transport = fixture_transport(invitation.tls_spki_sha256.clone());
+    let begin = store.with_ready_store(|store| {
+        begin_fixture_pairing(&app, store, invitation_json.as_bytes(), &transport)
+    })?;
+    let client_hello = begin
+        .exact_outgoing_bytes
+        .ok_or_else(|| "durable ClientHello is unavailable".to_string())?;
+    let response = session
+        .post_exact(PairingEndpoint::ClientHello, client_hello)
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.status != 200 {
+        return Err("Mac rejected the pairing request".to_string());
+    }
+    store.with_ready_store(|store| accept_server_hello(&app, store, &response.body, &transport))
+}
+
+/// Poll for the Mac owner's approval, stage the authenticated bootstrap, send
+/// ClientFinish, and atomically activate the phone when approval is ready.
+#[tauri::command]
+async fn mobile_pairing_poll_fixture(
+    app: AppHandle<Wry>,
+    store: State<'_, ProtectedMobileStore>,
+    manual_address: Option<String>,
+) -> Result<FixturePairingStatus, String> {
+    let _direct_sync = store.direct_sync.lock().await;
+    store.with_ready_store(|store| store.health().map(|_| ()))?;
+    let invitation = store.with_ready_store(|store| {
+        let checkpoint = store
+            .load_pairing_checkpoint()?
+            .ok_or_else(|| "pairing has not started".to_string())?;
+        serde_json::from_slice::<Invitation>(&checkpoint.client.invitation_bytes)
+            .map_err(|error| format!("invalid durable invitation: {error}"))
+    })?;
+    let candidates = private_lan_candidates(&app, manual_address)?;
+    let session = PrivateLanPairingSession::from_authenticated_invitation(&invitation, candidates)
+        .map_err(|error| error.to_string())?;
+    let transport = fixture_transport(invitation.tls_spki_sha256.clone());
+    let poll_request = store.with_ready_store(|store| create_bootstrap_poll(&app, store))?;
+    let poll_response = session
+        .post_exact(PairingEndpoint::Bootstrap, poll_request.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(prepared) = store.with_ready_store(|store| {
+        accept_bootstrap_poll_response(&app, store, &poll_request, &poll_response.body, &transport)
+    })?
+    else {
+        return store.with_ready_store(|store| recover_fixture_pairing(&app, store));
+    };
+    let client_finish = prepared
+        .exact_outgoing_bytes
+        .ok_or_else(|| "durable ClientFinish is unavailable".to_string())?;
+    let finish_response = session
+        .post_exact(PairingEndpoint::ClientFinish, client_finish)
+        .await
+        .map_err(|error| error.to_string())?;
+    if finish_response.status != 200 {
+        return Err("Mac rejected pairing activation".to_string());
+    }
+    store.with_ready_store(|store| {
+        accept_server_finish(&app, store, &finish_response.body, &transport)
+    })
+}
+
 fn fixture_transport(peer_spki_sha256: Vec<u8>) -> TransportEvidence {
     TransportEvidence {
         tls_version: "1.3".to_string(),
@@ -1319,6 +1426,8 @@ pub fn run() {
             restore_mobile_notes_export,
             mobile_sync_now,
             mobile_pairing_status_fixture,
+            mobile_pairing_connect_fixture,
+            mobile_pairing_poll_fixture,
             mobile_pairing_begin_fixture,
             mobile_pairing_accept_server_hello_fixture,
             mobile_pairing_confirm_fixture,

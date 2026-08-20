@@ -11,6 +11,8 @@ pub mod direct_pairing;
 pub mod durable_direct_sync;
 pub mod entities;
 pub mod fixture_authority_runtime;
+#[cfg(all(target_os = "macos", feature = "sanitized-development-fixtures"))]
+pub mod fixture_authority_app;
 pub mod gcal;
 pub mod hosted;
 mod managed_files;
@@ -4806,6 +4808,8 @@ pub fn run() {
             reminders::init(&dir);
             let conn = db::init(&dir.join("noted.db"))?;
             app.manage(Db(Mutex::new(conn)));
+            #[cfg(all(target_os = "macos", feature = "sanitized-development-fixtures"))]
+            app.manage(fixture_authority_app::MobileAuthorityState::default());
             reminders::spawn(app.handle().clone());
             // Vendor-neutral local agent access. The broker remains bound to a
             // user-only Unix socket so Settings can enable it without restarting;
@@ -5109,6 +5113,12 @@ pub fn run() {
             related_brain,
             brain_get_auto,
             brain_set_auto,
+            #[cfg(all(target_os = "macos", feature = "sanitized-development-fixtures"))]
+            fixture_authority_app::mobile_authority_start,
+            #[cfg(all(target_os = "macos", feature = "sanitized-development-fixtures"))]
+            fixture_authority_app::mobile_authority_status,
+            #[cfg(all(target_os = "macos", feature = "sanitized-development-fixtures"))]
+            fixture_authority_app::mobile_authority_confirm,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

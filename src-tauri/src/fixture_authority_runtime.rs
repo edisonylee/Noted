@@ -34,10 +34,16 @@ use crate::{
         AuthorityBindings, AuthorityClock, ClientHelloResult, CoordinatorError,
         DirectPairingCoordinator, OwnerConfirmationResult,
     },
+    direct_pairing_delivery::BootstrapPollResponse,
     direct_sync::{
         DirectRequest, DirectResponse, DirectSyncConfig, DirectSyncCrypto, DirectSyncError,
-        DirectSyncLimits, DirectSyncService, MAX_DIRECT_TRANSACTION_BYTES,
+        DirectSyncLimits, DirectSyncService, DIRECT_SYNC_CONTENT_TYPE,
+        MAX_DIRECT_TRANSACTION_BYTES,
         MAX_DIRECT_TRANSACTION_MEMBERS,
+    },
+    direct_sync_transport::{
+        DirectSyncRequestHandler, FixtureAuthorityRequestHandler, PairingEndpoint,
+        PairingTransportRequest, PairingTransportResponse,
     },
     durable_direct_sync::{FixtureAuthorityClock, SqliteDirectSyncAuthority},
     pairing_protocol::{
@@ -363,6 +369,70 @@ where
         self.operation_gate
             .lock()
             .map_err(|_| FixtureAuthorityError::StateUnavailable("operation gate is poisoned"))
+    }
+}
+
+impl<PC, PT, SC> DirectSyncRequestHandler for SanitizedFixtureAuthorityRuntime<PC, PT, SC>
+where
+    PC: PairingCrypto,
+    PT: AuthorityClock,
+    SC: DirectSyncCrypto,
+{
+    fn handle_direct_sync(&self, request: DirectRequest) -> DirectResponse {
+        self.handle_sync(request).unwrap_or_else(|_| DirectResponse {
+            status: 503,
+            content_type: DIRECT_SYNC_CONTENT_TYPE,
+            body: br#"{"error":{"code":"state_unavailable"}}"#.to_vec(),
+        })
+    }
+}
+
+impl<PC, PT, SC> FixtureAuthorityRequestHandler for SanitizedFixtureAuthorityRuntime<PC, PT, SC>
+where
+    PC: PairingCrypto,
+    PT: AuthorityClock,
+    SC: DirectSyncCrypto,
+{
+    fn handle_pairing(&self, request: PairingTransportRequest) -> PairingTransportResponse {
+        let result = match request.endpoint {
+            PairingEndpoint::ClientHello => self
+                .process_client_hello(&request.body, None, &request.transport)
+                .map(|result| (200, result.exact_response_bytes)),
+            PairingEndpoint::Bootstrap => self
+                .process_bootstrap_poll(&request.body, &request.transport)
+                .and_then(|bytes| {
+                    let response: BootstrapPollResponse = serde_json::from_slice(&bytes)
+                        .map_err(|_| FixtureAuthorityError::StateUnavailable(
+                            "committed bootstrap response could not be decoded",
+                        ))?;
+                    Ok((response.http_status(), bytes))
+                }),
+            PairingEndpoint::ClientFinish => self
+                .process_client_finish(&request.body, None, &request.transport)
+                .map(|bytes| (200, bytes)),
+        };
+        match result {
+            Ok((status, body)) => PairingTransportResponse { status, body },
+            Err(error) => pairing_wire_error(error),
+        }
+    }
+}
+
+fn pairing_wire_error(error: FixtureAuthorityError) -> PairingTransportResponse {
+    let (status, code) = match error {
+        FixtureAuthorityError::StateUnavailable(_)
+        | FixtureAuthorityError::Database(_)
+        | FixtureAuthorityError::Io(_)
+        | FixtureAuthorityError::Integrity(_)
+        | FixtureAuthorityError::Sync(_) => (503, "state_unavailable"),
+        FixtureAuthorityError::InvalidTarget(_)
+        | FixtureAuthorityError::ExistingDatabaseNotFixture
+        | FixtureAuthorityError::TargetAppeared
+        | FixtureAuthorityError::Pairing(_) => (400, "pairing_rejected"),
+    };
+    PairingTransportResponse {
+        status,
+        body: format!(r#"{{"error":{{"code":"{code}"}}}}"#).into_bytes(),
     }
 }
 

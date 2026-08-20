@@ -21,6 +21,8 @@ use crate::direct_sync::{
     DirectSyncLimits, DirectSyncService, EndpointLimits, ExactWireDirectSyncAuthority,
     DIRECT_TRANSACTION_REQUEST_BYTES, DIRECT_TRANSACTION_RESPONSE_BYTES, MAX_DIRECT_REQUEST_BYTES,
 };
+#[cfg(not(target_os = "ios"))]
+use crate::pairing_protocol::TransportEvidence;
 use std::fmt;
 
 pub use client::FixtureDirectSyncClient;
@@ -132,6 +134,54 @@ pub trait DirectSyncRequestHandler: Send + Sync + 'static {
     fn handle_direct_sync(&self, request: DirectRequest) -> DirectResponse;
 }
 
+/// The only pairing routes the shared fixture authority listener can expose.
+/// Keeping this closed enum beside the transport prevents the listener from
+/// becoming a generic desktop command bridge.
+#[cfg(not(target_os = "ios"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairingEndpoint {
+    ClientHello,
+    Bootstrap,
+    ClientFinish,
+}
+
+#[cfg(not(target_os = "ios"))]
+impl PairingEndpoint {
+    pub const CLIENT_HELLO_PATH: &'static str = "/pairing/v1/client-hello";
+    pub const CLIENT_FINISH_PATH: &'static str = "/pairing/v1/client-finish";
+
+    pub const fn path(self) -> &'static str {
+        match self {
+            Self::ClientHello => Self::CLIENT_HELLO_PATH,
+            Self::Bootstrap => crate::direct_pairing_delivery::BOOTSTRAP_DELIVERY_ROUTE,
+            Self::ClientFinish => Self::CLIENT_FINISH_PATH,
+        }
+    }
+}
+
+/// A pairing request whose TLS facts were derived by the native listener.
+/// Protocol bodies and certificate pins never pass through JavaScript.
+#[cfg(not(target_os = "ios"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingTransportRequest {
+    pub endpoint: PairingEndpoint,
+    pub body: Vec<u8>,
+    pub transport: TransportEvidence,
+}
+
+#[cfg(not(target_os = "ios"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingTransportResponse {
+    pub status: u16,
+    pub body: Vec<u8>,
+}
+
+/// Narrow seam used only by the shared pairing-and-sync authority listener.
+#[cfg(not(target_os = "ios"))]
+pub trait FixtureAuthorityRequestHandler: DirectSyncRequestHandler {
+    fn handle_pairing(&self, request: PairingTransportRequest) -> PairingTransportResponse;
+}
+
 impl<E, A, V> DirectSyncRequestHandler for DirectSyncService<E, A, V>
 where
     E: DirectSyncEnrollment,
@@ -148,6 +198,17 @@ pub(crate) fn endpoint_from_exact_target(target: &str) -> Option<DirectEndpoint>
     DirectEndpoint::ALL
         .into_iter()
         .find(|endpoint| endpoint.path() == target)
+}
+
+#[cfg(not(target_os = "ios"))]
+pub(crate) fn pairing_endpoint_from_exact_target(target: &str) -> Option<PairingEndpoint> {
+    [
+        PairingEndpoint::ClientHello,
+        PairingEndpoint::Bootstrap,
+        PairingEndpoint::ClientFinish,
+    ]
+    .into_iter()
+    .find(|endpoint| endpoint.path() == target)
 }
 
 fn valid_limits(limits: &DirectSyncLimits) -> bool {

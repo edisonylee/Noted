@@ -1461,8 +1461,9 @@ boundaries, checkpoint-bound paged bootstrap, byte- and member-bounded atomic
 transactions, serialized revocation, and exactly the allowed versioned sync
 operations. The phone outbox uses the same encrypted-byte ceiling, including
 AEAD overhead, so locally accepted batches remain sendable. These are logical
-cores and test seams, not a production network service. Fixture cryptography is
-deliberately unable to enroll a personal library.
+cores plus a sanitized-fixture-only native network surface, not a personal-data
+service. Fixture cryptography is deliberately unable to enroll a personal
+library.
 
 The production-facing crypto boundary is now implemented behind an iOS-only
 native plugin. Secure Enclave P-256 signing, ThisDeviceOnly Keychain X25519 and
@@ -1513,8 +1514,13 @@ Sanitized-fixture builds now also expose a separate private-IPv4-only listener
 type with an address-bound ephemeral certificate and matching Bonjour
 advertiser. Its TXT contract contains only protocol, numeric address, and port;
 it cannot carry a pin, library/device/receipt identifier, token, or credential.
-The ordinary loopback harness cannot widen its bind scope, and neither type has
-a personal-data constructor or desktop lifecycle/Tauri surface. Immutable
+The private listener can now bind the same serialized fixture authority to
+exactly three pairing routes and six direct-sync routes. Route-specific request
+and response ceilings are enforced before dispatch, TLS facts are constructed
+inside the native listener, sync-only listeners reject pairing paths, and no
+route reaches Tauri or JavaScript. The ordinary loopback harness cannot widen
+its bind scope, and neither listener mode has a personal-data constructor or
+desktop lifecycle/Tauri surface. Immutable
 replay evidence is retained for audit; only the trusted
 five-minute window counts toward replay admission, so the protocol is not
 permanently locked after the cap, but on-disk evidence is not yet compacted or
@@ -1560,10 +1566,11 @@ verify the new activation remains authoritative.
 
 The following work still blocks the M4 gate and any personal-data sync:
 
-- the authenticated pairing half of the native network driver, pairing routes
-  on the shared Mac TLS listener, and desktop lifecycle wiring that owns the
-  sanitized listener/advertiser/runtime as one unit. The private-LAN listener
-  and minimal Bonjour advertiser now exist as fixture-only types, while
+- the authenticated pairing half of the native iPhone network driver and
+  desktop lifecycle wiring that owns the shared sanitized
+  listener/advertiser/runtime as one unit. The private-LAN listener now routes
+  pairing and sync through one fixture authority instance, and the minimal
+  Bonjour advertiser exists as a fixture-only type, while
   post-activation Bonjour discovery, strict manual connect, and six-route Notes
   sync are implemented without trusting discovery metadata or passing protocol
   messages through JavaScript. The existing fixture pairing command that

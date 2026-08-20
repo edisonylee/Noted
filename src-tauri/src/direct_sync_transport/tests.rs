@@ -17,6 +17,7 @@ use tokio_rustls::TlsConnector;
 #[derive(Default)]
 struct RecordingHandler {
     requests: Mutex<Vec<DirectRequest>>,
+    pairing_requests: Mutex<Vec<PairingTransportRequest>>,
     oversized_response: Mutex<bool>,
 }
 
@@ -31,6 +32,20 @@ impl RecordingHandler {
 
     fn make_next_response_oversized(&self) {
         *self.oversized_response.lock().unwrap() = true;
+    }
+
+    fn pairing_requests(&self) -> Vec<PairingTransportRequest> {
+        self.pairing_requests.lock().unwrap().clone()
+    }
+}
+
+impl FixtureAuthorityRequestHandler for RecordingHandler {
+    fn handle_pairing(&self, request: PairingTransportRequest) -> PairingTransportResponse {
+        self.pairing_requests.lock().unwrap().push(request);
+        PairingTransportResponse {
+            status: 200,
+            body: br#"{"paired":true}"#.to_vec(),
+        }
     }
 }
 
@@ -149,6 +164,86 @@ async fn target_aliases_are_rejected_before_the_router() {
         }
     }
     assert_eq!(handler.request_count(), 0);
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn sync_only_listener_rejects_all_pairing_routes_before_the_router() {
+    let (handler, policy, server, _client) = fixture().await;
+    for endpoint in [
+        PairingEndpoint::ClientHello,
+        PairingEndpoint::Bootstrap,
+        PairingEndpoint::ClientFinish,
+    ] {
+        let response = raw_tls_request(
+            server.local_addr(),
+            &policy,
+            valid_request(server.local_addr(), endpoint.path()).as_bytes(),
+        )
+        .await;
+        assert!(response.is_empty());
+    }
+    assert_eq!(handler.request_count(), 0);
+    assert!(handler.pairing_requests().is_empty());
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_authority_listener_routes_only_fixed_pairing_paths_with_native_tls_evidence() {
+    let handler = Arc::new(RecordingHandler::default());
+    let identity = FixtureTlsIdentity::generate().unwrap();
+    let policy = FixtureTransportPolicy::new_fixture_only(
+        identity.spki_sha256(),
+        DirectSyncLimits::default(),
+    )
+    .unwrap();
+    let server = FixtureLoopbackServer::spawn_authority_fixture_only(
+        Arc::clone(&handler),
+        identity,
+        policy.clone(),
+    )
+    .await
+    .unwrap();
+
+    for endpoint in [
+        PairingEndpoint::ClientHello,
+        PairingEndpoint::Bootstrap,
+        PairingEndpoint::ClientFinish,
+    ] {
+        let response = raw_tls_request(
+            server.local_addr(),
+            &policy,
+            valid_request(server.local_addr(), endpoint.path()).as_bytes(),
+        )
+        .await;
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+    }
+
+    let requests = handler.pairing_requests();
+    assert_eq!(requests.len(), 3);
+    for (request, endpoint) in requests.iter().zip([
+        PairingEndpoint::ClientHello,
+        PairingEndpoint::Bootstrap,
+        PairingEndpoint::ClientFinish,
+    ]) {
+        assert_eq!(request.endpoint, endpoint);
+        assert_eq!(request.body, br#"{}"#);
+        assert_eq!(request.transport.tls_version, "1.3");
+        assert!(!request.transport.used_zero_rtt);
+        assert_eq!(
+            request.transport.peer_spki_sha256,
+            policy.expected_server_spki_sha256()
+        );
+    }
+
+    let alias = raw_tls_request(
+        server.local_addr(),
+        &policy,
+        valid_request(server.local_addr(), "/pairing/v1/client-hello/").as_bytes(),
+    )
+    .await;
+    assert!(alias.is_empty());
+    assert_eq!(handler.pairing_requests().len(), 3);
     server.shutdown().await.unwrap();
 }
 

@@ -1,12 +1,18 @@
 use super::client::exact_content_length;
 use super::{
-    endpoint_from_exact_target, DirectSyncRequestHandler, DirectSyncTransportError,
-    FixtureTransportPolicy, HTTP_1_1_ALPN, MAX_CONCURRENT_CONNECTIONS, MAX_HEADERS,
-    MAX_HEADER_BUFFER_BYTES,
+    endpoint_from_exact_target, pairing_endpoint_from_exact_target, DirectSyncRequestHandler,
+    DirectSyncTransportError, FixtureAuthorityRequestHandler, FixtureTransportPolicy,
+    PairingEndpoint, PairingTransportRequest, PairingTransportResponse, HTTP_1_1_ALPN,
+    MAX_CONCURRENT_CONNECTIONS, MAX_HEADERS, MAX_HEADER_BUFFER_BYTES,
+};
+use crate::direct_pairing_delivery::{
+    MAX_BOOTSTRAP_POLL_REQUEST_BYTES, MAX_BOOTSTRAP_POLL_RESPONSE_BYTES,
 };
 use crate::direct_sync::{
-    DirectRequest, DirectResponse, SecureTransportEvidence, DIRECT_SYNC_CONTENT_TYPE,
+    DirectEndpoint, DirectRequest, DirectResponse, EndpointLimits, SecureTransportEvidence,
+    DIRECT_SYNC_CONTENT_TYPE,
 };
+use crate::pairing_protocol::{TransportEvidence, MAX_PAIRING_MESSAGE_BYTES};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
@@ -43,6 +49,39 @@ const HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 const BODY_TIMEOUT: Duration = Duration::from_secs(30);
 const HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(40);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WireEndpoint {
+    Direct(DirectEndpoint),
+    Pairing(PairingEndpoint),
+}
+
+impl WireEndpoint {
+    fn limits(self, policy: &FixtureTransportPolicy) -> EndpointLimits {
+        match self {
+            Self::Direct(endpoint) => policy.limits_for(endpoint),
+            Self::Pairing(PairingEndpoint::Bootstrap) => EndpointLimits {
+                request_bytes: MAX_BOOTSTRAP_POLL_REQUEST_BYTES,
+                response_bytes: MAX_BOOTSTRAP_POLL_RESPONSE_BYTES,
+            },
+            Self::Pairing(_) => EndpointLimits {
+                request_bytes: MAX_PAIRING_MESSAGE_BYTES,
+                response_bytes: MAX_PAIRING_MESSAGE_BYTES,
+            },
+        }
+    }
+}
+
+fn wire_endpoint_from_exact_target(target: &str, pairing_enabled: bool) -> Option<WireEndpoint> {
+    endpoint_from_exact_target(target)
+        .map(WireEndpoint::Direct)
+        .or_else(|| {
+            pairing_enabled
+                .then(|| pairing_endpoint_from_exact_target(target))
+                .flatten()
+                .map(WireEndpoint::Pairing)
+        })
+}
 
 /// An in-memory P-256 certificate and key generated only for the sanitized
 /// loopback fixture. It is neither persisted nor accepted by production APIs.
@@ -104,6 +143,53 @@ impl FixtureTlsIdentity {
     }
 }
 
+trait WireRequestHandler: Send + Sync + 'static {
+    fn pairing_enabled(&self) -> bool;
+    fn handle_direct_sync(&self, request: DirectRequest) -> DirectResponse;
+    fn handle_pairing(&self, request: PairingTransportRequest) -> PairingTransportResponse;
+}
+
+struct DirectOnlyHandler<H>(Arc<H>);
+
+impl<H> WireRequestHandler for DirectOnlyHandler<H>
+where
+    H: DirectSyncRequestHandler,
+{
+    fn pairing_enabled(&self) -> bool {
+        false
+    }
+
+    fn handle_direct_sync(&self, request: DirectRequest) -> DirectResponse {
+        self.0.handle_direct_sync(request)
+    }
+
+    fn handle_pairing(&self, _request: PairingTransportRequest) -> PairingTransportResponse {
+        PairingTransportResponse {
+            status: StatusCode::NOT_FOUND.as_u16(),
+            body: br#"{"error":{"code":"route_not_found"}}"#.to_vec(),
+        }
+    }
+}
+
+struct SharedAuthorityHandler<H>(Arc<H>);
+
+impl<H> WireRequestHandler for SharedAuthorityHandler<H>
+where
+    H: FixtureAuthorityRequestHandler,
+{
+    fn pairing_enabled(&self) -> bool {
+        true
+    }
+
+    fn handle_direct_sync(&self, request: DirectRequest) -> DirectResponse {
+        self.0.handle_direct_sync(request)
+    }
+
+    fn handle_pairing(&self, request: PairingTransportRequest) -> PairingTransportResponse {
+        self.0.handle_pairing(request)
+    }
+}
+
 /// Owned loopback server handle. Dropping it signals shutdown; calling
 /// [`shutdown`](Self::shutdown) also waits for accepted fixture connections to
 /// finish their bounded TLS/HTTP work.
@@ -137,6 +223,44 @@ impl FixtureLoopbackServer {
         }
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handler = Arc::new(DirectOnlyHandler(handler));
+        let accept_task = tokio::spawn(run_accept_loop(
+            listener,
+            local_addr,
+            TlsAcceptor::from(tls_config),
+            handler,
+            policy,
+            PeerBoundary::Loopback,
+            shutdown_rx,
+        ));
+        Ok(Self {
+            local_addr,
+            shutdown_tx: Some(shutdown_tx),
+            accept_task: Some(accept_task),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn spawn_authority_fixture_only<H>(
+        handler: Arc<H>,
+        identity: FixtureTlsIdentity,
+        policy: FixtureTransportPolicy,
+    ) -> Result<Self, DirectSyncTransportError>
+    where
+        H: FixtureAuthorityRequestHandler,
+    {
+        if identity.spki_sha256 != policy.expected_server_spki_sha256() {
+            return Err(DirectSyncTransportError::InvalidFixtureConfiguration);
+        }
+        let tls_config = Arc::new(build_server_config(identity)?);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .map_err(|_| DirectSyncTransportError::ConnectionFailed)?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|_| DirectSyncTransportError::ConnectionFailed)?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handler = Arc::new(SharedAuthorityHandler(handler));
         let accept_task = tokio::spawn(run_accept_loop(
             listener,
             local_addr,
@@ -190,6 +314,50 @@ impl SanitizedPrivateLanServer {
     ) -> Result<Self, DirectSyncTransportError>
     where
         H: DirectSyncRequestHandler,
+    {
+        if !is_private_lan_ipv4(address) {
+            return Err(DirectSyncTransportError::PrivateLanRequired);
+        }
+        if identity.spki_sha256 != policy.expected_server_spki_sha256() {
+            return Err(DirectSyncTransportError::InvalidFixtureConfiguration);
+        }
+        Self::spawn(
+            address,
+            Arc::new(DirectOnlyHandler(handler)),
+            identity,
+            policy,
+        )
+        .await
+    }
+
+    /// Start the single fixture authority listener that owns both the three
+    /// fixed pairing routes and the six fixed direct-sync routes.
+    pub async fn spawn_authority_fixture_only<H>(
+        address: Ipv4Addr,
+        handler: Arc<H>,
+        identity: FixtureTlsIdentity,
+        policy: FixtureTransportPolicy,
+    ) -> Result<Self, DirectSyncTransportError>
+    where
+        H: FixtureAuthorityRequestHandler,
+    {
+        Self::spawn(
+            address,
+            Arc::new(SharedAuthorityHandler(handler)),
+            identity,
+            policy,
+        )
+        .await
+    }
+
+    async fn spawn<H>(
+        address: Ipv4Addr,
+        handler: Arc<H>,
+        identity: FixtureTlsIdentity,
+        policy: FixtureTransportPolicy,
+    ) -> Result<Self, DirectSyncTransportError>
+    where
+        H: WireRequestHandler,
     {
         if !is_private_lan_ipv4(address) {
             return Err(DirectSyncTransportError::PrivateLanRequired);
@@ -314,7 +482,7 @@ async fn run_accept_loop<H>(
     peer_boundary: PeerBoundary,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) where
-    H: DirectSyncRequestHandler,
+    H: WireRequestHandler,
 {
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
     // Direct-sync authority work is synchronous SQLite today. Keep it off the
@@ -365,7 +533,7 @@ async fn serve_connection<H>(
     policy: FixtureTransportPolicy,
     blocking_gate: Arc<Semaphore>,
 ) where
-    H: DirectSyncRequestHandler,
+    H: WireRequestHandler,
 {
     let Ok(Ok(mut tls)) = timeout(TLS_HANDSHAKE_TIMEOUT, tls_acceptor.accept(stream)).await else {
         return;
@@ -384,7 +552,14 @@ async fn serve_connection<H>(
     // appear on the wire. Inspect the bounded decrypted header before handing
     // the original bytes (plus any already-read body prefix) back to Hyper.
     let expected_authority = local_addr.to_string();
-    let Ok(prefix) = preflight_http_head(&mut tls, &policy, &expected_authority).await else {
+    let Ok(prefix) = preflight_http_head(
+        &mut tls,
+        &policy,
+        &expected_authority,
+        handler.pairing_enabled(),
+    )
+    .await
+    else {
         return;
     };
 
@@ -430,6 +605,7 @@ async fn preflight_http_head<T>(
     stream: &mut T,
     policy: &FixtureTransportPolicy,
     expected_authority: &str,
+    pairing_enabled: bool,
 ) -> Result<Vec<u8>, ()>
 where
     T: AsyncRead + Unpin,
@@ -458,7 +634,12 @@ where
         }
         prefix.extend_from_slice(&chunk[..read]);
     };
-    validate_raw_http_head(&prefix[..header_end], policy, expected_authority)?;
+    validate_raw_http_head(
+        &prefix[..header_end],
+        policy,
+        expected_authority,
+        pairing_enabled,
+    )?;
     Ok(prefix)
 }
 
@@ -466,6 +647,7 @@ fn validate_raw_http_head(
     head: &[u8],
     policy: &FixtureTransportPolicy,
     expected_authority: &str,
+    pairing_enabled: bool,
 ) -> Result<(), ()> {
     let text = std::str::from_utf8(head).map_err(|_| ())?;
     let mut lines = text.split("\r\n");
@@ -475,7 +657,7 @@ fn validate_raw_http_head(
         return Err(());
     }
     let target = request_parts.next().ok_or(())?;
-    let endpoint = endpoint_from_exact_target(target).ok_or(())?;
+    let endpoint = wire_endpoint_from_exact_target(target, pairing_enabled).ok_or(())?;
     if request_parts.next() != Some("HTTP/1.1") || request_parts.next().is_some() {
         return Err(());
     }
@@ -537,7 +719,7 @@ fn validate_raw_http_head(
         return Err(());
     }
     let content_length = content_length.ok_or(())?;
-    if content_length > policy.limits_for(endpoint).request_bytes {
+    if content_length > endpoint.limits(policy).request_bytes {
         return Err(());
     }
     Ok(())
@@ -645,7 +827,7 @@ async fn handle_http_request<H>(
     blocking_gate: Arc<Semaphore>,
 ) -> Response<Full<Bytes>>
 where
-    H: DirectSyncRequestHandler,
+    H: WireRequestHandler,
 {
     if request.version() != Version::HTTP_11 {
         return wire_error(
@@ -662,7 +844,7 @@ where
     let Some(target) = request.uri().path_and_query().map(|value| value.as_str()) else {
         return wire_error(StatusCode::NOT_FOUND, "route_not_found");
     };
-    let Some(endpoint) = endpoint_from_exact_target(target) else {
+    let Some(endpoint) = wire_endpoint_from_exact_target(target, handler.pairing_enabled()) else {
         return wire_error(StatusCode::NOT_FOUND, "route_not_found");
     };
     if request.headers().len() > MAX_HEADERS
@@ -700,7 +882,7 @@ where
         Ok(declared) => declared,
         Err(_) => return wire_error(StatusCode::BAD_REQUEST, "invalid_http_framing"),
     };
-    let limits = policy.limits_for(endpoint);
+    let limits = endpoint.limits(&policy);
     if declared > limits.request_bytes {
         return wire_error(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large");
     }
@@ -721,24 +903,39 @@ where
         return wire_error(StatusCode::BAD_REQUEST, "invalid_http_framing");
     }
 
-    let direct_request = DirectRequest {
-        method: "POST".to_owned(),
-        target: endpoint.path().to_owned(),
-        content_type,
-        content_encoding: None,
-        body,
-        authority_now: fixture_now_ms(),
-        transport,
+    let pairing_transport = TransportEvidence {
+        tls_version: transport.tls_version.clone(),
+        used_zero_rtt: transport.used_zero_rtt,
+        peer_spki_sha256: transport.server_spki_sha256.clone(),
     };
     let blocking_permit = match timeout(HANDLER_TIMEOUT, blocking_gate.acquire_owned()).await {
         Ok(Ok(permit)) => permit,
         _ => return wire_error(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
     };
-    let direct_response = match timeout(
+    let wire_response = match timeout(
         HANDLER_TIMEOUT,
         tokio::task::spawn_blocking(move || {
             let _blocking_permit = blocking_permit;
-            handler.handle_direct_sync(direct_request)
+            match endpoint {
+                WireEndpoint::Direct(endpoint) => {
+                    WireResponse::Direct(handler.handle_direct_sync(DirectRequest {
+                        method: "POST".to_owned(),
+                        target: endpoint.path().to_owned(),
+                        content_type,
+                        content_encoding: None,
+                        body,
+                        authority_now: fixture_now_ms(),
+                        transport,
+                    }))
+                }
+                WireEndpoint::Pairing(endpoint) => {
+                    WireResponse::Pairing(handler.handle_pairing(PairingTransportRequest {
+                        endpoint,
+                        body,
+                        transport: pairing_transport,
+                    }))
+                }
+            }
         }),
     )
     .await
@@ -747,16 +944,40 @@ where
         Ok(Err(_)) => return wire_error(StatusCode::SERVICE_UNAVAILABLE, "state_unavailable"),
         Err(_) => return wire_error(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
     };
-    if direct_response.body.len() > limits.response_bytes {
+    if wire_response.body_len() > limits.response_bytes {
         return wire_error(StatusCode::PAYLOAD_TOO_LARGE, "response_too_large");
     }
-    direct_response_to_http(direct_response)
+    match wire_response {
+        WireResponse::Direct(response) => direct_response_to_http(response),
+        WireResponse::Pairing(response) => pairing_response_to_http(response),
+    }
+}
+
+enum WireResponse {
+    Direct(DirectResponse),
+    Pairing(PairingTransportResponse),
+}
+
+impl WireResponse {
+    fn body_len(&self) -> usize {
+        match self {
+            Self::Direct(response) => response.body.len(),
+            Self::Pairing(response) => response.body.len(),
+        }
+    }
 }
 
 fn direct_response_to_http(response: DirectResponse) -> Response<Full<Bytes>> {
     if response.content_type != DIRECT_SYNC_CONTENT_TYPE {
         return wire_error(StatusCode::SERVICE_UNAVAILABLE, "state_unavailable");
     }
+    let Ok(status) = StatusCode::from_u16(response.status) else {
+        return wire_error(StatusCode::SERVICE_UNAVAILABLE, "state_unavailable");
+    };
+    build_response(status, response.body)
+}
+
+fn pairing_response_to_http(response: PairingTransportResponse) -> Response<Full<Bytes>> {
     let Ok(status) = StatusCode::from_u16(response.status) else {
         return wire_error(StatusCode::SERVICE_UNAVAILABLE, "state_unavailable");
     };

@@ -248,6 +248,44 @@ impl<R: Runtime> AppleSecurity<R> {
         wire.try_into()
     }
 
+    pub fn revoke_active(
+        &self,
+        identity: &IdentityHandle,
+        receipt_id: &str,
+        authority_generation: u64,
+        purge_generation: u64,
+        key_epoch: u64,
+    ) -> Result<PublicIdentity> {
+        crate::models::validate_uuid_v7(receipt_id)?;
+        if authority_generation == 0 || key_epoch == 0 {
+            return Err(Error::InvalidNativeResponse("revocation generations"));
+        }
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Args<'a> {
+            identity_handle: &'a str,
+            receipt_id: &'a str,
+            authority_generation: u64,
+            purge_generation: u64,
+            key_epoch: u64,
+        }
+        let wire: PublicIdentityWire = self.0.run_mobile_plugin(
+            "revokeActive",
+            Args {
+                identity_handle: identity.expose_opaque(),
+                receipt_id,
+                authority_generation,
+                purge_generation,
+                key_epoch,
+            },
+        )?;
+        let identity: PublicIdentity = wire.try_into()?;
+        if identity.lifecycle != IdentityLifecycle::Discarded {
+            return Err(Error::InvalidNativeResponse("revoked identity lifecycle"));
+        }
+        Ok(identity)
+    }
+
     pub fn protected_data_state(&self) -> Result<ProtectedDataState> {
         #[derive(serde::Deserialize)]
         struct Response {

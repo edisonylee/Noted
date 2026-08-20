@@ -37,6 +37,16 @@ const P256_P1363_SIGNATURE_BYTES: usize = 64;
 /// and the canonical plaintext already destined for the protected local
 /// replica.
 pub trait MobileRecordCrypto: MobileSyncCrypto {
+    /// Retire native private material only after authenticated revocation is
+    /// durable. Fixture implementations may keep the default no-op; production
+    /// iPhone custody overrides it with an idempotent Keychain tombstone.
+    fn retire_active_identity(
+        &self,
+        _profile: &ActiveSyncProfile,
+    ) -> Result<(), MobileRecordCryptoError> {
+        Ok(())
+    }
+
     fn seal_canonical_record(
         &self,
         profile: &ActiveSyncProfile,

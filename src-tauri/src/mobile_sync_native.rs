@@ -59,6 +59,31 @@ impl<R: Runtime> MobileSyncCrypto for AppleMobileSyncCrypto<'_, R> {
 }
 
 impl<R: Runtime> MobileRecordCrypto for AppleMobileSyncCrypto<'_, R> {
+    fn retire_active_identity(
+        &self,
+        profile: &crate::mobile_sync_runtime::ActiveSyncProfile,
+    ) -> Result<(), MobileRecordCryptoError> {
+        let identity = IdentityHandle::from_opaque(&profile.identity_handle)
+            .map_err(|_| MobileRecordCryptoError::NativeCryptoRejected)?;
+        let retired = self
+            .security
+            .revoke_active(
+                &identity,
+                &profile.receipt_id,
+                profile.authority_generation,
+                profile.purge_generation,
+                profile.key_epoch,
+            )
+            .map_err(|_| MobileRecordCryptoError::NativeCryptoRejected)?;
+        if retired.handle != identity
+            || retired.device_id != profile.device_id
+            || retired.lifecycle != noted_apple_security::IdentityLifecycle::Discarded
+        {
+            return Err(MobileRecordCryptoError::NativeCryptoRejected);
+        }
+        Ok(())
+    }
+
     fn seal_canonical_record(
         &self,
         profile: &crate::mobile_sync_runtime::ActiveSyncProfile,

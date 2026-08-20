@@ -158,6 +158,38 @@ enum IdentityLifecycleMachine {
 
     // This single-record transition is the logical commit point. All secret
     // representations are removed in the same SecItemUpdate as the tombstone.
+    discardSecrets(record: &record)
+  }
+
+  static func revokeActive(
+    record: inout IdentityRecord,
+    receiptId: String,
+    authorityGeneration: UInt64,
+    purgeGeneration: UInt64,
+    keyEpoch: UInt64
+  ) throws {
+    if record.lifecycle == .discarded {
+      return
+    }
+    guard record.lifecycle == .active else {
+      throw NotedSecurityError.invalidIdentityState(
+        expected: IdentityLifecycle.active.rawValue,
+        actual: record.lifecycle.rawValue)
+    }
+    guard let active = record.activeBootstrap,
+      active.receiptId == receiptId,
+      let metadata = active.metadata,
+      metadata.receiptId == receiptId,
+      metadata.authorityGeneration == authorityGeneration,
+      metadata.purgeGeneration == purgeGeneration,
+      metadata.keyEpoch == keyEpoch
+    else {
+      throw NotedSecurityError.bootstrapReplayMismatch
+    }
+    discardSecrets(record: &record)
+  }
+
+  private static func discardSecrets(record: inout IdentityRecord) {
     record.lifecycle = .discarded
     record.signingKeyRepresentation = nil
     record.agreementPrivateKey = nil

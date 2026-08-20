@@ -98,10 +98,20 @@ where
             .map_err(MobileNotesSyncError::Store)?
             .is_some()
         {
+            self.retire_native_identity()?;
             return Err(MobileSyncRuntimeError::DeviceRevoked.into());
         }
         match self.sync_once_active().await {
             Err(MobileNotesSyncError::Runtime(MobileSyncRuntimeError::DeviceRevoked)) => {
+                if self
+                    .store
+                    .authority_revocation()
+                    .map_err(MobileNotesSyncError::Store)?
+                    .is_some()
+                {
+                    self.retire_native_identity()?;
+                    return Err(MobileSyncRuntimeError::DeviceRevoked.into());
+                }
                 let journaled = self
                     .actor
                     .journal()
@@ -116,10 +126,18 @@ where
                     journaled.endpoint,
                     &response.body,
                 )?;
+                self.retire_native_identity()?;
                 Err(MobileSyncRuntimeError::DeviceRevoked.into())
             }
             result => result,
         }
+    }
+
+    fn retire_native_identity(&self) -> Result<(), MobileNotesSyncError> {
+        let profile = self.actor.journal().active_sync_profile()?;
+        self.crypto
+            .retire_active_identity(&profile)
+            .map_err(MobileNotesSyncError::RecordCrypto)
     }
 
     async fn sync_once_active(&mut self) -> Result<MobileNotesSyncReport, MobileNotesSyncError> {
@@ -604,6 +622,7 @@ where
                 response.completion.endpoint,
                 &response.exact_body,
             )?;
+            self.retire_native_identity()?;
             return Err(MobileSyncRuntimeError::DeviceRevoked.into());
         }
         Ok(disposition)

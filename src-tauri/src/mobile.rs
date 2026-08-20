@@ -13,8 +13,8 @@ use crate::mobile_store::{
 use crate::pairing_client::PairingClientState;
 use crate::pairing_protocol::TransportEvidence;
 use noted_apple_security::{
-    AppleSecurity, AppleSecurityExt, IdentityInventory, IdentityLifecycle, ProtectedDataEvent,
-    ProtectedDataState, SigningKeyBacking, StoreProtectionReport,
+    AppleSecurity, AppleSecurityExt, IdentityHandle, IdentityInventory, IdentityLifecycle,
+    ProtectedDataEvent, ProtectedDataState, SigningKeyBacking, StoreProtectionReport,
 };
 use serde::Serialize;
 use std::{
@@ -280,10 +280,15 @@ impl ProtectedMobileStore {
         )?;
 
         let expected_device_id = self.store.replica_device_id()?;
-        let native_inventory = security
+        let mut native_inventory = security
             .identity_inventory()
             .map_err(|error| error.to_string())?;
         commit_completed_native_discard(&self.store, &native_inventory)?;
+        if commit_native_authority_revocation(&self.store, security)? {
+            native_inventory = security
+                .identity_inventory()
+                .map_err(|error| error.to_string())?;
+        }
         let identity_reconciliation = native_identity_reconciliation(&self.store)?;
         let inventory = reconcile_identity_inventory(
             native_inventory,
@@ -323,10 +328,15 @@ impl ProtectedMobileStore {
                 .map_err(|error| error.to_string())?,
         )?;
         let expected_device_id = self.store.replica_device_id()?;
-        let native_inventory = security
+        let mut native_inventory = security
             .identity_inventory()
             .map_err(|error| error.to_string())?;
         commit_completed_native_discard(&self.store, &native_inventory)?;
+        if commit_native_authority_revocation(&self.store, security)? {
+            native_inventory = security
+                .identity_inventory()
+                .map_err(|error| error.to_string())?;
+        }
         let identity_reconciliation = native_identity_reconciliation(&self.store)?;
         let inventory = reconcile_identity_inventory(
             native_inventory,
@@ -445,7 +455,14 @@ fn require_compliant_store(report: StoreProtectionReport) -> Result<(), String> 
 fn native_identity_reconciliation(
     store: &MobileStore,
 ) -> Result<NativeIdentityReconciliation, String> {
+    let revoked = store.authority_revocation()?.is_some();
     if let Some(checkpoint) = store.load_pairing_checkpoint()? {
+        if revoked && checkpoint.client.state == PairingClientState::Active {
+            return Ok(NativeIdentityReconciliation {
+                requirement: NativeIdentityRequirement::FreshUnpaired,
+                expected_identity: None,
+            });
+        }
         let requirement = match checkpoint.client.state {
             PairingClientState::Cancelled => NativeIdentityRequirement::FreshUnpaired,
             PairingClientState::PendingActivation => {
@@ -471,6 +488,47 @@ fn native_identity_reconciliation(
         requirement: native_identity_requirement_from_health(&store.health()?)?,
         expected_identity: None,
     })
+}
+
+fn commit_native_authority_revocation<R: Runtime>(
+    store: &MobileStore,
+    security: &AppleSecurity<R>,
+) -> Result<bool, String> {
+    let Some(revocation) = store.authority_revocation()? else {
+        return Ok(false);
+    };
+    let Some(checkpoint) = store.load_pairing_checkpoint()? else {
+        return Err("revoked enrollment is missing its durable pairing checkpoint".to_string());
+    };
+    // A later-generation pending checkpoint proves the old active identity was
+    // already retired before re-enrollment began. Never target the new handle.
+    if checkpoint.client.state != PairingClientState::Active {
+        return Ok(false);
+    }
+    let identity = IdentityHandle::from_opaque(&checkpoint.identity_handle)
+        .map_err(|error| error.to_string())?;
+    let authority_generation = u64::try_from(revocation.authority_generation)
+        .map_err(|_| "revocation authority generation exceeds u64".to_string())?;
+    let purge_generation = u64::try_from(revocation.purge_generation)
+        .map_err(|_| "revocation purge generation exceeds u64".to_string())?;
+    let key_epoch = u64::try_from(revocation.key_epoch)
+        .map_err(|_| "revocation key epoch exceeds u64".to_string())?;
+    let retired = security
+        .revoke_active(
+            &identity,
+            &revocation.receipt_id,
+            authority_generation,
+            purge_generation,
+            key_epoch,
+        )
+        .map_err(|error| error.to_string())?;
+    if retired.handle != identity
+        || retired.device_id != revocation.device_id
+        || retired.lifecycle != IdentityLifecycle::Discarded
+    {
+        return Err("native revocation did not retire the authenticated identity".to_string());
+    }
+    Ok(true)
 }
 
 fn commit_completed_native_discard(

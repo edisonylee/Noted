@@ -102,6 +102,14 @@
     let receiptId: String?
   }
 
+  private struct RevokeActiveArgs: Decodable {
+    let identityHandle: String
+    let receiptId: String
+    let authorityGeneration: UInt64
+    let purgeGeneration: UInt64
+    let keyEpoch: UInt64
+  }
+
   private struct SubscribeProtectedDataArgs: Decodable {
     let handler: Channel
   }
@@ -261,6 +269,18 @@
           identityHandle: args.identityHandle,
           pendingBootstrapHandle: args.pendingBootstrapHandle,
           receiptId: args.receiptId)
+      }
+    }
+
+    @objc func revokeActive(_ invoke: Invoke) {
+      resolveInvocation(invoke) {
+        let args = try invoke.parseArgs(RevokeActiveArgs.self)
+        return try self.vault.revokeActive(
+          identityHandle: args.identityHandle,
+          receiptId: args.receiptId,
+          authorityGeneration: args.authorityGeneration,
+          purgeGeneration: args.purgeGeneration,
+          keyEpoch: args.keyEpoch)
       }
     }
 

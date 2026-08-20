@@ -216,6 +216,52 @@ final class IdentityLifecycleTests: XCTestCase {
         receiptId: staged.receiptId))
   }
 
+  func testAuthenticatedRevocationWipesActiveSecretsAndIsIdempotent() throws {
+    var value = record()
+    let binding = metadata()
+    let staged = try IdentityLifecycleMachine.stage(
+      record: &value,
+      bootstrapHandle: "018f47a0-7b80-7000-8000-000000000003",
+      receiptId: binding.receiptId,
+      envelopeDigest: Data(repeating: 0x55, count: 32),
+      material: keyPackage(),
+      metadata: binding)
+    try IdentityLifecycleMachine.activate(
+      record: &value,
+      bootstrapHandle: staged.handle,
+      receiptId: binding.receiptId,
+      activatedAtMs: 2)
+
+    let before = value
+    XCTAssertThrowsError(
+      try IdentityLifecycleMachine.revokeActive(
+        record: &value,
+        receiptId: binding.receiptId,
+        authorityGeneration: binding.authorityGeneration + 1,
+        purgeGeneration: binding.purgeGeneration,
+        keyEpoch: binding.keyEpoch))
+    XCTAssertEqual(value, before)
+
+    try IdentityLifecycleMachine.revokeActive(
+      record: &value,
+      receiptId: binding.receiptId,
+      authorityGeneration: binding.authorityGeneration,
+      purgeGeneration: binding.purgeGeneration,
+      keyEpoch: binding.keyEpoch)
+    try IdentityLifecycleMachine.revokeActive(
+      record: &value,
+      receiptId: binding.receiptId,
+      authorityGeneration: binding.authorityGeneration,
+      purgeGeneration: binding.purgeGeneration,
+      keyEpoch: binding.keyEpoch)
+    XCTAssertEqual(value.lifecycle, .discarded)
+    XCTAssertNil(value.signingKeyRepresentation)
+    XCTAssertNil(value.agreementPrivateKey)
+    XCTAssertNil(value.pendingBootstrap)
+    XCTAssertNil(value.activeBootstrap)
+    XCTAssertNil(value.activatedAtMs)
+  }
+
   func testLegacyBootstrapDecodesButRequiresExplicitDiscard() throws {
     var value = record()
     _ = try IdentityLifecycleMachine.stage(

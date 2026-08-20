@@ -1531,8 +1531,12 @@ Authenticated revocation is now a single durable phone-store transition. It
 records immutable evidence, marks the enrollment and sync profile revoked,
 quarantines unfinished inbound work, rejects open push bindings, and retires
 unsafe outbox entries as conflicts while preserving working branches for export.
-The revoked state remains terminal after restart. Native key disablement and a
-clean higher-generation re-enrollment flow remain product-runtime work.
+The revoked state remains terminal after restart. The product runtime now
+immediately converts the exact active Keychain identity to a secret-free
+tombstone after that durable transition, retries the retirement on resume, and
+allows only a same-library invitation with a higher authority generation to
+start replacement pairing. Completing and atomically replacing the finalized
+activation remains re-enrollment work.
 
 The following work still blocks the M4 gate and any personal-data sync:
 
@@ -1541,8 +1545,8 @@ The following work still blocks the M4 gate and any personal-data sync:
   discovery metadata or passing protocol messages through JavaScript. The
   existing fixture command that accepts claimed SPKI evidence from its caller is
   a harness only and cannot satisfy this gate;
-- product-runtime wiring that disables native key use after the durable
-  revocation transition and permits a clean, higher-generation re-enrollment;
+- completion of the higher-generation re-enrollment flow, including atomic
+  replacement of the finalized activation and restart tests across that swap;
 - production Mac key custody/signing and structural enforcement that pairing,
   revocation, and sync share one authority instance;
 - external review of the implemented pairing, cryptography, transport, and
@@ -1559,7 +1563,7 @@ M4 gate below passes.
 
 Checkpoint verification includes the complete Rust library suite, focused
 migration/pairing/direct-sync/fixture-authority suites, the encrypted cross-layer
-Notes test, 29 Swift native-security tests, 14 Rust Apple-security tests, shared
+Notes test, 30 Swift native-security tests, 14 Rust Apple-security tests, shared
 Rust/Swift golden vectors, frontend/iOS contract checks, and Rust library
 compilation for both the iPhone device and simulator targets. These prove the
 bounded fixture contracts; they do not substitute for the product-network,

@@ -282,6 +282,32 @@ public final class IdentityVault: @unchecked Sendable {
     }
   }
 
+  /// Applies only authority-authenticated revocation evidence already committed
+  /// by the Rust store. The exact active bootstrap binding must match before all
+  /// native secret material is removed in one Keychain item update.
+  public func revokeActive(
+    identityHandle: String,
+    receiptId: String,
+    authorityGeneration: UInt64,
+    purgeGeneration: UInt64,
+    keyEpoch: UInt64
+  ) throws -> PublicIdentityDescriptor {
+    try queue.sync {
+      var record = try store.load(handle: try validatedHandle(identityHandle))
+      try validate(record)
+      try UUIDv7Generator.validate(receiptId)
+      try IdentityLifecycleMachine.revokeActive(
+        record: &record,
+        receiptId: receiptId,
+        authorityGeneration: authorityGeneration,
+        purgeGeneration: purgeGeneration,
+        keyEpoch: keyEpoch)
+      try validate(record)
+      try store.replace(record)
+      return record.publicDescriptor()
+    }
+  }
+
   private func validatedHandle(_ handle: String) throws -> String {
     guard handle.count == 36,
       handle == handle.lowercased(),

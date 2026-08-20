@@ -653,10 +653,12 @@ mod ios {
             .apple_security()
             .identity_inventory()
             .map_err(|error| error.to_string())?;
-        if let Some(row) = store
-            .load_pairing_checkpoint()?
-            .filter(|checkpoint| checkpoint.client.state != PairingClientState::Cancelled)
-        {
+        let revoked_activation = store.authority_revocation()?;
+        if let Some(row) = store.load_pairing_checkpoint()?.filter(|checkpoint| {
+            checkpoint.client.state != PairingClientState::Cancelled
+                && !(checkpoint.client.state == PairingClientState::Active
+                    && revoked_activation.is_some())
+        }) {
             if row.client.invitation_bytes != invitation_bytes {
                 return Err(
                     "a different invitation cannot replace the durable pairing transcript"
@@ -701,6 +703,19 @@ mod ios {
                 "live native identity requires recovery or explicit discard before pairing"
                     .to_string(),
             );
+        }
+        if let Some(revocation) = &revoked_activation {
+            let invitation: crate::pairing_protocol::Invitation =
+                serde_json::from_slice(invitation_bytes)
+                    .map_err(|error| format!("decode re-enrollment invitation: {error}"))?;
+            if invitation.library_id != revocation.library_id
+                || invitation.authority_generation <= revocation.authority_generation as u64
+            {
+                return Err(
+                    "re-enrollment requires the same library and a higher authority generation"
+                        .to_string(),
+                );
+            }
         }
         let device_id = store.replica_device_id()?;
         let identity = prepare_fixture_identity(app, &device_id)?;

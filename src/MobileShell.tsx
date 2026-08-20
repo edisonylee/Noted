@@ -21,6 +21,7 @@ export const MOBILE_NOTES_COMMANDS = {
   file: "file_mobile_note",
   undoFiling: "undo_mobile_note_filing",
   resolveConflict: "resolve_mobile_note_conflict",
+  sync: "mobile_sync_now",
 } as const;
 
 export type LifecycleState = "active" | "trashed";
@@ -117,6 +118,7 @@ export type MobileNotesClient = {
   file(recordId: string, folderId: string): Promise<MobileNote>;
   undoFiling(recordId: string): Promise<MobileNote>;
   resolveConflict(recordId: string, resolution: ConflictResolution): Promise<MobileNote>;
+  sync(manualAddress?: string): Promise<void>;
 };
 
 const EMPTY_WORKSPACE: MobileWorkspace = {
@@ -284,6 +286,9 @@ export function createMobileNotesClient(invokeCommand: InvokeCommand): MobileNot
     },
     resolveConflict(recordId, resolution) {
       return invokeCommand<MobileNoteWire>(MOBILE_NOTES_COMMANDS.resolveConflict, { recordId, resolution }).then((note) => normalizeNote(note));
+    },
+    sync(manualAddress) {
+      return invokeCommand<void>(MOBILE_NOTES_COMMANDS.sync, { manualAddress: manualAddress ?? null });
     },
   };
 }
@@ -483,11 +488,15 @@ function LibraryIndex({
   location,
   workspace,
   onChoose,
+  onSync,
+  syncing,
   onClose,
 }: {
   location: LibraryLocation;
   workspace: MobileWorkspace;
   onChoose: (location: LibraryLocation) => void;
+  onSync: (manualAddress?: string) => void;
+  syncing: boolean;
   onClose: () => void;
 }) {
   const dialogRef = useModalFocus(onClose, "mobile-notes-library-button");
@@ -498,6 +507,7 @@ function LibraryIndex({
 
   const canOpenSpaces = workspace.capabilities.filing || workspace.capabilities.undoFiling;
   const canOpenTrash = workspace.capabilities.restore;
+  const enrolled = workspace.sync.state !== "local" && workspace.sync.state !== "not_enrolled";
 
   return (
     <div className="library-drawer-layer">
@@ -540,6 +550,26 @@ function LibraryIndex({
             <button type="button" aria-current={selected("trash") ? "page" : undefined} onClick={() => onChoose({ kind: "trash" })}>
               <span>Trash</span>{workspace.counts.trash !== null && <span>{workspace.counts.trash}</span>}
             </button>
+          )}
+
+          {enrolled && (
+            <div className="library-drawer__section library-drawer__connection">
+              <p>Mac connection</p>
+              <button type="button" disabled={syncing} onClick={() => onSync()}>
+                <span>{syncing ? "Looking for your Mac…" : "Sync now"}</span>
+              </button>
+              <button
+                type="button"
+                disabled={syncing}
+                onClick={() => {
+                  const address = window.prompt("Mac address", "192.168.1.2:43123")?.trim();
+                  if (address) onSync(address);
+                }}
+              >
+                <span>Connect by address</span>
+              </button>
+              <span className="library-drawer__empty">Use a numeric private address only. Your saved pairing still verifies the Mac.</span>
+            </div>
           )}
         </nav>
       </aside>
@@ -793,6 +823,21 @@ export function MobileShell({ client = mobileNotesClient }: { client?: MobileNot
     const result = await client.workspace(request);
     setWorkspace(result);
     return result;
+  }
+
+  async function syncNow(manualAddress?: string) {
+    if (activity) return;
+    setActivity("syncing");
+    setError(null);
+    try {
+      await client.sync(manualAddress);
+      const refreshed = await refreshWorkspace();
+      setAnnouncement(syncSummary(refreshed));
+    } catch (reason) {
+      setError(`Couldn’t sync with your Mac. ${messageFrom(reason)}`);
+    } finally {
+      setActivity(null);
+    }
   }
 
   async function openNoteByRecordId(recordId: string) {
@@ -1113,6 +1158,8 @@ export function MobileShell({ client = mobileNotesClient }: { client?: MobileNot
             setLocation(nextLocation);
             setDrawerOpen(false);
           }}
+          onSync={(manualAddress) => void syncNow(manualAddress)}
+          syncing={activity === "syncing"}
           onClose={() => setDrawerOpen(false)}
         />
       )}

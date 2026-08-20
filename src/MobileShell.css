@@ -448,6 +448,35 @@ textarea:focus-visible {
   font-size: 0.86rem;
 }
 
+.library-drawer__connection {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 0;
+}
+
+.library-drawer__connection > button {
+  min-height: 48px;
+  padding: 7px 13px;
+  border: 0;
+  color: #6d3e2c;
+  text-align: left;
+  background: transparent;
+  font-weight: 650;
+}
+
+.library-drawer__connection > button:active:not(:disabled) {
+  background: rgba(76, 58, 45, 0.07);
+}
+
+.library-drawer__connection > button:disabled {
+  opacity: 0.5;
+}
+
+.library-drawer__connection .library-drawer__empty {
+  padding-top: 5px;
+  line-height: 1.4;
+}
+
 .note-editor {
   display: flex;
   flex-direction: column;

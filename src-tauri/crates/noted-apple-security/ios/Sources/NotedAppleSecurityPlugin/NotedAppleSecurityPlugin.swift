@@ -1,5 +1,6 @@
 #if os(iOS)
   import Foundation
+  import Network
   import NotedAppleSecurityCore
   import Tauri
   import UIKit
@@ -108,6 +109,64 @@
     let authorityGeneration: UInt64
     let purgeGeneration: UInt64
     let keyEpoch: UInt64
+  }
+
+  private struct DiscoverPrivateLanEndpointsArgs: Decodable {
+    let timeoutMs: UInt64
+  }
+
+  private struct DiscoverPrivateLanEndpointsResponse: Encodable {
+    let endpoints: [PrivateLanEndpointHint]
+  }
+
+  private final class PrivateLanBonjourDiscovery {
+    private let browser: NWBrowser
+    private let queue = DispatchQueue(label: "com.noted.app.bonjour-discovery")
+    private let timeoutMs: UInt64
+    private let completion: ([PrivateLanEndpointHint]) -> Void
+    private var hints: [PrivateLanEndpointHint] = []
+    private var finished = false
+
+    init(timeoutMs: UInt64, completion: @escaping ([PrivateLanEndpointHint]) -> Void) {
+      self.timeoutMs = timeoutMs
+      self.completion = completion
+      let descriptor = NWBrowser.Descriptor.bonjour(type: "_noted-sync._tcp", domain: nil)
+      let parameters = NWParameters.tcp
+      parameters.includePeerToPeer = false
+      self.browser = NWBrowser(for: descriptor, using: parameters)
+    }
+
+    func start() {
+      // The browser owns these closures and they retain this one-shot operation
+      // until `finish` clears both handlers. Without that cycle, a local-only
+      // invocation would deallocate immediately after `start` returned.
+      browser.browseResultsChangedHandler = { [self] results, _ in
+        let discovered = results.compactMap { result -> PrivateLanEndpointHint? in
+          guard case .bonjour(let txtRecord) = result.metadata else { return nil }
+          return PrivateLanEndpointHintParser.parse(txt: txtRecord.dictionary)
+        }
+        self.hints = PrivateLanEndpointHintParser.uniqueBounded(discovered)
+      }
+      browser.stateUpdateHandler = { [self] state in
+        if case .failed = state {
+          self.finish()
+        }
+      }
+      browser.start(queue: queue)
+      queue.asyncAfter(deadline: .now() + .milliseconds(Int(timeoutMs))) { [self] in
+        finish()
+      }
+    }
+
+    private func finish() {
+      guard !finished else { return }
+      finished = true
+      let result = PrivateLanEndpointHintParser.uniqueBounded(hints)
+      browser.browseResultsChangedHandler = nil
+      browser.stateUpdateHandler = nil
+      browser.cancel()
+      completion(result)
+    }
   }
 
   private struct SubscribeProtectedDataArgs: Decodable {
@@ -281,6 +340,21 @@
           authorityGeneration: args.authorityGeneration,
           purgeGeneration: args.purgeGeneration,
           keyEpoch: args.keyEpoch)
+      }
+    }
+
+    @objc func discoverPrivateLanEndpoints(_ invoke: Invoke) {
+      do {
+        let args = try invoke.parseArgs(DiscoverPrivateLanEndpointsArgs.self)
+        guard (250...5_000).contains(args.timeoutMs) else {
+          throw NotedSecurityError.invalidArguments("invalid Bonjour discovery timeout")
+        }
+        let operation = PrivateLanBonjourDiscovery(timeoutMs: args.timeoutMs) { endpoints in
+          invoke.resolve(DiscoverPrivateLanEndpointsResponse(endpoints: endpoints))
+        }
+        operation.start()
+      } catch {
+        reject(invoke, error)
       }
     }
 

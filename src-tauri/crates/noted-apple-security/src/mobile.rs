@@ -4,7 +4,7 @@ use crate::record_crypto::{
     RecordCryptoContextV1, SealRecordArgs,
 };
 use crate::{Error, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::plugin::{PluginApi, PluginHandle};
@@ -23,6 +23,44 @@ pub(crate) fn init<R: Runtime>(
 pub struct AppleSecurity<R: Runtime>(PluginHandle<R>);
 
 impl<R: Runtime> AppleSecurity<R> {
+    /// Discover untrusted numeric private-LAN address hints from Bonjour.
+    /// Callers must validate every address and authenticate the subsequent TLS
+    /// connection with the pin from the durable pairing activation.
+    pub fn discover_private_lan_endpoints(&self, timeout_ms: u64) -> Result<Vec<String>> {
+        if !(250..=5_000).contains(&timeout_ms) {
+            return Err(Error::InvalidNativeResponse("Bonjour discovery timeout"));
+        }
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Args {
+            timeout_ms: u64,
+        }
+        #[derive(Deserialize)]
+        struct Endpoint {
+            address: String,
+        }
+        #[derive(Deserialize)]
+        struct Response {
+            endpoints: Vec<Endpoint>,
+        }
+        let response: Response = self
+            .0
+            .run_mobile_plugin("discoverPrivateLanEndpoints", Args { timeout_ms })?;
+        if response.endpoints.len() > 16
+            || response
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.address.is_empty() || endpoint.address.len() > 64)
+        {
+            return Err(Error::InvalidNativeResponse("Bonjour endpoint hints"));
+        }
+        Ok(response
+            .endpoints
+            .into_iter()
+            .map(|endpoint| endpoint.address)
+            .collect())
+    }
+
     pub fn prepare_identity(&self, device_id: &str) -> Result<PublicIdentity> {
         self.prepare_identity_with_gate(device_id, None)
     }

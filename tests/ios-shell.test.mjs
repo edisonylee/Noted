@@ -29,6 +29,7 @@ test("iOS backend exports only bounded local notes and navigation commands", asy
     "resolve_mobile_deep_link",
     "export_mobile_notes",
     "restore_mobile_notes_export",
+    "mobile_sync_now",
   ]) {
     assert.match(mobile, new RegExp(`\\b${command}\\b`));
   }
@@ -120,6 +121,25 @@ test("iOS signing configuration is reproducible", async () => {
   for (const forbidden of ["token", "secret", "libraryId", "deviceId", "databasePath"]) {
     assert.equal(info.includes(forbidden), false, `${forbidden} leaked into iOS discovery metadata`);
   }
+});
+
+test("native private-LAN sync never accepts a discovery pin or protocol body from JavaScript", async () => {
+  const mobile = await read("src-tauri/src/mobile.rs");
+  const transport = await read("src-tauri/src/direct_sync_transport/private_lan.rs");
+  const nativeBridge = await read("src-tauri/crates/noted-apple-security/src/mobile.rs");
+  const nativePlugin = await read("src-tauri/crates/noted-apple-security/ios/Sources/NotedAppleSecurityPlugin/NotedAppleSecurityPlugin.swift");
+
+  assert.match(mobile, /async fn mobile_sync_now/);
+  assert.match(mobile, /active_sync_profile\(\)/);
+  assert.match(mobile, /discover_private_lan_endpoints\(1_500\)/);
+  assert.match(mobile, /parse_manual_numeric/);
+  assert.match(mobile, /from_authenticated_activation\(\s*&profile/);
+  assert.match(mobile, /MobileNotesSyncOrchestrator::new/);
+  assert.doesNotMatch(mobile, /mobile_sync_now[\s\S]{0,250}spki|mobile_sync_now[\s\S]{0,250}request_body/);
+  assert.match(transport, /The caller cannot supply or override a pin through discovery metadata/);
+  assert.match(nativeBridge, /discoverPrivateLanEndpoints/);
+  assert.match(nativePlugin, /NWBrowser\.Descriptor\.bonjour\(type: "_noted-sync\._tcp"/);
+  assert.match(nativePlugin, /PrivateLanEndpointHintParser\.parse\(txt: txtRecord\.dictionary\)/);
 });
 
 test("mobile frontend bundle excludes desktop command surfaces", async () => {

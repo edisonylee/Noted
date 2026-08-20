@@ -51,5 +51,11 @@
 			<string>noted</string>
 		</dict>
 	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Noted connects directly to your paired Mac to sync your encrypted notes on your local network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_noted-sync._tcp</string>
+	</array>
 </dict>
 </plist>

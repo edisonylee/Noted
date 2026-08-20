@@ -1,4 +1,7 @@
+use crate::direct_sync::DirectSyncLimits;
+use crate::direct_sync_transport::{PrivateLanDirectSyncSession, PrivateLanEndpointCandidate};
 use crate::mobile_deep_link::MobileDeepLink;
+use crate::mobile_notes_sync::{MobileNotesSyncOrchestrator, MobileNotesSyncReport};
 use crate::mobile_pairing_runtime::{
     accept_bootstrap, accept_server_finish, accept_server_hello, begin_fixture_pairing,
     bootstrap_metadata_from_apple, checkpoint_after_completed_discard, confirm_fixture_pairing,
@@ -10,6 +13,9 @@ use crate::mobile_store::{
     MobileNote, MobileNotesWorkspace, MobileStore, MobileStoreHealth, MobileWorkspaceNote,
     MOBILE_STORE_LOCKED_ERROR,
 };
+use crate::mobile_sync_native::AppleMobileSyncCrypto;
+use crate::mobile_sync_runtime::ExactRequestJournal;
+use crate::mobile_sync_store_adapter::MobileStoreExactRequestJournal;
 use crate::pairing_client::PairingClientState;
 use crate::pairing_protocol::TransportEvidence;
 use noted_apple_security::{
@@ -80,6 +86,7 @@ struct ProtectedMobileStore {
     store: MobileStore,
     lifecycle: Mutex<ProtectedMobileLifecycle>,
     protected_data: ProtectedDataGate,
+    direct_sync: tokio::sync::Mutex<()>,
 }
 
 struct ProtectedMobileLifecycle {
@@ -121,6 +128,7 @@ impl ProtectedMobileStore {
                 identity_inventory: None,
             }),
             protected_data: ProtectedDataGate::default(),
+            direct_sync: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -1113,6 +1121,59 @@ fn restore_mobile_notes_export(
     store.with_ready_store(|store| store.restore_notes_export(&export_json))
 }
 
+/// Run one bounded direct-sync pass without exposing discovery metadata,
+/// protocol messages, or authenticated pins to JavaScript. Manual input is a
+/// strict numeric socket address; otherwise native Bonjour supplies address
+/// hints and the durable activation remains the sole TLS authority.
+#[tauri::command]
+async fn mobile_sync_now(
+    app: AppHandle<Wry>,
+    store: State<'_, ProtectedMobileStore>,
+    manual_address: Option<String>,
+) -> Result<MobileNotesSyncReport, String> {
+    let _direct_sync = store.direct_sync.lock().await;
+    store.with_ready_store(|store| store.health().map(|_| ()))?;
+
+    let journal = MobileStoreExactRequestJournal::new(&store.store);
+    let profile = journal
+        .active_sync_profile()
+        .map_err(|error| error.to_string())?;
+    let candidates = if let Some(address) = manual_address {
+        vec![PrivateLanEndpointCandidate::parse_manual_numeric(&address)
+            .map_err(|error| error.to_string())?]
+    } else {
+        app.apple_security()
+            .discover_private_lan_endpoints(1_500)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|hint| {
+                let address = hint
+                    .parse()
+                    .map_err(|_| "native Bonjour returned a non-numeric endpoint".to_string())?;
+                PrivateLanEndpointCandidate::from_bonjour_address_hint(address)
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let limits = DirectSyncLimits::default();
+    let session = PrivateLanDirectSyncSession::from_authenticated_activation(
+        &profile,
+        candidates,
+        limits.clone(),
+    )
+    .map_err(|error| error.to_string())?;
+    let crypto = AppleMobileSyncCrypto::new(app.apple_security());
+    let mut orchestrator =
+        MobileNotesSyncOrchestrator::new(&store.store, &crypto, &session, limits)
+            .map_err(|error| error.to_string())?;
+    let report = orchestrator
+        .sync_once()
+        .await
+        .map_err(|error| error.to_string())?;
+    store.with_ready_store(|store| store.health().map(|_| ()))?;
+    Ok(report)
+}
+
 fn fixture_transport(peer_spki_sha256: Vec<u8>) -> TransportEvidence {
     TransportEvidence {
         tls_version: "1.3".to_string(),
@@ -1256,6 +1317,7 @@ pub fn run() {
             resolve_mobile_deep_link,
             export_mobile_notes,
             restore_mobile_notes_export,
+            mobile_sync_now,
             mobile_pairing_status_fixture,
             mobile_pairing_begin_fixture,
             mobile_pairing_accept_server_hello_fixture,

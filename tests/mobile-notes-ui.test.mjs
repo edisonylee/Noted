@@ -22,6 +22,7 @@ test("the iPhone Notes UI centralizes its typed Tauri command contract", async (
     "delete_mobile_note",
     "restore_mobile_note",
     "resolve_mobile_note_conflict",
+    "mobile_sync_now",
   ]) {
     assert.match(shell, new RegExp(`\\b${command}\\b`), `${command} is missing from the client seam`);
   }
@@ -29,6 +30,17 @@ test("the iPhone Notes UI centralizes its typed Tauri command contract", async (
   assert.match(shell, /createMobileNotesClient\(\(command, args\) => invoke\(command, args\)\)/);
   assert.match(shell, /isMissingCommand\(reason, MOBILE_NOTES_COMMANDS\.workspace\)/);
   assert.doesNotMatch(shell, /invoke\(["'](?:get|list|create|update|file|undo|trash|delete|restore|resolve)_mobile/);
+});
+
+test("paired notebooks expose Bonjour sync and strict manual-address fallback", async () => {
+  const shell = await read("src/MobileShell.tsx");
+
+  assert.match(shell, /workspace\.sync\.state !== "local" && workspace\.sync\.state !== "not_enrolled"/);
+  assert.match(shell, /Sync now/);
+  assert.match(shell, /Connect by address/);
+  assert.match(shell, /client\.sync\(manualAddress\)/);
+  assert.match(shell, /manualAddress: manualAddress \?\? null/);
+  assert.match(shell, /Your saved pairing still verifies the Mac\./);
 });
 
 test("future Notes actions are capability-gated and legacy trash remains recoverable", async () => {

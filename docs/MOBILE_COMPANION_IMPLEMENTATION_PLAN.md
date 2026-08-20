@@ -1527,6 +1527,18 @@ pairing, encrypted bootstrap, an offline edit, convergence, crash/restart exact
 request recovery, tamper rejection, and authority revocation without exposing a
 library key to Rust or JavaScript in the production iPhone path.
 
+The paired iPhone now has a product-facing direct-sync driver. A native
+`NWBrowser` one-shot discovery adapter reduces Bonjour TXT metadata to at most
+16 versioned private numeric IPv4 address hints; Rust validates them again and
+constructs pinned TLS exclusively from the durable authenticated activation.
+The manual fallback accepts only a numeric private socket address and uses the
+same activation pin. The mobile UI can start either path, but JavaScript never
+receives or supplies a certificate pin, credential, protocol message, route, or
+response body. The driver runs the bounded six-route Notes orchestrator and
+refreshes the protected local workspace after success. The generated app plist
+now carries the same local-network purpose and `_noted-sync._tcp` declaration as
+the source-owned iOS configuration.
+
 Authenticated revocation is now a single durable phone-store transition. It
 records immutable evidence, marks the enrollment and sync profile revoked,
 quarantines unfinished inbound work, rejects open push bindings, and retires
@@ -1544,11 +1556,12 @@ verify the new activation remains authoritative.
 
 The following work still blocks the M4 gate and any personal-data sync:
 
-- a native authenticated pairing and sync network driver around the pinned-TLS
-  adapters, including Bonjour discovery and manual connect without trusting
-  discovery metadata or passing protocol messages through JavaScript. The
-  existing fixture command that accepts claimed SPKI evidence from its caller is
-  a harness only and cannot satisfy this gate;
+- the authenticated pairing half of the native network driver and the matching
+  Mac Bonjour advertiser/product listener. Post-activation Bonjour discovery,
+  strict manual connect, and six-route Notes sync are implemented without
+  trusting discovery metadata or passing protocol messages through JavaScript;
+  the existing fixture pairing command that accepts claimed SPKI evidence from
+  its caller remains a harness only and cannot satisfy this gate;
 - production Mac key custody/signing and structural enforcement that pairing,
   revocation, and sync share one authority instance;
 - external review of the implemented pairing, cryptography, transport, and
@@ -1565,7 +1578,7 @@ M4 gate below passes.
 
 Checkpoint verification includes the complete Rust library suite, focused
 migration/pairing/direct-sync/fixture-authority suites, the encrypted cross-layer
-Notes test, 30 Swift native-security tests, 14 Rust Apple-security tests, shared
+Notes test, 32 Swift native-security tests, 14 Rust Apple-security tests, shared
 Rust/Swift golden vectors, frontend/iOS contract checks, and Rust library
 compilation for both the iPhone device and simulator targets. These prove the
 bounded fixture contracts; they do not substitute for the product-network,

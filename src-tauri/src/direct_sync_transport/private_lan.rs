@@ -149,7 +149,8 @@ impl From<DirectSyncTransportError> for PrivateLanSessionError {
     fn from(error: DirectSyncTransportError) -> Self {
         match error {
             DirectSyncTransportError::InvalidFixtureConfiguration
-            | DirectSyncTransportError::LoopbackRequired => Self::InvalidTransportConfiguration,
+            | DirectSyncTransportError::LoopbackRequired
+            | DirectSyncTransportError::PrivateLanRequired => Self::InvalidTransportConfiguration,
             DirectSyncTransportError::RequestTooLarge => Self::RequestTooLarge,
             DirectSyncTransportError::ResponseTooLarge => Self::ResponseTooLarge,
             DirectSyncTransportError::InvalidHttpFraming => Self::InvalidHttpFraming,

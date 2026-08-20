@@ -1509,9 +1509,13 @@ exact-wire coordinator atomically prepares, signs, serializes, and finalizes
 responses, including byte-identical replay after restart. A strict pinned-TLS
 1.3 client/server adapter enforces the exact P-256 SPKI pin, disables 0-RTT and
 resumption, and bounds hosts, origins, bodies, headers, time, and concurrency.
-It is deliberately loopback-only test infrastructure: it has no personal-data
-constructor, product listener, Bonjour/manual-connect driver, or Tauri command
-surface. Immutable replay evidence is retained for audit; only the trusted
+Sanitized-fixture builds now also expose a separate private-IPv4-only listener
+type with an address-bound ephemeral certificate and matching Bonjour
+advertiser. Its TXT contract contains only protocol, numeric address, and port;
+it cannot carry a pin, library/device/receipt identifier, token, or credential.
+The ordinary loopback harness cannot widen its bind scope, and neither type has
+a personal-data constructor or desktop lifecycle/Tauri surface. Immutable
+replay evidence is retained for audit; only the trusted
 five-minute window counts toward replay admission, so the protocol is not
 permanently locked after the cap, but on-disk evidence is not yet compacted or
 size-bounded.
@@ -1556,12 +1560,15 @@ verify the new activation remains authoritative.
 
 The following work still blocks the M4 gate and any personal-data sync:
 
-- the authenticated pairing half of the native network driver and the matching
-  Mac Bonjour advertiser/product listener. Post-activation Bonjour discovery,
-  strict manual connect, and six-route Notes sync are implemented without
-  trusting discovery metadata or passing protocol messages through JavaScript;
-  the existing fixture pairing command that accepts claimed SPKI evidence from
-  its caller remains a harness only and cannot satisfy this gate;
+- the authenticated pairing half of the native network driver, pairing routes
+  on the shared Mac TLS listener, and desktop lifecycle wiring that owns the
+  sanitized listener/advertiser/runtime as one unit. The private-LAN listener
+  and minimal Bonjour advertiser now exist as fixture-only types, while
+  post-activation Bonjour discovery, strict manual connect, and six-route Notes
+  sync are implemented without trusting discovery metadata or passing protocol
+  messages through JavaScript. The existing fixture pairing command that
+  accepts claimed SPKI evidence from its caller remains a harness only and
+  cannot satisfy this gate;
 - production Mac key custody/signing and structural enforcement that pairing,
   revocation, and sync share one authority instance;
 - external review of the implemented pairing, cryptography, transport, and

@@ -10,6 +10,9 @@
 mod client;
 mod private_lan;
 
+#[cfg(target_os = "macos")]
+mod bonjour;
+
 #[cfg(not(target_os = "ios"))]
 mod server;
 
@@ -26,6 +29,11 @@ pub use private_lan::{
     PrivateLanSessionError,
 };
 
+#[cfg(all(target_os = "macos", feature = "sanitized-development-fixtures"))]
+pub use bonjour::SanitizedBonjourAdvertisement;
+
+#[cfg(all(not(target_os = "ios"), feature = "sanitized-development-fixtures"))]
+pub use server::SanitizedPrivateLanServer;
 #[cfg(not(target_os = "ios"))]
 pub use server::{FixtureLoopbackServer, FixtureTlsIdentity};
 
@@ -44,6 +52,7 @@ pub(crate) const MAX_CONCURRENT_CONNECTIONS: usize = 8;
 pub enum DirectSyncTransportError {
     InvalidFixtureConfiguration,
     LoopbackRequired,
+    PrivateLanRequired,
     RequestTooLarge,
     ResponseTooLarge,
     InvalidHttpFraming,
@@ -58,6 +67,7 @@ impl fmt::Display for DirectSyncTransportError {
         formatter.write_str(match self {
             Self::InvalidFixtureConfiguration => "invalid fixture transport configuration",
             Self::LoopbackRequired => "fixture transport requires a loopback address",
+            Self::PrivateLanRequired => "fixture transport requires a private IPv4 address",
             Self::RequestTooLarge => "direct-sync request exceeds its route limit",
             Self::ResponseTooLarge => "direct-sync response exceeds its route limit",
             Self::InvalidHttpFraming => "invalid direct-sync HTTP framing",

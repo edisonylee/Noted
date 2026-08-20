@@ -113,6 +113,7 @@ hound = "3"
 # System audio via Core Audio process taps (macOS 14.4+, gated at runtime).
 [target.'cfg(target_os = "macos")'.dependencies]
 cidre = "0.16"
+mdns-sd = "0.20.3"
 # Native window vibrancy: the sidebar's dark-glass look (desktop shows through).
 window-vibrancy = "0.6"
 

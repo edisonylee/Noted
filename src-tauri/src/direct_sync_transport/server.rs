@@ -23,7 +23,7 @@ use rustls::server::NoServerSessionStorage;
 use rustls::{ProtocolVersion, ServerConfig};
 use sha2::{Digest, Sha256};
 use std::convert::Infallible;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{
@@ -64,6 +64,28 @@ impl FixtureTlsIdentity {
         .map_err(|_| DirectSyncTransportError::InvalidFixtureConfiguration)?
         .self_signed(&key_pair)
         .map_err(|_| DirectSyncTransportError::InvalidFixtureConfiguration)?;
+        let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
+        Ok(Self {
+            certificate: certificate.der().clone(),
+            private_key,
+            spki_sha256,
+        })
+    }
+
+    /// Generate the pinned fixture identity for a private-LAN listener. The
+    /// certificate is still ephemeral and can protect sanitized data only.
+    #[cfg(feature = "sanitized-development-fixtures")]
+    pub fn generate_for_private_lan(address: Ipv4Addr) -> Result<Self, DirectSyncTransportError> {
+        if !is_private_lan_ipv4(address) {
+            return Err(DirectSyncTransportError::PrivateLanRequired);
+        }
+        let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
+            .map_err(|_| DirectSyncTransportError::InvalidFixtureConfiguration)?;
+        let spki_sha256 = Sha256::digest(key_pair.public_key_der()).into();
+        let certificate = CertificateParams::new(vec![address.to_string()])
+            .map_err(|_| DirectSyncTransportError::InvalidFixtureConfiguration)?
+            .self_signed(&key_pair)
+            .map_err(|_| DirectSyncTransportError::InvalidFixtureConfiguration)?;
         let private_key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
         Ok(Self {
             certificate: certificate.der().clone(),
@@ -121,6 +143,7 @@ impl FixtureLoopbackServer {
             TlsAcceptor::from(tls_config),
             handler,
             policy,
+            PeerBoundary::Loopback,
             shutdown_rx,
         ));
         Ok(Self {
@@ -145,6 +168,114 @@ impl FixtureLoopbackServer {
         }
         Ok(())
     }
+}
+
+/// Sanitized-fixture-only private-LAN listener. This is deliberately a
+/// separate type from the loopback harness so an ordinary build cannot widen
+/// its bind scope accidentally.
+#[cfg(feature = "sanitized-development-fixtures")]
+pub struct SanitizedPrivateLanServer {
+    local_addr: SocketAddr,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    accept_task: Option<JoinHandle<()>>,
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+impl SanitizedPrivateLanServer {
+    pub async fn spawn_fixture_only<H>(
+        address: Ipv4Addr,
+        handler: Arc<H>,
+        identity: FixtureTlsIdentity,
+        policy: FixtureTransportPolicy,
+    ) -> Result<Self, DirectSyncTransportError>
+    where
+        H: DirectSyncRequestHandler,
+    {
+        if !is_private_lan_ipv4(address) {
+            return Err(DirectSyncTransportError::PrivateLanRequired);
+        }
+        if identity.spki_sha256 != policy.expected_server_spki_sha256() {
+            return Err(DirectSyncTransportError::InvalidFixtureConfiguration);
+        }
+        let tls_config = Arc::new(build_server_config(identity)?);
+        let listener = TcpListener::bind((address, 0))
+            .await
+            .map_err(|_| DirectSyncTransportError::ConnectionFailed)?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|_| DirectSyncTransportError::ConnectionFailed)?;
+        if local_addr.ip() != IpAddr::V4(address) || local_addr.port() == 0 {
+            return Err(DirectSyncTransportError::PrivateLanRequired);
+        }
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let accept_task = tokio::spawn(run_accept_loop(
+            listener,
+            local_addr,
+            TlsAcceptor::from(tls_config),
+            handler,
+            policy,
+            PeerBoundary::PrivateLan,
+            shutdown_rx,
+        ));
+        Ok(Self {
+            local_addr,
+            shutdown_tx: Some(shutdown_tx),
+            accept_task: Some(accept_task),
+        })
+    }
+
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    pub async fn shutdown(mut self) -> Result<(), DirectSyncTransportError> {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        if let Some(accept_task) = self.accept_task.take() {
+            accept_task
+                .await
+                .map_err(|_| DirectSyncTransportError::ServerStopped)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+impl Drop for SanitizedPrivateLanServer {
+    fn drop(&mut self) {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PeerBoundary {
+    Loopback,
+    PrivateLan,
+}
+
+impl PeerBoundary {
+    fn accepts(self, address: IpAddr) -> bool {
+        match (self, address) {
+            (Self::Loopback, address) => address.is_loopback(),
+            (Self::PrivateLan, IpAddr::V4(address)) => is_private_lan_ipv4(address),
+            (Self::PrivateLan, IpAddr::V6(_)) => false,
+        }
+    }
+}
+
+pub(super) fn is_private_lan_ipv4(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    !address.is_loopback()
+        && !address.is_unspecified()
+        && !address.is_multicast()
+        && (octets[0] == 10
+            || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+            || (octets[0] == 192 && octets[1] == 168)
+            || (octets[0] == 169 && octets[1] == 254))
 }
 
 impl Drop for FixtureLoopbackServer {
@@ -180,6 +311,7 @@ async fn run_accept_loop<H>(
     tls_acceptor: TlsAcceptor,
     handler: Arc<H>,
     policy: FixtureTransportPolicy,
+    peer_boundary: PeerBoundary,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) where
     H: DirectSyncRequestHandler,
@@ -197,7 +329,7 @@ async fn run_accept_loop<H>(
             Some(_) = connections.join_next(), if !connections.is_empty() => {},
             accepted = listener.accept() => {
                 let Ok((stream, peer)) = accepted else { break };
-                if !peer.ip().is_loopback() {
+                if !peer_boundary.accepts(peer.ip()) {
                     continue;
                 }
                 let Ok(permit) = Arc::clone(&semaphore).try_acquire_owned() else {
@@ -465,6 +597,42 @@ where
 
     fn poll_shutdown(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_shutdown(context)
+    }
+}
+
+#[cfg(test)]
+mod private_lan_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn private_lan_listener_rejects_loopback_public_and_multicast_addresses() {
+        for address in [
+            Ipv4Addr::LOCALHOST,
+            Ipv4Addr::new(8, 8, 8, 8),
+            Ipv4Addr::new(224, 0, 0, 251),
+            Ipv4Addr::UNSPECIFIED,
+        ] {
+            assert!(!is_private_lan_ipv4(address), "accepted {address}");
+            assert!(!PeerBoundary::PrivateLan.accepts(IpAddr::V4(address)));
+        }
+        for address in [
+            Ipv4Addr::new(10, 0, 0, 8),
+            Ipv4Addr::new(172, 16, 0, 8),
+            Ipv4Addr::new(192, 168, 1, 8),
+            Ipv4Addr::new(169, 254, 1, 8),
+        ] {
+            assert!(is_private_lan_ipv4(address), "rejected {address}");
+            assert!(PeerBoundary::PrivateLan.accepts(IpAddr::V4(address)));
+        }
+        assert!(!PeerBoundary::PrivateLan.accepts(IpAddr::V6("fd00::8".parse().unwrap())));
+    }
+
+    #[cfg(feature = "sanitized-development-fixtures")]
+    #[test]
+    fn private_lan_fixture_identity_has_a_nonzero_stable_pin() {
+        let identity =
+            FixtureTlsIdentity::generate_for_private_lan(Ipv4Addr::new(192, 168, 1, 8)).unwrap();
+        assert_ne!(identity.spki_sha256(), [0; 32]);
     }
 }
 

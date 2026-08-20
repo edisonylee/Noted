@@ -74,7 +74,7 @@ export function SystemSettingsPanel() {
 
   return (
     <>
-      <h3>System</h3>
+      <h3>General</h3>
       <p className="settings-sub">
         Set the calendar day and wall clock Noted uses for schedules, journals, captures,
         greetings, and connected calendars.

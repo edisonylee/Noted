@@ -190,6 +190,22 @@ describe("shared document storage", () => {
     expect(documentPlainText(document)).toBe("Bold decision");
   });
 
+  test("preserves strikethrough marks without changing plain text", () => {
+    const stored = JSON.stringify({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [{ type: "text", text: "Superseded", marks: [{ type: "strike" }] }],
+        },
+      ],
+    });
+
+    const document = storedDocumentOrPlainText(stored, "Legacy fallback");
+    expect(document.content?.[0]?.content?.[0]?.marks).toEqual([{ type: "strike" }]);
+    expect(documentPlainText(document)).toBe("Superseded");
+  });
+
   test("falls back to preserved text when rich JSON is damaged", () => {
     expect(documentPlainText(storedDocumentOrPlainText("{broken", "Still here"))).toBe("Still here");
   });

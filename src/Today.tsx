@@ -31,9 +31,10 @@ import { easternDay, easternMinutes, formatDay } from "./day";
 import { joinUrl } from "./joinUrl";
 import { openExternalUrl } from "./openExternalUrl";
 import {
-  buildAdaptiveScheduleScale,
+  buildFixedScheduleScale,
   buildScheduleGrid,
   isCurrentInterval,
+  scheduleEventHeightPx,
   snapScheduleMinute,
 } from "./scheduleLayout";
 import { DocumentEditor } from "./editor/DocumentEditor";
@@ -812,6 +813,10 @@ export function TodayView({
   const [gridDetailsBusy, setGridDetailsBusy] = useState(false);
   const [gridDetailsError, setGridDetailsError] = useState<string | null>(null);
   const [gridDetailsContacts, setGridDetailsContacts] = useState<GcalContact[]>([]);
+  const [allDayCreateOpen, setAllDayCreateOpen] = useState(false);
+  const [allDayCreateBusy, setAllDayCreateBusy] = useState(false);
+  const [allDayCreateError, setAllDayCreateError] = useState<string | null>(null);
+  const [allDayCreateContacts, setAllDayCreateContacts] = useState<GcalContact[]>([]);
   const timeGridRef = useRef<HTMLDivElement>(null);
   const gridDraftInputRef = useRef<HTMLInputElement>(null);
 
@@ -1046,6 +1051,8 @@ export function TodayView({
     setCalLoading(false);
     setCalOpen(false);
     setAddOpen(false);
+    setAllDayCreateOpen(false);
+    setAllDayCreateError(null);
   }, [selectedDay]);
 
   // Dismiss the peek popover on outside-click or Escape.
@@ -1517,7 +1524,9 @@ export function TodayView({
     gridDraft != null ||
     gridResize != null ||
     gridDetailsOpen ||
-    gridDetailsBusy;
+    gridDetailsBusy ||
+    allDayCreateOpen ||
+    allDayCreateBusy;
 
   // Once the selected day's live calendar has loaded, make its timed events
   // part of the saved schedule without asking the user to assemble them. The
@@ -1966,10 +1975,7 @@ export function TodayView({
     !blocks.length &&
     (gcalConnected == null ||
       (gcalConnected && (calLoading || calEvents == null || calEventsDay !== selectedDay)));
-  const showEmptyCalendar = Boolean(
-    !blocks.length && !calendarPending && gcalConnected && calEvents && calEvents.length > 0,
-  );
-  const hasTimedCalendarEvents = calendarEventsToScheduleBlocks(calEvents ?? []).length > 0;
+  const allDayCalendarEvents = (calEvents ?? []).filter((event) => event.all_day);
 
   // ---- Agenda ----
   const nowMin = easternMinutes(now);
@@ -1977,13 +1983,12 @@ export function TodayView({
   const displayBlocks = reconcileScheduleBlocks(blocks, calEvents ?? []);
   const grid = buildScheduleGrid(displayBlocks);
   const gridStepMinutes = 15;
-  const gridMinEventHeight = 48;
-  const gridEventGap = 8;
-  const scheduleScale = buildAdaptiveScheduleScale(grid.items, {
+  const gridEventGap = 2;
+  const scheduleScale = buildFixedScheduleScale({
     gridStart: grid.start,
     gridEnd: grid.end,
-    minEventHeightPx: gridMinEventHeight,
-    eventGapPx: gridEventGap,
+    pixelsPerHour: 72,
+    markMinutes: 30,
   });
 
   const clampGridStart = (minute: number) =>
@@ -1998,10 +2003,7 @@ export function TodayView({
     );
 
   const paintedEventHeight = (start: number, end: number) =>
-    Math.max(
-      gridMinEventHeight,
-      scheduleScale.minuteToY(end) - scheduleScale.minuteToY(start) - 3,
-    );
+    scheduleEventHeightPx(scheduleScale, start, end, gridEventGap);
 
   const beginGridDraftAt = (start: number) => {
     if (rowBusy || editIdx != null || gridResize) return;
@@ -2081,6 +2083,48 @@ export function TodayView({
     setGridDetailsError(null);
     setGridDetailsOpen(true);
     api.gcalContacts().then(setGridDetailsContacts).catch(() => setGridDetailsContacts([]));
+  };
+
+  const openAllDayCreate = () => {
+    if (!gcalStatus?.connected) {
+      onOpenSettings?.();
+      return;
+    }
+    setAllDayCreateError(null);
+    setAllDayCreateOpen(true);
+    api.gcalContacts().then(setAllDayCreateContacts).catch(() => setAllDayCreateContacts([]));
+  };
+
+  const saveAllDayCreate = async (form: CalendarEventFormState) => {
+    if (allDayCreateBusy) return;
+    const { guests, invalid } = parseCalendarGuests(form.guests);
+    if (invalid.length) {
+      setAllDayCreateError(`That doesn't look like a valid email: ${invalid.join(", ")}.`);
+      return;
+    }
+    const [account, calendarId] = splitCalendarEventKey(form.calKey);
+    setAllDayCreateBusy(true);
+    setAllDayCreateError(null);
+    try {
+      await api.gcalCreateEvent({
+        account,
+        calendarId,
+        title: form.title.trim(),
+        date: form.date,
+        endDate: form.endDate || form.date,
+        location: form.location.trim(),
+        description: form.description.trim(),
+        addMeet: form.meet === "add",
+        ...(guests.length ? { guests } : {}),
+      });
+      localStorage.setItem("cal.lastCal", form.calKey);
+      setAllDayCreateOpen(false);
+      await loadCalEvents();
+    } catch (error) {
+      setAllDayCreateError(`Google Calendar couldn't create this all-day event: ${String(error)}`);
+    } finally {
+      setAllDayCreateBusy(false);
+    }
   };
 
   const saveGridDetails = async (form: CalendarEventFormState) => {
@@ -2307,54 +2351,68 @@ export function TodayView({
           <Loader size={14} className="spin" /> Checking calendar…
         </div>
       )}
-      {showEmptyCalendar && (
-        <div className="today-empty-context">
-          <div className="today-cal">
-            <div className="today-cal-head">
-              <CalendarDays size={15} /> From your calendar
+      {gcalConnected && !calendarPending && (
+        <section className="today-allday" aria-labelledby="today-allday-title">
+          <header className="today-allday-head">
+            <div className="today-allday-heading">
+              <CalendarDays size={14} aria-hidden="true" />
+              <h2 id="today-allday-title">All day</h2>
+              {allDayCalendarEvents.length > 0 && (
+                <span className="today-allday-count" aria-label={`${allDayCalendarEvents.length} all-day events`}>
+                  {allDayCalendarEvents.length}
+                </span>
+              )}
             </div>
-            <ul className="today-cal-list">
-              {calEvents!.map((event, i) => {
-                const meetingUrl = event.meet_link ? joinUrl(event.meet_link, event.account) : null;
-                return (
-                  <li key={event.id || i} className={"today-cal-row" + (meetingUrl ? " joinable" : "")}>
-                    {meetingUrl && (
-                      <a
-                        className="today-cal-event-hit"
-                        href={meetingUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        onClick={(event) => {
-                          event.preventDefault();
-                          openExternalUrl(meetingUrl);
-                        }}
-                        aria-label={`Join ${event.task}`}
-                      />
-                    )}
-                    <span className="today-cal-time">
-                      {event.all_day ? "All day" : fmtTime(event.start ?? undefined)}
+            <button type="button" className="today-allday-add" onClick={openAllDayCreate}>
+              <Plus size={13} aria-hidden="true" /> Add
+            </button>
+          </header>
+          {allDayCalendarEvents.length > 0 ? (
+            <ul className="today-allday-list">
+              {allDayCalendarEvents.map((event, index) => (
+                <li key={event.id || `${event.account}-${event.calendar_id}-${index}`}>
+                  {event.html_link ? (
+                    <a
+                      className="today-allday-event"
+                      style={{ "--today-calendar-color": event.color || "var(--accent)" } as CSSProperties}
+                      href={event.html_link}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(clickEvent) => {
+                        clickEvent.preventDefault();
+                        openExternalUrl(event.html_link!);
+                      }}
+                      aria-label={`Open ${event.task} in Google Calendar`}
+                    >
+                      <span className="today-allday-dot" aria-hidden="true" />
+                      <span>{event.task}</span>
+                    </a>
+                  ) : (
+                    <span
+                      className="today-allday-event"
+                      style={{ "--today-calendar-color": event.color || "var(--accent)" } as CSSProperties}
+                    >
+                      <span className="today-allday-dot" aria-hidden="true" />
+                      <span>{event.task}</span>
                     </span>
-                    <span className="today-cal-task">{event.task}</span>
-                    {meetingUrl && <Video size={13} className="today-cal-join-icon" aria-hidden="true" />}
-                  </li>
-                );
-              })}
+                  )}
+                </li>
+              ))}
             </ul>
-            {hasTimedCalendarEvents ? (
-              calendarAutoState === "error" ? (
-                <div className="today-cal-auto is-error" role="alert">
-                  <span>Couldn’t update the schedule.</span>
-                  <button type="button" onClick={retryAutomaticCalendar}>Try again</button>
-                </div>
-              ) : (
-                <div className="today-cal-auto" role="status" aria-live="polite">
-                  <Loader size={14} className="spin" /> Updating schedule…
-                </div>
-              )
-            ) : (
-              <div className="today-cal-auto">No timed events</div>
-            )}
-          </div>
+          ) : (
+            <p className="today-allday-empty">Nothing scheduled all day.</p>
+          )}
+        </section>
+      )}
+      {calendarAutoState === "saving" && (
+        <div className="today-calendar-auto" role="status" aria-live="polite">
+          <Loader size={14} className="spin" /> Updating the timed schedule…
+        </div>
+      )}
+      {calendarAutoState === "error" && (
+        <div className="today-calendar-auto is-error" role="alert">
+          <span>Couldn’t update the timed schedule.</span>
+          <button type="button" onClick={retryAutomaticCalendar}>Try again</button>
         </div>
       )}
       <div className="today-agenda" ref={agendaRef}>
@@ -2370,7 +2428,7 @@ export function TodayView({
           className="today-time-grid"
           style={{ height: `${scheduleScale.heightPx + scheduleGridPad * 2}px` }}
           role="region"
-          aria-label="Daily schedule, adaptive time grid"
+          aria-label="Daily schedule, fixed half-hour time grid"
         >
           <div className="today-grid-hours" aria-hidden="true">
             {scheduleScale.marks.map((mark) => (
@@ -2382,25 +2440,6 @@ export function TodayView({
                 <span>{fmtTime(minToStr(mark.minute)).replace(":00", "")}</span>
               </div>
             ))}
-            {scheduleScale.bands
-              .filter((band) => band.compressed)
-              .map((band) => (
-                <div
-                  className="today-grid-gap"
-                  key={`gap-${band.start}-${band.end}`}
-                  style={{
-                    top: `${scheduleGridPad + band.topPx}px`,
-                    height: `${band.heightPx}px`,
-                  }}
-                >
-                  <span className="today-grid-gap-copy">
-                    <span>{fmtRange(minToStr(band.start), minToStr(band.end))}</span>
-                    {band.end - band.start >= 120 && (
-                      <strong>Free time · {fmtDur(band.end - band.start)}</strong>
-                    )}
-                  </span>
-                </div>
-              ))}
           </div>
           <div
             ref={timeGridRef}
@@ -2847,6 +2886,38 @@ export function TodayView({
             if (gridDetailsBusy) return;
             setGridDetailsOpen(false);
             setGridDetailsError(null);
+          }}
+        />
+      )}
+      {allDayCreateOpen && (
+        <CalendarEventForm
+          key={selectedDay}
+          heading="New all-day event"
+          mode="create"
+          init={{
+            title: "",
+            date: selectedDay,
+            allDay: true,
+            start: "09:00",
+            end: "10:00",
+            endDate: selectedDay,
+            location: "",
+            description: "",
+            calKey: defaultCalendarEventKey(gcalStatus),
+            meet: "none",
+            guests: "",
+          }}
+          status={gcalStatus}
+          contacts={allDayCreateContacts}
+          lockDate
+          allowAllDay={false}
+          busy={allDayCreateBusy}
+          error={allDayCreateError}
+          onSave={(form) => void saveAllDayCreate(form)}
+          onCancel={() => {
+            if (allDayCreateBusy) return;
+            setAllDayCreateOpen(false);
+            setAllDayCreateError(null);
           }}
         />
       )}

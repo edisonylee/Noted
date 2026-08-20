@@ -365,6 +365,7 @@ export type CalEvent = {
   all_day: boolean;
   calendar: string;
   calendar_id: string;
+  color: string;
   account: string;
   meet_link: string | null;
   html_link: string | null;

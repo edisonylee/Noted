@@ -17,6 +17,7 @@ function calendarEvent(overrides: Partial<CalEvent> = {}): CalEvent {
     all_day: false,
     calendar: "Work",
     calendar_id: "work-calendar",
+    color: "#7986cb",
     account: "person@example.com",
     meet_link: null,
     html_link: null,

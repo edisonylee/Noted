@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   assignOverlapLanes,
-  buildAdaptiveScheduleScale,
+  buildFixedScheduleScale,
   buildScheduleGrid,
   computeEventGeometry,
   isCurrentInterval,
   resolveEventEnd,
   scheduleEndFromResizeDelta,
+  scheduleEventHeightPx,
   scheduleGridBounds,
   scheduleMinuteFromGridOffset,
   scheduleStartFromResizeDelta,
@@ -65,7 +66,7 @@ describe("schedule overlap lanes", () => {
   });
 });
 
-describe("adaptive schedule scale", () => {
+describe("fixed schedule scale", () => {
   const blocks = [
     { task: "Stand-up", start: "08:00", end: "08:15" },
     { task: "One-on-one", start: "09:00", end: "09:15" },
@@ -75,25 +76,37 @@ describe("adaptive schedule scale", () => {
     { task: "Gym", start: "17:00", end: "18:30" },
   ];
 
-  test("expands busy clusters, compresses long gaps, and stays reversible", () => {
+  test("keeps the same half-hour rhythm through busy and empty time", () => {
     const grid = buildScheduleGrid(blocks);
-    const scale = buildAdaptiveScheduleScale(grid.items, {
+    const scale = buildFixedScheduleScale({
       gridStart: grid.start,
       gridEnd: grid.end,
-      minEventHeightPx: 48,
-      eventGapPx: 8,
+      pixelsPerHour: 72,
+      markMinutes: 30,
     });
 
-    expect(scale.minuteToY(10 * 60) - scale.minuteToY(9 * 60 + 45)).toBeGreaterThanOrEqual(56);
-    const middayGap = scale.bands.find(
-      (band) => band.compressed && band.start >= 10 * 60 && band.end <= 15 * 60,
-    );
-    expect(middayGap).toBeDefined();
-    expect(middayGap!.heightPx).toBeLessThan(((middayGap!.end - middayGap!.start) / 60) * 44);
+    expect(scale.minuteToY(8 * 60 + 30) - scale.minuteToY(8 * 60)).toBe(36);
+    expect(scale.minuteToY(13 * 60 + 30) - scale.minuteToY(13 * 60)).toBe(36);
+    expect(scale.heightPx).toBe(18 * 72);
+    expect(scale.marks.every((mark, index, marks) =>
+      index === 0 || mark.minute - marks[index - 1].minute === 30
+    )).toBe(true);
 
     for (const minute of [6 * 60, 8 * 60, 9 * 60 + 45, 13 * 60, 18 * 60 + 30, 24 * 60]) {
       expect(scale.yToMinute(scale.minuteToY(minute))).toBeCloseTo(minute, 6);
     }
+  });
+
+  test("keeps short event cards inside their real time slot", () => {
+    const scale = buildFixedScheduleScale({
+      gridStart: 6 * 60,
+      gridEnd: 24 * 60,
+      pixelsPerHour: 72,
+    });
+
+    expect(scheduleEventHeightPx(scale, 9 * 60 + 45, 10 * 60, 2)).toBe(16);
+    expect(scheduleEventHeightPx(scale, 10 * 60, 10 * 60 + 15, 2)).toBe(16);
+    expect(scheduleEventHeightPx(scale, 14 * 60 + 30, 17 * 60 + 30, 2)).toBe(214);
   });
 
   test("uses columns only for real overlaps", () => {

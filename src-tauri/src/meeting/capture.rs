@@ -19,11 +19,27 @@
 //   - the default output device changes (AirPods!) — uid checked each tick
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use std::{io::Write, path::Path};
 
 use anyhow::{anyhow, Result};
+
+// VoiceProcessingIO and the system-audio aggregate both reconfigure CoreAudio.
+// Starting them concurrently is usually tolerated, but route changes (Zoom +
+// Bluetooth is the common case) can make both rebuild at once and leave the new
+// aggregate half-initialized. Serialize only graph setup; capture still runs on
+// its independent real-time threads after startup.
+#[cfg(target_os = "macos")]
+static AUDIO_GRAPH_SETUP: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+fn audio_graph_setup_lock() -> MutexGuard<'static, ()> {
+    AUDIO_GRAPH_SETUP
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn epoch_ms() -> u64 {
     std::time::SystemTime::now()
@@ -72,8 +88,11 @@ impl ChannelBuf {
         self.pushed_total
             .fetch_add(mono.len() as u64, Ordering::Relaxed);
         let cap = (self.sample_rate.load(Ordering::Relaxed).max(16_000) as usize) * 120;
-        let mut buf = self.samples.lock().unwrap();
-        if buf.len() + mono.len() > cap {
+        let mut buf = self
+            .samples
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if buf.len().saturating_add(mono.len()) > cap {
             buf.clear();
         }
         buf.extend_from_slice(mono);
@@ -82,7 +101,10 @@ impl ChannelBuf {
     /// Take everything accumulated since the last drain.
     pub fn drain(&self) -> (Vec<f32>, u32) {
         let rate = self.sample_rate.load(Ordering::Relaxed);
-        let mut buf = self.samples.lock().unwrap();
+        let mut buf = self
+            .samples
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         (std::mem::take(&mut *buf), rate)
     }
 }
@@ -320,6 +342,10 @@ mod vp {
     pub fn vp_session(buf: &Arc<ChannelBuf>, stop: &Arc<AtomicBool>) -> Result<()> {
         let e = |what: &'static str| move |err| anyhow!("vp {what}: {err:?}");
 
+        // Do not race the system-tap aggregate while Zoom/CoreAudio is moving
+        // between speaker, headset, and Bluetooth call profiles.
+        let setup_guard = audio_graph_setup_lock();
+
         // The callback reads Ctx behind a raw pointer, so it must be declared
         // before (= dropped after) the Output that drives the callbacks.
         let render_err = Arc::new(AtomicBool::new(false));
@@ -396,6 +422,7 @@ mod vp {
         buf.sample_rate
             .store(fmt.sample_rate as u32, Ordering::Relaxed);
         output.start().map_err(e("start"))?;
+        drop(setup_guard);
         eprintln!(
             "[noted] mic: VoiceProcessingIO running ({} Hz, AEC on)",
             fmt.sample_rate as u32
@@ -486,9 +513,14 @@ pub fn run_system_tap(
         match macos::tap_session(&buf, &stop, log_path.as_deref()) {
             Ok(()) => break, // clean stop
             Err(e) => {
-                eprintln!("[noted] system tap error (rebuilding in 2s): {e}");
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                eprintln!("[noted] system tap error (waiting for audio route): {e}");
                 capture_log(log_path.as_deref(), &format!("tap rebuild: {e}"));
-                for _ in 0..8 {
+                // VPIO retries after 2s. Give it a short head start so the mic
+                // graph establishes the final Zoom route before the tap binds.
+                for _ in 0..10 {
                     if stop.load(Ordering::Relaxed) {
                         return;
                     }
@@ -521,6 +553,7 @@ mod macos {
         last_rate_clock: Option<(f64, u64)>,
         host_clock_hz: f64,
         format_mismatches: Arc<AtomicU64>,
+        callback_panicked: Arc<AtomicBool>,
         callbacks: u64,
         pushed_frames: u64,
         first_bytes: u32,
@@ -531,19 +564,12 @@ mod macos {
         rate_changes: u64,
     }
 
-    extern "C" fn io_proc(
-        _device: ca::Device,
-        _now: &cat::AudioTimeStamp,
+    fn io_proc_inner(
         input_data: &cat::AudioBufList<1>,
         input_time: &cat::AudioTimeStamp,
-        _output_data: &mut cat::AudioBufList<1>,
-        _output_time: &cat::AudioTimeStamp,
-        ctx: Option<&mut Ctx>,
+        ctx: &mut Ctx,
     ) -> os::Status {
-        let Some(ctx) = ctx else {
-            return Default::default();
-        };
-        ctx.callbacks += 1;
+        ctx.callbacks = ctx.callbacks.saturating_add(1);
         // Read exactly mDataByteSize from the callback. Do not wrap this in an
         // AVAudioPCMBuffer using the tap's creation-time format: after VPIO
         // reconfigures the output device, that wrapper can report a stale frame
@@ -555,7 +581,7 @@ mod macos {
         ctx.max_bytes = ctx.max_bytes.max(b.data_bytes_size);
         let header_channels = b.number_channels as usize;
         let Some(mut frames) = callback_mono_frames(b.data_bytes_size, header_channels) else {
-            ctx.invalid_callbacks += 1;
+            ctx.invalid_callbacks = ctx.invalid_callbacks.saturating_add(1);
             return Default::default();
         };
         let total_samples = b.data_bytes_size as usize / std::mem::size_of::<f32>();
@@ -573,7 +599,8 @@ mod macos {
                     frames = clock_frames;
                     channels = inferred;
                     if inferred != header_channels {
-                        ctx.clock_layout_corrections += 1;
+                        ctx.clock_layout_corrections =
+                            ctx.clock_layout_corrections.saturating_add(1);
                     }
                 } else if callback_overdelivers(frames, previous, input_time.sample_time) {
                     ctx.format_mismatches.fetch_add(1, Ordering::Relaxed);
@@ -597,7 +624,7 @@ mod macos {
                         let current = ctx.buf.sample_rate.load(Ordering::Relaxed);
                         if current.abs_diff(measured) > current.max(1) / 100 {
                             ctx.buf.sample_rate.store(measured, Ordering::Relaxed);
-                            ctx.rate_changes += 1;
+                            ctx.rate_changes = ctx.rate_changes.saturating_add(1);
                         }
                     }
                 }
@@ -614,11 +641,19 @@ mod macos {
                 ctx.channels
             );
             ctx.channels = channels;
-            ctx.channel_changes += 1;
+            ctx.channel_changes = ctx.channel_changes.saturating_add(1);
         }
-        if frames > 0 && !b.data.is_null() {
+        if frames > 0 {
+            // CoreAudio normally provides aligned Float32 data, but a device
+            // being rebuilt can briefly violate that contract. Creating a Rust
+            // slice from a null or misaligned foreign pointer aborts instead of
+            // unwinding, so reject the callback before touching the pointer.
+            if !audio_data_is_aligned(b.data) {
+                ctx.invalid_callbacks = ctx.invalid_callbacks.saturating_add(1);
+                return Default::default();
+            }
             let data = unsafe { std::slice::from_raw_parts(b.data as *const f32, total_samples) };
-            ctx.pushed_frames += frames as u64;
+            ctx.pushed_frames = ctx.pushed_frames.saturating_add(frames as u64);
             if channels == 1 {
                 ctx.buf.push(data);
             } else {
@@ -634,6 +669,105 @@ mod macos {
         Default::default()
     }
 
+    fn audio_data_is_aligned(data: *mut u8) -> bool {
+        !data.is_null() && (data as usize) % std::mem::align_of::<f32>() == 0
+    }
+
+    fn contain_callback_panic(
+        callback_panicked: &Arc<AtomicBool>,
+        callback: impl FnOnce() -> os::Status,
+    ) -> os::Status {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
+            Ok(status) => status,
+            Err(_) => {
+                callback_panicked.store(true, Ordering::Relaxed);
+                Default::default()
+            }
+        }
+    }
+
+    extern "C" fn io_proc(
+        _device: ca::Device,
+        _now: &cat::AudioTimeStamp,
+        input_data: &cat::AudioBufList<1>,
+        input_time: &cat::AudioTimeStamp,
+        _output_data: &mut cat::AudioBufList<1>,
+        _output_time: &cat::AudioTimeStamp,
+        ctx: Option<&mut Ctx>,
+    ) -> os::Status {
+        let Some(ctx) = ctx else {
+            return Default::default();
+        };
+        if ctx.callback_panicked.load(Ordering::Relaxed) {
+            return Default::default();
+        }
+        let callback_panicked = ctx.callback_panicked.clone();
+        contain_callback_panic(&callback_panicked, || {
+            io_proc_inner(input_data, input_time, ctx)
+        })
+    }
+
+    fn wait_for_stable_output_device(stop: &AtomicBool) -> Result<ca::Device> {
+        let mut candidate = ca::System::default_output_device()
+            .map_err(|e| anyhow!("no default output device: {e:?}"))?;
+        let mut candidate_uid = candidate.uid().map_err(|e| anyhow!("output uid: {e:?}"))?;
+        let mut stable_since = std::time::Instant::now();
+        let deadline = stable_since + Duration::from_secs(8);
+
+        while std::time::Instant::now() < deadline {
+            if stop.load(Ordering::Relaxed) {
+                return Err(anyhow!("capture stopped while audio route was settling"));
+            }
+            if let Ok(current) = ca::System::default_output_device() {
+                if let Ok(uid) = current.uid() {
+                    if !uid.equal(&candidate_uid) {
+                        candidate = current;
+                        candidate_uid = uid;
+                        stable_since = std::time::Instant::now();
+                    } else {
+                        candidate = current;
+                    }
+
+                    if stable_since.elapsed() >= Duration::from_millis(750) {
+                        let alive = candidate.is_alive().unwrap_or(false);
+                        let rate = candidate.nominal_sample_rate().unwrap_or(0.0);
+                        let has_output = candidate
+                            .output_stream_cfg()
+                            .map(|cfg| cfg.number_buffers() > 0)
+                            .unwrap_or(false);
+                        if alive && rate.is_finite() && rate > 0.0 && has_output {
+                            return Ok(candidate);
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        Err(anyhow!("default output device did not become ready"))
+    }
+
+    #[cfg(test)]
+    mod callback_tests {
+        use super::*;
+
+        #[test]
+        fn callback_panics_are_quarantined_before_the_c_boundary() {
+            let panicked = Arc::new(AtomicBool::new(false));
+            let _ = contain_callback_panic(&panicked, || panic!("simulated callback failure"));
+            assert!(panicked.load(Ordering::Relaxed));
+        }
+
+        #[test]
+        fn callback_rejects_null_and_misaligned_float_buffers() {
+            let mut samples = [0.0_f32; 2];
+            let aligned = samples.as_mut_ptr() as *mut u8;
+            assert!(audio_data_is_aligned(aligned));
+            assert!(!audio_data_is_aligned(std::ptr::null_mut()));
+            assert!(!audio_data_is_aligned(unsafe { aligned.add(1) }));
+        }
+    }
+
     /// One tap lifetime: build → run until stop / stall / device change.
     /// Ok(()) = clean stop; Err = rebuild wanted.
     pub fn tap_session(
@@ -641,11 +775,20 @@ mod macos {
         stop: &Arc<AtomicBool>,
         log_path: Option<&Path>,
     ) -> Result<()> {
-        let output_device = ca::System::default_output_device()
-            .map_err(|e| anyhow!("no default output device: {e:?}"))?;
+        let output_device = wait_for_stable_output_device(stop)?;
         let output_uid = output_device
             .uid()
             .map_err(|e| anyhow!("output uid: {e:?}"))?;
+
+        // The route is stable. Hold the setup gate while creating and starting
+        // the aggregate so VPIO cannot reconfigure the same device underneath.
+        let setup_guard = audio_graph_setup_lock();
+        let current_uid = ca::System::default_output_device()
+            .and_then(|device| device.uid())
+            .map_err(|e| anyhow!("output route changed before tap setup: {e:?}"))?;
+        if !current_uid.equal(&output_uid) {
+            return Err(anyhow!("default output device changed before tap setup"));
+        }
 
         // Exclude noted's own audio (e.g. notification sounds) from the tap.
         let exclude = match ca::Process::with_pid(std::process::id() as i32) {
@@ -716,6 +859,7 @@ mod macos {
             .map_err(|e| anyhow!("aggregate device: {e:?}"))?;
 
         let format_mismatches = Arc::new(AtomicU64::new(0));
+        let callback_panicked = Arc::new(AtomicBool::new(false));
         let mut ctx = Ctx {
             buf: buf.clone(),
             channels,
@@ -723,6 +867,7 @@ mod macos {
             last_rate_clock: None,
             host_clock_hz: cidre::cv::host_clock_frequency(),
             format_mismatches: format_mismatches.clone(),
+            callback_panicked: callback_panicked.clone(),
             callbacks: 0,
             pushed_frames: 0,
             first_bytes: 0,
@@ -737,6 +882,7 @@ mod macos {
             .map_err(|e| anyhow!("io proc: {e:?}"))?;
         let started = ca::device_start(&*agg_device, Some(proc_id))
             .map_err(|e| anyhow!("device start: {e:?}"))?;
+        drop(setup_guard);
 
         // Poll loop: clean stop, watchdog stall, format drift, or output-device
         // switch.
@@ -748,6 +894,10 @@ mod macos {
                 break Ok(());
             }
             std::thread::sleep(Duration::from_millis(250));
+
+            if callback_panicked.load(Ordering::Relaxed) {
+                break Err(anyhow!("tap callback panicked; rebuilding safely"));
+            }
 
             let mismatches = format_mismatches.load(Ordering::Relaxed);
             if mismatches > 0 {
@@ -801,7 +951,7 @@ mod macos {
         capture_log(
             log_path,
             &format!(
-                "tap ended: callbacks={}, mono_frames={}, first_bytes={}, max_bytes={}, channels={}, channel_changes={}, clock_layout_corrections={}, rate_changes={}, invalid_callbacks={}, format_mismatches={}, result={}",
+                "tap ended: callbacks={}, mono_frames={}, first_bytes={}, max_bytes={}, channels={}, channel_changes={}, clock_layout_corrections={}, rate_changes={}, invalid_callbacks={}, format_mismatches={}, callback_panicked={}, result={}",
                 ctx.callbacks,
                 ctx.pushed_frames,
                 ctx.first_bytes,
@@ -812,6 +962,7 @@ mod macos {
                 ctx.rate_changes,
                 ctx.invalid_callbacks,
                 ctx.format_mismatches.load(Ordering::Relaxed),
+                ctx.callback_panicked.load(Ordering::Relaxed),
                 if result.is_ok() { "clean" } else { "rebuild" },
             ),
         );
@@ -845,6 +996,22 @@ mod tests {
         assert!(!vpio_needs_raw_fallback(2_000, 0));
         assert!(vpio_needs_raw_fallback(2_001, 0));
         assert!(!vpio_needs_raw_fallback(10_000, 1));
+    }
+
+    #[test]
+    fn channel_buffer_recovers_from_a_poisoned_audio_lock() {
+        let buf = ChannelBuf::new();
+        let poison_target = buf.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poison_target.samples.lock().unwrap();
+            panic!("simulated worker failure while holding audio samples");
+        });
+
+        buf.sample_rate.store(48_000, Ordering::Relaxed);
+        buf.push(&[0.1, -0.1]);
+        let (samples, rate) = buf.drain();
+        assert_eq!(rate, 48_000);
+        assert_eq!(samples, vec![0.1, -0.1]);
     }
 
     /// Live smoke test: builds a real VoiceProcessingIO session, records 3s,

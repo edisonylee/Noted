@@ -2060,6 +2060,7 @@ pub async fn list_events(dir: &Path, event_date: &str) -> Result<Vec<Value>> {
                     "all_day": all_day,
                     "calendar": cal.name,
                     "calendar_id": cal.id,
+                    "color": cal.color,
                     "account": email,
                     "meet_link": conference_link(it),
                     "html_link": it.get("htmlLink").and_then(|v| v.as_str()),

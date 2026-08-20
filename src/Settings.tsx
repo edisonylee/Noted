@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { X, Check, ChevronDown, ChevronUp, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, CalendarDays, Download, Mic, AudioLines, Plus, RefreshCw, Trash2, FolderPlus, FolderOpen, Laptop, Gauge, Cloud, KeyRound, Palette, Boxes, BookType, MessageCircle, Bot, Copy, ShieldCheck, BellRing } from "lucide-react";
+import { X, Check, ChevronDown, ChevronUp, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, CalendarDays, Download, Mic, AudioLines, Plus, RefreshCw, Trash2, FolderPlus, FolderOpen, Laptop, Gauge, Cloud, KeyRound, Palette, Boxes, BookType, MessageCircle, Bot, Copy, ShieldCheck, BellRing, Settings2 } from "lucide-react";
 import { api, isDesktop, type AgentAccessStatus, type AgentClientSetup, type AgentContextReceipt, type BrainVaultStatus, type ByokConfig, type CloudProvider, type GcalStatus, type MeetingFilingBackfillPreview, type MeetingFilingRule, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type NoteFolderInfo, type ProviderId, type ProviderMode, type ProviderSettings, type ReminderSettings } from "./api";
 import { ThemesSettings } from "./ThemesSettings";
 import { TranscriptVocabularySettings } from "./TranscriptVocabularySettings";
@@ -31,7 +31,14 @@ function meetingTemplateLabel(name: string) {
   return name === "Meeting" ? "General" : name;
 }
 
-type SettingsSection = "models" | "assistant" | "agents" | "themes" | "calendar" | "vaults" | "meetings" | "vocabulary";
+type SettingsSection = "system" | "models" | "assistant" | "agents" | "themes" | "notifications" | "calendar" | "vaults" | "meetings" | "vocabulary";
+
+type SettingsSectionEntry = {
+  id: SettingsSection;
+  label: string;
+  description: string;
+  icon: typeof Laptop;
+};
 
 // Model-provider settings. noted runs 100% local by default; the internally
 // named "balanced" mode sends only new captures to a cloud extract/OCR model.
@@ -39,7 +46,7 @@ type SettingsSection = "models" | "assistant" | "agents" | "themes" | "calendar"
 // Rendered two ways: `page` (desktop — a real Settings view with a section
 // nav) or as the compact modal (mobile).
 export function SettingsModal({ onClose, page = false }: { onClose: () => void; page?: boolean }) {
-  const [section, setSection] = useState<SettingsSection | "system">("system");
+  const [section, setSection] = useState<SettingsSection>("system");
   const [savedHint, setSavedHint] = useState(false);
   const [s, setS] = useState<ProviderSettings | null>(null);
   const [mode, setMode] = useState<ProviderMode>("local");
@@ -868,39 +875,71 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
     </label>
   );
 
-  const sections = [
-    { id: "system", label: "System", description: "Time zone and regional behavior", icon: CalendarDays },
-    { id: "models", label: "Models", description: "Intelligence and providers", icon: Laptop },
-    { id: "assistant", label: "Assistant", description: "Chat and keyboard shortcut", icon: MessageCircle },
-    ...(isDesktop ? [{ id: "agents" as const, label: "Agent Access", description: "Permissioned MCP connections", icon: Bot }] : []),
-    { id: "themes", label: "Appearance", description: "Theme and color mode", icon: Palette },
-    { id: "calendar", label: "Calendar", description: "Reminders, accounts, and filing", icon: CalendarDays },
-    { id: "vaults", label: "Vaults", description: "Obsidian connections", icon: Boxes },
-    { id: "meetings", label: "Meetings", description: "Recording and meeting notes", icon: AudioLines },
-    { id: "vocabulary", label: "Vocabulary", description: "Recognition and corrections", icon: BookType },
-  ] satisfies Array<{
-    id: SettingsSection | "system";
+  const sectionGroups: Array<{
+    id: string;
     label: string;
-    description: string;
-    icon: typeof Laptop;
-  }>;
+    sections: SettingsSectionEntry[];
+  }> = [
+    {
+      id: "app",
+      label: "App",
+      sections: [
+        { id: "system", label: "General", description: "Time zone and regional behavior", icon: Settings2 },
+        { id: "themes", label: "Appearance", description: "Theme and color mode", icon: Palette },
+        ...(isDesktop
+          ? [{ id: "notifications" as const, label: "Notifications", description: "Meeting and plan alerts", icon: BellRing }]
+          : []),
+      ],
+    },
+    {
+      id: "intelligence",
+      label: "Intelligence",
+      sections: [
+        { id: "models", label: "Models", description: "Intelligence and providers", icon: Laptop },
+        { id: "assistant", label: "Assistant", description: "Chat and keyboard shortcut", icon: MessageCircle },
+        ...(isDesktop
+          ? [{ id: "agents" as const, label: "Agent Access", description: "Permissioned MCP connections", icon: Bot }]
+          : []),
+      ],
+    },
+    {
+      id: "data-capture",
+      label: "Data & capture",
+      sections: [
+        { id: "calendar", label: "Calendar", description: "Accounts, sync, and filing", icon: CalendarDays },
+        { id: "vaults", label: "Vaults", description: "Obsidian connections", icon: Boxes },
+        { id: "meetings", label: "Meetings", description: "Recording and meeting notes", icon: AudioLines },
+        { id: "vocabulary", label: "Vocabulary", description: "Recognition and corrections", icon: BookType },
+      ],
+    },
+  ];
 
   const inner = (
     <div className="settings-layout">
       <nav className="settings-nav" aria-label="Settings sections">
-        {sections.map(({ id, label, description, icon: Icon }) => (
-          <button
-            key={id}
-            className={section === id ? "on" : ""}
-            onClick={() => setSection(id)}
-            aria-current={section === id ? "page" : undefined}
+        {sectionGroups.map((group) => (
+          <div
+            className="settings-nav-group"
+            role="group"
+            aria-labelledby={`settings-nav-${group.id}`}
+            key={group.id}
           >
-            <Icon size={16} aria-hidden="true" />
-            <span>
-              <strong>{label}</strong>
-              <small>{description}</small>
-            </span>
-          </button>
+            <span className="settings-nav-label" id={`settings-nav-${group.id}`}>{group.label}</span>
+            {group.sections.map(({ id, label, description, icon: Icon }) => (
+              <button
+                key={id}
+                className={section === id ? "on" : ""}
+                onClick={() => setSection(id)}
+                aria-current={section === id ? "page" : undefined}
+              >
+                <Icon size={16} aria-hidden="true" />
+                <span>
+                  <strong>{label}</strong>
+                  <small>{description}</small>
+                </span>
+              </button>
+            ))}
+          </div>
         ))}
       </nav>
       <div className="settings-body" data-section={section}>
@@ -1474,72 +1513,86 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
           </>
         )}
 
+        {section === "notifications" && isDesktop && (
+          <>
+        <h3>Notifications</h3>
+        <p className="settings-sub">
+          Choose when Noted gives you an audible heads-up for what is next.
+        </p>
+
+        <div className="settings-fields notification-settings">
+          <section className="settings-group">
+            <header className="settings-group-head">
+              <h4>Upcoming meetings and plans</h4>
+              <p>One native Mac alert for each timed item. All-day items stay quiet.</p>
+            </header>
+            <label className="vault-auto reminder-toggle">
+              <input
+                type="checkbox"
+                checked={reminders?.enabled ?? false}
+                onChange={(event) => {
+                  if (!reminders) return;
+                  void saveReminderSettings({ ...reminders, enabled: event.target.checked });
+                }}
+                disabled={!reminders || reminderBusy}
+              />
+              <span>
+                Notification sound
+                <em>
+                  Includes Google Calendar events and timed plans in your Noted daily schedule.
+                  Focus and your Mac notification settings still apply.
+                </em>
+              </span>
+            </label>
+            <div className="reminder-controls">
+              <label className="field reminder-lead">
+                <span className="field-label">Notify me before</span>
+                <select
+                  value={reminders?.lead_minutes ?? 10}
+                  onChange={(event) => {
+                    if (!reminders) return;
+                    void saveReminderSettings({ ...reminders, lead_minutes: Number(event.target.value) });
+                  }}
+                  disabled={!reminders || reminderBusy}
+                >
+                  {[5, 10, 15, 30, 60].map((minutes) => (
+                    <option key={minutes} value={minutes}>{minutes} minutes</option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="ghost-btn reminder-test"
+                onClick={() => void testReminder()}
+                disabled={!reminders || reminderBusy}
+              >
+                {reminderBusy ? <Loader2 size={14} className="spin" /> : <BellRing size={14} />}
+                Play test
+              </button>
+            </div>
+            <span className="field-hint">
+              Sounds play through the sound-effects output selected in macOS System Settings.
+            </span>
+            {reminderMsg && <span className="field-hint" role="status">{reminderMsg}</span>}
+            {reminders?.enabled && reminderPermission === false && !reminderMsg && (
+              <span className="conn-detail" role="status">
+                Reminders are enabled, but macOS notifications are currently blocked for Noted.
+              </span>
+            )}
+          </section>
+        </div>
+
+          </>
+        )}
+
         {section === "calendar" && (
           <>
         <h3>Calendar</h3>
         <p className="settings-sub">
-          Get an audible heads-up for what is next, and bring work and personal calendars into one view.
+          Connect accounts, choose where meeting notes go, and control daily schedule sync.
         </p>
 
         <div className="settings-fields">
-          {isDesktop && (
-            <section className="settings-group">
-              <header className="settings-group-head">
-                <h4>Upcoming reminders</h4>
-                <p>One native Mac notification for each timed meeting or plan. All-day items stay quiet.</p>
-              </header>
-              <label className="vault-auto reminder-toggle">
-                <input
-                  type="checkbox"
-                  checked={reminders?.enabled ?? false}
-                  onChange={(event) => {
-                    if (!reminders) return;
-                    void saveReminderSettings({ ...reminders, enabled: event.target.checked });
-                  }}
-                  disabled={!reminders || reminderBusy}
-                />
-                <span>
-                  Notification sound
-                  <em>
-                    Alerts include Google Calendar events and timed plans in your Noted daily schedule.
-                    They respect Focus and the notification settings on this Mac.
-                  </em>
-                </span>
-              </label>
-              <div className="reminder-controls">
-                <label className="field reminder-lead">
-                  <span className="field-label">Notify me before</span>
-                  <select
-                    value={reminders?.lead_minutes ?? 10}
-                    onChange={(event) => {
-                      if (!reminders) return;
-                      void saveReminderSettings({ ...reminders, lead_minutes: Number(event.target.value) });
-                    }}
-                    disabled={!reminders || reminderBusy}
-                  >
-                    {[5, 10, 15, 30, 60].map((minutes) => (
-                      <option key={minutes} value={minutes}>{minutes} minutes</option>
-                    ))}
-                  </select>
-                </label>
-                <button
-                  type="button"
-                  className="ghost-btn reminder-test"
-                  onClick={() => void testReminder()}
-                  disabled={!reminders || reminderBusy}
-                >
-                  {reminderBusy ? <Loader2 size={14} className="spin" /> : <BellRing size={14} />}
-                  Play test
-                </button>
-              </div>
-              {reminderMsg && <span className="field-hint" role="status">{reminderMsg}</span>}
-              {reminders?.enabled && reminderPermission === false && !reminderMsg && (
-                <span className="conn-detail" role="status">
-                  Reminders are enabled, but macOS notifications are currently blocked for Noted.
-                </span>
-              )}
-            </section>
-          )}
 
           <section className="settings-group calendar-connection-settings">
             <header className="settings-group-head">

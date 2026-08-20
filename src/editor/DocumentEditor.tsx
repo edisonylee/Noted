@@ -21,6 +21,7 @@ import {
   ListTodo,
   Pilcrow,
   Redo2,
+  Strikethrough,
   Underline as UnderlineIcon,
   Undo2,
   type LucideIcon,
@@ -352,6 +353,14 @@ export function DocumentEditor({
           disabled={!editor || disabled}
           shortcut="⌘U"
           onClick={() => editor?.chain().focus().toggleUnderline().run()}
+        />
+        <EditorButton
+          label="Strikethrough"
+          icon={Strikethrough}
+          active={editor?.isActive("strike")}
+          disabled={!editor || disabled}
+          shortcut="⌘⇧S"
+          onClick={() => editor?.chain().focus().toggleStrike().run()}
         />
         <span className="document-editor-spacer" />
         <EditorButton

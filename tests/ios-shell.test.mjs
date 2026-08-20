@@ -111,10 +111,15 @@ test("generated iOS app requests no desktop recorder permissions", async () => {
 test("iOS signing configuration is reproducible", async () => {
   const config = JSON.parse(await read("src-tauri/tauri.ios.conf.json"));
   const info = await read("src-tauri/Info.ios.plist");
+  const generatedProject = await read("src-tauri/gen/apple/project.yml");
+  const generatedPbxProject = await read("src-tauri/gen/apple/tauri-app.xcodeproj/project.pbxproj");
 
   assert.equal(config.identifier, "com.noted.iphone");
   assert.equal(config.bundle.iOS.developmentTeam, "MYGAYC672C");
   assert.equal(config.bundle.iOS.minimumSystemVersion, "17.0");
+  assert.match(generatedProject, /deploymentTarget:\s*\n\s*iOS: 17\.0/);
+  assert.doesNotMatch(generatedPbxProject, /IPHONEOS_DEPLOYMENT_TARGET = 14\.0/);
+  assert.equal((generatedPbxProject.match(/IPHONEOS_DEPLOYMENT_TARGET = 17\.0/g) ?? []).length, 2);
   assert.equal(config.bundle.iOS.infoPlist, "Info.ios.plist");
   assert.match(info, /NSLocalNetworkUsageDescription/);
   assert.match(info, /_noted-sync\._tcp/);

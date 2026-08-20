@@ -16,7 +16,16 @@ use std::{
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde_json::json;
-use sha2::{Digest, Sha256};
+
+#[cfg(feature = "sanitized-development-fixtures")]
+use noted_apple_security::{
+    decode_record_ciphertext_v1, encode_record_ciphertext_v1, BootstrapCapabilityV1,
+    BootstrapMetadataV1 as NativeBootstrapMetadataV1, RecordCryptoContextV1,
+    RecordCryptoOperationV1, RecordKindV1, SanitizedFixtureRecordCrypto, RECORD_CIPHER_SUITE,
+    RECORD_CRYPTO_CONTEXT_VERSION,
+};
+#[cfg(feature = "sanitized-development-fixtures")]
+use zeroize::Zeroizing;
 
 use crate::{
     db::{self, SaveInput},
@@ -38,9 +47,9 @@ use crate::{
     portable::{canonical_json, canonical_sha256, new_uuid_v7, ContextRecordV1},
     sync_protocol::{
         negotiate_capabilities, AcceptedHead, BootstrapRecord, BootstrapSnapshot, HeadAdvance,
-        MutationDraft, MutationEnvelope, ProtocolCapabilities, ReceiptDisposition,
-        RecordKindCapability, SignedTransaction, TransactionHeader, TransactionReceipt,
-        BOOTSTRAP_SNAPSHOT_VERSION, SYNC_PROTOCOL_VERSION,
+        MutationDraft, MutationEnvelope, MutationOperation, ProtocolCapabilities,
+        ReceiptDisposition, RecordKindCapability, SignedTransaction, TransactionHeader,
+        TransactionReceipt, BOOTSTRAP_SNAPSHOT_VERSION, SYNC_PROTOCOL_VERSION,
     },
 };
 
@@ -50,7 +59,19 @@ const FIXTURE_CONTRACT_VERSION: i64 = 1;
 const FIXTURE_CREATED_AT: &str = "2026-08-17T12:00:00.000Z";
 const FIXTURE_CREATED_AT_MS: i64 = 1_786_968_000_000;
 const FIXTURE_EVENT_DATE: &str = "2026-08-17";
-const FIXTURE_CIPHERTEXT_PREFIX: &[u8] = b"fixture-json:";
+#[cfg(not(feature = "sanitized-development-fixtures"))]
+const LEGACY_FIXTURE_CIPHERTEXT_PREFIX: &[u8] = b"fixture-json:";
+#[cfg(feature = "sanitized-development-fixtures")]
+const FIXTURE_CRYPTO_RECEIPT_ID: &str = "00000000-0000-7000-8000-0000000000f1";
+#[cfg(feature = "sanitized-development-fixtures")]
+const FIXTURE_CRYPTO_SCOPE_ID: &str = "00000000-0000-7000-8000-0000000000f2";
+/// Publicly known development-fixture material. These values protect protocol
+/// integrity and exercise the real wire format; they are intentionally not
+/// credentials and are never used for personal or production data.
+#[cfg(feature = "sanitized-development-fixtures")]
+const FIXTURE_LIBRARY_KEY: [u8; 32] = [0x31; 32];
+#[cfg(feature = "sanitized-development-fixtures")]
+const FIXTURE_SEED_SIGNING_KEY: [u8; 32] = [0x51; 32];
 const FIXTURE_CATEGORY_NAME: &str = "Sanitized Fixture";
 const FIXTURE_FOLDER_NAME: &str = "Phone Sync Fixture";
 const FIXTURE_NOTE_TITLE: &str = "Generated phone sync fixture";
@@ -191,6 +212,7 @@ where
         sync_clock: Arc<dyn FixtureAuthorityClock>,
         bindings: AuthorityBindings,
     ) -> Result<Self, FixtureAuthorityError> {
+        require_fixture_crypto_gate()?;
         let database_path = database_path.as_ref();
         validate_target(database_path)?;
         if !database_path.exists() {
@@ -200,6 +222,18 @@ where
         }
         let descriptor = verify_published_fixture(database_path)?;
         let pairing_connection = open_read_write(database_path)?;
+        #[cfg(feature = "sanitized-development-fixtures")]
+        let record_crypto = {
+            let seed_writer_id = fixture_seed_writer_id(&pairing_connection, &descriptor)?;
+            Arc::new(fixture_record_crypto(
+                &descriptor.library_id,
+                &seed_writer_id,
+                &descriptor.default_scope_id,
+                descriptor.authority_generation,
+                descriptor.purge_generation,
+                descriptor.key_epoch,
+            )?)
+        };
         let pairing = DirectPairingCoordinator::new_fixture_only(
             pairing_connection,
             pairing_crypto,
@@ -207,6 +241,15 @@ where
             pairing_policy(&descriptor),
             bindings.clone(),
         )?;
+        #[cfg(feature = "sanitized-development-fixtures")]
+        let authority = SqliteDirectSyncAuthority::open_sanitized_fixture_with_record_crypto(
+            database_path,
+            &descriptor.library_id,
+            sync_clock,
+            record_crypto,
+        )
+        .map_err(|error| FixtureAuthorityError::Integrity(format!("{error:?}")))?;
+        #[cfg(not(feature = "sanitized-development-fixtures"))]
         let authority = SqliteDirectSyncAuthority::open_sanitized_fixture(
             database_path,
             &descriptor.library_id,
@@ -290,6 +333,17 @@ where
             .map_err(Into::into)
     }
 
+    pub fn process_bootstrap_poll(
+        &self,
+        bytes: &[u8],
+        transport: &TransportEvidence,
+    ) -> Result<Vec<u8>, FixtureAuthorityError> {
+        let _operation = self.lock_operation()?;
+        self.pairing
+            .process_bootstrap_poll(bytes, transport)
+            .map_err(Into::into)
+    }
+
     pub fn handle_sync(
         &self,
         request: DirectRequest,
@@ -318,6 +372,7 @@ where
 pub fn provision_sanitized_fixture_authority(
     database_path: impl AsRef<Path>,
 ) -> Result<SanitizedFixtureAuthorityDescriptor, FixtureAuthorityError> {
+    require_fixture_crypto_gate()?;
     let database_path = database_path.as_ref();
     let parent = validate_target(database_path)?;
     if database_path.exists() {
@@ -640,21 +695,49 @@ fn initialize_fixture_authority(
     // authority-log provenance without ever impersonating the Mac authority;
     // it is revoked in this same unpublished staging transaction.
     let seed_writer_id = new_uuid_v7();
+    #[cfg(feature = "sanitized-development-fixtures")]
+    let seed_record_crypto = fixture_record_crypto(
+        &descriptor.library_id,
+        &seed_writer_id,
+        &descriptor.default_scope_id,
+        descriptor.authority_generation,
+        descriptor.purge_generation,
+        descriptor.key_epoch,
+    )?;
     transaction.execute(
         "INSERT INTO portable_devices
          (device_id, library_id, device_kind, display_name, role,
-          enrollment_state, capabilities_json, last_transaction_counter,
+          enrollment_state, capabilities_json, public_signing_key,
+          last_transaction_counter,
           created_at, enrolled_at)
          VALUES (?1, ?2, 'fixture_seed', 'Generated fixture seed writer',
-                 'replica', 'active', ?3, 0, ?4, ?4)",
+                 'replica', 'active', ?3, ?4, 0, ?5, ?5)",
         params![
             seed_writer_id,
             descriptor.library_id,
             capabilities_json,
+            {
+                #[cfg(feature = "sanitized-development-fixtures")]
+                {
+                    seed_record_crypto.signing_public_key().to_vec()
+                }
+                #[cfg(not(feature = "sanitized-development-fixtures"))]
+                {
+                    let mut legacy_key = vec![0x41_u8; 65];
+                    legacy_key[0] = 0x04;
+                    legacy_key
+                }
+            },
             FIXTURE_CREATED_AT,
         ],
     )?;
-    seed_direct_accepted_heads(&transaction, &descriptor, &seed_writer_id)?;
+    seed_direct_accepted_heads(
+        &transaction,
+        &descriptor,
+        &seed_writer_id,
+        #[cfg(feature = "sanitized-development-fixtures")]
+        &seed_record_crypto,
+    )?;
     let revoked = transaction.execute(
         "UPDATE portable_devices
          SET enrollment_state = 'revoked', revoked_at = ?2
@@ -674,6 +757,8 @@ fn seed_direct_accepted_heads(
     transaction: &rusqlite::Transaction<'_>,
     descriptor: &SanitizedFixtureAuthorityDescriptor,
     seed_writer_id: &str,
+    #[cfg(feature = "sanitized-development-fixtures")]
+    seed_record_crypto: &SanitizedFixtureRecordCrypto,
 ) -> Result<(), FixtureAuthorityError> {
     let profile_cursor: i64 = transaction.query_row(
         "SELECT high_water_cursor FROM direct_authority_profiles WHERE library_id = ?1",
@@ -699,7 +784,7 @@ fn seed_direct_accepted_heads(
         schema_version: u32,
         revision: u64,
         version_id: String,
-        snapshot_json: String,
+        record: ContextRecordV1,
         base_version_id: Option<String>,
     }
 
@@ -769,7 +854,7 @@ fn seed_direct_accepted_heads(
             schema_version,
             revision,
             version_id,
-            snapshot_json,
+            record,
             base_version_id,
         });
     }
@@ -795,10 +880,13 @@ fn seed_direct_accepted_heads(
     let drafts = heads
         .iter()
         .map(|head| {
-            let mut ciphertext = FIXTURE_CIPHERTEXT_PREFIX.to_vec();
-            ciphertext.extend_from_slice(head.snapshot_json.as_bytes());
-            MutationDraft {
+            let mut draft = MutationDraft {
                 mutation_id: new_uuid_v7(),
+                operation: if head.revision == 1 && head.base_version_id.is_none() {
+                    MutationOperation::Create
+                } else {
+                    MutationOperation::Update
+                },
                 record_id: head.record_id.clone(),
                 record_kind: head.kind.clone(),
                 record_schema_version: head.schema_version,
@@ -806,10 +894,38 @@ fn seed_direct_accepted_heads(
                 base_head_version_id: head.base_version_id.clone(),
                 proposed_revision: head.revision,
                 version_id: head.version_id.clone(),
-                ciphertext,
+                ciphertext: Vec::new(),
+            };
+            #[cfg(feature = "sanitized-development-fixtures")]
+            {
+                let context = fixture_record_context_from_draft(descriptor, &draft)?;
+                let plaintext = canonical_json(
+                    &serde_json::to_value(&head.record)
+                        .map_err(|error| FixtureAuthorityError::Integrity(error.to_string()))?,
+                )
+                .into_bytes();
+                let sealed = seed_record_crypto
+                    .seal_record(&context, &plaintext)
+                    .map_err(|error| FixtureAuthorityError::Integrity(error.to_string()))?;
+                draft.ciphertext = encode_record_ciphertext_v1(&sealed, &context)
+                    .map_err(|error| FixtureAuthorityError::Integrity(error.to_string()))?;
             }
+            #[cfg(not(feature = "sanitized-development-fixtures"))]
+            {
+                draft
+                    .ciphertext
+                    .extend_from_slice(LEGACY_FIXTURE_CIPHERTEXT_PREFIX);
+                draft.ciphertext.extend_from_slice(
+                    canonical_json(
+                        &serde_json::to_value(&head.record)
+                            .map_err(|error| FixtureAuthorityError::Integrity(error.to_string()))?,
+                    )
+                    .as_bytes(),
+                );
+            }
+            Ok(draft)
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, FixtureAuthorityError>>()?;
     let prepared = SignedTransaction::prepare(
         TransactionHeader {
             protocol_version: SYNC_PROTOCOL_VERSION,
@@ -831,8 +947,20 @@ fn seed_direct_accepted_heads(
     let signatures = prepared
         .signing_inputs()
         .into_iter()
-        .map(|input| fixture_seed_signature(&input.canonical_bytes))
-        .collect();
+        .map(|input| {
+            #[cfg(feature = "sanitized-development-fixtures")]
+            {
+                seed_record_crypto
+                    .sign_p256_p1363(&input.canonical_bytes)
+                    .map(|signature| signature.to_vec())
+                    .map_err(|error| FixtureAuthorityError::Integrity(error.to_string()))
+            }
+            #[cfg(not(feature = "sanitized-development-fixtures"))]
+            {
+                Ok(legacy_fixture_seed_signature(&input.canonical_bytes))
+            }
+        })
+        .collect::<Result<Vec<_>, FixtureAuthorityError>>()?;
     let signed = prepared
         .attach_signatures(signatures)
         .map_err(|error| FixtureAuthorityError::Integrity(error.to_string()))?;
@@ -958,22 +1086,256 @@ fn seed_direct_accepted_heads(
     Ok(())
 }
 
-fn fixture_seed_signature(signing_bytes: &[u8]) -> Vec<u8> {
+#[cfg(not(feature = "sanitized-development-fixtures"))]
+fn legacy_fixture_seed_signature(signing_bytes: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+
     let mut digest = Sha256::new();
     digest.update(b"noted.sanitized-fixture-authority.v1/seed-signature\0");
     digest.update(signing_bytes);
     digest.finalize().to_vec()
 }
 
-/// Recognize the deterministic pseudo-signature used only for generated seed
-/// records in this sanitized development fixture. A fixture crypto adapter may
-/// call this from `verify_mutation_ciphertext`; production or personal-data
-/// code must never treat it as cryptographic authentication.
+/// Verify a generated seed mutation with the implementation selected at
+/// compile time. The development-fixture feature uses the complete NRC1
+/// container, its inner signature, the outer P-256 signature, AEAD, and the
+/// canonical portable-record binding. The legacy recognizer exists only so
+/// the historical non-feature test seam remains usable.
 pub fn verify_generated_fixture_seed_mutation(
     mutation: &crate::sync_protocol::MutationEnvelope,
 ) -> bool {
-    mutation.ciphertext.starts_with(FIXTURE_CIPHERTEXT_PREFIX)
-        && mutation.signature == fixture_seed_signature(&mutation.signing_bytes())
+    #[cfg(feature = "sanitized-development-fixtures")]
+    {
+        open_generated_fixture_seed_mutation(mutation, FIXTURE_CRYPTO_SCOPE_ID).is_ok()
+    }
+    #[cfg(all(not(feature = "sanitized-development-fixtures"), debug_assertions))]
+    {
+        mutation
+            .ciphertext
+            .starts_with(LEGACY_FIXTURE_CIPHERTEXT_PREFIX)
+            && mutation.signature == legacy_fixture_seed_signature(&mutation.signing_bytes())
+    }
+    #[cfg(all(not(feature = "sanitized-development-fixtures"), not(debug_assertions)))]
+    {
+        let _ = mutation;
+        false
+    }
+}
+
+fn require_fixture_crypto_gate() -> Result<(), FixtureAuthorityError> {
+    #[cfg(all(not(feature = "sanitized-development-fixtures"), not(debug_assertions)))]
+    {
+        return Err(FixtureAuthorityError::InvalidTarget(
+            "sanitized fixture authority requires the explicit development-fixture crypto feature",
+        ));
+    }
+    #[cfg(any(feature = "sanitized-development-fixtures", debug_assertions))]
+    {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+fn fixture_record_crypto(
+    library_id: &str,
+    device_id: &str,
+    default_scope_id: &str,
+    authority_generation: u64,
+    purge_generation: u64,
+    key_epoch: u64,
+) -> Result<SanitizedFixtureRecordCrypto, FixtureAuthorityError> {
+    let exact_capability = BootstrapCapabilityV1 {
+        reader_version: 1,
+        writer_version: Some(1),
+    };
+    let metadata = NativeBootstrapMetadataV1 {
+        version: 1,
+        protocol: "noted.direct-pairing.v1".to_owned(),
+        suite: "tls13+p256-p1363+auth-hpke-x25519-hkdfsha256-aes256gcm".to_owned(),
+        sync_protocol_version: SYNC_PROTOCOL_VERSION,
+        environment: "development".to_owned(),
+        library_data_class: "sanitized_fixture".to_owned(),
+        receipt_id: FIXTURE_CRYPTO_RECEIPT_ID.to_owned(),
+        library_id: library_id.to_owned(),
+        device_id: device_id.to_owned(),
+        authority_generation,
+        purge_generation,
+        key_epoch,
+        default_scope_id: default_scope_id.to_owned(),
+        default_scope_class: "unknown".to_owned(),
+        granted_scopes: vec![
+            "note".to_owned(),
+            "category".to_owned(),
+            "folder".to_owned(),
+        ],
+        capabilities: BTreeMap::from([
+            ("note".to_owned(), exact_capability),
+            ("category".to_owned(), exact_capability),
+            ("folder".to_owned(), exact_capability),
+        ]),
+        record_cipher_suite: RECORD_CIPHER_SUITE.to_owned(),
+        durable_sync_spki_sha256: [0xa5; 32],
+        transcript_digest: [0xb6; 32],
+    };
+    SanitizedFixtureRecordCrypto::new(
+        metadata,
+        Zeroizing::new(FIXTURE_LIBRARY_KEY),
+        Zeroizing::new(FIXTURE_SEED_SIGNING_KEY),
+    )
+    .map_err(|error| FixtureAuthorityError::Integrity(error.to_string()))
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+fn fixture_record_context_from_draft(
+    descriptor: &SanitizedFixtureAuthorityDescriptor,
+    draft: &MutationDraft,
+) -> Result<RecordCryptoContextV1, FixtureAuthorityError> {
+    fixture_record_context(
+        &descriptor.library_id,
+        descriptor.authority_generation,
+        descriptor.purge_generation,
+        descriptor.key_epoch,
+        draft.operation,
+        &draft.record_id,
+        &draft.record_kind,
+        draft.record_schema_version,
+        draft.base_head_revision,
+        draft.base_head_version_id.clone(),
+        draft.proposed_revision,
+        &draft.version_id,
+        &draft.mutation_id,
+    )
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+fn fixture_record_context_from_envelope(
+    mutation: &MutationEnvelope,
+) -> Result<RecordCryptoContextV1, FixtureAuthorityError> {
+    fixture_record_context(
+        &mutation.library_id,
+        mutation.authority_generation,
+        mutation.purge_generation,
+        mutation.key_epoch,
+        mutation.operation,
+        &mutation.record_id,
+        &mutation.record_kind,
+        mutation.record_schema_version,
+        mutation.base_head_revision,
+        mutation.base_head_version_id.clone(),
+        mutation.proposed_revision,
+        &mutation.version_id,
+        &mutation.mutation_id,
+    )
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+#[allow(clippy::too_many_arguments)]
+fn fixture_record_context(
+    library_id: &str,
+    authority_generation: u64,
+    purge_generation: u64,
+    key_epoch: u64,
+    operation: MutationOperation,
+    record_id: &str,
+    record_kind: &str,
+    record_schema_version: u32,
+    base_head_revision: u64,
+    base_head_version_id: Option<String>,
+    proposed_revision: u64,
+    version_id: &str,
+    mutation_id: &str,
+) -> Result<RecordCryptoContextV1, FixtureAuthorityError> {
+    let record_kind = match record_kind {
+        "note" => RecordKindV1::Note,
+        "category" => RecordKindV1::Category,
+        "folder" => RecordKindV1::Folder,
+        _ => {
+            return Err(FixtureAuthorityError::Integrity(
+                "fixture record kind is unsupported".to_owned(),
+            ))
+        }
+    };
+    let operation = match operation {
+        MutationOperation::Create => RecordCryptoOperationV1::Create,
+        MutationOperation::Update => RecordCryptoOperationV1::Update,
+        MutationOperation::Delete => RecordCryptoOperationV1::Delete,
+    };
+    let context = RecordCryptoContextV1 {
+        version: RECORD_CRYPTO_CONTEXT_VERSION,
+        cipher_suite: RECORD_CIPHER_SUITE.to_owned(),
+        library_id: library_id.to_owned(),
+        record_id: record_id.to_owned(),
+        record_kind,
+        schema_version: record_schema_version,
+        base_revision: base_head_revision,
+        base_version_id: base_head_version_id,
+        proposed_revision,
+        version_id: version_id.to_owned(),
+        mutation_id: mutation_id.to_owned(),
+        authority_generation,
+        purge_generation,
+        key_epoch,
+        operation,
+    };
+    context
+        .validate()
+        .map_err(|error| FixtureAuthorityError::Integrity(error.to_string()))?;
+    Ok(context)
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+fn open_generated_fixture_seed_mutation(
+    mutation: &MutationEnvelope,
+    default_scope_id: &str,
+) -> Result<ContextRecordV1, FixtureAuthorityError> {
+    let crypto = fixture_record_crypto(
+        &mutation.library_id,
+        &mutation.device_id,
+        default_scope_id,
+        mutation.authority_generation,
+        mutation.purge_generation,
+        mutation.key_epoch,
+    )?;
+    if mutation.signature.len() != 64
+        || !SanitizedFixtureRecordCrypto::verify_p256_p1363(
+            &crypto.signing_public_key(),
+            &mutation.signing_bytes(),
+            &mutation.signature,
+        )
+        .map_err(|error| FixtureAuthorityError::Integrity(error.to_string()))?
+    {
+        return Err(FixtureAuthorityError::Integrity(
+            "fixture seed outer signature is invalid".to_owned(),
+        ));
+    }
+    let context = fixture_record_context_from_envelope(mutation)?;
+    let sealed = decode_record_ciphertext_v1(&mutation.ciphertext, &context)
+        .map_err(|error| FixtureAuthorityError::Integrity(error.to_string()))?;
+    let opened = crypto
+        .open_record(&context, &sealed, &crypto.signing_public_key())
+        .map_err(|error| FixtureAuthorityError::Integrity(error.to_string()))?;
+    let record: ContextRecordV1 = serde_json::from_slice(&opened.plaintext)
+        .map_err(|error| FixtureAuthorityError::Integrity(error.to_string()))?;
+    record
+        .validate()
+        .map_err(|error| FixtureAuthorityError::Integrity(error.to_string()))?;
+    let canonical = canonical_json(
+        &serde_json::to_value(&record)
+            .map_err(|error| FixtureAuthorityError::Integrity(error.to_string()))?,
+    );
+    if canonical.as_bytes() != opened.plaintext
+        || record.library_id != mutation.library_id
+        || record.record_id != mutation.record_id
+        || record.kind != mutation.record_kind
+        || record.record_schema_version != mutation.record_schema_version
+        || record.revision != mutation.proposed_revision
+        || record.version_id != mutation.version_id
+    {
+        return Err(FixtureAuthorityError::Integrity(
+            "fixture seed plaintext binding is invalid".to_owned(),
+        ));
+    }
+    Ok(record)
 }
 
 fn create_marker(
@@ -1164,6 +1526,29 @@ fn verify_fixture_connection(
         return Err(FixtureAuthorityError::Integrity(
             "fixture Mac authority device is missing or inactive".to_owned(),
         ));
+    }
+    let _seed_writer_id = fixture_seed_writer_id(connection, &descriptor)?;
+    #[cfg(feature = "sanitized-development-fixtures")]
+    {
+        let stored_key: Vec<u8> = connection.query_row(
+            "SELECT public_signing_key FROM portable_devices WHERE device_id = ?1",
+            [&_seed_writer_id],
+            |row| row.get(0),
+        )?;
+        let expected = fixture_record_crypto(
+            &descriptor.library_id,
+            &_seed_writer_id,
+            &descriptor.default_scope_id,
+            descriptor.authority_generation,
+            descriptor.purge_generation,
+            descriptor.key_epoch,
+        )?
+        .signing_public_key();
+        if stored_key != expected {
+            return Err(FixtureAuthorityError::Integrity(
+                "fixture seed writer signing key diverged".to_owned(),
+            ));
+        }
     }
 
     let profile: Option<(i64, String, String, String, i64)> = connection
@@ -1421,6 +1806,10 @@ fn validate_direct_bootstrap_and_log(
                 "direct mutation rows diverged from their signed transaction".to_owned(),
             ));
         }
+        #[cfg(feature = "sanitized-development-fixtures")]
+        for member in &signed_members {
+            open_generated_fixture_seed_mutation(member, &descriptor.default_scope_id)?;
+        }
         expected_sequence = expected_sequence.checked_add(1).ok_or_else(|| {
             FixtureAuthorityError::Integrity("direct change sequence overflowed".to_owned())
         })?;
@@ -1431,6 +1820,26 @@ fn validate_direct_bootstrap_and_log(
         ));
     }
     Ok(())
+}
+
+fn fixture_seed_writer_id(
+    connection: &Connection,
+    descriptor: &SanitizedFixtureAuthorityDescriptor,
+) -> Result<String, FixtureAuthorityError> {
+    let mut statement = connection.prepare(
+        "SELECT device_id FROM portable_devices
+         WHERE library_id = ?1 AND device_kind = 'fixture_seed'
+           AND role = 'replica' AND enrollment_state = 'revoked'",
+    )?;
+    let ids = statement
+        .query_map([&descriptor.library_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    match ids.as_slice() {
+        [device_id] if crate::portable::is_uuid_v7(device_id) => Ok(device_id.clone()),
+        _ => Err(FixtureAuthorityError::Integrity(
+            "fixture must retain exactly one revoked seed writer".to_owned(),
+        )),
+    }
 }
 
 fn exact_notes_capabilities() -> ProtocolCapabilities {

@@ -127,7 +127,7 @@ impl FixtureDirectSyncClient {
     }
 }
 
-fn build_client_config(
+pub(super) fn build_client_config(
     policy: &FixtureTransportPolicy,
 ) -> Result<ClientConfig, DirectSyncTransportError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
@@ -150,7 +150,7 @@ fn build_client_config(
     Ok(config)
 }
 
-async fn collect_response(
+pub(super) async fn collect_response(
     response: Response<Incoming>,
     response_limit: usize,
 ) -> Result<DirectResponse, DirectSyncTransportError> {
@@ -213,7 +213,7 @@ fn server_name_for(address: IpAddr) -> ServerName<'static> {
     ServerName::IpAddress(address.into())
 }
 
-fn authority_header(address: SocketAddr) -> String {
+pub(super) fn authority_header(address: SocketAddr) -> String {
     match address {
         SocketAddr::V4(_) => address.to_string(),
         SocketAddr::V6(_) => format!("[{}]:{}", address.ip(), address.port()),

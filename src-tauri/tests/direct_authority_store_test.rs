@@ -152,7 +152,7 @@ fn seed_database(database: &TestDatabase) {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .expect("begin schema transaction");
-    DirectAuthorityStore::install_schema(&transaction).expect("install v3 expansion");
+    DirectAuthorityStore::install_schema(&transaction).expect("install direct-authority expansion");
     DirectAuthorityStore::initialize_fixture_profile(
         &transaction,
         LIBRARY_ID,
@@ -163,7 +163,7 @@ fn seed_database(database: &TestDatabase) {
     .expect("initialize sanitized fixture profile");
     transaction.commit().expect("commit schema transaction");
 
-    assert_eq!(DIRECT_AUTHORITY_SCHEMA_VERSION, 3);
+    assert_eq!(DIRECT_AUTHORITY_SCHEMA_VERSION, 4);
     DirectAuthorityStore::verify_schema(&connection).expect("verify new fixture schema");
 }
 

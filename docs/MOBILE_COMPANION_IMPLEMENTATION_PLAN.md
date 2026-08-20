@@ -2,13 +2,13 @@
 
 Status: M0 direction accepted; M1 checkpoint complete; M2 native shell and
 local-only Notes proven on physical hardware; the M3 portability implementation
-checkpoint is complete; the M4 authenticated fixture bootstrap and activation
-checkpoint is complete, but encrypted record transport, production, and
+checkpoint is complete; the M4 encrypted sanitized-fixture Notes sync checkpoint
+is complete, but native product-network, production, external-review, and
 personal-data gates remain closed; no sync has shipped
 
 Date: 2026-08-14
 
-Last updated: 2026-08-17
+Last updated: 2026-08-20
 
 Scope: iPhone first, while preserving macOS as the primary capture and intelligence platform
 
@@ -1440,8 +1440,8 @@ Rollback:
 **Purpose:** prove one complete path—migration, local replica, mobile UI, offline
 edit, conflict, and direct sync—before expanding record families.
 
-Status: authenticated sanitized-fixture bootstrap and activation checkpoint
-complete; milestone gate not passed. The branch now contains the portable local
+Status: encrypted sanitized-fixture Notes sync checkpoint complete; milestone
+gate not passed. The branch now contains the portable local
 Notes workspace and mobile UI,
 including Inbox, Needs filing, spaces/folders, search, create/edit, filing/undo,
 Trash/restore, read-only external-authority records, conflict preservation and
@@ -1516,6 +1516,24 @@ five-minute window counts toward replay admission, so the protocol is not
 permanently locked after the cap, but on-disk evidence is not yet compacted or
 size-bounded.
 
+The sanitized fixture path now also proves the complete encrypted Notes data
+cycle. Canonical NRC1 Note, Category, and Folder records are encrypted with fresh
+AES-256-GCM nonces, signed by their exact writer, and verified against the active
+pairing profile before local application. The phone durably journals each exact
+signed request before its first socket write, stages bounded ciphertext bootstrap
+pages, resumes them by authenticated checkpoint, and performs incremental
+push/pull through all six pinned-TLS routes. One cross-layer test exercises real
+pairing, encrypted bootstrap, an offline edit, convergence, crash/restart exact
+request recovery, tamper rejection, and authority revocation without exposing a
+library key to Rust or JavaScript in the production iPhone path.
+
+Authenticated revocation is now a single durable phone-store transition. It
+records immutable evidence, marks the enrollment and sync profile revoked,
+quarantines unfinished inbound work, rejects open push bindings, and retires
+unsafe outbox entries as conflicts while preserving working branches for export.
+The revoked state remains terminal after restart. Native key disablement and a
+clean higher-generation re-enrollment flow remain product-runtime work.
+
 The following work still blocks the M4 gate and any personal-data sync:
 
 - a native authenticated pairing and sync network driver around the pinned-TLS
@@ -1523,15 +1541,8 @@ The following work still blocks the M4 gate and any personal-data sync:
   discovery metadata or passing protocol messages through JavaScript. The
   existing fixture command that accepts claimed SPKI evidence from its caller is
   a harness only and cannot satisfy this gate;
-- native record encryption/decryption, real fixture-author signatures, an exact
-  signed request journal, bounded ciphertext bootstrap staging, and one
-  end-to-end sanitized Notes bootstrap plus incremental push/pull over that
-  product transport. Provisioned fixture records are not yet encoded with the
-  advertised record AEAD/signature contract and therefore cannot count as an
-  end-to-end proof;
-- an authenticated phone-side revocation transition that disables native key
-  use, retires unsafe outbox work, preserves the chosen offline export policy,
-  and permits a clean re-enrollment;
+- product-runtime wiring that disables native key use after the durable
+  revocation transition and permits a clean, higher-generation re-enrollment;
 - production Mac key custody/signing and structural enforcement that pairing,
   revocation, and sync share one authority instance;
 - external review of the implemented pairing, cryptography, transport, and
@@ -1546,12 +1557,13 @@ No hosted provider has been selected or provisioned, and no hosted-sync spend is
 authorized by this checkpoint. Provider evaluation begins only after the full
 M4 gate below passes.
 
-Checkpoint verification includes the full 43-test mobile-store suite, 40 mobile
-workspace/apply and pairing-client/runtime tests, 75 protocol/direct-sync and
-fixture-authority tests, 22 Swift native-security tests, shared Rust/Swift golden
-vectors, frontend/iOS contract checks, and Rust library compilation for both the
-iPhone device and simulator targets. These prove the bounded fixture contracts;
-they do not substitute for the physical-device and external-review gates above.
+Checkpoint verification includes the complete Rust library suite, focused
+migration/pairing/direct-sync/fixture-authority suites, the encrypted cross-layer
+Notes test, 29 Swift native-security tests, 14 Rust Apple-security tests, shared
+Rust/Swift golden vectors, frontend/iOS contract checks, and Rust library
+compilation for both the iPhone device and simulator targets. These prove the
+bounded fixture contracts; they do not substitute for the product-network,
+physical-device, personal-data, and external-review gates above.
 
 Deliverables:
 

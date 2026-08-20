@@ -22,12 +22,18 @@ use crate::{
         ActivateEnrollment, ActivateOutcome, ConfirmEnrollment, ConfirmOutcome, ConsumeInvitation,
         ConsumeOutcome, DirectAuthorityStore, InvitationRegistration, NewInvitation, StoreError,
     },
+    direct_pairing_delivery::{
+        BootstrapDeliveryBinding, BootstrapDeliveryCoordinator, BootstrapDeliveryError,
+        BootstrapDeliveryReplay, BootstrapDeliveryResolution, BootstrapDeliverySnapshot,
+        BootstrapDeliveryStore, BootstrapDeliveryTerminal, BootstrapDeliveryTransport,
+        BootstrapDeliveryVerifier, BootstrapReplayCommit, MacBootstrapDeliverySigner,
+    },
     pairing_protocol::{
         bootstrap_associated_data, bootstrap_envelope_digest, bootstrap_hpke_exporter_context,
         bootstrap_hpke_info, canonical_challenge_plaintext, canonical_client_finish_signed,
         canonical_client_finish_unsigned, canonical_client_hello_signed,
         canonical_client_hello_unsigned, canonical_invitation_signed,
-        canonical_invitation_unsigned, canonical_receipt, canonical_server_finish_unsigned,
+        canonical_invitation_unsigned, canonical_server_finish_unsigned,
         canonical_server_hello_unsigned, challenge_hpke_exporter_context, challenge_hpke_info,
         derive_verification_code, enrollment_confirmation_digest, fixture_bootstrap_metadata,
         invitation_nonce_proof, is_uuid_v7, negotiate_capabilities, pairing_transcript_digest,
@@ -50,6 +56,8 @@ const X25519_PUBLIC_KEY_BYTES: usize = 32;
 const DIGEST_BYTES: usize = 32;
 const NONCE_BYTES: usize = 32;
 const P1363_SIGNATURE_BYTES: usize = 64;
+const BOOTSTRAP_DELIVERY_REPLAY_RATE_WINDOW_MS: i64 = 5 * 60 * 1_000;
+const MAX_BOOTSTRAP_DELIVERY_REPLAYS_PER_WINDOW: i64 = 128;
 
 /// Trusted wall-clock seam. Implementations must read authority-local time;
 /// request bodies never provide timestamps used for expiry or abuse windows.
@@ -100,6 +108,7 @@ pub enum CoordinatorError {
     Database(String),
     Serialization,
     ClockUnavailable,
+    BootstrapDelivery(BootstrapDeliveryError),
     StateUnavailable(&'static str),
 }
 
@@ -111,6 +120,7 @@ impl fmt::Display for CoordinatorError {
             Self::Database(error) => write!(formatter, "direct pairing database error: {error}"),
             Self::Serialization => formatter.write_str("direct pairing serialization failed"),
             Self::ClockUnavailable => formatter.write_str("direct pairing authority clock failed"),
+            Self::BootstrapDelivery(error) => write!(formatter, "{error}"),
             Self::StateUnavailable(reason) => {
                 write!(formatter, "direct pairing state unavailable: {reason}")
             }
@@ -135,6 +145,12 @@ impl From<StoreError> for CoordinatorError {
 impl From<rusqlite::Error> for CoordinatorError {
     fn from(value: rusqlite::Error) -> Self {
         Self::Database(value.to_string())
+    }
+}
+
+impl From<BootstrapDeliveryError> for CoordinatorError {
+    fn from(value: BootstrapDeliveryError) -> Self {
+        Self::BootstrapDelivery(value)
     }
 }
 
@@ -592,6 +608,26 @@ impl<C: PairingCrypto, T: AuthorityClock> DirectPairingCoordinator<C, T> {
         }
     }
 
+    /// Poll the exact approved bootstrap through the same durable pairing
+    /// authority. The request is authenticated by the enrolled phone signing
+    /// key, the response by the Mac pairing key, and every returned byte is
+    /// committed before it can leave this method.
+    pub fn process_bootstrap_poll(
+        &self,
+        bytes: &[u8],
+        transport: &TransportEvidence,
+    ) -> Result<Vec<u8>, CoordinatorError> {
+        let delivery_transport = BootstrapDeliveryTransport {
+            tls_version: transport.tls_version.clone(),
+            used_zero_rtt: transport.used_zero_rtt,
+            peer_spki_sha256: transport.peer_spki_sha256.clone(),
+        };
+        let crypto = PairingBootstrapDeliveryCrypto(self.crypto.as_ref());
+        BootstrapDeliveryCoordinator::new(self, crypto)
+            .handle_poll(bytes, &delivery_transport)
+            .map_err(Into::into)
+    }
+
     fn now_ms(&self) -> Result<i64, CoordinatorError> {
         let value = self
             .clock
@@ -748,14 +784,13 @@ impl<C: PairingCrypto, T: AuthorityClock> DirectPairingCoordinator<C, T> {
             &server_nonce,
             &receipt,
         );
-        let associated_data = canonical_receipt(&receipt);
         let seal = self
             .crypto
             .seal_authenticated(
                 LocalHpkeKey::MacPairing,
                 &hello.client_hpke_public_key,
                 &challenge_hpke_info(&receipt),
-                &associated_data,
+                &receipt.transcript_digest,
                 &canonical_challenge_plaintext(&receipt),
                 &challenge_hpke_exporter_context(&receipt),
             )
@@ -927,6 +962,209 @@ impl<C: PairingCrypto, T: AuthorityClock> DirectPairingCoordinator<C, T> {
             return Err(PairingError::CryptoUnavailable.into());
         }
         serde_json::to_vec(&finish).map_err(|_| CoordinatorError::Serialization)
+    }
+}
+
+struct PairingBootstrapDeliveryCrypto<'a, C: PairingCrypto>(&'a C);
+
+impl<C: PairingCrypto> BootstrapDeliveryVerifier for PairingBootstrapDeliveryCrypto<'_, C> {
+    fn verify_p256_p1363(
+        &self,
+        signer_role: PairingRole,
+        public_key: &[u8; P256_PUBLIC_KEY_BYTES],
+        message: &[u8],
+        signature: &[u8; P1363_SIGNATURE_BYTES],
+    ) -> Result<(), ()> {
+        self.0
+            .verify_signature(signer_role, public_key, message, signature)
+    }
+}
+
+impl<C: PairingCrypto> MacBootstrapDeliverySigner for PairingBootstrapDeliveryCrypto<'_, C> {
+    fn sign_mac_delivery(&self, message: &[u8]) -> Result<[u8; P1363_SIGNATURE_BYTES], ()> {
+        self.0
+            .sign(LocalSigningKey::MacPairing, message)?
+            .try_into()
+            .map_err(|_| ())
+    }
+}
+
+impl<C: PairingCrypto, T: AuthorityClock> BootstrapDeliveryStore
+    for &DirectPairingCoordinator<C, T>
+{
+    type Error = CoordinatorError;
+
+    fn load_delivery(
+        &self,
+        receipt_id: &str,
+    ) -> Result<Option<BootstrapDeliverySnapshot>, Self::Error> {
+        let connection = self.lock_connection()?;
+        let Some(snapshot) = load_receipt(&connection, receipt_id)? else {
+            return Ok(None);
+        };
+        self.validate_receipt_snapshot(&snapshot)?;
+        let binding = BootstrapDeliveryBinding {
+            receipt_id: snapshot.receipt.receipt_id.clone(),
+            device_id: snapshot.receipt.device_id.clone(),
+            transcript_digest: to_array(&snapshot.receipt.transcript_digest)?,
+            tls_spki_sha256: snapshot.tls_spki_sha256,
+            iphone_signing_public_key: snapshot.client_signing_public_key,
+            mac_pairing_signing_public_key: self.bindings.mac_pairing_signing_public_key,
+        };
+        let expired =
+            snapshot.state != "active" && self.now_ms()? >= snapshot.receipt.expires_at_ms;
+        let resolution = if expired {
+            BootstrapDeliveryResolution::Rejected {
+                reason: BootstrapDeliveryTerminal::Expired,
+            }
+        } else {
+            match snapshot.state.as_str() {
+                "pending_user_confirmation" => BootstrapDeliveryResolution::Pending {
+                    retry_after_ms: 500,
+                },
+                "pending_finish" | "active" => BootstrapDeliveryResolution::Ready {
+                    exact_bootstrap_envelope: committed_bootstrap(&snapshot)?.response_bytes,
+                },
+                "cancelled" => BootstrapDeliveryResolution::Rejected {
+                    reason: BootstrapDeliveryTerminal::Cancelled,
+                },
+                "expired" => BootstrapDeliveryResolution::Rejected {
+                    reason: BootstrapDeliveryTerminal::Expired,
+                },
+                "revoked" => BootstrapDeliveryResolution::Rejected {
+                    reason: BootstrapDeliveryTerminal::Revoked,
+                },
+                _ => {
+                    return Err(CoordinatorError::StateUnavailable(
+                        "invalid bootstrap delivery receipt state",
+                    ))
+                }
+            }
+        };
+        Ok(Some(BootstrapDeliverySnapshot {
+            binding,
+            resolution,
+        }))
+    }
+
+    fn load_replay(
+        &self,
+        message_id: &str,
+    ) -> Result<Option<BootstrapDeliveryReplay>, Self::Error> {
+        let connection = self.lock_connection()?;
+        connection
+            .query_row(
+                "SELECT message_id, receipt_id, device_id, tls_spki_sha256,
+                        exact_request_sha256, exact_response_sha256,
+                        exact_response_bytes
+                 FROM direct_bootstrap_delivery_replays WHERE message_id = ?1",
+                [message_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(
+                |(message_id, receipt_id, device_id, pin, request, response, bytes)| {
+                    Ok(BootstrapDeliveryReplay {
+                        message_id,
+                        receipt_id,
+                        device_id,
+                        tls_spki_sha256: to_array(&pin)?,
+                        exact_request_sha256: to_array(&request)?,
+                        exact_response_sha256: to_array(&response)?,
+                        exact_response_bytes: bytes,
+                    })
+                },
+            )
+            .transpose()
+    }
+
+    fn commit_replay(
+        &self,
+        replay: &BootstrapDeliveryReplay,
+    ) -> Result<BootstrapReplayCommit, Self::Error> {
+        let now_ms = self.now_ms()?;
+        let mut connection = self.lock_connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = transaction
+            .query_row(
+                "SELECT message_id, receipt_id, device_id, tls_spki_sha256,
+                        exact_request_sha256, exact_response_sha256,
+                        exact_response_bytes
+                 FROM direct_bootstrap_delivery_replays WHERE message_id = ?1",
+                [&replay.message_id],
+                |row| {
+                    Ok(BootstrapDeliveryReplay {
+                        message_id: row.get(0)?,
+                        receipt_id: row.get(1)?,
+                        device_id: row.get(2)?,
+                        tls_spki_sha256: row
+                            .get::<_, Vec<u8>>(3)?
+                            .try_into()
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        exact_request_sha256: row
+                            .get::<_, Vec<u8>>(4)?
+                            .try_into()
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        exact_response_sha256: row
+                            .get::<_, Vec<u8>>(5)?
+                            .try_into()
+                            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        exact_response_bytes: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            transaction.commit()?;
+            return Ok(
+                if existing.exact_request_sha256 == replay.exact_request_sha256 {
+                    BootstrapReplayCommit::Existing(existing)
+                } else {
+                    BootstrapReplayCommit::Conflict
+                },
+            );
+        }
+        let recent: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM direct_bootstrap_delivery_replays
+             WHERE receipt_id = ?1 AND created_at_ms >= ?2",
+            params![
+                replay.receipt_id,
+                now_ms.saturating_sub(BOOTSTRAP_DELIVERY_REPLAY_RATE_WINDOW_MS)
+            ],
+            |row| row.get(0),
+        )?;
+        if recent >= MAX_BOOTSTRAP_DELIVERY_REPLAYS_PER_WINDOW {
+            return Err(CoordinatorError::Protocol(PairingError::ResourceLimit));
+        }
+        transaction.execute(
+            "INSERT INTO direct_bootstrap_delivery_replays (
+               message_id, receipt_id, device_id, tls_spki_sha256,
+               exact_request_sha256, exact_response_sha256,
+               exact_response_bytes, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                replay.message_id,
+                replay.receipt_id,
+                replay.device_id,
+                replay.tls_spki_sha256.as_slice(),
+                replay.exact_request_sha256.as_slice(),
+                replay.exact_response_sha256.as_slice(),
+                replay.exact_response_bytes,
+                now_ms,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(BootstrapReplayCommit::Inserted)
     }
 }
 

@@ -11,6 +11,15 @@ use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 
+#[cfg(feature = "sanitized-development-fixtures")]
+use noted_apple_security::{
+    encode_record_ciphertext_v1, BootstrapCapabilityV1, BootstrapMetadataV1, RecordCryptoContextV1,
+    RecordCryptoOperationV1, RecordKindV1, SanitizedFixtureRecordCrypto, RECORD_CIPHER_SUITE,
+    RECORD_CRYPTO_CONTEXT_VERSION,
+};
+#[cfg(feature = "sanitized-development-fixtures")]
+use zeroize::Zeroizing;
+
 use tauri_app_lib::direct_authority_store::DirectAuthorityStore;
 use tauri_app_lib::direct_sync::{
     request_signing_bytes, AckRequest, AckResponse, AuthorityStoreError, BootstrapRequest,
@@ -29,8 +38,8 @@ use tauri_app_lib::portable::{
     ScopeClass,
 };
 use tauri_app_lib::sync_protocol::{
-    MutationDraft, ProtocolCapabilities, ProtocolError, ReceiptDisposition, RecordKindCapability,
-    SignedTransaction, SubmitOutcome, TerminalRejection, TransactionHeader,
+    MutationDraft, MutationOperation, ProtocolCapabilities, ProtocolError, ReceiptDisposition,
+    RecordKindCapability, SignedTransaction, SubmitOutcome, TerminalRejection, TransactionHeader,
     DEFAULT_MAX_TRANSACTION_BYTES, SYNC_PROTOCOL_VERSION,
 };
 
@@ -42,6 +51,12 @@ const INVITATION_ID: &str = "018f47a0-7b80-7000-8000-000000000005";
 const RECEIPT_ID: &str = "018f47a0-7b80-7000-8000-000000000006";
 const AUTHORITY_GENERATION: u64 = 7;
 const NOW: i64 = 1_776_000_000_000;
+#[cfg(feature = "sanitized-development-fixtures")]
+const FIXTURE_LIBRARY_KEY: [u8; 32] = [0x71; 32];
+#[cfg(feature = "sanitized-development-fixtures")]
+const PHONE_SIGNING_KEY: [u8; 32] = [0x61; 32];
+#[cfg(feature = "sanitized-development-fixtures")]
+const AUTHORITY_CUSTODY_SIGNING_KEY: [u8; 32] = [0x62; 32];
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(1);
 
@@ -257,6 +272,23 @@ fn seed(database: &TestDatabase) {
             ],
         )
         .unwrap();
+    #[cfg(feature = "sanitized-development-fixtures")]
+    let phone_signing_key = fixture_crypto(PHONE_DEVICE_ID, PHONE_SIGNING_KEY)
+        .signing_public_key()
+        .to_vec();
+    #[cfg(not(feature = "sanitized-development-fixtures"))]
+    let phone_signing_key = {
+        let mut key = vec![0x16_u8; 65];
+        key[0] = 4;
+        key
+    };
+    connection
+        .execute(
+            "UPDATE portable_devices SET public_signing_key = ?2
+             WHERE device_id = ?1 AND role = 'replica'",
+            params![PHONE_DEVICE_ID, phone_signing_key],
+        )
+        .unwrap();
 
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -320,11 +352,7 @@ fn seed(database: &TestDatabase) {
                 PHONE_DEVICE_ID,
                 AUTHORITY_GENERATION,
                 serde_json::to_string(&notes_capabilities()).unwrap(),
-                {
-                    let mut key = vec![0x16_u8; 65];
-                    key[0] = 4;
-                    key
-                },
+                phone_signing_key,
                 vec![0x17_u8; 32],
                 vec![0x18_u8; 32],
                 vec![0x19_u8; 32],
@@ -347,7 +375,121 @@ fn seed(database: &TestDatabase) {
 }
 
 fn adapter(database: &TestDatabase, clock: Arc<TestClock>) -> SqliteDirectSyncAuthority {
-    SqliteDirectSyncAuthority::open_sanitized_fixture(&database.0, LIBRARY_ID, clock).unwrap()
+    #[cfg(feature = "sanitized-development-fixtures")]
+    {
+        let purge_generation: u64 = open(&database.0)
+            .query_row(
+                "SELECT purge_generation FROM libraries WHERE library_id = ?1",
+                [LIBRARY_ID],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+            .try_into()
+            .unwrap();
+        SqliteDirectSyncAuthority::open_sanitized_fixture_with_record_crypto(
+            &database.0,
+            LIBRARY_ID,
+            clock,
+            Arc::new(fixture_crypto_at_purge(
+                MAC_DEVICE_ID,
+                AUTHORITY_CUSTODY_SIGNING_KEY,
+                purge_generation,
+            )),
+        )
+        .unwrap()
+    }
+    #[cfg(not(feature = "sanitized-development-fixtures"))]
+    {
+        SqliteDirectSyncAuthority::open_legacy_sanitized_fixture_for_tests(
+            &database.0,
+            LIBRARY_ID,
+            clock,
+        )
+        .unwrap()
+    }
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+fn fixture_crypto(device_id: &str, signing_key: [u8; 32]) -> SanitizedFixtureRecordCrypto {
+    fixture_crypto_at_purge(device_id, signing_key, 0)
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+fn fixture_crypto_at_purge(
+    device_id: &str,
+    signing_key: [u8; 32],
+    purge_generation: u64,
+) -> SanitizedFixtureRecordCrypto {
+    let capability = BootstrapCapabilityV1 {
+        reader_version: 1,
+        writer_version: Some(1),
+    };
+    SanitizedFixtureRecordCrypto::new(
+        BootstrapMetadataV1 {
+            version: 1,
+            protocol: "noted.direct-pairing.v1".to_owned(),
+            suite: "tls13+p256-p1363+auth-hpke-x25519-hkdfsha256-aes256gcm".to_owned(),
+            sync_protocol_version: 1,
+            environment: "development".to_owned(),
+            library_data_class: "sanitized_fixture".to_owned(),
+            receipt_id: RECEIPT_ID.to_owned(),
+            library_id: LIBRARY_ID.to_owned(),
+            device_id: device_id.to_owned(),
+            authority_generation: AUTHORITY_GENERATION,
+            purge_generation,
+            key_epoch: 1,
+            default_scope_id: SCOPE_ID.to_owned(),
+            default_scope_class: "unknown".to_owned(),
+            granted_scopes: vec![
+                "note".to_owned(),
+                "category".to_owned(),
+                "folder".to_owned(),
+            ],
+            capabilities: BTreeMap::from([
+                ("note".to_owned(), capability),
+                ("category".to_owned(), capability),
+                ("folder".to_owned(), capability),
+            ]),
+            record_cipher_suite: RECORD_CIPHER_SUITE.to_owned(),
+            durable_sync_spki_sha256: [0x81; 32],
+            transcript_digest: [0x82; 32],
+        },
+        Zeroizing::new(FIXTURE_LIBRARY_KEY),
+        Zeroizing::new(signing_key),
+    )
+    .unwrap()
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+fn record_context(draft: &MutationDraft, purge_generation: u64) -> RecordCryptoContextV1 {
+    let record_kind = match draft.record_kind.as_str() {
+        "note" => RecordKindV1::Note,
+        "category" => RecordKindV1::Category,
+        "folder" => RecordKindV1::Folder,
+        _ => panic!("unsupported fixture kind"),
+    };
+    let operation = match draft.operation {
+        MutationOperation::Create => RecordCryptoOperationV1::Create,
+        MutationOperation::Update => RecordCryptoOperationV1::Update,
+        MutationOperation::Delete => RecordCryptoOperationV1::Delete,
+    };
+    RecordCryptoContextV1 {
+        version: RECORD_CRYPTO_CONTEXT_VERSION,
+        cipher_suite: RECORD_CIPHER_SUITE.to_owned(),
+        library_id: LIBRARY_ID.to_owned(),
+        record_id: draft.record_id.clone(),
+        record_kind,
+        schema_version: draft.record_schema_version,
+        base_revision: draft.base_head_revision,
+        base_version_id: draft.base_head_version_id.clone(),
+        proposed_revision: draft.proposed_revision,
+        version_id: draft.version_id.clone(),
+        mutation_id: draft.mutation_id.clone(),
+        authority_generation: AUTHORITY_GENERATION,
+        purge_generation,
+        key_epoch: 1,
+        operation,
+    }
 }
 
 fn fixture_record(record_number: u64, version_number: u64, revision: u64) -> ContextRecordV1 {
@@ -413,9 +555,42 @@ fn transaction_expiring(
     purge_generation: u64,
     expires_at: u64,
 ) -> SignedTransaction {
-    let mut ciphertext = b"fixture-json:".to_vec();
-    ciphertext.extend(serde_json::to_vec(&record).unwrap());
-    SignedTransaction::prepare(
+    let mut draft = MutationDraft {
+        mutation_id: id(mutation_number),
+        operation: if base_revision == 0 {
+            MutationOperation::Create
+        } else if record.lifecycle.state == LifecycleState::Tombstone {
+            MutationOperation::Delete
+        } else {
+            MutationOperation::Update
+        },
+        record_id: record.record_id.clone(),
+        record_kind: record.kind.clone(),
+        record_schema_version: record.record_schema_version,
+        base_head_revision: base_revision,
+        base_head_version_id: base_version_id,
+        proposed_revision: record.revision,
+        version_id: record.version_id.clone(),
+        ciphertext: Vec::new(),
+    };
+    #[cfg(feature = "sanitized-development-fixtures")]
+    {
+        let crypto = fixture_crypto_at_purge(PHONE_DEVICE_ID, PHONE_SIGNING_KEY, purge_generation);
+        let context = record_context(&draft, purge_generation);
+        let plaintext =
+            tauri_app_lib::portable::canonical_json(&serde_json::to_value(&record).unwrap())
+                .into_bytes();
+        let sealed = crypto.seal_record(&context, &plaintext).unwrap();
+        draft.ciphertext = encode_record_ciphertext_v1(&sealed, &context).unwrap();
+    }
+    #[cfg(not(feature = "sanitized-development-fixtures"))]
+    {
+        draft.ciphertext.extend_from_slice(b"fixture-json:");
+        draft
+            .ciphertext
+            .extend(serde_json::to_vec(&record).unwrap());
+    }
+    let prepared = SignedTransaction::prepare(
         TransactionHeader {
             protocol_version: 1,
             library_id: LIBRARY_ID.to_owned(),
@@ -426,22 +601,79 @@ fn transaction_expiring(
             purge_generation,
             key_epoch: 1,
         },
-        vec![MutationDraft {
-            mutation_id: id(mutation_number),
-            record_id: record.record_id.clone(),
-            record_kind: record.kind.clone(),
-            record_schema_version: record.record_schema_version,
-            base_head_revision: base_revision,
-            base_head_version_id: base_version_id,
-            proposed_revision: record.revision,
-            version_id: record.version_id.clone(),
-            ciphertext,
-        }],
+        vec![draft],
         expires_at,
     )
-    .unwrap()
-    .attach_signatures(vec![vec![0x44; 64]])
-    .unwrap()
+    .unwrap();
+    #[cfg(feature = "sanitized-development-fixtures")]
+    {
+        let crypto = fixture_crypto_at_purge(PHONE_DEVICE_ID, PHONE_SIGNING_KEY, purge_generation);
+        let signatures = prepared
+            .signing_inputs()
+            .into_iter()
+            .map(|input| {
+                crypto
+                    .sign_p256_p1363(&input.canonical_bytes)
+                    .unwrap()
+                    .to_vec()
+            })
+            .collect();
+        prepared.attach_signatures(signatures).unwrap()
+    }
+    #[cfg(not(feature = "sanitized-development-fixtures"))]
+    {
+        prepared.attach_signatures(vec![vec![0x44; 64]]).unwrap()
+    }
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+fn replace_ciphertext_and_resign(
+    transaction: &SignedTransaction,
+    ciphertext: Vec<u8>,
+) -> SignedTransaction {
+    let member = transaction.members.first().unwrap();
+    let prepared = SignedTransaction::prepare(
+        TransactionHeader {
+            protocol_version: transaction.manifest.protocol_version,
+            library_id: transaction.manifest.library_id.clone(),
+            transaction_id: transaction.manifest.transaction_id.clone(),
+            device_id: transaction.manifest.device_id.clone(),
+            device_transaction_counter: transaction.manifest.device_transaction_counter,
+            authority_generation: transaction.manifest.authority_generation,
+            purge_generation: transaction.manifest.purge_generation,
+            key_epoch: transaction.manifest.key_epoch,
+        },
+        vec![MutationDraft {
+            mutation_id: member.mutation_id.clone(),
+            operation: member.operation,
+            record_id: member.record_id.clone(),
+            record_kind: member.record_kind.clone(),
+            record_schema_version: member.record_schema_version,
+            base_head_revision: member.base_head_revision,
+            base_head_version_id: member.base_head_version_id.clone(),
+            proposed_revision: member.proposed_revision,
+            version_id: member.version_id.clone(),
+            ciphertext,
+        }],
+        transaction.manifest.expires_at,
+    )
+    .unwrap();
+    let crypto = fixture_crypto_at_purge(
+        PHONE_DEVICE_ID,
+        PHONE_SIGNING_KEY,
+        transaction.manifest.purge_generation,
+    );
+    let signatures = prepared
+        .signing_inputs()
+        .into_iter()
+        .map(|input| {
+            crypto
+                .sign_p256_p1363(&input.canonical_bytes)
+                .unwrap()
+                .to_vec()
+        })
+        .collect();
+    prepared.attach_signatures(signatures).unwrap()
 }
 
 fn request_digest(label: &[u8]) -> [u8; 32] {
@@ -531,6 +763,176 @@ fn prepared_push_survives_restart_and_exact_replay_survives_later_cursor() {
     assert_eq!(replay.exact_response_bytes, b"signed-response-one");
     assert_eq!(replay.receipt.high_water_cursor, 1);
     assert_eq!(reopened.pull(0, 10).unwrap().high_water_cursor, 2);
+}
+
+#[cfg(not(feature = "sanitized-development-fixtures"))]
+#[test]
+fn ordinary_constructor_never_materializes_legacy_fixture_plaintext() {
+    let database = TestDatabase::new();
+    seed(&database);
+    let clock: Arc<dyn FixtureAuthorityClock> = Arc::new(TestClock::new(NOW));
+    let authority =
+        SqliteDirectSyncAuthority::open_sanitized_fixture(&database.0, LIBRARY_ID, clock).unwrap();
+    let signed = transaction(1, 310, 311, fixture_record(312, 313, 1), 0, None, 0);
+    let prepared = prepare(
+        &authority,
+        314,
+        b"legacy-plaintext-must-fail-closed",
+        signed,
+        NOW as u64,
+    );
+    assert!(matches!(
+        authority.finalize_push(&prepared, 200, b"must-not-commit", NOW as u64),
+        Err(DurableAuthorityError::StateUnavailable(
+            "fixture record custody is unavailable"
+        ))
+    ));
+    assert_eq!(
+        open(&database.0)
+            .query_row("SELECT COUNT(*) FROM portable_records", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+#[test]
+fn nrc1_materialization_requires_custody_then_survives_restart_with_historical_key() {
+    let database = TestDatabase::new();
+    seed(&database);
+    let clock = Arc::new(TestClock::new(NOW));
+    let signed = transaction(1, 320, 321, fixture_record(322, 323, 1), 0, None, 0);
+    assert!(signed.members[0].ciphertext.starts_with(b"NRC1"));
+    assert!(!signed.members[0]
+        .ciphertext
+        .windows(b"sanitized".len())
+        .any(|window| window == b"sanitized"));
+
+    let without_custody = SqliteDirectSyncAuthority::open_sanitized_fixture(
+        &database.0,
+        LIBRARY_ID,
+        Arc::clone(&clock) as Arc<dyn FixtureAuthorityClock>,
+    )
+    .unwrap();
+    let prepared = prepare(
+        &without_custody,
+        324,
+        b"custody-required",
+        signed.clone(),
+        NOW as u64,
+    );
+    assert!(matches!(
+        without_custody.finalize_push(&prepared, 200, b"must-not-commit", NOW as u64),
+        Err(DurableAuthorityError::StateUnavailable(
+            "fixture record custody is unavailable"
+        ))
+    ));
+    let connection = open(&database.0);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT high_water_cursor FROM direct_authority_profiles WHERE library_id = ?1",
+                [LIBRARY_ID],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM portable_records", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(connection);
+
+    let with_custody = adapter(&database, Arc::clone(&clock));
+    let prepared = prepare(
+        &with_custody,
+        324,
+        b"custody-required",
+        signed,
+        NOW as u64 + 1,
+    );
+    with_custody
+        .finalize_push(&prepared, 200, b"committed", NOW as u64 + 1)
+        .unwrap();
+    drop(with_custody);
+
+    let reopened = adapter(&database, clock);
+    let snapshot = reopened.bootstrap().unwrap();
+    assert_eq!(snapshot.high_water_cursor, 1);
+    assert_eq!(snapshot.records.len(), 1);
+    assert!(snapshot.records[0].mutation.ciphertext.starts_with(b"NRC1"));
+    assert_eq!(
+        tauri_app_lib::direct_sync::DirectSyncEnrollment::historical_writer_signing_public_key(
+            &reopened,
+            PHONE_DEVICE_ID,
+            LIBRARY_ID,
+            Environment::Development,
+            AUTHORITY_GENERATION,
+        )
+        .unwrap(),
+        fixture_crypto(PHONE_DEVICE_ID, PHONE_SIGNING_KEY)
+            .signing_public_key()
+            .to_vec()
+    );
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+#[test]
+fn valid_outer_signature_cannot_hide_tampered_nrc1_inner_signature() {
+    let database = TestDatabase::new();
+    seed(&database);
+    let clock = Arc::new(TestClock::new(NOW));
+    let authority = adapter(&database, clock);
+    let original = transaction(1, 330, 331, fixture_record(332, 333, 1), 0, None, 0);
+    let mut ciphertext = original.members[0].ciphertext.clone();
+    // NRC1: magic + version + length + nonce + context/envelope digests,
+    // followed by the fixed-width inner P-256 signature.
+    let inner_signature_offset = 4 + 4 + 4 + 12 + 32 + 32;
+    ciphertext[inner_signature_offset] ^= 0x01;
+    let tampered = replace_ciphertext_and_resign(&original, ciphertext);
+    assert!(SanitizedFixtureRecordCrypto::verify_p256_p1363(
+        &fixture_crypto(PHONE_DEVICE_ID, PHONE_SIGNING_KEY).signing_public_key(),
+        &tampered.members[0].signing_bytes(),
+        &tampered.members[0].signature,
+    )
+    .unwrap());
+
+    let prepared = prepare(
+        &authority,
+        334,
+        b"tampered-inner-signature",
+        tampered,
+        NOW as u64,
+    );
+    assert!(matches!(
+        authority.finalize_push(&prepared, 200, b"must-not-commit", NOW as u64),
+        Err(DurableAuthorityError::StateUnavailable(
+            "fixture record authentication or decryption failed"
+        ))
+    ));
+    let connection = open(&database.0);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT high_water_cursor FROM direct_authority_profiles WHERE library_id = ?1",
+                [LIBRARY_ID],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM record_heads", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -813,11 +1215,27 @@ impl DirectSyncCrypto for RouteCrypto {
         device_id: &str,
         mutation: &tauri_app_lib::sync_protocol::MutationEnvelope,
     ) -> Result<(), ()> {
-        (mutation.device_id == device_id
-            && mutation.ciphertext.starts_with(b"fixture-json:")
-            && !mutation.signature.is_empty())
-        .then_some(())
-        .ok_or(())
+        #[cfg(feature = "sanitized-development-fixtures")]
+        {
+            (mutation.device_id == device_id
+                && mutation.ciphertext.starts_with(b"NRC1")
+                && SanitizedFixtureRecordCrypto::verify_p256_p1363(
+                    &fixture_crypto(PHONE_DEVICE_ID, PHONE_SIGNING_KEY).signing_public_key(),
+                    &mutation.signing_bytes(),
+                    &mutation.signature,
+                )
+                .map_err(|_| ())?)
+            .then_some(())
+            .ok_or(())
+        }
+        #[cfg(not(feature = "sanitized-development-fixtures"))]
+        {
+            (mutation.device_id == device_id
+                && mutation.ciphertext.starts_with(b"fixture-json:")
+                && !mutation.signature.is_empty())
+            .then_some(())
+            .ok_or(())
+        }
     }
 
     fn authenticate_response(

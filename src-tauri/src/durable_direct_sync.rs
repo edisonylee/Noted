@@ -8,10 +8,10 @@
 //!
 //! There is deliberately no listener, personal-data constructor, key access,
 //! or production-mode switch here.  The only constructor verifies an existing
-//! sanitized-development v3 authority database and the portable Notes schema.
+//! sanitized-development v4 authority database and the portable Notes schema.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -21,6 +21,14 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+#[cfg(feature = "sanitized-development-fixtures")]
+use noted_apple_security::{
+    decode_record_ciphertext_v1, RecordCryptoContextV1, RecordCryptoOperationV1, RecordKindV1,
+    SanitizedFixtureRecordCrypto, RECORD_CIPHER_SUITE, RECORD_CRYPTO_CONTEXT_VERSION,
+};
+#[cfg(feature = "sanitized-development-fixtures")]
+use sha2::{Digest, Sha256};
 
 use crate::direct_authority_store::{
     AckOutcome, AcknowledgeCheckpoint, CheckpointOutcome, DirectAuthorityStore, IssueCheckpoint,
@@ -40,11 +48,12 @@ use crate::portable::{
 use crate::sync_protocol::{
     negotiate_capabilities, AcceptedChange, AcceptedHead, BootstrapRecord, BootstrapSnapshot,
     ChangePage, HeadAdvance, HeadConflict, MutationEnvelope, ProtocolCapabilities, ProtocolError,
-    ReceiptDisposition, SignedTransaction, SubmitOutcome, TerminalRejection, TransactionReceipt,
-    BOOTSTRAP_SNAPSHOT_VERSION, MAX_PULL_PAGE_CHANGES,
+    ReceiptDisposition, RecordKindCapability, SignedTransaction, SubmitOutcome, TerminalRejection,
+    TransactionReceipt, BOOTSTRAP_SNAPSHOT_VERSION, MAX_PULL_PAGE_CHANGES, SYNC_PROTOCOL_VERSION,
 };
 
-const FIXTURE_CIPHERTEXT_PREFIX: &[u8] = b"fixture-json:";
+#[cfg(all(not(feature = "sanitized-development-fixtures"), debug_assertions))]
+const LEGACY_FIXTURE_CIPHERTEXT_PREFIX: &[u8] = b"fixture-json:";
 const DIRECT_PUSH_ENDPOINT: &str = "/sync/v1/push";
 const DIRECT_ACK_ENDPOINT: &str = "/sync/v1/ack";
 const MAX_EXACT_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -168,11 +177,108 @@ struct StoredTransaction {
     receipt: Option<TransactionReceipt>,
 }
 
+/// The durable sequencer stores opaque ciphertext, but accepted fixture
+/// writes also update the local portable projection. Materialization is an
+/// explicit cryptographic boundary so the feature-enabled runtime can never
+/// silently treat ciphertext as plaintext JSON.
+trait FixtureRecordMaterializer: Send + Sync {
+    fn open_record(
+        &self,
+        member: &MutationEnvelope,
+        authority_authenticated_writer_key: &[u8],
+    ) -> Result<ContextRecordV1, DurableAuthorityError>;
+}
+
+struct FailClosedFixtureRecordMaterializer;
+
+impl FixtureRecordMaterializer for FailClosedFixtureRecordMaterializer {
+    fn open_record(
+        &self,
+        _member: &MutationEnvelope,
+        _authority_authenticated_writer_key: &[u8],
+    ) -> Result<ContextRecordV1, DurableAuthorityError> {
+        Err(DurableAuthorityError::StateUnavailable(
+            "fixture record custody is unavailable",
+        ))
+    }
+}
+
+#[cfg(all(not(feature = "sanitized-development-fixtures"), debug_assertions))]
+struct LegacyFixtureRecordMaterializer;
+
+#[cfg(all(not(feature = "sanitized-development-fixtures"), debug_assertions))]
+impl FixtureRecordMaterializer for LegacyFixtureRecordMaterializer {
+    fn open_record(
+        &self,
+        member: &MutationEnvelope,
+        _authority_authenticated_writer_key: &[u8],
+    ) -> Result<ContextRecordV1, DurableAuthorityError> {
+        decode_legacy_fixture_record(member)
+    }
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+struct Nrc1FixtureRecordMaterializer {
+    custody: Arc<SanitizedFixtureRecordCrypto>,
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+impl FixtureRecordMaterializer for Nrc1FixtureRecordMaterializer {
+    fn open_record(
+        &self,
+        member: &MutationEnvelope,
+        authority_authenticated_writer_key: &[u8],
+    ) -> Result<ContextRecordV1, DurableAuthorityError> {
+        if member.signature.len() != 64
+            || !SanitizedFixtureRecordCrypto::verify_p256_p1363(
+                authority_authenticated_writer_key,
+                &member.signing_bytes(),
+                &member.signature,
+            )
+            .map_err(|_| {
+                DurableAuthorityError::StateUnavailable(
+                    "fixture mutation signature verification failed",
+                )
+            })?
+        {
+            return Err(DurableAuthorityError::StateUnavailable(
+                "fixture mutation signature is invalid",
+            ));
+        }
+        let context = nrc1_context(member)?;
+        let sealed = decode_record_ciphertext_v1(&member.ciphertext, &context).map_err(|_| {
+            DurableAuthorityError::StateUnavailable("fixture NRC1 container is invalid")
+        })?;
+        let opened = self
+            .custody
+            .open_record(&context, &sealed, authority_authenticated_writer_key)
+            .map_err(|_| {
+                DurableAuthorityError::StateUnavailable(
+                    "fixture record authentication or decryption failed",
+                )
+            })?;
+        let record: ContextRecordV1 = serde_json::from_slice(&opened.plaintext).map_err(|_| {
+            DurableAuthorityError::StateUnavailable("fixture record is not valid JSON")
+        })?;
+        validate_opened_record(member, &record)?;
+        let canonical = canonical_json(&serde_json::to_value(&record).map_err(|_| {
+            DurableAuthorityError::StateUnavailable("fixture record serialization failed")
+        })?);
+        if canonical.as_bytes() != opened.plaintext {
+            return Err(DurableAuthorityError::StateUnavailable(
+                "fixture record plaintext is not canonical",
+            ));
+        }
+        Ok(record)
+    }
+}
+
 #[derive(Clone)]
 pub struct SqliteDirectSyncAuthority {
     database_path: PathBuf,
     library_id: String,
     clock: Arc<dyn FixtureAuthorityClock>,
+    record_materializer: Arc<dyn FixtureRecordMaterializer>,
 }
 
 impl SqliteDirectSyncAuthority {
@@ -188,12 +294,55 @@ impl SqliteDirectSyncAuthority {
             database_path: database_path.as_ref().to_path_buf(),
             library_id: library_id.to_owned(),
             clock,
+            record_materializer: Arc::new(FailClosedFixtureRecordMaterializer),
         };
         let connection = adapter.open_connection()?;
         DirectAuthorityStore::verify_schema(&connection)?;
         require_portable_notes_schema(&connection)?;
         let profile = load_profile(&connection, &adapter.library_id)?;
         require_notes_capabilities(&profile.capabilities)?;
+        Ok(adapter)
+    }
+
+    /// Compatibility seam for the pre-NRC1 durable tests. It is not present
+    /// in optimized production builds and must never be selected by a runtime.
+    #[cfg(all(not(feature = "sanitized-development-fixtures"), debug_assertions))]
+    pub fn open_legacy_sanitized_fixture_for_tests(
+        database_path: impl AsRef<Path>,
+        library_id: &str,
+        clock: Arc<dyn FixtureAuthorityClock>,
+    ) -> Result<Self, DurableAuthorityError> {
+        let mut adapter = Self::open_sanitized_fixture(database_path, library_id, clock)?;
+        adapter.record_materializer = Arc::new(LegacyFixtureRecordMaterializer);
+        Ok(adapter)
+    }
+
+    /// Open the generated development fixture with explicit NRC1 custody.
+    /// The ordinary constructor remains useful for read-only bootstrap, but
+    /// feature-enabled writes fail closed until this constructor is used.
+    #[cfg(feature = "sanitized-development-fixtures")]
+    pub fn open_sanitized_fixture_with_record_crypto(
+        database_path: impl AsRef<Path>,
+        library_id: &str,
+        clock: Arc<dyn FixtureAuthorityClock>,
+        custody: Arc<SanitizedFixtureRecordCrypto>,
+    ) -> Result<Self, DurableAuthorityError> {
+        let mut adapter = Self::open_sanitized_fixture(database_path, library_id, clock)?;
+        let connection = adapter.open_connection()?;
+        let profile = load_profile(&connection, &adapter.library_id)?;
+        let metadata = custody.bootstrap_metadata();
+        if metadata.library_id != profile.library_id
+            || metadata.authority_generation != profile.authority_generation
+            || metadata.purge_generation != profile.purge_generation
+            || metadata.key_epoch != profile.key_epoch
+            || metadata.environment != "development"
+            || metadata.library_data_class != "sanitized_fixture"
+        {
+            return Err(DurableAuthorityError::InvalidInput(
+                "fixture_record_crypto_binding",
+            ));
+        }
+        adapter.record_materializer = Arc::new(Nrc1FixtureRecordMaterializer { custody });
         Ok(adapter)
     }
 
@@ -379,7 +528,14 @@ impl SqliteDirectSyncAuthority {
             if receipt != prepared.receipt {
                 return Err(DurableAuthorityError::StateChanged);
             }
-            finalize_transaction(database, &profile, &stored.transaction, &receipt, now_ms)?;
+            finalize_transaction(
+                database,
+                &profile,
+                &stored.transaction,
+                &receipt,
+                now_ms,
+                self.record_materializer.as_ref(),
+            )?;
             insert_request_replay(
                 database,
                 &stored.transaction.manifest.device_id,
@@ -611,7 +767,14 @@ impl DirectSyncAuthority for SqliteDirectSyncAuthority {
             }
             let profile = load_profile(database, &self.library_id)?;
             let receipt = candidate_receipt(database, &profile, &stored.transaction, now)?;
-            finalize_transaction(database, &profile, &stored.transaction, &receipt, now_ms)?;
+            finalize_transaction(
+                database,
+                &profile,
+                &stored.transaction,
+                &receipt,
+                now_ms,
+                self.record_materializer.as_ref(),
+            )?;
             Ok(SubmitOutcome::Terminal(receipt))
         })
         .map_err(Into::into)
@@ -837,6 +1000,52 @@ impl DirectSyncEnrollment for SqliteDirectSyncAuthority {
         })
     }
 
+    fn historical_writer_signing_public_key(
+        &self,
+        device_id: &str,
+        library_id: &str,
+        environment: Environment,
+        authority_generation: u64,
+    ) -> Result<Vec<u8>, EnrollmentAuthorizationError> {
+        self.write(|database| {
+            if library_id != self.library_id || environment != Environment::Development {
+                return Err(DurableAuthorityError::InvalidInput("writer_key_binding"));
+            }
+            let profile = load_profile(database, &self.library_id)?;
+            if profile.authority_generation != authority_generation {
+                return Err(DurableAuthorityError::InvalidInput("writer_key_binding"));
+            }
+            let row: Option<(String, String, String, Option<Vec<u8>>)> = database
+                .query_row(
+                    "SELECT library_id, role, enrollment_state, public_signing_key
+                     FROM portable_devices WHERE device_id = ?1",
+                    [device_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            let Some((writer_library, role, state, key)) = row else {
+                return Err(DurableAuthorityError::Protocol(
+                    ProtocolError::DeviceUnknown,
+                ));
+            };
+            let key = key.ok_or(DurableAuthorityError::StateUnavailable(
+                "historical writer signing key is missing",
+            ))?;
+            if writer_library != self.library_id
+                || role != "replica"
+                || !matches!(state.as_str(), "active" | "revoked")
+                || key.len() != 65
+                || key.first() != Some(&0x04)
+            {
+                return Err(DurableAuthorityError::StateUnavailable(
+                    "historical writer signing key is invalid",
+                ));
+            }
+            Ok(key)
+        })
+        .map_err(map_durable_enrollment_error)
+    }
+
     fn revoke_device(
         &self,
         device_id: &str,
@@ -948,20 +1157,50 @@ fn durable_enrollment_capabilities(
     }
     let granted_scopes: BTreeSet<String> = serde_json::from_str(&scopes_json)
         .map_err(|_| DurableAuthorityError::StateUnavailable("granted scopes are invalid"))?;
-    let receipt_capabilities: ProtocolCapabilities =
-        serde_json::from_str(&receipt_capabilities_json).map_err(|_| {
-            DurableAuthorityError::StateUnavailable("enrollment capabilities are invalid")
-        })?;
-    let device_capabilities: ProtocolCapabilities = serde_json::from_str(&device_capabilities_json)
-        .map_err(|_| DurableAuthorityError::StateUnavailable("device capabilities are invalid"))?;
-    receipt_capabilities.validate()?;
-    device_capabilities.validate()?;
+    let receipt_capabilities =
+        decode_enrollment_capabilities(&receipt_capabilities_json, &profile.capabilities)?;
+    let device_capabilities =
+        decode_enrollment_capabilities(&device_capabilities_json, &profile.capabilities)?;
     if receipt_capabilities != device_capabilities {
         return Err(DurableAuthorityError::StateUnavailable(
             "device and enrollment capabilities disagree",
         ));
     }
     Ok((granted_scopes, receipt_capabilities))
+}
+
+fn decode_enrollment_capabilities(
+    encoded: &str,
+    authority_capabilities: &ProtocolCapabilities,
+) -> Result<ProtocolCapabilities, DurableAuthorityError> {
+    if let Ok(capabilities) = serde_json::from_str::<ProtocolCapabilities>(encoded) {
+        capabilities.validate()?;
+        return Ok(capabilities);
+    }
+    let pairing = serde_json::from_str::<BTreeMap<RecordKind, KindCapability>>(encoded).map_err(
+        |_| DurableAuthorityError::StateUnavailable("enrollment capabilities are invalid"),
+    )?;
+    let record_kinds = pairing
+        .into_iter()
+        .map(|(kind, capability)| {
+            (
+                pairing_record_kind_name(kind).to_owned(),
+                RecordKindCapability::new(
+                    capability.reader_version,
+                    capability.writer_version.unwrap_or(0),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut capabilities = ProtocolCapabilities::new(
+        SYNC_PROTOCOL_VERSION,
+        SYNC_PROTOCOL_VERSION,
+        record_kinds,
+    );
+    capabilities.max_transaction_members = authority_capabilities.max_transaction_members;
+    capabilities.max_transaction_bytes = authority_capabilities.max_transaction_bytes;
+    capabilities.validate()?;
+    Ok(capabilities)
 }
 
 #[derive(Debug)]
@@ -1360,6 +1599,7 @@ fn finalize_transaction(
     transaction: &SignedTransaction,
     receipt: &TransactionReceipt,
     authority_now_ms: i64,
+    record_materializer: &dyn FixtureRecordMaterializer,
 ) -> Result<(), DurableAuthorityError> {
     let (state, accepted_cursor) = match &receipt.disposition {
         ReceiptDisposition::Accepted { .. } => ("accepted", Some(receipt.high_water_cursor)),
@@ -1370,7 +1610,13 @@ fn finalize_transaction(
         if receipt.high_water_cursor != profile.high_water_cursor + 1 {
             return Err(DurableAuthorityError::StateChanged);
         }
-        materialize_fixture_transaction(database, transaction, receipt, authority_now_ms)?;
+        materialize_fixture_transaction(
+            database,
+            transaction,
+            receipt,
+            authority_now_ms,
+            record_materializer,
+        )?;
         let changed = database.execute(
             "UPDATE direct_authority_profiles
              SET high_water_cursor = ?2, state_revision = state_revision + 1,
@@ -1434,6 +1680,7 @@ fn materialize_fixture_transaction(
     transaction: &SignedTransaction,
     receipt: &TransactionReceipt,
     authority_now_ms: i64,
+    record_materializer: &dyn FixtureRecordMaterializer,
 ) -> Result<(), DurableAuthorityError> {
     let accepted_at = portable_timestamp(authority_now_ms)?;
     database.execute(
@@ -1457,7 +1704,12 @@ fn materialize_fixture_transaction(
     let mut members = transaction.members.iter().collect::<Vec<_>>();
     members.sort_by_key(|member| member.transaction_member_index);
     for member in members {
-        let record = decode_fixture_record(member)?;
+        let writer_key = historical_writer_key_for_materialization(
+            database,
+            &transaction.manifest.library_id,
+            &member.device_id,
+        )?;
+        let record = record_materializer.open_record(member, &writer_key)?;
         require_record_scope(database, &record)?;
         let existing: Option<(String, String)> = database
             .query_row(
@@ -1467,7 +1719,15 @@ fn materialize_fixture_transaction(
             )
             .optional()?;
         if let Some((library_id, source_table)) = existing {
-            if library_id != record.library_id || source_table != DIRECT_FIXTURE_SOURCE {
+            let expected_source = match record.kind.as_str() {
+                "note" => "notes",
+                "category" => "categories",
+                "folder" => "note_folders",
+                _ => return Err(DurableAuthorityError::FixtureOnly),
+            };
+            if library_id != record.library_id
+                || !matches_source(&source_table, expected_source)
+            {
                 return Err(DurableAuthorityError::FixtureOnly);
             }
             database.execute(
@@ -1583,15 +1843,28 @@ fn materialize_fixture_transaction(
     Ok(())
 }
 
-fn decode_fixture_record(
+fn matches_source(source_table: &str, seeded_source: &str) -> bool {
+    source_table == DIRECT_FIXTURE_SOURCE || source_table == seeded_source
+}
+
+#[cfg(all(not(feature = "sanitized-development-fixtures"), debug_assertions))]
+fn decode_legacy_fixture_record(
     member: &MutationEnvelope,
 ) -> Result<ContextRecordV1, DurableAuthorityError> {
     let bytes = member
         .ciphertext
-        .strip_prefix(FIXTURE_CIPHERTEXT_PREFIX)
+        .strip_prefix(LEGACY_FIXTURE_CIPHERTEXT_PREFIX)
         .ok_or(DurableAuthorityError::FixtureOnly)?;
     let record: ContextRecordV1 = serde_json::from_slice(bytes)
         .map_err(|_| DurableAuthorityError::StateUnavailable("fixture record is not valid JSON"))?;
+    validate_opened_record(member, &record)?;
+    Ok(record)
+}
+
+fn validate_opened_record(
+    member: &MutationEnvelope,
+    record: &ContextRecordV1,
+) -> Result<(), DurableAuthorityError> {
     record.validate().map_err(|_| {
         DurableAuthorityError::StateUnavailable("fixture record contract is invalid")
     })?;
@@ -1601,12 +1874,113 @@ fn decode_fixture_record(
         || record.record_schema_version != member.record_schema_version
         || record.revision != member.proposed_revision
         || record.version_id != member.version_id
+        || match member.operation {
+            crate::sync_protocol::MutationOperation::Delete => {
+                record.lifecycle.state != LifecycleState::Tombstone
+            }
+            crate::sync_protocol::MutationOperation::Create
+            | crate::sync_protocol::MutationOperation::Update => {
+                record.lifecycle.state == LifecycleState::Tombstone
+            }
+        }
     {
         return Err(DurableAuthorityError::StateUnavailable(
             "fixture record does not match mutation envelope",
         ));
     }
-    Ok(record)
+    Ok(())
+}
+
+fn historical_writer_key_for_materialization(
+    database: &Transaction<'_>,
+    library_id: &str,
+    device_id: &str,
+) -> Result<Vec<u8>, DurableAuthorityError> {
+    let row: Option<(String, String, String, Option<Vec<u8>>)> = database
+        .query_row(
+            "SELECT library_id, role, enrollment_state, public_signing_key
+             FROM portable_devices WHERE device_id = ?1",
+            [device_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((writer_library_id, role, enrollment_state, key)) = row else {
+        return Err(DurableAuthorityError::Protocol(
+            ProtocolError::DeviceUnknown,
+        ));
+    };
+    let key = key.ok_or(DurableAuthorityError::StateUnavailable(
+        "historical writer signing key is missing",
+    ))?;
+    if writer_library_id != library_id
+        || role != "replica"
+        || !matches!(enrollment_state.as_str(), "active" | "revoked")
+        || key.len() != 65
+        || key.first() != Some(&0x04)
+    {
+        return Err(DurableAuthorityError::StateUnavailable(
+            "historical writer signing key is invalid",
+        ));
+    }
+    Ok(key)
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+fn nrc1_context(member: &MutationEnvelope) -> Result<RecordCryptoContextV1, DurableAuthorityError> {
+    if member.protocol_version != crate::sync_protocol::SYNC_PROTOCOL_VERSION
+        || member.ciphertext_hash != hex_lower(&Sha256::digest(&member.ciphertext))
+    {
+        return Err(DurableAuthorityError::StateUnavailable(
+            "fixture mutation binding is invalid",
+        ));
+    }
+    let record_kind = match member.record_kind.as_str() {
+        "note" => RecordKindV1::Note,
+        "category" => RecordKindV1::Category,
+        "folder" => RecordKindV1::Folder,
+        _ => {
+            return Err(DurableAuthorityError::StateUnavailable(
+                "fixture record kind is unsupported",
+            ))
+        }
+    };
+    let operation = match member.operation {
+        crate::sync_protocol::MutationOperation::Create => RecordCryptoOperationV1::Create,
+        crate::sync_protocol::MutationOperation::Update => RecordCryptoOperationV1::Update,
+        crate::sync_protocol::MutationOperation::Delete => RecordCryptoOperationV1::Delete,
+    };
+    let context = RecordCryptoContextV1 {
+        version: RECORD_CRYPTO_CONTEXT_VERSION,
+        cipher_suite: RECORD_CIPHER_SUITE.to_owned(),
+        library_id: member.library_id.clone(),
+        record_id: member.record_id.clone(),
+        record_kind,
+        schema_version: member.record_schema_version,
+        base_revision: member.base_head_revision,
+        base_version_id: member.base_head_version_id.clone(),
+        proposed_revision: member.proposed_revision,
+        version_id: member.version_id.clone(),
+        mutation_id: member.mutation_id.clone(),
+        authority_generation: member.authority_generation,
+        purge_generation: member.purge_generation,
+        key_epoch: member.key_epoch,
+        operation,
+    };
+    context.validate().map_err(|_| {
+        DurableAuthorityError::StateUnavailable("fixture record context is invalid")
+    })?;
+    Ok(context)
+}
+
+#[cfg(feature = "sanitized-development-fixtures")]
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
 
 fn require_record_scope(

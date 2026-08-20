@@ -7,8 +7,11 @@ private let identityService = "com.noted.app.apple-security.identity.v1"
 @available(iOS 17.0, macOS 14.0, *)
 public final class IdentityVault: @unchecked Sendable {
   private let queue = DispatchQueue(label: "com.noted.app.apple-security.identity-vault")
-  private let store: KeychainIdentityStore
+  private let store: any IdentityRecordStore
   private let now: @Sendable () -> Int64
+  private let keyPairValidator: @Sendable (IdentityRecord) throws -> Void
+  private let recordNonceProvider: RecordCryptoContractV1.NonceProvider
+  private let recordSigner: @Sendable (IdentityRecord, Data) throws -> Data
 
   public init(
     accessGroup: String? = nil,
@@ -18,6 +21,25 @@ public final class IdentityVault: @unchecked Sendable {
   ) {
     self.store = KeychainIdentityStore(accessGroup: accessGroup)
     self.now = now
+    self.keyPairValidator = { try AppleCrypto.validateKeyPair(record: $0) }
+    self.recordNonceProvider = { try AppleCrypto.secureRandomBytes(count: 12) }
+    self.recordSigner = { try AppleCrypto.sign(record: $0, message: $1) }
+  }
+
+  /// Internal dependency seam for host Keychain-store tests. The public
+  /// initializer always uses Data Protection Keychain + native cryptography.
+  init(
+    store: any IdentityRecordStore,
+    now: @escaping @Sendable () -> Int64,
+    keyPairValidator: @escaping @Sendable (IdentityRecord) throws -> Void,
+    recordNonceProvider: @escaping RecordCryptoContractV1.NonceProvider,
+    recordSigner: @escaping @Sendable (IdentityRecord, Data) throws -> Data
+  ) {
+    self.store = store
+    self.now = now
+    self.keyPairValidator = keyPairValidator
+    self.recordNonceProvider = recordNonceProvider
+    self.recordSigner = recordSigner
   }
 
   public func prepareIdentity(
@@ -64,7 +86,9 @@ public final class IdentityVault: @unchecked Sendable {
       // Inventory is the recovery entry point for pre-contract pending
       // bootstraps. Expose only their identity tombstone candidate; the public
       // descriptor deliberately omits a metadata-less bootstrap binding.
-      try records.forEach { try validate($0, allowLegacyPendingBootstrap: true) }
+      for record in records {
+        try validate(record, allowLegacyPendingBootstrap: true)
+      }
       let descriptors = records.map { $0.publicDescriptor() }
       return IdentityInventory(
         pending: descriptors.filter { $0.lifecycle == .pending }.sorted { $0.handle < $1.handle },
@@ -80,6 +104,42 @@ public final class IdentityVault: @unchecked Sendable {
       let record = try store.load(handle: try validatedHandle(handle))
       try validate(record)
       return try AppleCrypto.sign(record: record, message: message)
+    }
+  }
+
+  public func sealRecord(
+    identityHandle: String,
+    context: RecordCryptoContextV1,
+    plaintext: Data
+  ) throws -> RecordCiphertextDescriptorV1 {
+    try queue.sync {
+      let record = try store.load(handle: try validatedHandle(identityHandle))
+      try validate(record)
+      return try RecordCryptoContractV1.seal(
+        record: record,
+        context: context,
+        plaintext: plaintext,
+        nonceProvider: recordNonceProvider,
+        signer: { try self.recordSigner(record, $0) })
+    }
+  }
+
+  /// `expectedSignerPublicKey` must come from an independently authenticated
+  /// device-key directory. No key embedded beside the ciphertext is trusted.
+  public func openRecord(
+    identityHandle: String,
+    context: RecordCryptoContextV1,
+    sealed: RecordCiphertextDescriptorV1,
+    expectedSignerPublicKey: Data
+  ) throws -> OpenedRecordDescriptorV1 {
+    try queue.sync {
+      let record = try store.load(handle: try validatedHandle(identityHandle))
+      try validate(record)
+      return try RecordCryptoContractV1.open(
+        record: record,
+        context: context,
+        sealed: sealed,
+        expectedSignerPublicKey: expectedSignerPublicKey)
     }
   }
 
@@ -257,7 +317,7 @@ public final class IdentityVault: @unchecked Sendable {
       else {
         throw NotedSecurityError.identityCorrupted("invalid pending lifecycle fields")
       }
-      try AppleCrypto.validateKeyPair(record: record)
+      try keyPairValidator(record)
     case .active:
       guard record.signingKeyRepresentation != nil,
         record.agreementPrivateKey?.count == 32,
@@ -267,7 +327,7 @@ public final class IdentityVault: @unchecked Sendable {
       else {
         throw NotedSecurityError.identityCorrupted("invalid active lifecycle fields")
       }
-      try AppleCrypto.validateKeyPair(record: record)
+      try keyPairValidator(record)
     case .discarded:
       guard record.signingKeyRepresentation == nil,
         record.agreementPrivateKey == nil,
@@ -278,6 +338,13 @@ public final class IdentityVault: @unchecked Sendable {
       }
     }
   }
+}
+
+protocol IdentityRecordStore: Sendable {
+  func add(_ record: IdentityRecord) throws
+  func load(handle: String) throws -> IdentityRecord
+  func loadAll() throws -> [IdentityRecord]
+  func replace(_ record: IdentityRecord) throws
 }
 
 /// Keeps the one legacy recovery exception narrow and independently testable:
@@ -321,7 +388,7 @@ enum IdentityBootstrapValidator {
   }
 }
 
-private struct KeychainIdentityStore: Sendable {
+struct KeychainIdentityStore: IdentityRecordStore, Sendable {
   let accessGroup: String?
 
   func add(_ record: IdentityRecord) throws {

@@ -24,11 +24,17 @@ const BASELINE_MIGRATION: crate::migrations::MigrationDescriptor<'static> =
         "legacy-additive-baseline",
         "92aed657051490183fd931d523bc2146522f0e6094d176da9479b0be91d61659",
     );
-const DIRECT_AUTHORITY_MIGRATION: crate::migrations::MigrationDescriptor<'static> =
+const DIRECT_AUTHORITY_MIGRATION_V3: crate::migrations::MigrationDescriptor<'static> =
     crate::migrations::MigrationDescriptor::new(
-        crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+        3,
         "desktop-direct-authority-fixture-store",
         "2725b90efe07a1e6703159632e20e68eea7486d67defdf10d9ae7b58690dabd0",
+    );
+const DIRECT_AUTHORITY_MIGRATION_V4: crate::migrations::MigrationDescriptor<'static> =
+    crate::migrations::MigrationDescriptor::new(
+        crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+        "desktop-direct-bootstrap-delivery-journal",
+        "68bc509b5c194479d733af8a036d9f924915152b48882a7b7ab0b11ea7cb5c15",
     );
 const DIRECT_AUTHORITY_SCHEMA_STAMP: crate::migrations::DatabaseStamp =
     crate::migrations::DatabaseStamp::new(
@@ -436,7 +442,8 @@ pub fn init(db_path: &Path) -> Result<Connection> {
             &[
                 BASELINE_MIGRATION,
                 crate::sync_journal::PORTABLE_MIGRATION,
-                DIRECT_AUTHORITY_MIGRATION,
+                DIRECT_AUTHORITY_MIGRATION_V3,
+                DIRECT_AUTHORITY_MIGRATION_V4,
             ],
         )?;
     }
@@ -594,11 +601,21 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     crate::sync_journal::verify_portable_schema(&conn)?;
     crate::migrations::apply_migration(
         &mut conn,
-        DIRECT_AUTHORITY_MIGRATION,
+        DIRECT_AUTHORITY_MIGRATION_V3,
+        crate::migrations::DatabaseStamp::new(3, 1, 3),
+        env!("CARGO_PKG_VERSION"),
+        |transaction| {
+            crate::direct_authority_store::DirectAuthorityStore::install_schema_v3(transaction)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+        },
+    )?;
+    crate::migrations::apply_migration(
+        &mut conn,
+        DIRECT_AUTHORITY_MIGRATION_V4,
         DIRECT_AUTHORITY_SCHEMA_STAMP,
         env!("CARGO_PKG_VERSION"),
         |transaction| {
-            crate::direct_authority_store::DirectAuthorityStore::install_schema(transaction)
+            crate::direct_authority_store::DirectAuthorityStore::install_schema_v4(transaction)
                 .and_then(|_| {
                     crate::direct_authority_store::DirectAuthorityStore::verify_schema(transaction)
                 })

@@ -58,6 +58,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 x509-cert = { version = "0.2", default-features = false }
+# Shared public record format and native iPhone custody boundary. The desktop
+# build uses only its feature-gated sanitized fixture provider; private iPhone
+# key operations remain implemented by the iOS plugin.
+noted-apple-security = { path = "crates/noted-apple-security" }
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 hyper = { version = "1", default-features = false, features = ["server"] }
@@ -116,6 +120,3 @@ window-vibrancy = "0.6"
 # Native custom-scheme delivery for public-ID note links. The parser and local
 # library check remain in the Rust command boundary before navigation occurs.
 tauri-plugin-deep-link = "2"
-# Native-only Keychain, Secure Enclave, HPKE, and Data Protection boundary.
-# This plugin intentionally exposes no JavaScript commands.
-noted-apple-security = { path = "crates/noted-apple-security" }

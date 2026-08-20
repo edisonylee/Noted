@@ -6,14 +6,28 @@
 //! bootstrap stay inside the native boundary.
 
 mod error;
+#[cfg(feature = "sanitized-development-fixtures")]
+mod fixture_record_crypto;
 mod models;
+mod record_crypto;
 
 pub use error::{Error, NativeErrorCode, Result};
+#[cfg(feature = "sanitized-development-fixtures")]
+pub use fixture_record_crypto::SanitizedFixtureRecordCrypto;
 pub use models::{
     BootstrapCapabilityV1, BootstrapMetadataV1, BootstrapRecovery, IdentityHandle,
     IdentityInventory, IdentityLifecycle, OpenedHpke, PendingBootstrapHandle, ProtectedDataEvent,
     ProtectedDataState, PublicIdentity, SigningKeyBacking, StagedBootstrapDescriptor,
     StoreProtectionReport,
+};
+pub use record_crypto::{
+    canonical_record_crypto_context, decode_record_ciphertext_v1, encode_record_ciphertext_v1,
+    max_plaintext_for_transaction, record_associated_data, record_context_digest,
+    record_envelope_digest, record_hkdf_info, record_hkdf_salt, record_signature_message,
+    OpenedRecordV1, RecordCiphertextV1, RecordCryptoContextV1, RecordCryptoOperationV1,
+    RecordKindV1, MAX_RECORD_CIPHERTEXT_BYTES, MAX_RECORD_CIPHERTEXT_CONTAINER_BYTES,
+    MAX_RECORD_PLAINTEXT_BYTES, RECORD_CIPHERTEXT_V1_FIXED_OVERHEAD, RECORD_CIPHER_SUITE,
+    RECORD_CRYPTO_CONTEXT_VERSION, RECORD_HKDF_SALT_DOMAIN, RECORD_NONCE_BYTES, RECORD_TAG_BYTES,
 };
 
 use tauri::plugin::{Builder, TauriPlugin};

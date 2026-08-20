@@ -16,6 +16,10 @@ use tauri_app_lib::{
         AuthorityBindings, AuthorityClock, AuthorityClockError, CoordinatorError,
         DirectPairingCoordinator, OwnerConfirmationResult,
     },
+    direct_pairing_delivery::{
+        parse_and_verify_poll_response, sign_poll_request, BootstrapDeliveryBinding,
+        BootstrapDeliveryVerifier, BootstrapPollDisposition, IphoneBootstrapPollSigner,
+    },
     pairing_protocol::{
         canonical_client_finish_unsigned, canonical_client_hello_unsigned,
         canonical_invitation_unsigned, enrollment_confirmation_digest, invitation_nonce_proof,
@@ -38,10 +42,18 @@ const AUTHORITY_GENERATION: u64 = 9;
 const UNKNOWN_SCOPE_ID: &str = "018f47a0-7b80-7000-8000-000000000104";
 
 const AUTHORITY_KEY: [u8; 65] = [0xa1; 65];
-const MAC_SIGNING_KEY: [u8; 65] = [0xb2; 65];
+const MAC_SIGNING_KEY: [u8; 65] = {
+    let mut key = [0xb2; 65];
+    key[0] = 0x04;
+    key
+};
 const MAC_HPKE_KEY: [u8; 32] = [0xc3; 32];
 const TLS_PIN: [u8; 32] = [0xd4; 32];
-const CLIENT_SIGNING_KEY: [u8; 65] = [0xe5; 65];
+const CLIENT_SIGNING_KEY: [u8; 65] = {
+    let mut key = [0xe5; 65];
+    key[0] = 0x04;
+    key
+};
 const CLIENT_HPKE_KEY: [u8; 32] = [0xf6; 32];
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(1);
@@ -313,6 +325,30 @@ impl PairingCrypto for FixtureCrypto {
     }
 }
 
+struct FixtureClientPollCrypto;
+
+impl IphoneBootstrapPollSigner for FixtureClientPollCrypto {
+    fn sign_iphone_poll(&self, message: &[u8]) -> Result<[u8; 64], ()> {
+        fixture_signature(PairingRole::IphoneCompanion, &CLIENT_SIGNING_KEY, message)
+            .try_into()
+            .map_err(|_| ())
+    }
+}
+
+impl BootstrapDeliveryVerifier for FixtureClientPollCrypto {
+    fn verify_p256_p1363(
+        &self,
+        signer_role: PairingRole,
+        public_key: &[u8; 65],
+        message: &[u8],
+        signature: &[u8; 64],
+    ) -> Result<(), ()> {
+        (signature.as_slice() == fixture_signature(signer_role, public_key, message))
+            .then_some(())
+            .ok_or(())
+    }
+}
+
 fn fixture_signature(role: PairingRole, public_key: &[u8], message: &[u8]) -> Vec<u8> {
     let role = match role {
         PairingRole::MacAuthority => b"mac".as_slice(),
@@ -504,6 +540,22 @@ fn transport() -> TransportEvidence {
     }
 }
 
+fn bootstrap_delivery_binding(server: &ServerHello) -> BootstrapDeliveryBinding {
+    BootstrapDeliveryBinding {
+        receipt_id: server.receipt.receipt_id.clone(),
+        device_id: server.receipt.device_id.clone(),
+        transcript_digest: server
+            .receipt
+            .transcript_digest
+            .as_slice()
+            .try_into()
+            .expect("fixture transcript digest"),
+        tls_spki_sha256: TLS_PIN,
+        iphone_signing_public_key: CLIENT_SIGNING_KEY,
+        mac_pairing_signing_public_key: MAC_SIGNING_KEY,
+    }
+}
+
 fn encode<T: serde::Serialize>(value: &T) -> Vec<u8> {
     serde_json::to_vec(value).expect("serialize fixture pairing message")
 }
@@ -537,6 +589,80 @@ fn begin_and_confirm(
     let bootstrap: BootstrapEnvelope =
         serde_json::from_slice(&bootstrap_bytes).expect("decode bootstrap response");
     (hello, server, code, bootstrap, bootstrap_bytes)
+}
+
+#[test]
+fn authenticated_bootstrap_poll_survives_approval_and_restart() {
+    let database = TestDatabase::new();
+    seed(&database);
+    let crypto = FixtureCrypto::new();
+    let clock = FixtureClock::new(NOW_MS + 10);
+    let invite = invitation(1, NOW_MS, NOW_MS + 300_000);
+    let coordinator = make_coordinator(&database, crypto.clone(), clock.clone());
+    coordinator
+        .register_invitation(&invite)
+        .expect("register fixture invitation");
+    let hello = client_hello(&invite, 1, PHONE_DEVICE_ID);
+    let begin = coordinator
+        .process_client_hello(&encode(&hello), None, &transport())
+        .expect("accept ClientHello");
+    let server: ServerHello =
+        serde_json::from_slice(&begin.exact_response_bytes).expect("decode ServerHello");
+    let binding = bootstrap_delivery_binding(&server);
+    let pending_request = sign_poll_request(&binding, uuid(0x701), &FixtureClientPollCrypto)
+        .expect("sign pending bootstrap poll");
+    let pending_bytes = coordinator
+        .process_bootstrap_poll(&pending_request, &transport())
+        .expect("poll pending bootstrap");
+    let pending = parse_and_verify_poll_response(
+        &pending_bytes,
+        &pending_request,
+        &binding,
+        &FixtureClientPollCrypto,
+    )
+    .expect("verify pending bootstrap response");
+    assert!(matches!(
+        pending.disposition,
+        BootstrapPollDisposition::Pending { .. }
+    ));
+
+    let code = begin.verification_code.expect("verification code");
+    let expected_bootstrap = match coordinator
+        .confirm_owner(&server.receipt.receipt_id, &code, &scopes(), true)
+        .expect("approve bootstrap")
+    {
+        OwnerConfirmationResult::Bootstrap(bytes) => bytes,
+        OwnerConfirmationResult::Cancelled => panic!("expected approved bootstrap"),
+    };
+    let ready_request = sign_poll_request(&binding, uuid(0x702), &FixtureClientPollCrypto)
+        .expect("sign ready bootstrap poll");
+    let ready_bytes = coordinator
+        .process_bootstrap_poll(&ready_request, &transport())
+        .expect("poll ready bootstrap");
+    let ready = parse_and_verify_poll_response(
+        &ready_bytes,
+        &ready_request,
+        &binding,
+        &FixtureClientPollCrypto,
+    )
+    .expect("verify ready bootstrap response");
+    let BootstrapPollDisposition::Ready {
+        exact_bootstrap_envelope,
+        ..
+    } = ready.disposition
+    else {
+        panic!("expected ready bootstrap")
+    };
+    assert_eq!(exact_bootstrap_envelope, expected_bootstrap);
+    drop(coordinator);
+
+    let restarted = make_coordinator(&database, crypto, clock);
+    assert_eq!(
+        restarted
+            .process_bootstrap_poll(&ready_request, &transport())
+            .expect("replay ready poll after restart"),
+        ready_bytes
+    );
 }
 
 #[test]

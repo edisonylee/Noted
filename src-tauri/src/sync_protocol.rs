@@ -190,9 +190,38 @@ pub struct TransactionHeader {
     pub key_epoch: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationOperation {
+    Create,
+    Update,
+    Delete,
+}
+
+impl MutationOperation {
+    fn validates_revision_contract(
+        &self,
+        base_head_revision: u64,
+        base_head_version_id: Option<&str>,
+        proposed_revision: u64,
+    ) -> bool {
+        let Some(expected_revision) = base_head_revision.checked_add(1) else {
+            return false;
+        };
+        if proposed_revision != expected_revision {
+            return false;
+        }
+        match self {
+            Self::Create => base_head_revision == 0 && base_head_version_id.is_none(),
+            Self::Update | Self::Delete => base_head_revision > 0 && base_head_version_id.is_some(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationDraft {
     pub mutation_id: String,
+    pub operation: MutationOperation,
     pub record_id: String,
     pub record_kind: String,
     pub record_schema_version: u32,
@@ -217,6 +246,7 @@ pub struct MutationEnvelope {
     pub device_transaction_counter: u64,
     pub authority_generation: u64,
     pub purge_generation: u64,
+    pub operation: MutationOperation,
     pub record_id: String,
     pub record_kind: String,
     pub record_schema_version: u32,
@@ -247,6 +277,7 @@ impl MutationEnvelope {
             "device_transaction_counter": self.device_transaction_counter,
             "authority_generation": self.authority_generation,
             "purge_generation": self.purge_generation,
+            "operation": self.operation,
             "record_id": self.record_id,
             "record_kind": self.record_kind,
             "record_schema_version": self.record_schema_version,
@@ -342,6 +373,13 @@ impl PreparedTransaction {
             u32::try_from(drafts.len()).map_err(|_| ProtocolError::TransactionLimitExceeded)?;
         let mut members = Vec::with_capacity(drafts.len());
         for (index, draft) in drafts.into_iter().enumerate() {
+            if !draft.operation.validates_revision_contract(
+                draft.base_head_revision,
+                draft.base_head_version_id.as_deref(),
+                draft.proposed_revision,
+            ) {
+                return Err(ProtocolError::MalformedEnvelope);
+            }
             let ciphertext_hash = sha256_bytes(&draft.ciphertext);
             members.push(MutationEnvelope {
                 protocol_version: header.protocol_version,
@@ -356,6 +394,7 @@ impl PreparedTransaction {
                 device_transaction_counter: header.device_transaction_counter,
                 authority_generation: header.authority_generation,
                 purge_generation: header.purge_generation,
+                operation: draft.operation,
                 record_id: draft.record_id,
                 record_kind: draft.record_kind,
                 record_schema_version: draft.record_schema_version,
@@ -523,14 +562,11 @@ impl SignedTransaction {
             {
                 return Err(ProtocolError::MalformedEnvelope);
             }
-            let expected_revision = member
-                .base_head_revision
-                .checked_add(1)
-                .ok_or(ProtocolError::MalformedEnvelope)?;
-            if member.proposed_revision != expected_revision
-                || (member.base_head_revision == 0 && member.base_head_version_id.is_some())
-                || (member.base_head_revision > 0 && member.base_head_version_id.is_none())
-            {
+            if !member.operation.validates_revision_contract(
+                member.base_head_revision,
+                member.base_head_version_id.as_deref(),
+                member.proposed_revision,
+            ) {
                 return Err(ProtocolError::MalformedEnvelope);
             }
             match negotiated.access_for(&member.record_kind, member.record_schema_version) {
@@ -723,15 +759,11 @@ impl BootstrapSnapshot {
                 || record.mutation.ciphertext.is_empty()
                 || record.mutation.ciphertext.len() as u64 > DEFAULT_MAX_TRANSACTION_BYTES
                 || record.mutation.ciphertext_hash != sha256_bytes(&record.mutation.ciphertext)
-                || record
-                    .mutation
-                    .base_head_revision
-                    .checked_add(1)
-                    .is_none_or(|revision| revision != record.mutation.proposed_revision)
-                || (record.mutation.base_head_revision == 0
-                    && record.mutation.base_head_version_id.is_some())
-                || (record.mutation.base_head_revision > 0
-                    && record.mutation.base_head_version_id.is_none())
+                || !record.mutation.operation.validates_revision_contract(
+                    record.mutation.base_head_revision,
+                    record.mutation.base_head_version_id.as_deref(),
+                    record.mutation.proposed_revision,
+                )
                 || record
                     .mutation
                     .base_head_version_id
@@ -1289,6 +1321,20 @@ impl AuthorityState {
         }
         self.capabilities.validate()?;
         for (transaction_id, record) in &self.transactions {
+            let registration = self
+                .devices
+                .get(&record.transaction.manifest.device_id)
+                .ok_or_else(|| {
+                    ProtocolError::CheckpointCorrupt(
+                        "transaction references an unknown device".to_string(),
+                    )
+                })?;
+            let negotiated = negotiate_capabilities(&self.capabilities, &registration.capabilities)
+                .map_err(|error| ProtocolError::CheckpointCorrupt(error.to_string()))?;
+            record
+                .transaction
+                .validate(0, &negotiated)
+                .map_err(|error| ProtocolError::CheckpointCorrupt(error.to_string()))?;
             if transaction_id != &record.transaction.manifest.transaction_id
                 || record.signed_digest != record.transaction.signed_digest()
             {
@@ -2170,6 +2216,11 @@ mod tests {
             },
             vec![MutationDraft {
                 mutation_id,
+                operation: if base_revision == 0 {
+                    MutationOperation::Create
+                } else {
+                    MutationOperation::Update
+                },
                 record_id,
                 record_kind: "note".to_string(),
                 record_schema_version: 1,
@@ -2264,6 +2315,7 @@ mod tests {
             },
             vec![MutationDraft {
                 mutation_id: id(4),
+                operation: MutationOperation::Create,
                 record_id: id(5),
                 record_kind: "note".to_string(),
                 record_schema_version: 1,
@@ -2304,6 +2356,132 @@ mod tests {
     }
 
     #[test]
+    fn mutation_operation_is_required_and_uses_a_closed_wire_vocabulary() {
+        assert_eq!(
+            serde_json::to_value(MutationOperation::Create).unwrap(),
+            json!("create")
+        );
+        assert_eq!(
+            serde_json::to_value(MutationOperation::Update).unwrap(),
+            json!("update")
+        );
+        assert_eq!(
+            serde_json::to_value(MutationOperation::Delete).unwrap(),
+            json!("delete")
+        );
+
+        let transaction = transaction(
+            &id(20),
+            &id(21),
+            1,
+            id(22),
+            id(23),
+            id(24),
+            0,
+            None,
+            id(25),
+            "ciphertext",
+        );
+        let mut value = serde_json::to_value(&transaction.members[0]).unwrap();
+        value.as_object_mut().unwrap().remove("operation");
+        assert!(serde_json::from_value::<MutationEnvelope>(value).is_err());
+
+        let mut unknown = serde_json::to_value(&transaction.members[0]).unwrap();
+        unknown["operation"] = json!("upsert");
+        assert!(serde_json::from_value::<MutationEnvelope>(unknown).is_err());
+    }
+
+    #[test]
+    fn prepare_enforces_operation_specific_revision_contracts() {
+        let header = TransactionHeader {
+            protocol_version: 1,
+            library_id: id(30),
+            transaction_id: id(31),
+            device_id: id(32),
+            device_transaction_counter: 1,
+            authority_generation: 3,
+            purge_generation: 2,
+            key_epoch: 1,
+        };
+        let draft = |operation, base_head_revision, base_head_version_id, proposed_revision| {
+            MutationDraft {
+                mutation_id: id(33),
+                operation,
+                record_id: id(34),
+                record_kind: "note".to_string(),
+                record_schema_version: 1,
+                base_head_revision,
+                base_head_version_id,
+                proposed_revision,
+                version_id: id(35),
+                ciphertext: b"ciphertext".to_vec(),
+            }
+        };
+
+        for invalid in [
+            draft(MutationOperation::Create, 1, Some(id(36)), 2),
+            draft(MutationOperation::Create, 0, Some(id(36)), 1),
+            draft(MutationOperation::Update, 0, None, 1),
+            draft(MutationOperation::Update, 1, None, 2),
+            draft(MutationOperation::Delete, 0, None, 1),
+            draft(MutationOperation::Delete, 1, Some(id(36)), 3),
+            draft(MutationOperation::Delete, u64::MAX, Some(id(36)), u64::MAX),
+        ] {
+            assert_eq!(
+                SignedTransaction::prepare(header.clone(), vec![invalid], NOW + 100),
+                Err(ProtocolError::MalformedEnvelope)
+            );
+        }
+
+        for valid in [
+            draft(MutationOperation::Create, 0, None, 1),
+            draft(MutationOperation::Update, 1, Some(id(36)), 2),
+            draft(MutationOperation::Delete, 1, Some(id(36)), 2),
+        ] {
+            SignedTransaction::prepare(header.clone(), vec![valid], NOW + 100).unwrap();
+        }
+    }
+
+    #[test]
+    fn operation_is_bound_by_member_manifest_and_signing_digests() {
+        let create = transaction(
+            &id(40),
+            &id(41),
+            1,
+            id(42),
+            id(43),
+            id(44),
+            0,
+            None,
+            id(45),
+            "ciphertext",
+        );
+        let mut tampered = create.clone();
+        tampered.members[0].operation = MutationOperation::Update;
+
+        assert_ne!(
+            create.members[0].member_digest(),
+            tampered.members[0].member_digest()
+        );
+        assert_ne!(
+            create.members[0].signing_bytes(),
+            tampered.members[0].signing_bytes()
+        );
+        assert_ne!(
+            create.members[0].signing_digest(),
+            tampered.members[0].signing_digest()
+        );
+        assert_ne!(create.signed_digest(), tampered.signed_digest());
+
+        let capabilities =
+            negotiate_capabilities(&notes_capability(2, 2), &notes_capability(2, 2)).unwrap();
+        assert_eq!(
+            tampered.validate(NOW, &capabilities),
+            Err(ProtocolError::AggregateDigestMismatch)
+        );
+    }
+
+    #[test]
     fn transaction_manifest_is_order_independent_but_complete_and_digest_bound() {
         let library = id(1);
         let device = id(2);
@@ -2321,6 +2499,7 @@ mod tests {
             vec![
                 MutationDraft {
                     mutation_id: id(4),
+                    operation: MutationOperation::Create,
                     record_id: id(5),
                     record_kind: "note".to_string(),
                     record_schema_version: 1,
@@ -2332,6 +2511,7 @@ mod tests {
                 },
                 MutationDraft {
                     mutation_id: id(7),
+                    operation: MutationOperation::Create,
                     record_id: id(8),
                     record_kind: "note".to_string(),
                     record_schema_version: 1,
@@ -2403,6 +2583,7 @@ mod tests {
             vec![
                 MutationDraft {
                     mutation_id: id(13),
+                    operation: MutationOperation::Create,
                     record_id: id(14),
                     record_kind: "note".to_string(),
                     record_schema_version: 1,
@@ -2414,6 +2595,7 @@ mod tests {
                 },
                 MutationDraft {
                     mutation_id: id(16),
+                    operation: MutationOperation::Create,
                     record_id: id(17),
                     record_kind: "note".to_string(),
                     record_schema_version: 1,
@@ -2941,6 +3123,51 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_rejects_an_invalid_operation_even_if_internal_digests_are_rebound() {
+        let library = id(80);
+        let device = id(81);
+        let transaction_id = id(82);
+        let mutation_id = id(83);
+        let mut authority = authority(&library, &[&device]);
+        let original = transaction(
+            &library,
+            &device,
+            1,
+            transaction_id.clone(),
+            mutation_id.clone(),
+            id(84),
+            0,
+            None,
+            id(85),
+            "durable",
+        );
+        authority.begin_transaction(original, NOW).unwrap();
+
+        let rebound_digest = {
+            let record = authority.transactions.get_mut(&transaction_id).unwrap();
+            record.transaction.members[0].operation = MutationOperation::Update;
+            refresh_manifest(&mut record.transaction);
+            record.signed_digest = record.transaction.signed_digest();
+            record.signed_digest.clone()
+        };
+        authority.mutation_bindings.insert(
+            mutation_id,
+            authority.transactions[&transaction_id].transaction.members[0].signed_digest(),
+        );
+        authority
+            .counters
+            .get_mut(&device)
+            .unwrap()
+            .bindings
+            .insert(1, rebound_digest);
+
+        assert!(matches!(
+            AuthorityState::from_checkpoint_json(&authority.checkpoint_json().unwrap()),
+            Err(ProtocolError::CheckpointCorrupt(_))
+        ));
+    }
+
+    #[test]
     fn accepted_change_pages_are_bounded_contiguous_and_duplicate_free() {
         let library = id(300);
         let device = id(301);
@@ -3118,6 +3345,91 @@ mod tests {
     }
 
     #[test]
+    fn delete_operation_survives_manifest_log_bootstrap_and_authority_restart() {
+        let library = id(520);
+        let device = id(521);
+        let record = id(522);
+        let first_version = id(523);
+        let mut authority = authority(&library, &[&device]);
+        terminal_receipt(
+            authority
+                .submit_transaction(
+                    transaction(
+                        &library,
+                        &device,
+                        1,
+                        id(524),
+                        id(525),
+                        record.clone(),
+                        0,
+                        None,
+                        first_version.clone(),
+                        "created ciphertext",
+                    ),
+                    NOW,
+                )
+                .unwrap(),
+        );
+
+        let mut deletion = transaction(
+            &library,
+            &device,
+            2,
+            id(526),
+            id(527),
+            record,
+            1,
+            Some(first_version),
+            id(528),
+            "tombstone ciphertext",
+        );
+        deletion.members[0].operation = MutationOperation::Delete;
+        refresh_manifest(&mut deletion);
+        terminal_receipt(
+            authority
+                .submit_transaction(deletion.clone(), NOW + 1)
+                .unwrap(),
+        );
+
+        let change = accepted_change_at(&authority, 2);
+        assert_eq!(
+            change.transaction.members[0].operation,
+            MutationOperation::Delete
+        );
+        assert_eq!(
+            authority.bootstrap_snapshot().unwrap().records[0]
+                .mutation
+                .operation,
+            MutationOperation::Delete
+        );
+
+        let checkpoint = authority.checkpoint_json().unwrap();
+        let restarted = AuthorityState::from_checkpoint_json(&checkpoint).unwrap();
+        assert_eq!(
+            restarted.bootstrap_snapshot().unwrap().records[0]
+                .mutation
+                .operation,
+            MutationOperation::Delete
+        );
+
+        let mut tampered: serde_json::Value = serde_json::from_str(&checkpoint).unwrap();
+        tampered["transactions"][id(526)]["transaction"]["members"][0]["operation"] =
+            json!("update");
+        assert!(matches!(
+            AuthorityState::from_checkpoint_json(&serde_json::to_string(&tampered).unwrap()),
+            Err(ProtocolError::CheckpointCorrupt(_))
+        ));
+
+        let snapshot = authority.bootstrap_snapshot().unwrap();
+        let mut tampered_snapshot = snapshot.clone();
+        tampered_snapshot.records[0].mutation.operation = MutationOperation::Update;
+        assert_ne!(
+            snapshot.checkpoint_digest,
+            tampered_snapshot.computed_checkpoint_digest()
+        );
+    }
+
+    #[test]
     fn bootstrap_rejects_rehashed_but_structurally_invalid_envelopes() {
         let library = id(550);
         let device = id(551);
@@ -3179,6 +3491,14 @@ mod tests {
         bad_revision.checkpoint_digest = bad_revision.computed_checkpoint_digest();
         assert_eq!(
             bad_revision.validate(),
+            Err(ProtocolError::BootstrapSnapshotInvalid)
+        );
+
+        let mut bad_operation = authority.bootstrap_snapshot().unwrap();
+        bad_operation.records[0].mutation.operation = MutationOperation::Update;
+        bad_operation.checkpoint_digest = bad_operation.computed_checkpoint_digest();
+        assert_eq!(
+            bad_operation.validate(),
             Err(ProtocolError::BootstrapSnapshotInvalid)
         );
     }

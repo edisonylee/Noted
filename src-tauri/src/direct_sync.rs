@@ -137,7 +137,7 @@ impl Default for DirectSyncLimits {
 }
 
 impl DirectSyncLimits {
-    fn for_endpoint(&self, endpoint: DirectEndpoint) -> EndpointLimits {
+    pub fn for_endpoint(&self, endpoint: DirectEndpoint) -> EndpointLimits {
         match endpoint {
             DirectEndpoint::Negotiate => self.negotiate,
             DirectEndpoint::Bootstrap => self.bootstrap,
@@ -259,6 +259,10 @@ pub struct BootstrapRequest {
 #[serde(deny_unknown_fields)]
 pub struct BootstrapResponse {
     pub page: BootstrapPage,
+    /// Exact historical writer keys needed to verify only the mutations in
+    /// this page. The authority signature over the response authenticates the
+    /// directory, including keys for revoked seed writers.
+    pub writer_signing_keys: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +305,10 @@ pub struct PullRequest {
 #[serde(deny_unknown_fields)]
 pub struct PullResponse {
     pub page: ChangePage,
+    /// Exact historical writer keys needed by this page. No unused directory
+    /// entries are emitted, which keeps key substitution and key smuggling
+    /// detectable by the phone.
+    pub writer_signing_keys: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,6 +429,17 @@ pub trait DirectSyncEnrollment: Send + Sync + 'static {
         require_write: bool,
     ) -> Result<KindCapability, EnrollmentAuthorizationError>;
 
+    /// Resolve an immutable public key for a writer represented in bootstrap
+    /// or pull history. Revoked writers remain resolvable for verification,
+    /// but this method grants no write authorization.
+    fn historical_writer_signing_public_key(
+        &self,
+        device_id: &str,
+        library_id: &str,
+        environment: Environment,
+        authority_generation: u64,
+    ) -> Result<Vec<u8>, EnrollmentAuthorizationError>;
+
     fn revoke_device(
         &self,
         device_id: &str,
@@ -463,6 +482,23 @@ impl<C: PairingCrypto> DirectSyncEnrollment for PairingMachine<C> {
             authority_generation,
             scope,
             require_write,
+        )
+        .map_err(map_enrollment_error)
+    }
+
+    fn historical_writer_signing_public_key(
+        &self,
+        device_id: &str,
+        library_id: &str,
+        environment: Environment,
+        authority_generation: u64,
+    ) -> Result<Vec<u8>, EnrollmentAuthorizationError> {
+        PairingMachine::historical_writer_signing_public_key(
+            self,
+            device_id,
+            library_id,
+            environment,
+            authority_generation,
         )
         .map_err(map_enrollment_error)
     }
@@ -1096,8 +1132,8 @@ where
                 {
                     return Err(DirectSyncError::BootstrapChanged);
                 }
-                let page = self.paginate_bootstrap(&signed, snapshot, limits.response_bytes)?;
-                for record in &page.records {
+                let response = self.paginate_bootstrap(&signed, snapshot, limits.response_bytes)?;
+                for record in &response.page.records {
                     if !signed
                         .payload
                         .requested_record_kinds
@@ -1115,12 +1151,7 @@ where
                         .verify_mutation_ciphertext(&record.mutation.device_id, &record.mutation)
                         .map_err(|_| DirectSyncError::CiphertextRejected)?;
                 }
-                self.respond(
-                    endpoint,
-                    &signed,
-                    BootstrapResponse { page },
-                    limits.response_bytes,
-                )
+                self.respond(endpoint, &signed, response, limits.response_bytes)
             }
             DirectEndpoint::Push => {
                 let signed: SignedSyncRequest<PushRequest> = parse_request(&request.body)?;
@@ -1221,14 +1252,9 @@ where
                     signed.payload.limit.min(MAX_PULL_PAGE_CHANGES),
                 )?;
                 self.validate_pull_page_binding(&signed, &raw)?;
-                let page =
+                let response =
                     self.filter_and_bound_pull(&signed, raw, &capabilities, limits.response_bytes)?;
-                self.respond(
-                    endpoint,
-                    &signed,
-                    PullResponse { page },
-                    limits.response_bytes,
-                )
+                self.respond(endpoint, &signed, response, limits.response_bytes)
             }
             DirectEndpoint::Checkpoint => {
                 let signed: SignedSyncRequest<CheckpointRequest> = parse_request(&request.body)?;
@@ -1437,7 +1463,7 @@ where
         request: &SignedSyncRequest<BootstrapRequest>,
         snapshot: BootstrapSnapshot,
         response_limit: usize,
-    ) -> Result<BootstrapPage, DirectSyncError> {
+    ) -> Result<BootstrapResponse, DirectSyncError> {
         let BootstrapSnapshot {
             contract_version,
             library_id,
@@ -1479,7 +1505,10 @@ where
             page.next_after_record_id = Some(record.record_id.clone());
             page.records.push(record);
             page.has_more = start + page.records.len() < records.len();
-            let projected = BootstrapResponse { page: page.clone() };
+            let projected = BootstrapResponse {
+                writer_signing_keys: self.writer_keys_for_bootstrap(&page)?,
+                page: page.clone(),
+            };
             if unsigned_response_size(request, &projected)? > response_limit {
                 page.records.pop();
                 page.next_after_record_id =
@@ -1494,7 +1523,11 @@ where
         if page.records.is_empty() && start == records.len() {
             page.has_more = false;
         }
-        Ok(page)
+        let writer_signing_keys = self.writer_keys_for_bootstrap(&page)?;
+        Ok(BootstrapResponse {
+            page,
+            writer_signing_keys,
+        })
     }
 
     fn validate_checkpoint_binding(
@@ -1663,19 +1696,21 @@ where
             high_water_cursor: u64::MAX,
             disposition: ReceiptDisposition::Accepted { advances },
         };
+        let page = ChangePage {
+            requested_cursor: u64::MAX - 1,
+            next_cursor: u64::MAX,
+            high_water_cursor: u64::MAX,
+            has_more: false,
+            changes: vec![crate::sync_protocol::AcceptedChange {
+                sequence: u64::MAX,
+                transaction_digest: transaction.signed_digest(),
+                transaction: transaction.clone(),
+                receipt,
+            }],
+        };
         let projected = PullResponse {
-            page: ChangePage {
-                requested_cursor: u64::MAX - 1,
-                next_cursor: u64::MAX,
-                high_water_cursor: u64::MAX,
-                has_more: false,
-                changes: vec![crate::sync_protocol::AcceptedChange {
-                    sequence: u64::MAX,
-                    transaction_digest: transaction.signed_digest(),
-                    transaction: transaction.clone(),
-                    receipt,
-                }],
-            },
+            writer_signing_keys: self.writer_keys_for_pull(&page)?,
+            page,
         };
         let max_response_bytes = self
             .config
@@ -1694,7 +1729,7 @@ where
         raw: ChangePage,
         capabilities: &ProtocolCapabilities,
         response_limit: usize,
-    ) -> Result<ChangePage, DirectSyncError> {
+    ) -> Result<PullResponse, DirectSyncError> {
         let requested = &request.payload.requested_record_kinds;
 
         let mut page = ChangePage {
@@ -1735,7 +1770,10 @@ where
                 page.changes.push(change.clone());
                 page.next_cursor = change.sequence;
                 page.has_more = page.next_cursor < page.high_water_cursor;
-                let projected = PullResponse { page: page.clone() };
+                let projected = PullResponse {
+                    writer_signing_keys: self.writer_keys_for_pull(&page)?,
+                    page: page.clone(),
+                };
                 if unsigned_response_size(request, &projected)? > response_limit {
                     page.changes.pop();
                     page.next_cursor = change.sequence.saturating_sub(1);
@@ -1753,7 +1791,64 @@ where
                 page.has_more = page.next_cursor < page.high_water_cursor;
             }
         }
-        Ok(page)
+        let writer_signing_keys = self.writer_keys_for_pull(&page)?;
+        Ok(PullResponse {
+            page,
+            writer_signing_keys,
+        })
+    }
+
+    fn writer_keys_for_bootstrap(
+        &self,
+        page: &BootstrapPage,
+    ) -> Result<BTreeMap<String, Vec<u8>>, DirectSyncError> {
+        self.writer_keys_for_ids(
+            page.records
+                .iter()
+                .map(|record| record.mutation.device_id.as_str()),
+        )
+    }
+
+    fn writer_keys_for_pull(
+        &self,
+        page: &ChangePage,
+    ) -> Result<BTreeMap<String, Vec<u8>>, DirectSyncError> {
+        self.writer_keys_for_ids(page.changes.iter().flat_map(|change| {
+            change
+                .transaction
+                .members
+                .iter()
+                .map(|member| member.device_id.as_str())
+        }))
+    }
+
+    fn writer_keys_for_ids<'a>(
+        &self,
+        writer_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Result<BTreeMap<String, Vec<u8>>, DirectSyncError> {
+        let writer_ids = writer_ids.into_iter().collect::<BTreeSet<_>>();
+        let mut keys = BTreeMap::new();
+        for writer_id in writer_ids {
+            if !is_uuid_v7(writer_id) {
+                return Err(DirectSyncError::StateUnavailable);
+            }
+            let key = self
+                .enrollment
+                .historical_writer_signing_public_key(
+                    writer_id,
+                    &self.config.library_id,
+                    self.config.environment,
+                    self.config.authority_generation,
+                )
+                .map_err(|_| DirectSyncError::StateUnavailable)?;
+            if key.len() != 65 || key.first() != Some(&0x04) {
+                return Err(DirectSyncError::StateUnavailable);
+            }
+            if keys.insert(writer_id.to_owned(), key).is_some() {
+                return Err(DirectSyncError::StateUnavailable);
+            }
+        }
+        Ok(keys)
     }
 
     fn respond<T: Serialize>(
@@ -1855,6 +1950,19 @@ fn exact_wire_response(
 fn parse_request<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, DirectSyncError> {
     if bytes.len() > MAX_DIRECT_REQUEST_BYTES {
         return Err(DirectSyncError::RequestTooLarge);
+    }
+    parse_bounded_direct_json(bytes, MAX_DIRECT_REQUEST_BYTES)
+}
+
+/// Parse direct-sync JSON with the same duplicate-key, depth, collection, and
+/// aggregate string budgets used by the authority. Phone response handling
+/// uses this instead of an unbounded `serde_json::from_slice` call.
+pub fn parse_bounded_direct_json<T: DeserializeOwned>(
+    bytes: &[u8],
+    max_bytes: usize,
+) -> Result<T, DirectSyncError> {
+    if max_bytes == 0 || max_bytes > MAX_DIRECT_REQUEST_BYTES || bytes.len() > max_bytes {
+        return Err(DirectSyncError::ResponseTooLarge);
     }
     let budget = Arc::new(Mutex::new(DirectJsonBudget::default()));
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);

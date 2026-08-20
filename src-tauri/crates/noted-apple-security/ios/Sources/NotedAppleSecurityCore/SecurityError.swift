@@ -16,6 +16,9 @@ public enum NotedSecurityError: Error, Equatable, Sendable {
   case legacyBootstrapRequiresDiscard
   case signingFailed
   case hpkeOpenFailed
+  case recordContextMismatch
+  case recordSignatureInvalid
+  case recordCryptoFailed
   case protectedDataUnavailable
   case fileProtectionFailed(String)
   case backupExclusionFailed(String)
@@ -37,6 +40,9 @@ public enum NotedSecurityError: Error, Equatable, Sendable {
     case .legacyBootstrapRequiresDiscard: "legacy_bootstrap_requires_discard"
     case .signingFailed: "signing_failed"
     case .hpkeOpenFailed: "hpke_open_failed"
+    case .recordContextMismatch: "record_context_mismatch"
+    case .recordSignatureInvalid: "record_signature_invalid"
+    case .recordCryptoFailed: "record_crypto_failed"
     case .protectedDataUnavailable: "protected_data_unavailable"
     case .fileProtectionFailed: "file_protection_failed"
     case .backupExclusionFailed: "backup_exclusion_failed"
@@ -63,6 +69,9 @@ public enum NotedSecurityError: Error, Equatable, Sendable {
       "The legacy sanitized bootstrap must be discarded and paired again"
     case .signingFailed: "The native signing operation failed"
     case .hpkeOpenFailed: "Authenticated HPKE open failed"
+    case .recordContextMismatch: "The encrypted record does not match its authenticated context"
+    case .recordSignatureInvalid: "The encrypted record signature is invalid"
+    case .recordCryptoFailed: "The native record encryption operation failed"
     case .protectedDataUnavailable: "Protected data is unavailable while the device is locked"
     case .fileProtectionFailed(let path):
       "NSFileProtectionComplete could not be enforced for \(path)"

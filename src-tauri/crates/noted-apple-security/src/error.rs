@@ -21,6 +21,9 @@ pub enum NativeErrorCode {
     LegacyBootstrapRequiresDiscard,
     SigningFailed,
     HpkeOpenFailed,
+    RecordContextMismatch,
+    RecordSignatureInvalid,
+    RecordCryptoFailed,
     ProtectedDataUnavailable,
     FileProtectionFailed,
     BackupExclusionFailed,
@@ -45,6 +48,9 @@ impl NativeErrorCode {
             "legacy_bootstrap_requires_discard" => Self::LegacyBootstrapRequiresDiscard,
             "signing_failed" => Self::SigningFailed,
             "hpke_open_failed" => Self::HpkeOpenFailed,
+            "record_context_mismatch" => Self::RecordContextMismatch,
+            "record_signature_invalid" => Self::RecordSignatureInvalid,
+            "record_crypto_failed" => Self::RecordCryptoFailed,
             "protected_data_unavailable" => Self::ProtectedDataUnavailable,
             "file_protection_failed" => Self::FileProtectionFailed,
             "backup_exclusion_failed" => Self::BackupExclusionFailed,
@@ -58,6 +64,8 @@ impl NativeErrorCode {
 pub enum Error {
     UnsupportedPlatform,
     InvalidNativeResponse(&'static str),
+    #[cfg(feature = "sanitized-development-fixtures")]
+    SanitizedFixtureCrypto(&'static str),
     Native {
         code: NativeErrorCode,
         raw_code: Option<String>,
@@ -102,6 +110,13 @@ impl fmt::Display for Error {
             Self::InvalidNativeResponse(field) => {
                 write!(formatter, "native Apple security returned invalid {field}")
             }
+            #[cfg(feature = "sanitized-development-fixtures")]
+            Self::SanitizedFixtureCrypto(detail) => {
+                write!(
+                    formatter,
+                    "sanitized fixture record crypto failed: {detail}"
+                )
+            }
             Self::Native { code, message, .. } => write!(formatter, "{code:?}: {message}"),
             #[cfg(target_os = "ios")]
             Self::Bridge(error) => error.fmt(formatter),
@@ -124,6 +139,10 @@ mod tests {
         assert_eq!(
             NativeErrorCode::from_code("protected_data_unavailable"),
             NativeErrorCode::ProtectedDataUnavailable
+        );
+        assert_eq!(
+            NativeErrorCode::from_code("record_signature_invalid"),
+            NativeErrorCode::RecordSignatureInvalid
         );
         assert_eq!(
             NativeErrorCode::from_code("future_native_error"),

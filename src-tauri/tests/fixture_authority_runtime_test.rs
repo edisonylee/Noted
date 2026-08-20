@@ -163,6 +163,19 @@ fn provisioner_publishes_only_generated_notes_slice_with_bootstrap_ciphertext() 
     let snapshot = authority.bootstrap().expect("validated bootstrap");
     assert_eq!(snapshot.high_water_cursor, 1);
     assert!(!snapshot.records.is_empty());
+    #[cfg(feature = "sanitized-development-fixtures")]
+    {
+        assert!(snapshot
+            .records
+            .iter()
+            .all(|record| record.mutation.ciphertext.starts_with(b"NRC1")));
+        assert!(snapshot.records.iter().all(|record| !record
+            .mutation
+            .ciphertext
+            .windows(b"fixture-json:".len())
+            .any(|window| window == b"fixture-json:")));
+    }
+    #[cfg(not(feature = "sanitized-development-fixtures"))]
     assert!(snapshot
         .records
         .iter()

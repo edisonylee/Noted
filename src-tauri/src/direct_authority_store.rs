@@ -11,7 +11,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde_json::Value;
 
-pub const DIRECT_AUTHORITY_SCHEMA_VERSION: u32 = 3;
+pub const DIRECT_AUTHORITY_SCHEMA_VERSION: u32 = 4;
 
 const DEVELOPMENT: &str = "development";
 const SANITIZED_FIXTURE: &str = "sanitized_fixture";
@@ -288,6 +288,32 @@ END;
 CREATE TRIGGER IF NOT EXISTS direct_request_replays_no_delete
 BEFORE DELETE ON direct_request_replays BEGIN
   SELECT RAISE(ABORT, 'direct request replay is immutable');
+END;
+"#;
+
+/// Additive v4 bootstrap-delivery replay journal. Keeping this separate from
+/// the immutable v3 descriptor preserves a contiguous migration history for
+/// both existing v3 databases and fresh installs.
+const DIRECT_AUTHORITY_SCHEMA_V4: &str = r#"
+CREATE TABLE IF NOT EXISTS direct_bootstrap_delivery_replays (
+  message_id             TEXT PRIMARY KEY,
+  receipt_id             TEXT NOT NULL REFERENCES direct_enrollment_receipts(receipt_id) ON DELETE RESTRICT,
+  device_id              TEXT NOT NULL,
+  tls_spki_sha256        BLOB NOT NULL CHECK(length(tls_spki_sha256) = 32),
+  exact_request_sha256   BLOB NOT NULL CHECK(length(exact_request_sha256) = 32),
+  exact_response_sha256  BLOB NOT NULL CHECK(length(exact_response_sha256) = 32),
+  exact_response_bytes   BLOB NOT NULL CHECK(length(exact_response_bytes) BETWEEN 1 AND 98304),
+  created_at_ms          INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS direct_bootstrap_delivery_replays_receipt_created
+  ON direct_bootstrap_delivery_replays(receipt_id, created_at_ms);
+CREATE TRIGGER IF NOT EXISTS direct_bootstrap_delivery_replays_no_update
+BEFORE UPDATE ON direct_bootstrap_delivery_replays BEGIN
+  SELECT RAISE(ABORT, 'direct bootstrap delivery replay is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS direct_bootstrap_delivery_replays_no_delete
+BEFORE DELETE ON direct_bootstrap_delivery_replays BEGIN
+  SELECT RAISE(ABORT, 'direct bootstrap delivery replay is immutable');
 END;
 "#;
 
@@ -584,10 +610,23 @@ struct AcknowledgementStateRow {
 pub struct DirectAuthorityStore;
 
 impl DirectAuthorityStore {
-    /// Install only the v3 expansion. The caller owns migration ordering,
-    /// recovery snapshots, schema stamping, and the surrounding transaction.
+    /// Install the complete current schema for isolated authority-store tests.
+    /// Desktop migration code uses the version-specific installers below.
     pub fn install_schema(transaction: &Transaction<'_>) -> StoreResult<()> {
         transaction.execute_batch(DIRECT_AUTHORITY_SCHEMA)?;
+        transaction.execute_batch(DIRECT_AUTHORITY_SCHEMA_V4)?;
+        Ok(())
+    }
+
+    /// Exact v3 expansion retained as an immutable migration step.
+    pub fn install_schema_v3(transaction: &Transaction<'_>) -> StoreResult<()> {
+        transaction.execute_batch(DIRECT_AUTHORITY_SCHEMA)?;
+        Ok(())
+    }
+
+    /// Additive v4 bootstrap-delivery replay journal.
+    pub fn install_schema_v4(transaction: &Transaction<'_>) -> StoreResult<()> {
+        transaction.execute_batch(DIRECT_AUTHORITY_SCHEMA_V4)?;
         Ok(())
     }
 
@@ -1693,6 +1732,7 @@ impl DirectAuthorityStore {
             "direct_pairing_invitations",
             "direct_enrollment_receipts",
             "direct_pairing_replays",
+            "direct_bootstrap_delivery_replays",
             "direct_pairing_quarantine",
             "direct_authority_transactions",
             "direct_authority_mutations",
@@ -1709,6 +1749,8 @@ impl DirectAuthorityStore {
             "direct_terminal_transaction_guard",
             "direct_pairing_replays_no_update",
             "direct_pairing_replays_no_delete",
+            "direct_bootstrap_delivery_replays_no_update",
+            "direct_bootstrap_delivery_replays_no_delete",
             "direct_pairing_quarantine_no_update",
             "direct_pairing_quarantine_no_delete",
             "direct_authority_mutations_no_update",
@@ -1725,6 +1767,7 @@ impl DirectAuthorityStore {
         for index in [
             "direct_pairing_invitations_library_state",
             "direct_pairing_replays_created",
+            "direct_bootstrap_delivery_replays_receipt_created",
             "direct_pairing_quarantine_created",
             "direct_enrollment_receipts_live_device",
             "direct_enrollment_receipts_library_state",

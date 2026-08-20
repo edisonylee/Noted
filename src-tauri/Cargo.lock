@@ -27,6 +27,7 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures",
+ "zeroize",
 ]
 
 [[package]]
@@ -41,6 +42,7 @@ dependencies = [
  "ctr",
  "ghash",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -3139,12 +3141,19 @@ dependencies = [
 name = "noted-apple-security"
 version = "0.1.0"
 dependencies = [
+ "aes",
+ "aes-gcm",
  "base64 0.22.1",
+ "getrandom 0.3.4",
+ "hkdf",
+ "p256",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-plugin",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]

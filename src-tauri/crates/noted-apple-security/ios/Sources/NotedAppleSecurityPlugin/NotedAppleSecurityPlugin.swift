@@ -8,6 +8,7 @@
   private let maximumFieldBytes = 256 * 1024
   private let maximumBootstrapBindingBytes = 16 * 1024
   private let bootstrapKeyPackageCiphertextBytes = 64
+  private let maximumRecordPlaintextBytes = RecordCryptoLimitsV1.maximumPlaintextByteCount
 
   private struct PrepareIdentityArgs: Decodable {
     let deviceId: String
@@ -62,6 +63,19 @@
   private struct OpenHpkeResponse: Encodable {
     let plaintextBase64: String
     let exporterSecretBase64: String
+  }
+
+  private struct SealRecordArgs: Decodable {
+    let identityHandle: String
+    let context: RecordCryptoContextV1
+    let plaintextBase64: String
+  }
+
+  private struct OpenRecordArgs: Decodable {
+    let identityHandle: String
+    let context: RecordCryptoContextV1
+    let sealed: RecordCiphertextDescriptorV1
+    let signerPublicKeyBase64: String
   }
 
   private struct StageBootstrapArgs: Decodable {
@@ -185,6 +199,29 @@
         return OpenHpkeResponse(
           plaintextBase64: opened.plaintext.base64EncodedString(),
           exporterSecretBase64: exporter.base64EncodedString())
+      }
+    }
+
+    @objc func sealRecord(_ invoke: Invoke) {
+      resolveInvocation(invoke) {
+        let args = try invoke.parseArgs(SealRecordArgs.self)
+        return try self.vault.sealRecord(
+          identityHandle: args.identityHandle,
+          context: args.context,
+          plaintext: try decodeBase64(
+            args.plaintextBase64, maximum: maximumRecordPlaintextBytes))
+      }
+    }
+
+    @objc func openRecord(_ invoke: Invoke) {
+      resolveInvocation(invoke) {
+        let args = try invoke.parseArgs(OpenRecordArgs.self)
+        return try self.vault.openRecord(
+          identityHandle: args.identityHandle,
+          context: args.context,
+          sealed: args.sealed,
+          expectedSignerPublicKey: try decodeBase64(
+            args.signerPublicKeyBase64, exact: 65))
       }
     }
 

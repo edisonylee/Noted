@@ -153,7 +153,7 @@ fn unversioned_database_is_snapshotted_before_convergence_and_stamped_once() {
     let live = db::init(&path).expect("migrate legacy database");
     assert_eq!(
         migrations::read_database_stamp(&live).unwrap(),
-        migrations::DatabaseStamp::new(3, 1, 3)
+        migrations::DatabaseStamp::new(4, 1, 4)
     );
     let application_id: i64 = live
         .pragma_query_value(None, "application_id", |row| row.get(0))
@@ -162,13 +162,13 @@ fn unversioned_database_is_snapshotted_before_convergence_and_stamped_once() {
     let user_version: i64 = live
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 3);
+    assert_eq!(user_version, 4);
     assert_eq!(
         live.query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
             row.get::<_, i64>(0)
         })
         .unwrap(),
-        3
+        4
     );
     tauri_app_lib::direct_authority_store::DirectAuthorityStore::verify_schema(&live)
         .expect("verify direct authority schema after ordered migration");
@@ -215,7 +215,7 @@ fn unversioned_database_is_snapshotted_before_convergence_and_stamped_once() {
                 row.get::<_, i64>(0)
             })
             .unwrap(),
-        3
+        4
     );
     let stored_recovery: String = reopened
         .query_row(
@@ -284,7 +284,7 @@ fn v1_upgrade_is_snapshotted_and_restore_recreates_portable_ids() {
     let upgraded = db::init(&path).expect("upgrade stamped v1 database");
     assert_eq!(
         migrations::read_database_stamp(&upgraded).unwrap(),
-        migrations::DatabaseStamp::new(3, 1, 3)
+        migrations::DatabaseStamp::new(4, 1, 4)
     );
     tauri_app_lib::direct_authority_store::DirectAuthorityStore::verify_schema(&upgraded)
         .expect("verify direct authority schema after v1 upgrade");

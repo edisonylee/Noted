@@ -10,14 +10,14 @@ use tauri_app_lib::pairing_protocol::{
     canonical_invitation_unsigned, invitation_nonce_proof, AuthenticatedHpkeEnvelope,
     AuthenticatedHpkeSeal, BootstrapMetadataV1, ClientFinish, ClientHello, Environment,
     FreshValuePurpose, Invitation, KindCapability, LibraryDataClass, LocalHpkeKey, LocalSigningKey,
-    PairingCrypto, PairingMachine, PairingPolicy, PairingRole, RecordKind as PairingRecordKind,
-    ServerHello, TransportEvidence, BOOTSTRAP_KEY_PACKAGE_BYTES,
+    PairingCrypto, PairingError, PairingMachine, PairingPolicy, PairingRole,
+    RecordKind as PairingRecordKind, ServerHello, TransportEvidence, BOOTSTRAP_KEY_PACKAGE_BYTES,
     BOOTSTRAP_KEY_PACKAGE_CIPHERTEXT_BYTES, HPKE_ENCAPSULATED_KEY_BYTES,
     HPKE_EXPORTER_SECRET_BYTES, PAIRING_PROTOCOL, PAIRING_SUITE,
 };
 use tauri_app_lib::sync_protocol::{
-    AuthorityState, MutationDraft, ProtocolCapabilities, ReceiptDisposition, RecordKindCapability,
-    SignedTransaction, TransactionHeader, SYNC_PROTOCOL_VERSION,
+    AuthorityState, MutationDraft, MutationOperation, ProtocolCapabilities, ReceiptDisposition,
+    RecordKindCapability, SignedTransaction, TransactionHeader, SYNC_PROTOCOL_VERSION,
 };
 
 const NOW: u64 = 10_000;
@@ -433,11 +433,86 @@ impl DirectSyncCrypto for FixtureDirectCrypto {
     }
 }
 
-type TestService = DirectSyncService<
-    PairingMachine<FixturePairingCrypto>,
-    AuthorityStateStore,
-    FixtureDirectCrypto,
->;
+struct FixtureEnrollment {
+    pairing: PairingMachine<FixturePairingCrypto>,
+}
+
+fn enrollment_error(error: PairingError) -> EnrollmentAuthorizationError {
+    match error {
+        PairingError::DeviceRevoked => EnrollmentAuthorizationError::Revoked,
+        PairingError::ScopeNotGranted | PairingError::CapabilityMismatch => {
+            EnrollmentAuthorizationError::ScopeViolation
+        }
+        PairingError::StateUnavailable => EnrollmentAuthorizationError::StateUnavailable,
+        _ => EnrollmentAuthorizationError::NotAuthorized,
+    }
+}
+
+impl DirectSyncEnrollment for FixtureEnrollment {
+    fn require_active_device(
+        &self,
+        device_id: &str,
+        library_id: &str,
+        environment: Environment,
+        authority_generation: u64,
+    ) -> Result<(), EnrollmentAuthorizationError> {
+        self.pairing
+            .require_active_device(device_id, library_id, environment, authority_generation)
+            .map_err(enrollment_error)
+    }
+
+    fn require_active_device_scope(
+        &self,
+        device_id: &str,
+        library_id: &str,
+        environment: Environment,
+        authority_generation: u64,
+        scope: PairingRecordKind,
+        require_write: bool,
+    ) -> Result<KindCapability, EnrollmentAuthorizationError> {
+        self.pairing
+            .require_active_device_scope(
+                device_id,
+                library_id,
+                environment,
+                authority_generation,
+                scope,
+                require_write,
+            )
+            .map_err(enrollment_error)
+    }
+
+    fn historical_writer_signing_public_key(
+        &self,
+        device_id: &str,
+        library_id: &str,
+        environment: Environment,
+        authority_generation: u64,
+    ) -> Result<Vec<u8>, EnrollmentAuthorizationError> {
+        if library_id != LIBRARY_ID
+            || environment != Environment::Development
+            || authority_generation != 7
+            || !tauri_app_lib::portable::is_uuid_v7(device_id)
+        {
+            return Err(EnrollmentAuthorizationError::NotAuthorized);
+        }
+        let mut key = vec![0x71; 65];
+        key[0] = 0x04;
+        Ok(key)
+    }
+
+    fn revoke_device(
+        &self,
+        device_id: &str,
+        now_ms: i64,
+    ) -> Result<(), EnrollmentAuthorizationError> {
+        self.pairing
+            .revoke_device(device_id, now_ms)
+            .map_err(enrollment_error)
+    }
+}
+
+type TestService = DirectSyncService<FixtureEnrollment, AuthorityStateStore, FixtureDirectCrypto>;
 
 fn authority_with_devices(devices: &[&str]) -> AuthorityState {
     let capabilities = notes_protocol_capabilities();
@@ -548,7 +623,9 @@ fn service_with_authority(
     authority: AuthorityState,
     limits: DirectSyncLimits,
 ) -> (TestService, (), Arc<Mutex<Vec<String>>>) {
-    let pairing = active_pairing();
+    let pairing = FixtureEnrollment {
+        pairing: active_pairing(),
+    };
     let crypto = FixtureDirectCrypto::default();
     let verified_sources = Arc::clone(&crypto.verified_sources);
     let store = AuthorityStateStore::new_fixture_only(authority);
@@ -680,6 +757,11 @@ fn transaction(
             .map(
                 |(index, (kind, base, base_version, proposed, ciphertext))| MutationDraft {
                     mutation_id: id(30_000 + transaction_number * 10 + index as u64),
+                    operation: if base == 0 {
+                        MutationOperation::Create
+                    } else {
+                        MutationOperation::Update
+                    },
                     record_id: id(40_000 + transaction_number * 10 + index as u64),
                     record_kind: kind.to_owned(),
                     record_schema_version: 1,

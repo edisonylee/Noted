@@ -1388,6 +1388,45 @@ impl<C: PairingCrypto> PairingMachine<C> {
         Ok(capability)
     }
 
+    /// Return the immutable signing key for an enrolled historical writer.
+    /// Revocation intentionally does not erase this public verification key:
+    /// existing signed records must remain verifiable after the writer loses
+    /// authorization to submit new work.
+    pub fn historical_writer_signing_public_key(
+        &self,
+        device_id: &str,
+        library_id: &str,
+        environment: Environment,
+        authority_generation: u64,
+    ) -> Result<Vec<u8>, PairingError> {
+        let ledger = self.lock_ledger()?;
+        let device = ledger
+            .devices
+            .get(device_id)
+            .ok_or(PairingError::ReceiptNotFound)?;
+        let receipt = ledger
+            .receipts
+            .get(&device.receipt_id)
+            .ok_or(PairingError::StateUnavailable)?;
+        if receipt.receipt.library_id != library_id {
+            return Err(PairingError::BindingMismatch("library_id"));
+        }
+        if receipt.receipt.environment != environment {
+            return Err(PairingError::BindingMismatch("environment"));
+        }
+        if receipt.receipt.authority_generation != authority_generation
+            || ledger.authority_generation != authority_generation
+        {
+            return Err(PairingError::AuthorityChanged);
+        }
+        if receipt.client_signing_public_key.len() != P256_PUBLIC_KEY_BYTES
+            || receipt.client_signing_public_key.first() != Some(&0x04)
+        {
+            return Err(PairingError::StateUnavailable);
+        }
+        Ok(receipt.client_signing_public_key.clone())
+    }
+
     pub fn quarantine_records(&self) -> Result<Vec<QuarantineRecord>, PairingError> {
         Ok(self.lock_ledger()?.quarantines.clone())
     }

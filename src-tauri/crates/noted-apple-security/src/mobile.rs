@@ -1,4 +1,8 @@
 use crate::models::*;
+use crate::record_crypto::{
+    OpenRecordArgs, OpenedRecordBridge, OpenedRecordV1, RecordCiphertextBridge, RecordCiphertextV1,
+    RecordCryptoContextV1, SealRecordArgs,
+};
 use crate::{Error, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -82,6 +86,44 @@ impl<R: Runtime> AppleSecurity<R> {
             VerifySignatureArgs::new(public_key, message, signature)?,
         )?;
         Ok(wire.valid)
+    }
+
+    /// Seal one canonical fixture record under the active native-only library
+    /// key. The returned descriptor contains ciphertext and public bindings;
+    /// the library key never crosses the plugin boundary.
+    pub fn seal_record(
+        &self,
+        identity: &IdentityHandle,
+        context: &RecordCryptoContextV1,
+        plaintext: &[u8],
+    ) -> Result<RecordCiphertextV1> {
+        let wire: RecordCiphertextBridge = self.0.run_mobile_plugin(
+            "sealRecord",
+            SealRecordArgs::new(identity, context, plaintext)?,
+        )?;
+        wire.into_public(context)
+    }
+
+    /// Verify the inner record-envelope signature and open it with the
+    /// active library key. `signer_public_key` is the expected enrolled P-256
+    /// X9.63 key selected by the Rust sync authority, never a key from the
+    /// untrusted ciphertext descriptor. This signature authenticates the
+    /// encrypted record only; callers must independently create or verify the
+    /// outer mutation-envelope signature over `MutationEnvelope::signing_bytes`.
+    /// Bootstrap and pull must remain closed until the caller has an
+    /// authority-authenticated historical writer-key directory.
+    pub fn open_record(
+        &self,
+        identity: &IdentityHandle,
+        context: &RecordCryptoContextV1,
+        sealed: &RecordCiphertextV1,
+        signer_public_key: &[u8],
+    ) -> Result<OpenedRecordV1> {
+        let wire: OpenedRecordBridge = self.0.run_mobile_plugin(
+            "openRecord",
+            OpenRecordArgs::new(identity, context, sealed, signer_public_key)?,
+        )?;
+        wire.into_public(context, sealed)
     }
 
     pub fn fresh_bytes(&self, length: usize) -> Result<Vec<u8>> {

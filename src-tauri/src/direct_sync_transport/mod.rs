@@ -8,6 +8,7 @@
 //! `Origin` header are rejected instead of participating in CORS.
 
 mod client;
+mod private_lan;
 
 #[cfg(not(target_os = "ios"))]
 mod server;
@@ -20,6 +21,10 @@ use crate::direct_sync::{
 use std::fmt;
 
 pub use client::FixtureDirectSyncClient;
+pub use private_lan::{
+    PrivateLanCandidateSource, PrivateLanDirectSyncSession, PrivateLanEndpointCandidate,
+    PrivateLanSessionError,
+};
 
 #[cfg(not(target_os = "ios"))]
 pub use server::{FixtureLoopbackServer, FixtureTlsIdentity};

@@ -1535,8 +1535,12 @@ The revoked state remains terminal after restart. The product runtime now
 immediately converts the exact active Keychain identity to a secret-free
 tombstone after that durable transition, retries the retirement on resume, and
 allows only a same-library invitation with a higher authority generation to
-start replacement pairing. Completing and atomically replacing the finalized
-activation remains re-enrollment work.
+start replacement pairing. Finalizing that replacement now atomically swaps the
+revoked activation, enrollment, sync profile, and active checkpoint only when
+the new receipt, identity, public keys, and authority generation satisfy the
+authenticated re-enrollment invariants. Existing Note identities survive the
+swap, exact replay remains idempotent, rollback is rejected, and restart tests
+verify the new activation remains authoritative.
 
 The following work still blocks the M4 gate and any personal-data sync:
 
@@ -1545,8 +1549,6 @@ The following work still blocks the M4 gate and any personal-data sync:
   discovery metadata or passing protocol messages through JavaScript. The
   existing fixture command that accepts claimed SPKI evidence from its caller is
   a harness only and cannot satisfy this gate;
-- completion of the higher-generation re-enrollment flow, including atomic
-  replacement of the finalized activation and restart tests across that swap;
 - production Mac key custody/signing and structural enforcement that pairing,
   revocation, and sync share one authority instance;
 - external review of the implemented pairing, cryptography, transport, and

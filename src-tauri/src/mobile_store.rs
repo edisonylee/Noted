@@ -1477,15 +1477,13 @@ impl MobileStore {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
-        let already_finalized: bool = transaction
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM mobile_pairing_activation_v1 WHERE singleton = 1)",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
-        if already_finalized {
-            return Err("a finalized pairing checkpoint cannot be rolled back".to_string());
+        if let Some(finalized) = load_mobile_pairing_activation(&transaction)? {
+            let revoked = load_mobile_authority_revocation_by_activation(
+                &transaction,
+                &finalized.activation_sha256,
+            )?
+            .ok_or_else(|| "a finalized pairing checkpoint cannot be rolled back".to_string())?;
+            validate_reenrollment_checkpoint(checkpoint, &finalized.activation, &revoked.public)?;
         }
         let replica = replica_identity(&transaction)?;
         if checkpoint.client.identity.device_id != replica.device_id {
@@ -1494,6 +1492,7 @@ impl MobileStore {
             );
         }
         write_mobile_pairing_checkpoint(&transaction, checkpoint)?;
+        verify_mobile_pairing_activation_schema(&transaction)?;
         transaction.commit().map_err(|error| error.to_string())
     }
 
@@ -2234,6 +2233,66 @@ fn validate_mobile_pairing_activation(activation: &MobilePairingActivation) -> R
             || confirmation.granted_scopes != activation.granted_scopes
     }) {
         return Err("mobile pairing activation is missing the exact user confirmation".to_string());
+    }
+    Ok(())
+}
+
+fn validate_reenrollment_checkpoint(
+    checkpoint: &MobilePairingCheckpoint,
+    previous: &MobilePairingActivation,
+    revocation: &MobileAuthorityRevocation,
+) -> Result<(), String> {
+    if checkpoint.client.state == PairingClientState::Active
+        || checkpoint.client.identity.device_id != previous.device_id
+        || revocation.library_id != previous.library_id
+        || revocation.device_id != previous.device_id
+        || revocation.receipt_id != previous.receipt_id
+        || revocation.authority_generation != previous.authority_generation
+    {
+        return Err("re-enrollment checkpoint is not bound to the revoked activation".to_string());
+    }
+    let invitation: Invitation = serde_json::from_slice(&checkpoint.client.invitation_bytes)
+        .map_err(|error| format!("decode re-enrollment Invitation: {error}"))?;
+    if invitation.library_id != previous.library_id
+        || invitation.authority_generation
+            <= u64::try_from(previous.authority_generation)
+                .map_err(|_| "previous authority generation exceeds u64".to_string())?
+        || invitation.environment != checkpoint.client.config.environment
+        || invitation.library_data_class != checkpoint.client.config.library_data_class
+    {
+        return Err(
+            "re-enrollment requires the same library and a higher authority generation".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_reenrollment_activation(
+    next: &MobilePairingActivation,
+    previous: &MobilePairingActivation,
+    revocation: &MobileAuthorityRevocation,
+) -> Result<(), String> {
+    if revocation.receipt_id != previous.receipt_id
+        || revocation.library_id != previous.library_id
+        || revocation.device_id != previous.device_id
+        || revocation.authority_generation != previous.authority_generation
+        || next.library_id != previous.library_id
+        || next.device_id != previous.device_id
+        || next.default_scope_id != previous.default_scope_id
+        || next.receipt_id == previous.receipt_id
+        || next.authority_generation <= previous.authority_generation
+        || next.purge_generation < previous.purge_generation
+        || next.key_epoch < previous.key_epoch
+        || next.checkpoint.identity_handle == previous.checkpoint.identity_handle
+        || next.checkpoint.client.identity.signing_public_key
+            == previous.checkpoint.client.identity.signing_public_key
+        || next.checkpoint.client.identity.hpke_public_key
+            == previous.checkpoint.client.identity.hpke_public_key
+    {
+        return Err(
+            "re-enrollment activation does not monotonically replace the revoked identity"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -3861,10 +3920,13 @@ fn activate_sync_enrollment_in_transaction(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|error| error.to_string())?;
-    if enrollment_state != "not_enrolled"
-        || activation.authority_generation < current_authority
-        || activation.purge_generation < current_purge
-    {
+    let permitted_state = enrollment_state == "not_enrolled" || enrollment_state == "revoked";
+    let generation_is_monotonic = if enrollment_state == "revoked" {
+        activation.authority_generation > current_authority
+    } else {
+        activation.authority_generation >= current_authority
+    };
+    if !permitted_state || !generation_is_monotonic || activation.purge_generation < current_purge {
         return Err("mobile sync enrollment is not an untouched monotonic activation".to_string());
     }
     let pending: bool = transaction
@@ -3880,11 +3942,12 @@ fn activate_sync_enrollment_in_transaction(
              SET enrollment_state = 'active', sync_state = ?1,
                  authority_generation = ?2, purge_generation = ?3,
                  last_error_code = NULL
-             WHERE singleton = 1 AND enrollment_state = 'not_enrolled'",
+             WHERE singleton = 1 AND enrollment_state = ?4",
             params![
                 if pending { "pending" } else { "idle" },
                 activation.authority_generation,
                 activation.purge_generation,
+                enrollment_state,
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -4793,22 +4856,33 @@ impl MobileStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
 
-        if let Some(stored) = load_mobile_pairing_activation(&transaction)? {
+        let previous_activation = if let Some(stored) =
+            load_mobile_pairing_activation(&transaction)?
+        {
             if stored.activation != *activation
                 || stored.activation_json != activation_json
                 || stored.activation_sha256 != activation_sha256
             {
-                return Err(
-                    "byte-different mobile pairing activation replay was rejected".to_string(),
-                );
+                let revoked = load_mobile_authority_revocation_by_activation(
+                    &transaction,
+                    &stored.activation_sha256,
+                )?
+                .ok_or_else(|| {
+                    "byte-different mobile pairing activation replay was rejected".to_string()
+                })?;
+                validate_reenrollment_activation(activation, &stored.activation, &revoked.public)?;
+                Some(stored)
+            } else {
+                verify_mobile_pairing_activation_schema(&transaction)?;
+                transaction.commit().map_err(|error| error.to_string())?;
+                return Ok(MobilePairingActivationResult {
+                    adopted_note_count: stored.adopted_note_count,
+                    replayed: true,
+                });
             }
-            verify_mobile_pairing_activation_schema(&transaction)?;
-            transaction.commit().map_err(|error| error.to_string())?;
-            return Ok(MobilePairingActivationResult {
-                adopted_note_count: stored.adopted_note_count,
-                replayed: true,
-            });
-        }
+        } else {
+            None
+        };
 
         let pending = load_mobile_pairing_checkpoint(&transaction)?.ok_or_else(|| {
             "pairing activation has no durable PendingActivation checkpoint".to_string()
@@ -4820,12 +4894,6 @@ impl MobileStore {
             );
         }
         let identity = replica_identity(&transaction)?;
-        if identity.library_state != "local_staging" || identity.device_id != activation.device_id {
-            return Err(
-                "pairing activation requires the matching untouched local_staging replica"
-                    .to_string(),
-            );
-        }
         let enrollment_state: String = transaction
             .query_row(
                 "SELECT enrollment_state FROM mobile_sync_state WHERE singleton = 1",
@@ -4833,17 +4901,34 @@ impl MobileStore {
                 |row| row.get(0),
             )
             .map_err(|error| error.to_string())?;
-        if enrollment_state != "not_enrolled" {
-            return Err(
-                "pairing activation requires an untouched not_enrolled sync state".to_string(),
-            );
-        }
-
-        let adopted_note_count = adopt_staging_for_pairing_activation(
-            &transaction,
-            &activation.library_id,
-            &activation.default_scope_id,
-        )?;
+        let adopted_note_count = if let Some(previous) = &previous_activation {
+            if identity.library_state != "paired"
+                || identity.library_id != activation.library_id
+                || identity.device_id != activation.device_id
+                || identity.default_scope_id != activation.default_scope_id
+                || enrollment_state != "revoked"
+            {
+                return Err(
+                    "re-enrollment requires the matching revoked paired replica".to_string()
+                );
+            }
+            previous.adopted_note_count
+        } else {
+            if identity.library_state != "local_staging"
+                || identity.device_id != activation.device_id
+                || enrollment_state != "not_enrolled"
+            {
+                return Err(
+                    "pairing activation requires the matching untouched local_staging replica"
+                        .to_string(),
+                );
+            }
+            adopt_staging_for_pairing_activation(
+                &transaction,
+                &activation.library_id,
+                &activation.default_scope_id,
+            )?
+        };
         activate_sync_enrollment_in_transaction(&transaction, activation)?;
         let finalized_at = next_timestamp(&transaction)?.max(activation.checkpoint.updated_at);
         let adopted_note_count_i64 = i64::try_from(adopted_note_count)
@@ -4859,7 +4944,24 @@ impl MobileStore {
                  ) VALUES (
                    1, 'sanitized_fixture', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
                    ?9, ?10, ?11, ?12, ?13, ?14, ?15
-                 )",
+                 )
+                 ON CONFLICT(singleton) DO UPDATE SET
+                   fixture_class = excluded.fixture_class,
+                   receipt_id = excluded.receipt_id,
+                   library_id = excluded.library_id,
+                   device_id = excluded.device_id,
+                   default_scope_id = excluded.default_scope_id,
+                   authority_generation = excluded.authority_generation,
+                   purge_generation = excluded.purge_generation,
+                   key_epoch = excluded.key_epoch,
+                   sync_spki_sha256 = excluded.sync_spki_sha256,
+                   record_cipher_suite = excluded.record_cipher_suite,
+                   granted_scopes_json = excluded.granted_scopes_json,
+                   capabilities_json = excluded.capabilities_json,
+                   activation_json = excluded.activation_json,
+                   activation_sha256 = excluded.activation_sha256,
+                   adopted_note_count = excluded.adopted_note_count,
+                   finalized_at = excluded.finalized_at",
                 params![
                     activation.receipt_id,
                     activation.library_id,
@@ -15438,6 +15540,86 @@ mod tests {
         }
     }
 
+    fn fixture_reenrollment_activation(
+        store: &MobileStore,
+        previous: &MobilePairingActivation,
+    ) -> MobilePairingActivation {
+        let mut next = fixture_pairing_activation(store);
+        next.library_id = previous.library_id.clone();
+        next.default_scope_id = previous.default_scope_id.clone();
+        next.authority_generation = previous.authority_generation + 1;
+        next.purge_generation = previous.purge_generation;
+        next.key_epoch = previous.key_epoch;
+        next.checkpoint.identity_handle = "018f47a0-7b80-4000-8000-000000000099".to_string();
+        next.checkpoint.client.identity.signing_public_key = {
+            let mut key = vec![21; 65];
+            key[0] = 4;
+            key
+        };
+        next.checkpoint.client.identity.hpke_public_key = vec![22; 32];
+
+        let mut invitation: Invitation =
+            serde_json::from_slice(&next.checkpoint.client.invitation_bytes)
+                .expect("decode replacement invitation");
+        invitation.library_id = next.library_id.clone();
+        invitation.authority_generation = next.authority_generation as u64;
+        next.checkpoint.client.invitation_bytes =
+            serde_json::to_vec(&invitation).expect("encode replacement invitation");
+
+        let mut receipt = next
+            .checkpoint
+            .client
+            .activation
+            .as_ref()
+            .expect("replacement activation receipt")
+            .receipt
+            .clone();
+        receipt.library_id = next.library_id.clone();
+        receipt.authority_generation = next.authority_generation as u64;
+        receipt.client_signing_key_fingerprint =
+            Sha256::digest(&next.checkpoint.client.identity.signing_public_key).to_vec();
+        receipt.client_hpke_key_fingerprint =
+            Sha256::digest(&next.checkpoint.client.identity.hpke_public_key).to_vec();
+        next.checkpoint.client.activation.as_mut().unwrap().receipt = receipt.clone();
+
+        let mut server_hello: ServerHello = serde_json::from_slice(
+            next.checkpoint
+                .client
+                .server_hello_bytes
+                .as_deref()
+                .unwrap(),
+        )
+        .expect("decode replacement ServerHello");
+        server_hello.receipt = receipt.clone();
+        next.checkpoint.client.server_hello_bytes =
+            Some(serde_json::to_vec(&server_hello).expect("encode replacement ServerHello"));
+
+        let mut bootstrap: BootstrapEnvelope =
+            serde_json::from_slice(next.checkpoint.client.bootstrap_bytes.as_deref().unwrap())
+                .expect("decode replacement bootstrap");
+        bootstrap.metadata.library_id = next.library_id.clone();
+        bootstrap.metadata.authority_generation = next.authority_generation as u64;
+        bootstrap.metadata.purge_generation = next.purge_generation as u64;
+        bootstrap.metadata.key_epoch = next.key_epoch as u64;
+        bootstrap.metadata.default_scope_id = next.default_scope_id.clone();
+        bootstrap.envelope_digest = bootstrap_envelope_digest(&bootstrap);
+        next.checkpoint.client.bootstrap_bytes =
+            Some(serde_json::to_vec(&bootstrap).expect("encode replacement bootstrap"));
+
+        let mut server_finish: ServerFinish = serde_json::from_slice(
+            next.checkpoint
+                .client
+                .server_finish_bytes
+                .as_deref()
+                .unwrap(),
+        )
+        .expect("decode replacement ServerFinish");
+        server_finish.receipt = receipt;
+        next.checkpoint.client.server_finish_bytes =
+            Some(serde_json::to_vec(&server_finish).expect("encode replacement ServerFinish"));
+        next
+    }
+
     fn save_pending_predecessor(store: &MobileStore, activation: &MobilePairingActivation) {
         let mut pending = activation.checkpoint.clone();
         pending.client.state = PairingClientState::PendingActivation;
@@ -15696,6 +15878,96 @@ mod tests {
         assert!(reopened
             .export_notes()
             .expect("export after revoked restart")
+            .contains(&note.record_id));
+        drop(reopened);
+        remove_database(&path);
+    }
+
+    #[test]
+    fn higher_generation_reenrollment_atomically_replaces_revoked_activation() {
+        let path = temporary_path("higher-generation-reenrollment");
+        let store = MobileStore::open(&path).expect("open re-enrollment store");
+        let note = store
+            .create("Offline survivor", "keep the same public note identity")
+            .expect("create pre-pairing note");
+        let previous = activate_fixture_store(&store);
+
+        let request_id = new_uuid_v7();
+        store
+            .prepare_direct_sync_request(&MobileDirectSyncRequestDraft {
+                request_id: request_id.clone(),
+                endpoint: "/sync/v1/negotiate".to_string(),
+                operation: "negotiate".to_string(),
+                purpose_json: purpose_json(serde_json::json!({
+                    "operation": "negotiate",
+                    "capabilities_sha256": exact_sha256(b"reenrollment capabilities")
+                })),
+                push_transaction_id: None,
+                push_counter: None,
+                signed_request_bytes: br#"{"request":"signed-negotiate"}"#.to_vec(),
+            })
+            .expect("prepare revocation request");
+        let response = br#"{"error":{"code":"device_revoked"}}"#.to_vec();
+        store
+            .record_direct_sync_response(
+                &request_id,
+                "/sync/v1/negotiate",
+                403,
+                "application/json",
+                &response,
+            )
+            .expect("record revocation response");
+        store
+            .apply_authority_revocation(&MobileAuthorityRevocationEvidence {
+                request_id,
+                endpoint: "/sync/v1/negotiate".to_string(),
+                exact_response_bytes: response,
+            })
+            .expect("apply revocation");
+
+        let next = fixture_reenrollment_activation(&store, &previous);
+        save_pending_predecessor(&store, &next);
+        let replaced = store
+            .finalize_pairing_activation(&next)
+            .expect("atomically replace revoked activation");
+        assert!(!replaced.replayed);
+        assert_eq!(replaced.adopted_note_count, 1);
+        assert_eq!(
+            store
+                .finalized_pairing_activation()
+                .expect("load replacement activation"),
+            Some(next.clone())
+        );
+        assert_eq!(
+            store
+                .authority_revocation()
+                .expect("read current revocation"),
+            None,
+            "old immutable revocation evidence must not revoke the replacement"
+        );
+        let exported = store.export_notes().expect("export after re-enrollment");
+        assert!(exported.contains(&note.record_id));
+        assert_eq!(
+            store
+                .finalize_pairing_activation(&next)
+                .expect("replay exact replacement"),
+            MobilePairingActivationResult {
+                adopted_note_count: 1,
+                replayed: true,
+            }
+        );
+        drop(store);
+
+        let reopened = MobileStore::open(&path).expect("reopen replacement activation");
+        assert_eq!(
+            reopened
+                .finalized_pairing_activation()
+                .expect("load replacement after restart"),
+            Some(next)
+        );
+        assert!(reopened
+            .export_notes()
+            .expect("export after replacement restart")
             .contains(&note.record_id));
         drop(reopened);
         remove_database(&path);

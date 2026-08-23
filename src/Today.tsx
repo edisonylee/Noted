@@ -6,7 +6,6 @@ import {
   useState,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
-  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
@@ -35,6 +34,8 @@ import {
   buildScheduleGrid,
   isCurrentInterval,
   scheduleEventHeightPx,
+  scheduleRangeFromDrag,
+  scheduleRangeFromMove,
   snapScheduleMinute,
 } from "./scheduleLayout";
 import { DocumentEditor } from "./editor/DocumentEditor";
@@ -73,6 +74,32 @@ type GridResizeState = {
   currentEnd: number;
   originMinute: number;
   pointerId: number;
+};
+
+type GridCreateState = {
+  anchor: number;
+  current: number;
+  originClientY: number;
+  pointerId: number;
+  dragged: boolean;
+};
+
+type GridMoveState = {
+  index: number;
+  initialStart: number;
+  initialEnd: number;
+  currentStart: number;
+  currentEnd: number;
+  originMinute: number;
+  originClientY: number;
+  pointerId: number;
+  dragged: boolean;
+};
+
+type ScheduleUndoState = {
+  message: string;
+  blocks: Block[];
+  calendarRestore?: { event: CalEvent; block: Block };
 };
 
 // Schedule blocks intentionally remain lightweight. Join behavior is resolved
@@ -547,12 +574,16 @@ function ScheduleRowForm({
   onCommit,
   onCancel,
   onDelete,
+  meetingUrl,
+  calendarUrl,
 }: {
   init: Block;
   busy: boolean;
   onCommit: (b: Block) => void;
   onCancel: () => void;
   onDelete?: () => void;
+  meetingUrl?: string | null;
+  calendarUrl?: string | null;
 }) {
   const [start, setStart] = useState(init.start ? fmtTime(init.start) : "");
   const [end, setEnd] = useState(init.end ? fmtTime(init.end) : "");
@@ -638,7 +669,14 @@ function ScheduleRowForm({
     currentEndMinutes < currentStartMinutes;
 
   return (
-    <div className="today-block today-rowedit" role="listitem">
+    <div
+      className="today-block today-rowedit"
+      role="listitem"
+      onBlur={(event) => {
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+        if (task.trim()) commit();
+      }}
+    >
       <div className="today-rowedit-times">
         <label className="today-timefield">
           <span>Start</span>
@@ -710,15 +748,39 @@ function ScheduleRowForm({
         onKeyDown={onEditorKeyDown}
       />
       <div className="today-rowedit-actions">
-        <button className="today-rowbtn save" onClick={commit} disabled={busy || !task.trim()} title="Save (Enter)">
+        {meetingUrl && (
+          <button
+            type="button"
+            className="today-rowbtn meeting"
+            onClick={() => openExternalUrl(meetingUrl)}
+            disabled={busy}
+            title="Join meeting"
+            aria-label="Join meeting"
+          >
+            <Video size={15} />
+          </button>
+        )}
+        {calendarUrl && (
+          <button
+            type="button"
+            className="today-rowbtn"
+            onClick={() => openExternalUrl(calendarUrl)}
+            disabled={busy}
+            title="Open in Google Calendar"
+            aria-label="Open in Google Calendar"
+          >
+            <CalendarDays size={15} />
+          </button>
+        )}
+        <button type="button" className="today-rowbtn save" onClick={commit} disabled={busy || !task.trim()} title="Save (Enter)">
           <Check size={15} />
         </button>
         {onDelete && (
-          <button className="today-rowbtn del" onClick={onDelete} disabled={busy} title="Delete">
+          <button type="button" className="today-rowbtn del" onClick={onDelete} disabled={busy} title="Delete">
             <Trash2 size={15} />
           </button>
         )}
-        <button className="today-rowbtn" onClick={onCancel} disabled={busy} title="Cancel (Esc)">
+        <button type="button" className="today-rowbtn" onClick={onCancel} disabled={busy} title="Cancel (Esc)">
           <X size={15} />
         </button>
       </div>
@@ -808,7 +870,10 @@ export function TodayView({
   const [gridDraft, setGridDraft] = useState<GridDraftEvent | null>(null);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [gridCursorMinute, setGridCursorMinute] = useState<number | null>(null);
+  const [gridCreate, setGridCreate] = useState<GridCreateState | null>(null);
+  const [gridMove, setGridMove] = useState<GridMoveState | null>(null);
   const [gridResize, setGridResize] = useState<GridResizeState | null>(null);
+  const [scheduleUndo, setScheduleUndo] = useState<ScheduleUndoState | null>(null);
   const [gridDetailsOpen, setGridDetailsOpen] = useState(false);
   const [gridDetailsBusy, setGridDetailsBusy] = useState(false);
   const [gridDetailsError, setGridDetailsError] = useState<string | null>(null);
@@ -819,6 +884,11 @@ export function TodayView({
   const [allDayCreateContacts, setAllDayCreateContacts] = useState<GcalContact[]>([]);
   const timeGridRef = useRef<HTMLDivElement>(null);
   const gridDraftInputRef = useRef<HTMLInputElement>(null);
+  const scheduleUndoTimerRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (scheduleUndoTimerRef.current != null) window.clearTimeout(scheduleUndoTimerRef.current);
+  }, []);
 
   useEffect(() => {
     if (!gridDraft) return;
@@ -962,7 +1032,11 @@ export function TodayView({
     setGridDraft(null);
     setSelectedIdx(null);
     setGridCursorMinute(null);
+    setGridCreate(null);
+    setGridMove(null);
     setGridResize(null);
+    setScheduleUndo(null);
+    if (scheduleUndoTimerRef.current != null) window.clearTimeout(scheduleUndoTimerRef.current);
     setGridDetailsOpen(false);
     setGridDetailsError(null);
     calendarAutoAttemptRef.current = null;
@@ -1335,12 +1409,13 @@ export function TodayView({
   // IN PLACE (update_entry) so the same DB row changes — Today and the Timeline
   // reflect the edit with no duplicate note, and the note is re-embedded. Only
   // when there's no schedule yet do we insert a fresh note.
-  async function persistBlocks(next: Block[]): Promise<boolean> {
+  async function persistBlocks(next: Block[], beforeSave?: () => Promise<void>): Promise<boolean> {
     if (rowBusy) return false;
     setRowBusy(true);
     setEditError(null);
     try {
       const cleaned = sortBlocks(next.filter((b) => b.task.trim()));
+      if (beforeSave) await beforeSave();
       if (entry?.id != null) {
         await api.updateEntry(entry.id, { blocks: cleaned });
       } else {
@@ -1372,8 +1447,88 @@ export function TodayView({
     }
   }
 
-  const commitEdit = (idx: number, b: Block) => persistBlocks(blocks.map((x, i) => (i === idx ? b : x)));
-  const deleteBlock = (idx: number) => persistBlocks(blocks.filter((_, i) => i !== idx));
+  const updateCalendarBlock = async (event: CalEvent, block: Block) => {
+    await api.gcalUpdateEvent(event.id, {
+      account: event.account,
+      calendarId: event.calendar_id,
+      title: block.task.trim(),
+      date: selectedDay,
+      start: block.start,
+      end: block.end,
+    });
+  };
+
+  const offerScheduleUndo = (
+    message: string,
+    previousBlocks: Block[],
+    calendarRestore?: { event: CalEvent; block: Block },
+  ) => {
+    if (scheduleUndoTimerRef.current != null) window.clearTimeout(scheduleUndoTimerRef.current);
+    setScheduleUndo({ message, blocks: previousBlocks, calendarRestore });
+    scheduleUndoTimerRef.current = window.setTimeout(() => setScheduleUndo(null), 7000);
+  };
+
+  const persistBlockChange = async (
+    idx: number,
+    block: Block,
+    undoMessage?: string,
+  ): Promise<boolean> => {
+    const original = blocks[idx];
+    if (!original) return false;
+    const calendarEvent = matchingCalendarEvent(original, calEvents ?? []);
+    const previousBlocks = blocks;
+    const saved = await persistBlocks(
+      blocks.map((item, itemIdx) => (itemIdx === idx ? block : item)),
+      calendarEvent
+        ? async () => {
+            try {
+              await updateCalendarBlock(calendarEvent, block);
+            } catch (error) {
+              throw new Error(`Google Calendar couldn't update this block: ${String(error)}`);
+            }
+          }
+        : undefined,
+    );
+    if (!saved) return false;
+    if (calendarEvent) await loadCalEvents();
+    if (undoMessage) {
+      offerScheduleUndo(
+        undoMessage,
+        previousBlocks,
+        calendarEvent ? { event: calendarEvent, block: original } : undefined,
+      );
+    }
+    return true;
+  };
+
+  const undoScheduleChange = async () => {
+    if (!scheduleUndo) return;
+    const undo = scheduleUndo;
+    setScheduleUndo(null);
+    if (scheduleUndoTimerRef.current != null) window.clearTimeout(scheduleUndoTimerRef.current);
+    const saved = await persistBlocks(
+      undo.blocks,
+      undo.calendarRestore
+        ? () => updateCalendarBlock(undo.calendarRestore!.event, undo.calendarRestore!.block)
+        : undefined,
+    );
+    if (saved && undo.calendarRestore) await loadCalEvents();
+  };
+
+  const dismissScheduleUndo = () => {
+    setScheduleUndo(null);
+    if (scheduleUndoTimerRef.current != null) window.clearTimeout(scheduleUndoTimerRef.current);
+  };
+
+  const commitEdit = (idx: number, b: Block) => persistBlockChange(idx, b);
+  const deleteBlock = async (idx: number) => {
+    const original = blocks[idx];
+    if (!original || matchingCalendarEvent(original, calEvents ?? [])) return;
+    const previousBlocks = blocks;
+    if (await persistBlocks(blocks.filter((_, itemIdx) => itemIdx !== idx))) {
+      offerScheduleUndo("Block deleted", previousBlocks);
+    }
+  };
   const commitAdd = (b: Block) => persistBlocks([...blocks, b]);
   const beginAdd = () => {
     setAddOpen(false);
@@ -1381,6 +1536,8 @@ export function TodayView({
     setEditError(null);
     setGridDraft(null);
     setSelectedIdx(null);
+    setGridCreate(null);
+    setGridMove(null);
     setGridResize(null);
     setGridDetailsOpen(false);
     setGridDetailsError(null);
@@ -1392,6 +1549,8 @@ export function TodayView({
     setEditError(null);
     setGridDraft(null);
     setSelectedIdx(idx);
+    setGridCreate(null);
+    setGridMove(null);
     setGridResize(null);
     setGridDetailsOpen(false);
     setGridDetailsError(null);
@@ -1522,6 +1681,8 @@ export function TodayView({
     editIdx != null ||
     adding ||
     gridDraft != null ||
+    gridCreate != null ||
+    gridMove != null ||
     gridResize != null ||
     gridDetailsOpen ||
     gridDetailsBusy ||
@@ -1994,13 +2155,20 @@ export function TodayView({
   const clampGridStart = (minute: number) =>
     Math.min(Math.max(grid.start, minute), Math.max(grid.start, grid.end - 60));
 
-  const minuteAtGridY = (clientY: number, rectTop: number) =>
-    clampGridStart(
-      snapScheduleMinute(
-        scheduleScale.yToMinute(clientY - rectTop - scheduleGridPad),
-        gridStepMinutes,
+  const minuteAtGridYRaw = (clientY: number, rectTop: number) =>
+    Math.min(
+      grid.end,
+      Math.max(
+        grid.start,
+        snapScheduleMinute(
+          scheduleScale.yToMinute(clientY - rectTop - scheduleGridPad),
+          gridStepMinutes,
+        ),
       ),
     );
+
+  const minuteAtGridY = (clientY: number, rectTop: number) =>
+    clampGridStart(minuteAtGridYRaw(clientY, rectTop));
 
   const paintedEventHeight = (start: number, end: number) =>
     scheduleEventHeightPx(scheduleScale, start, end, gridEventGap);
@@ -2013,20 +2181,74 @@ export function TodayView({
     setEditError(null);
     setSelectedIdx(null);
     setGridCursorMinute(null);
+    setGridCreate(null);
+    setGridMove(null);
     setGridDetailsOpen(false);
     setGridDetailsError(null);
     setGridDraft({ task: "", start, end: start + 60 });
     window.setTimeout(() => gridDraftInputRef.current?.focus({ preventScroll: true }), 40);
   };
 
+  const beginGridCreate = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (
+      event.button !== 0 ||
+      event.target !== event.currentTarget ||
+      gridDraft ||
+      gridResize ||
+      gridMove ||
+      rowBusy ||
+      editIdx != null
+    ) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const anchor = minuteAtGridY(event.clientY, event.currentTarget.getBoundingClientRect().top);
+    setAddOpen(false);
+    setAdding(false);
+    setSelectedIdx(null);
+    setGridCursorMinute(null);
+    setGridCreate({
+      anchor,
+      current: anchor,
+      originClientY: event.clientY,
+      pointerId: event.pointerId,
+      dragged: false,
+    });
+  };
+
   const handleGridPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.target !== event.currentTarget || gridResize || gridDraft) return;
+    if (gridCreate && event.pointerId === gridCreate.pointerId) {
+      event.preventDefault();
+      const current = minuteAtGridYRaw(
+        event.clientY,
+        event.currentTarget.getBoundingClientRect().top,
+      );
+      setGridCreate({
+        ...gridCreate,
+        current,
+        dragged: gridCreate.dragged || Math.abs(event.clientY - gridCreate.originClientY) >= 4,
+      });
+      return;
+    }
+    if (event.target !== event.currentTarget || gridResize || gridDraft || gridMove) return;
     setGridCursorMinute(minuteAtGridY(event.clientY, event.currentTarget.getBoundingClientRect().top));
   };
 
-  const handleGridClick = (event: ReactMouseEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || event.target !== event.currentTarget || gridDraft) return;
-    beginGridDraftAt(minuteAtGridY(event.clientY, event.currentTarget.getBoundingClientRect().top));
+  const finishGridCreate = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!gridCreate || event.pointerId !== gridCreate.pointerId) return;
+    event.preventDefault();
+    const range = scheduleRangeFromDrag(gridCreate.anchor, gridCreate.current, {
+      minStart: grid.start,
+      maxEnd: grid.end,
+      dragged: gridCreate.dragged,
+      stepMinutes: gridStepMinutes,
+    });
+    setGridCreate(null);
+    setGridDraft({ task: "", ...range });
+  };
+
+  const cancelGridCreate = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!gridCreate || event.pointerId !== gridCreate.pointerId) return;
+    setGridCreate(null);
   };
 
   const handleGridKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -2048,6 +2270,8 @@ export function TodayView({
       event.stopPropagation();
       setSelectedIdx(null);
       setGridCursorMinute(null);
+      setGridCreate(null);
+      setGridMove(null);
       return;
     } else {
       return;
@@ -2187,12 +2411,95 @@ export function TodayView({
   const persistGridResize = async (index: number, start: number, end: number) => {
     const block = blocks[index];
     if (!block) return;
-    await commitEdit(index, {
+    await persistBlockChange(index, {
       ...block,
       start: minToStr(start),
       end: minToStr(end),
       duration_min: end - start,
+    }, "Block resized");
+  };
+
+  const beginGridMove = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    index: number,
+    start: number,
+    end: number,
+  ) => {
+    if (
+      event.button !== 0 ||
+      rowBusy ||
+      gridDraft ||
+      gridResize ||
+      (event.target as HTMLElement).closest("button, a, input")
+    ) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const gridTop = timeGridRef.current?.getBoundingClientRect().top;
+    const originMinute = gridTop == null
+      ? start
+      : scheduleScale.yToMinute(event.clientY - gridTop - scheduleGridPad);
+    setSelectedIdx(index);
+    setGridCursorMinute(null);
+    setGridMove({
+      index,
+      initialStart: start,
+      initialEnd: end,
+      currentStart: start,
+      currentEnd: end,
+      originMinute,
+      originClientY: event.clientY,
+      pointerId: event.pointerId,
+      dragged: false,
     });
+  };
+
+  const updateGridMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!gridMove || event.pointerId !== gridMove.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const gridTop = timeGridRef.current?.getBoundingClientRect().top;
+    if (gridTop == null) return;
+    const pointerMinute = scheduleScale.yToMinute(event.clientY - gridTop - scheduleGridPad);
+    const next = scheduleRangeFromMove(
+      gridMove.initialStart,
+      gridMove.initialEnd,
+      pointerMinute - gridMove.originMinute,
+      { minStart: grid.start, maxEnd: grid.end, stepMinutes: gridStepMinutes },
+    );
+    setGridMove({
+      ...gridMove,
+      currentStart: next.start,
+      currentEnd: next.end,
+      dragged: gridMove.dragged || Math.abs(event.clientY - gridMove.originClientY) >= 4,
+    });
+  };
+
+  const finishGridMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!gridMove || event.pointerId !== gridMove.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const completed = gridMove;
+    setGridMove(null);
+    if (!completed.dragged) {
+      beginEdit(completed.index);
+      return;
+    }
+    if (completed.currentStart === completed.initialStart) return;
+    const block = blocks[completed.index];
+    if (!block) return;
+    void persistBlockChange(completed.index, {
+      ...block,
+      start: minToStr(completed.currentStart),
+      end: minToStr(completed.currentEnd),
+      duration_min: completed.currentEnd - completed.currentStart,
+    }, "Block moved");
+  };
+
+  const cancelGridMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!gridMove || event.pointerId !== gridMove.pointerId) return;
+    event.stopPropagation();
+    setGridMove(null);
   };
 
   const beginGridResize = (
@@ -2215,6 +2522,8 @@ export function TodayView({
         : scheduleScale.yToMinute(event.clientY - gridTop - scheduleGridPad);
     setSelectedIdx(index);
     setGridCursorMinute(null);
+    setGridCreate(null);
+    setGridMove(null);
     setGridResize({
       index,
       edge,
@@ -2312,13 +2621,6 @@ export function TodayView({
     return { isNow, isPast: !isNow && nowMin >= item.end };
   };
 
-  const meetingFor = (block: Block) => {
-    const calendarEvent = matchingCalendarEvent(block, calEvents ?? []);
-    return calendarEvent?.meet_link
-      ? joinUrl(calendarEvent.meet_link, calendarEvent.account)
-      : null;
-  };
-
   const eventClasses = (
     base: string,
     item: (typeof grid.items)[number],
@@ -2342,6 +2644,14 @@ export function TodayView({
     ? gridResize?.index === null
       ? gridResize.currentEnd
       : gridDraft.end
+    : null;
+  const createPreview = gridCreate
+    ? scheduleRangeFromDrag(gridCreate.anchor, gridCreate.current, {
+        minStart: grid.start,
+        maxEnd: grid.end,
+        dragged: gridCreate.dragged,
+        stepMinutes: gridStepMinutes,
+      })
     : null;
 
   return renderScheduleShell(
@@ -2446,15 +2756,17 @@ export function TodayView({
             className="today-grid-events"
             role="list"
             tabIndex={gridDraft ? -1 : 0}
-            aria-label="Schedule canvas. Use the arrow keys to choose a time, then press Enter to add an event."
+            aria-label="Schedule canvas. Click or drag empty time to add an event. Use the arrow keys to choose a time, then press Enter to add an event."
+            onPointerDown={beginGridCreate}
             onPointerMove={handleGridPointerMove}
-            onClick={handleGridClick}
-            onPointerLeave={() => !gridResize && setGridCursorMinute(null)}
+            onPointerUp={finishGridCreate}
+            onPointerCancel={cancelGridCreate}
+            onPointerLeave={() => !gridCreate && !gridMove && !gridResize && setGridCursorMinute(null)}
             onKeyDown={handleGridKeyDown}
           >
-            {!grid.items.length && !gridDraft && (
+            {!grid.items.length && !gridDraft && !gridCreate && (
               <div className="today-grid-empty" role="status">
-                Click any time to add an event
+                Click or drag any time to add a block
               </div>
             )}
             {isToday && nowMin >= grid.start && nowMin <= grid.end && (
@@ -2475,6 +2787,18 @@ export function TodayView({
                 }}
               >
                 <span>{fmtTime(minToStr(gridCursorMinute))}</span>
+              </div>
+            )}
+            {createPreview && (
+              <div
+                className="today-grid-create-range"
+                aria-hidden="true"
+                style={{
+                  top: `${scheduleGridPad + scheduleScale.minuteToY(createPreview.start)}px`,
+                  height: `${paintedEventHeight(createPreview.start, createPreview.end)}px`,
+                }}
+              >
+                <span>{fmtRange(minToStr(createPreview.start), minToStr(createPreview.end))}</span>
               </div>
             )}
             {gridDraft && draftStart != null && draftEnd != null && (
@@ -2602,6 +2926,10 @@ export function TodayView({
             {grid.items.map((item) => {
               const idx = item.index;
               const block = item.block;
+              const calendarEvent = matchingCalendarEvent(block, calEvents ?? []);
+              const meetingUrl = calendarEvent?.meet_link
+                ? joinUrl(calendarEvent.meet_link, calendarEvent.account)
+                : null;
               if (idx === editIdx) {
                 return (
                   <div
@@ -2614,16 +2942,20 @@ export function TodayView({
                       busy={rowBusy}
                       onCommit={(next) => commitEdit(idx, next)}
                       onCancel={() => setEditIdx(null)}
-                      onDelete={() => deleteBlock(idx)}
+                      onDelete={calendarEvent ? undefined : () => deleteBlock(idx)}
+                      meetingUrl={meetingUrl}
+                      calendarUrl={calendarEvent?.html_link}
                     />
                   </div>
                 );
               }
 
-              const meetingUrl = meetingFor(block);
               const { isNow } = eventState(item);
-              const previewStart = gridResize?.index === idx ? gridResize.currentStart : item.start;
-              const previewEnd = gridResize?.index === idx ? gridResize.currentEnd : item.end;
+              const activeMove = gridMove?.index === idx ? gridMove : null;
+              const previewStart = activeMove?.currentStart ??
+                (gridResize?.index === idx ? gridResize.currentStart : item.start);
+              const previewEnd = activeMove?.currentEnd ??
+                (gridResize?.index === idx ? gridResize.currentEnd : item.end);
               const previewHeight = paintedEventHeight(previewStart, previewEnd);
               const previewDuration = previewEnd - previewStart;
               const compact = previewDuration <= 30 || previewHeight < 52;
@@ -2641,6 +2973,7 @@ export function TodayView({
                     eventClasses("today-grid-event editable", item, meetingUrl) +
                     (compact ? " compact" : "") +
                     (selected ? " selected" : "") +
+                    (activeMove?.dragged ? " moving" : "") +
                     (gridResize?.index === idx ? " resizing" : "")
                   }
                   style={{
@@ -2649,16 +2982,12 @@ export function TodayView({
                     left: `calc(${left}% + ${laneOffset}px)`,
                     width: `calc(${width}% - ${laneReduction}px)`,
                   }}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    if (!gridDraft && !gridResize) setSelectedIdx(idx);
-                  }}
-                  onDoubleClick={(event) => {
-                    event.stopPropagation();
-                    beginEdit(idx);
-                  }}
+                  onPointerDown={(event) => beginGridMove(event, idx, previewStart, previewEnd)}
+                  onPointerMove={updateGridMove}
+                  onPointerUp={finishGridMove}
+                  onPointerCancel={cancelGridMove}
                   onPointerEnter={() => setGridCursorMinute(null)}
-                  title="Click to select · double-click to edit"
+                  title="Click to edit · drag to move"
                   role="listitem"
                   tabIndex={0}
                   onFocus={() => !gridDraft && setSelectedIdx(idx)}
@@ -2717,62 +3046,58 @@ export function TodayView({
                       <Pencil size={13} />
                     </button>
                   </div>
-                  {selected && (
-                    <>
-                      <button
-                        type="button"
-                        className="today-grid-resize today-grid-resize-start"
-                        onPointerDown={(event) =>
-                          beginGridResize(event, idx, "start", previewStart, previewEnd)
-                        }
-                        onPointerMove={updateGridResize}
-                        onPointerUp={finishGridResize}
-                        onPointerCancel={cancelGridResize}
-                        onKeyDown={(event) => {
-                          if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-                          event.preventDefault();
-                          event.stopPropagation();
-                          resizeWithKeyboard(
-                            idx,
-                            "start",
-                            previewStart,
-                            previewEnd,
-                            event.key === "ArrowUp" ? -1 : 1,
-                          );
-                        }}
-                        aria-label={`Adjust ${block.task} start. Currently starts at ${fmtTime(minToStr(previewStart))}. Use the up and down arrow keys in 15-minute steps.`}
-                        title={`Adjust start · ${fmtTime(minToStr(previewStart))}`}
-                      >
-                        <GripHorizontal size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        className="today-grid-resize today-grid-resize-end"
-                        onPointerDown={(event) =>
-                          beginGridResize(event, idx, "end", previewStart, previewEnd)
-                        }
-                        onPointerMove={updateGridResize}
-                        onPointerUp={finishGridResize}
-                        onPointerCancel={cancelGridResize}
-                        onKeyDown={(event) => {
-                          if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-                          event.preventDefault();
-                          event.stopPropagation();
-                          resizeWithKeyboard(
-                            idx,
-                            "end",
-                            previewStart,
-                            previewEnd,
-                            event.key === "ArrowUp" ? -1 : 1,
-                          );
-                        }}
-                        aria-label={`Adjust ${block.task} end. Currently ends at ${fmtTime(minToStr(previewEnd))}. Use the up and down arrow keys in 15-minute steps.`}
-                        title={`Adjust end · ${fmtTime(minToStr(previewEnd))}`}
-                      >
-                        <GripHorizontal size={14} />
-                      </button>
-                    </>
-                  )}
+                  <button
+                    type="button"
+                    className="today-grid-resize today-grid-resize-start"
+                    onPointerDown={(event) =>
+                      beginGridResize(event, idx, "start", previewStart, previewEnd)
+                    }
+                    onPointerMove={updateGridResize}
+                    onPointerUp={finishGridResize}
+                    onPointerCancel={cancelGridResize}
+                    onKeyDown={(event) => {
+                      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      resizeWithKeyboard(
+                        idx,
+                        "start",
+                        previewStart,
+                        previewEnd,
+                        event.key === "ArrowUp" ? -1 : 1,
+                      );
+                    }}
+                    aria-label={`Adjust ${block.task} start. Currently starts at ${fmtTime(minToStr(previewStart))}. Use the up and down arrow keys in 15-minute steps.`}
+                    title={`Adjust start · ${fmtTime(minToStr(previewStart))}`}
+                  >
+                    <GripHorizontal size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="today-grid-resize today-grid-resize-end"
+                    onPointerDown={(event) =>
+                      beginGridResize(event, idx, "end", previewStart, previewEnd)
+                    }
+                    onPointerMove={updateGridResize}
+                    onPointerUp={finishGridResize}
+                    onPointerCancel={cancelGridResize}
+                    onKeyDown={(event) => {
+                      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      resizeWithKeyboard(
+                        idx,
+                        "end",
+                        previewStart,
+                        previewEnd,
+                        event.key === "ArrowUp" ? -1 : 1,
+                      );
+                    }}
+                    aria-label={`Adjust ${block.task} end. Currently ends at ${fmtTime(minToStr(previewEnd))}. Use the up and down arrow keys in 15-minute steps.`}
+                    title={`Adjust end · ${fmtTime(minToStr(previewEnd))}`}
+                  >
+                    <GripHorizontal size={14} />
+                  </button>
                 </div>
               );
             })}
@@ -2783,6 +3108,10 @@ export function TodayView({
           {grid.items.map((item) => {
             const idx = item.index;
             const block = item.block;
+            const calendarEvent = matchingCalendarEvent(block, calEvents ?? []);
+            const meetingUrl = calendarEvent?.meet_link
+              ? joinUrl(calendarEvent.meet_link, calendarEvent.account)
+              : null;
             if (idx === editIdx) {
               return (
                 <ScheduleRowForm
@@ -2791,31 +3120,23 @@ export function TodayView({
                   busy={rowBusy}
                   onCommit={(next) => commitEdit(idx, next)}
                   onCancel={() => setEditIdx(null)}
-                  onDelete={() => deleteBlock(idx)}
+                  onDelete={calendarEvent ? undefined : () => deleteBlock(idx)}
+                  meetingUrl={meetingUrl}
+                  calendarUrl={calendarEvent?.html_link}
                 />
               );
             }
-            const meetingUrl = meetingFor(block);
             const { isNow } = eventState(item);
             const range = fmtRange(block.start, minToStr(item.end));
             return (
               <div
                 key={`ledger-event-${idx}`}
                 className={eventClasses("today-block editable", item, meetingUrl)}
-                onDoubleClick={meetingUrl ? undefined : () => beginEdit(idx)}
-                title={meetingUrl ? `Join ${block.task}` : "Double-click to edit"}
+                onClick={() => beginEdit(idx)}
+                title="Click to edit"
                 role="listitem"
                 aria-label={`${block.task}, ${range}${isNow ? ", now" : ""}`}
               >
-                {meetingUrl && (
-                  <a
-                    className="today-event-hit"
-                    href={meetingUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    aria-label={`Join ${block.task}, ${range}`}
-                  />
-                )}
                 <div className="today-time" aria-hidden="true">
                   <span>{fmtTime(block.start)}</span>
                   <span className="today-time-end">{fmtTime(minToStr(item.end))}</span>
@@ -2830,9 +3151,20 @@ export function TodayView({
                       </span>
                     )}
                     {meetingUrl && (
-                      <span className="today-event-join">
+                      <a
+                        className="today-event-join"
+                        href={meetingUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          openExternalUrl(meetingUrl);
+                        }}
+                        aria-label={`Join ${block.task}, ${range}`}
+                      >
                         <Video size={12} aria-hidden="true" /> Join meeting
-                      </span>
+                      </a>
                     )}
                   </div>
                   <span className="today-dur">{fmtDur(item.durationMinutes)}</span>
@@ -2855,6 +3187,21 @@ export function TodayView({
         </div>
 
       </div>
+
+      {scheduleUndo && (
+        <div className="today-schedule-undo" role="status" aria-live="polite">
+          <span>{scheduleUndo.message}</span>
+          <button type="button" onClick={() => void undoScheduleChange()}>Undo</button>
+          <button
+            type="button"
+            className="today-schedule-undo-dismiss"
+            onClick={dismissScheduleUndo}
+            aria-label="Dismiss"
+          >
+            <X size={14} aria-hidden="true" />
+          </button>
+        </div>
+      )}
 
       {editError && !editing && <div className="error today-rowerror">{editError}</div>}
       {gridDetailsOpen && gridDraft && (

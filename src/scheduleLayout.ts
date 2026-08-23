@@ -177,6 +177,67 @@ export function snapScheduleMinute(value: number, stepMinutes = 15): number {
   return Math.round(value / step) * step;
 }
 
+export function scheduleRangeFromDrag(
+  anchor: number,
+  current: number,
+  {
+    minStart,
+    maxEnd,
+    dragged,
+    stepMinutes = 15,
+    defaultDuration = 60,
+  }: {
+    minStart: number;
+    maxEnd: number;
+    dragged: boolean;
+    stepMinutes?: number;
+    defaultDuration?: number;
+  },
+): { start: number; end: number } {
+  const step = Number.isFinite(stepMinutes) && stepMinutes > 0 ? stepMinutes : 15;
+  const duration = Number.isFinite(defaultDuration) && defaultDuration > 0
+    ? defaultDuration
+    : 60;
+  const safeMin = Math.min(minStart, maxEnd - step);
+  const safeMax = Math.max(maxEnd, safeMin + step);
+  const snappedAnchor = Math.min(safeMax - step, Math.max(safeMin, snapScheduleMinute(anchor, step)));
+
+  if (!dragged) {
+    const start = Math.min(snappedAnchor, Math.max(safeMin, safeMax - duration));
+    return { start, end: Math.min(safeMax, start + duration) };
+  }
+
+  const snappedCurrent = Math.min(safeMax, Math.max(safeMin, snapScheduleMinute(current, step)));
+  if (snappedCurrent < snappedAnchor) {
+    return { start: snappedCurrent, end: Math.max(snappedCurrent + step, snappedAnchor) };
+  }
+  return { start: snappedAnchor, end: Math.min(safeMax, Math.max(snappedAnchor + step, snappedCurrent)) };
+}
+
+export function scheduleRangeFromMove(
+  initialStart: number,
+  initialEnd: number,
+  deltaMinutes: number,
+  {
+    minStart,
+    maxEnd,
+    stepMinutes = 15,
+  }: {
+    minStart: number;
+    maxEnd: number;
+    stepMinutes?: number;
+  },
+): { start: number; end: number } {
+  const step = Number.isFinite(stepMinutes) && stepMinutes > 0 ? stepMinutes : 15;
+  const duration = Math.max(step, initialEnd - initialStart);
+  const latestStart = Math.max(minStart, maxEnd - duration);
+  const start = Math.min(
+    latestStart,
+    Math.max(minStart, snapScheduleMinute(initialStart + deltaMinutes, step)),
+  );
+  return { start, end: start + duration };
+}
+
 /**
  * Builds a uniform time ruler for a day view. Event density never changes the
  * scale: an hour is always the same height, empty time remains visible, and

@@ -10,6 +10,8 @@ import {
   scheduleEventHeightPx,
   scheduleGridBounds,
   scheduleMinuteFromGridOffset,
+  scheduleRangeFromDrag,
+  scheduleRangeFromMove,
   scheduleStartFromResizeDelta,
   type ScheduleInterval,
 } from "../src/scheduleLayout";
@@ -154,6 +156,51 @@ describe("schedule grid geometry", () => {
 });
 
 describe("direct schedule manipulation", () => {
+  test("creates a default block on click and an exact range on drag", () => {
+    expect(
+      scheduleRangeFromDrag(9 * 60, 9 * 60, {
+        minStart: 6 * 60,
+        maxEnd: 24 * 60,
+        dragged: false,
+      }),
+    ).toEqual({ start: 9 * 60, end: 10 * 60 });
+    expect(
+      scheduleRangeFromDrag(9 * 60, 10 * 60 + 30, {
+        minStart: 6 * 60,
+        maxEnd: 24 * 60,
+        dragged: true,
+      }),
+    ).toEqual({ start: 9 * 60, end: 10 * 60 + 30 });
+    expect(
+      scheduleRangeFromDrag(10 * 60, 8 * 60 + 30, {
+        minStart: 6 * 60,
+        maxEnd: 24 * 60,
+        dragged: true,
+      }),
+    ).toEqual({ start: 8 * 60 + 30, end: 10 * 60 });
+  });
+
+  test("moves a block in snapped steps without crossing the day edges", () => {
+    expect(
+      scheduleRangeFromMove(9 * 60, 10 * 60, 22, {
+        minStart: 6 * 60,
+        maxEnd: 24 * 60,
+      }),
+    ).toEqual({ start: 9 * 60 + 15, end: 10 * 60 + 15 });
+    expect(
+      scheduleRangeFromMove(6 * 60, 7 * 60, -90, {
+        minStart: 6 * 60,
+        maxEnd: 24 * 60,
+      }),
+    ).toEqual({ start: 6 * 60, end: 7 * 60 });
+    expect(
+      scheduleRangeFromMove(23 * 60, 24 * 60, 90, {
+        minStart: 6 * 60,
+        maxEnd: 24 * 60,
+      }),
+    ).toEqual({ start: 23 * 60, end: 24 * 60 });
+  });
+
   test("maps a grid click to the nearest 15-minute start", () => {
     expect(
       scheduleMinuteFromGridOffset(132, {

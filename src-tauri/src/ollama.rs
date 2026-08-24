@@ -119,7 +119,15 @@ pub async fn chat_json_local_ctx(
         "keep_alive": "5m",
         // A small non-zero temperature avoids two temp-0 failure modes: degenerate
         // JSON loops and anchoring every note onto the first listed category.
-        "options": { "temperature": 0.3, "num_ctx": num_ctx },
+        // Keep schema-constrained calls from extending a valid JSON array
+        // indefinitely when a local model fails to choose an end point. Meeting
+        // packs normally finish well below this ceiling; the schema's maxItems
+        // bounds keep the response complete before the limit is reached.
+        "options": {
+            "temperature": 0.3,
+            "num_ctx": num_ctx,
+            "num_predict": num_ctx.min(12_288),
+        },
         "messages": [
             { "role": "system", "content": system },
             user_msg,

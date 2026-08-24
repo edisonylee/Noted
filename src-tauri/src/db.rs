@@ -312,6 +312,7 @@ CREATE TABLE IF NOT EXISTS meeting_summaries (
   meeting_id INTEGER NOT NULL REFERENCES meetings(id),
   template   TEXT NOT NULL,
   content_md TEXT NOT NULL,
+  content_json TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -491,6 +492,9 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     // NULL so the UI can withhold pace instead of presenting padded spans as
     // precise articulation timing.
     ensure_column(&conn, "meeting_segments", "voiced_ms", "INTEGER")?;
+    // Meeting Pack v2 keeps a structured source of truth next to the Markdown
+    // projection used by search, older clients, and user edits.
+    ensure_column(&conn, "meeting_summaries", "content_json", "TEXT")?;
     backfill_meeting_public_ids(&conn)?;
     initialize_meeting_filing_provenance(&conn)?;
     initialize_meeting_transcript_index(&conn)?;

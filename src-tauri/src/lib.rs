@@ -3180,7 +3180,7 @@ async fn meeting_export_pdf(
     let export_kind = if kind.as_deref() == Some("transcript") {
         meeting::pdf::ExportKind::Transcript
     } else {
-        meeting::pdf::ExportKind::Brief
+        meeting::pdf::ExportKind::Notes
     };
     let extension = if export_kind == meeting::pdf::ExportKind::Transcript {
         "transcript.pdf"

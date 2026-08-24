@@ -96,6 +96,47 @@ fn vec_loads_and_schema_evolves() {
 }
 
 #[test]
+fn legacy_meeting_summaries_gain_structured_pack_storage_additively() {
+    let tmp = std::env::temp_dir().join(format!(
+        "noted_meeting_pack_migration_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    {
+        let legacy = rusqlite::Connection::open(&tmp).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE meeting_summaries (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               meeting_id INTEGER NOT NULL,
+               template TEXT NOT NULL,
+               content_md TEXT NOT NULL,
+               created_at TEXT NOT NULL
+             );",
+            )
+            .unwrap();
+    }
+
+    let conn = db::init(&tmp).unwrap();
+    let has_content_json = conn
+        .prepare("PRAGMA table_info(meeting_summaries)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+        .iter()
+        .any(|column| column == "content_json");
+    assert!(has_content_json);
+    drop(conn);
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
 fn note_titles_and_bodies_are_user_editable() {
     let tmp = std::env::temp_dir().join(format!(
         "noted_note_edit_{}_{}.db",
@@ -171,14 +212,23 @@ fn meeting_title_and_generated_notes_are_editable() {
         })
         .unwrap();
     store::set_note_id(&conn, meeting_id, note_id).unwrap();
+    let meeting_pack = json!({
+        "executive_summary": "Original structured summary.",
+        "discussion": []
+    });
     let summary_id = store::insert_summary(
         &conn,
         meeting_id,
         store::DEFAULT_TEMPLATE,
         "## Summary\n\nOriginal summary.",
+        Some(&meeting_pack),
         "2026-07-31T12:31:00Z",
     )
     .unwrap();
+    assert_eq!(
+        store::list_summaries(&conn, meeting_id).unwrap()[0]["content_json"],
+        meeting_pack
+    );
 
     assert_eq!(
         store::set_title(&conn, meeting_id, "Weekly product review").unwrap(),
@@ -205,6 +255,7 @@ fn meeting_title_and_generated_notes_are_editable() {
         detail["summaries"][0]["content_md"],
         "## Summary\n\nEdited by me."
     );
+    assert!(detail["summaries"][0]["content_json"].is_null());
     let note = db::list_notes(&conn).unwrap().pop().unwrap();
     assert_eq!(note.title, "Weekly product review");
     assert!(note.raw_text.contains("Edited by me."));

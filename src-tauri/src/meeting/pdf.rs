@@ -29,7 +29,7 @@ const ACCENT_TINT: (f32, f32, f32) = (0.882, 0.918, 0.957);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExportKind {
-    Brief,
+    Notes,
     Transcript,
 }
 
@@ -59,7 +59,7 @@ struct MarkdownSection {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct BriefCounts {
+struct NotesCounts {
     decisions: usize,
     next_moves: usize,
     open_threads: usize,
@@ -183,8 +183,8 @@ fn section_item_count(section: &MarkdownSection) -> usize {
     }
 }
 
-fn brief_counts(sections: &[MarkdownSection]) -> BriefCounts {
-    let mut counts = BriefCounts::default();
+fn notes_counts(sections: &[MarkdownSection]) -> NotesCounts {
+    let mut counts = NotesCounts::default();
     for section in sections {
         let heading = section.heading.to_lowercase();
         let items = section_item_count(section);
@@ -494,7 +494,7 @@ impl Writer {
         );
     }
 
-    fn readout(&mut self, insight: &str, counts: BriefCounts) {
+    fn readout(&mut self, insight: &str, counts: NotesCounts) {
         let lines = wrap(insight, 67);
         let line_height = 6.0;
         let height = 24.0 + lines.len() as f32 * line_height + 12.0;
@@ -649,6 +649,20 @@ impl Writer {
                     && number.chars().all(|ch| ch.is_ascii_digit())
             }) {
                 self.editorial_list_item(item, &format!("{number}."), None, x, width, authored);
+            } else if line.starts_with('|') && line.ends_with('|') {
+                let cells = line
+                    .trim_matches('|')
+                    .split('|')
+                    .map(str::trim)
+                    .collect::<Vec<_>>();
+                let divider = cells.iter().all(|cell| {
+                    let cell = cell.trim_matches(':').trim();
+                    cell.len() >= 3 && cell.chars().all(|ch| ch == '-')
+                });
+                if !divider {
+                    self.text_at(&cells.join("  /  "), 9.2, false, INK, x, width, 4.4);
+                    self.y -= 1.0;
+                }
             } else {
                 let strong_lead = line.starts_with("**");
                 self.text_at(line, 10.3, strong_lead, INK, x, width, 4.8);
@@ -727,7 +741,7 @@ impl Writer {
     }
 }
 
-fn render_brief(meeting: &Value, writer: &mut Writer, summary_id: Option<i64>) {
+fn render_notes(meeting: &Value, writer: &mut Writer, summary_id: Option<i64>) {
     if let Some(summary) = selected_summary(meeting, summary_id) {
         let sections = markdown_sections(summary["content_md"].as_str().unwrap_or(""));
         if let Some((featured_index, featured)) = sections
@@ -735,7 +749,7 @@ fn render_brief(meeting: &Value, writer: &mut Writer, summary_id: Option<i64>) {
             .enumerate()
             .find(|(_, section)| !first_prose(section).is_empty())
         {
-            writer.readout(&first_prose(featured), brief_counts(&sections));
+            writer.readout(&first_prose(featured), notes_counts(&sections));
             let mut index = 1;
             for (section_index, section) in sections.iter().enumerate() {
                 if section_index == featured_index || section.body.trim().is_empty() {
@@ -807,7 +821,7 @@ fn render_transcript(meeting: &Value, writer: &mut Writer, turns: &[TranscriptTu
 pub fn export(meeting: &Value, path: &Path, options: ExportOptions) -> Result<ExportStats> {
     let title = meeting["title"].as_str().unwrap_or("Meeting");
     let document_label = match options.kind {
-        ExportKind::Brief => "Meeting notes",
+        ExportKind::Notes => "Meeting notes",
         ExportKind::Transcript => "Transcript",
     };
     let mut writer = Writer::new(title, document_label)?;
@@ -834,7 +848,7 @@ pub fn export(meeting: &Value, path: &Path, options: ExportOptions) -> Result<Ex
 
     let turns = transcript_turns(meeting);
     match options.kind {
-        ExportKind::Brief => render_brief(meeting, &mut writer, options.summary_id),
+        ExportKind::Notes => render_notes(meeting, &mut writer, options.summary_id),
         ExportKind::Transcript => render_transcript(meeting, &mut writer, &turns),
     }
     let stats = ExportStats {
@@ -894,8 +908,8 @@ mod tests {
             "The pilot became the launch plan."
         );
         assert_eq!(
-            brief_counts(&sections),
-            BriefCounts {
+            notes_counts(&sections),
+            NotesCounts {
                 decisions: 2,
                 next_moves: 1,
                 open_threads: 1,
@@ -904,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_only_the_requested_summary_for_the_brief() {
+    fn selects_only_the_requested_summary_for_the_notes_export() {
         let meeting = meeting_with_segments(1);
         let selected = selected_summary(&meeting, Some(2)).unwrap();
         assert_eq!(selected["template"], "Project Update");
@@ -936,13 +950,13 @@ mod tests {
     }
 
     #[test]
-    fn brief_stays_short_even_when_the_transcript_is_long() {
-        let path = std::env::temp_dir().join("noted-meeting-brief-test.pdf");
+    fn notes_export_excludes_the_transcript_even_when_it_is_long() {
+        let path = std::env::temp_dir().join("noted-meeting-notes-test.pdf");
         let stats = export(
             &meeting_with_segments(180),
             &path,
             ExportOptions {
-                kind: ExportKind::Brief,
+                kind: ExportKind::Notes,
                 summary_id: Some(1),
             },
         )
@@ -950,7 +964,7 @@ mod tests {
         assert!(std::fs::metadata(&path).unwrap().len() > 1_000);
         assert_eq!(
             stats.pages, 1,
-            "the full transcript must not leak into the brief"
+            "the full transcript must not leak into the notes export"
         );
         assert_eq!(stats.transcript_turns, 180);
         let pdf = printpdf::lopdf::Document::load(&path).unwrap();
@@ -961,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn long_brief_paginates_without_becoming_a_transcript() {
+    fn long_notes_export_paginates_without_becoming_a_transcript() {
         let mut meeting = meeting_with_segments(180);
         let details = (1..=72)
             .map(|number| {
@@ -974,12 +988,12 @@ mod tests {
         meeting["summaries"][0]["content_md"] = json!(format!(
             "## Overview\nThe team reviewed the complete launch plan.\n\n## Detailed decisions\n{details}"
         ));
-        let path = std::env::temp_dir().join("noted-meeting-long-brief-test.pdf");
+        let path = std::env::temp_dir().join("noted-meeting-long-notes-test.pdf");
         let stats = export(
             &meeting,
             &path,
             ExportOptions {
-                kind: ExportKind::Brief,
+                kind: ExportKind::Notes,
                 summary_id: Some(1),
             },
         )

@@ -127,19 +127,19 @@ async function copyText(text: string): Promise<void> {
   }
 }
 
-// Minimal markdown for our own deterministic summary output (## headings,
-// bullets, checkboxes, **bold**, and grounded source jumps) — no external
-// renderer dependency.
+// Minimal markdown for our deterministic Meeting Pack output: hierarchy,
+// tables, bullets, checkboxes, bold text, and grounded source jumps.
 function MdBlock({ md, onSource }: { md: string; onSource?: (source: string) => void }) {
-  const sourcePattern = /^\[(\d{2,}:\d{2}|notes)\]$/i;
+  const sourcePattern = /^\[(?:(\d{2,}:\d{2})(?:-\d{2,}:\d{2})?|(notes))\]$/i;
   const inline = (s: string) => {
-    const parts = s.split(/(\*\*[^*]+\*\*|\[(?:\d{2,}:\d{2}|notes)\])/gi);
+    const parts = s.split(/(\*\*[^*]+\*\*|\[(?:\d{2,}:\d{2}(?:-\d{2,}:\d{2})?|notes)\])/gi);
     return parts.map((part, i) => {
       const bold = part.startsWith("**") && part.endsWith("**");
       const content = bold ? part.slice(2, -2) : part;
-      const source = content.match(sourcePattern)?.[1];
+      const sourceMatch = content.match(sourcePattern);
+      const source = sourceMatch?.[1] ?? sourceMatch?.[2];
       if (source) {
-        const label = source.toLowerCase() === "notes" ? "My notes" : source;
+        const label = source.toLowerCase() === "notes" ? "My notes" : content.slice(1, -1);
         if (!onSource) {
           return <span key={i} className="summary-source static">{label}</span>;
         }
@@ -168,9 +168,38 @@ function MdBlock({ md, onSource }: { md: string; onSource?: (source: string) => 
       list = [];
     }
   };
-  for (const line of lines) {
+  const tableCells = (line: string) => line.trim().replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
+  const tableDivider = (line: string) => {
+    const cells = tableCells(line);
+    return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+  };
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
     const t = line.trim();
-    if (t.startsWith("## ")) {
+    if (t.startsWith("|") && lines[lineIndex + 1] && tableDivider(lines[lineIndex + 1])) {
+      flush();
+      const headers = tableCells(t);
+      const rows: string[][] = [];
+      let rowIndex = lineIndex + 2;
+      while (rowIndex < lines.length && lines[rowIndex].trim().startsWith("|")) {
+        rows.push(tableCells(lines[rowIndex]));
+        rowIndex += 1;
+      }
+      out.push(
+        <div className="meeting-pack-table-wrap" key={key++}>
+          <table className="meeting-pack-table">
+            <thead><tr>{headers.map((header, index) => <th key={index}>{inline(header)}</th>)}</tr></thead>
+            <tbody>{rows.map((row, rowKey) => (
+              <tr key={rowKey}>{headers.map((_, cellKey) => <td key={cellKey}>{inline(row[cellKey] ?? "")}</td>)}</tr>
+            ))}</tbody>
+          </table>
+        </div>
+      );
+      lineIndex = rowIndex - 1;
+    } else if (t.startsWith("### ")) {
+      flush();
+      out.push(<h4 key={key++}>{t.slice(4)}</h4>);
+    } else if (t.startsWith("## ")) {
       flush();
       out.push(<h3 key={key++}>{t.slice(3)}</h3>);
     } else if (t.startsWith("- [ ] ") || t.startsWith("- [x] ")) {
@@ -194,8 +223,8 @@ function MdBlock({ md, onSource }: { md: string; onSource?: (source: string) => 
 }
 
 const TEMPLATE_COPY: Record<string, { label: string; description: string }> = {
-  Meeting: { label: "General", description: "Outcomes, decisions, actions, and unresolved risks" },
-  "1:1": { label: "1:1", description: "Updates, feedback, support, and commitments" },
+  Meeting: { label: "General", description: "Comprehensive timeline, discussion, decisions, actions, and risks" },
+  "1:1": { label: "1:1", description: "Detailed updates, feedback, support, workplan, and commitments" },
   Standup: { label: "Standup", description: "Progress, next work, blockers, and follow-ups" },
   Interview: { label: "Interview", description: "Evidence, themes, gaps, and follow-ups" },
   Lecture: { label: "Lecture", description: "Thesis, key ideas, examples, and implications" },
@@ -1191,10 +1220,10 @@ export function MeetingPage({
     }
   };
 
-  const exportPdf = async (kind: "brief" | "transcript") => {
+  const exportPdf = async (kind: "notes" | "transcript") => {
     if (id == null) return;
     try {
-      setExportMsg(kind === "brief" ? "Creating meeting notes PDF…" : "Creating transcript PDF…");
+      setExportMsg(kind === "notes" ? "Creating meeting notes PDF…" : "Creating transcript PDF…");
       const selectedSummaryId = typeof tab === "number" ? summaries[tab]?.id : summaries[0]?.id;
       const path = await api.meetingExportPdf(id, kind, selectedSummaryId);
       setExportMsg(`PDF saved to ${path.split("/").slice(-2).join("/")}`);
@@ -1636,7 +1665,7 @@ export function MeetingPage({
                   <span><strong>Copy meeting Markdown</strong><small>Current summary, notes, and transcript</small></span>
                 </button>
                 {(summaries.length > 0 || notes.trim().length > 0) && (
-                  <button onClick={() => { setShareOpen(false); void exportPdf("brief"); }}>
+                  <button onClick={() => { setShareOpen(false); void exportPdf("notes"); }}>
                     <FileDown size={15} />
                     <span><strong>Export meeting notes PDF</strong><small>Summary and your notes</small></span>
                   </button>

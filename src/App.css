@@ -3394,9 +3394,15 @@ a.cal-btn { text-decoration: none; }
 }
 .meeting-summary .md h3 { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; color: var(--ink); margin: 26px 0 9px; }
 .meeting-summary .md h3:first-child { margin-top: 8px; }
+.meeting-summary .md h4 { font-size: 14px; font-weight: 650; letter-spacing: -0.005em; color: var(--ink); margin: 20px 0 8px; }
 .meeting-summary .md p { margin: 0 0 10px; font-size: 14px; line-height: 1.65; }
 .meeting-summary .md ul { margin: 0 0 10px; padding-left: 20px; display: flex; flex-direction: column; gap: 7px; }
 .meeting-summary .md li { font-size: 14px; line-height: 1.55; }
+.meeting-pack-table-wrap { width: 100%; overflow-x: auto; margin: 4px 0 18px; border: 1px solid var(--line); border-radius: 10px; }
+.meeting-pack-table { width: 100%; border-collapse: collapse; min-width: 520px; font-size: 13px; line-height: 1.45; }
+.meeting-pack-table th { padding: 9px 11px; text-align: left; vertical-align: top; color: var(--ink); background: var(--surface-2); border-bottom: 1px solid var(--line-strong); font-weight: 650; }
+.meeting-pack-table td { padding: 10px 11px; text-align: left; vertical-align: top; color: var(--ink); border-bottom: 1px solid var(--line); }
+.meeting-pack-table tbody tr:last-child td { border-bottom: 0; }
 .meeting-summary .md li.todo { list-style: none; margin-left: -20px; display: flex; gap: 8px; align-items: baseline; }
 .meeting-summary .md li.todo .box {
   flex: none; width: 14px; height: 14px; border: 1.5px solid var(--line-strong);

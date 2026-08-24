@@ -434,6 +434,7 @@ export type MeetingSummary = {
   id: number;
   template: string;
   content_md: string;
+  content_json?: Record<string, unknown> | null;
   created_at: string;
 };
 export type MeetingSpeakerUpdateResult = {
@@ -1101,7 +1102,7 @@ export const api = {
     invoke<{ answer: string }>("meeting_assist", { id, question }),
   // Writes "<date> <title>.md" into ~/Downloads; resolves to the path.
   meetingExportMd: (id: number) => invoke<string>("meeting_export_md", { id }),
-  meetingExportPdf: (id: number, kind: "brief" | "transcript" = "brief", summaryId?: number) =>
+  meetingExportPdf: (id: number, kind: "notes" | "transcript" = "notes", summaryId?: number) =>
     invoke<string>("meeting_export_pdf", { id, kind, summaryId }),
   meetingTemplates: () => invoke<MeetingTemplate[]>("meeting_templates"),
   meetingTemplateSave: (name: string, prompt: string) =>

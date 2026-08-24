@@ -3025,8 +3025,10 @@ pub fn insert_summary(
     meeting_id: i64,
     template: &str,
     content_md: &str,
+    content_json: Option<&Value>,
     now: &str,
 ) -> Result<i64> {
+    let content_json = content_json.map(serde_json::to_string).transpose()?;
     let existing = conn
         .query_row(
             "SELECT id FROM meeting_summaries WHERE meeting_id = ?1 AND template = ?2
@@ -3037,8 +3039,10 @@ pub fn insert_summary(
         .optional()?;
     if let Some(id) = existing {
         conn.execute(
-            "UPDATE meeting_summaries SET content_md = ?2, created_at = ?3 WHERE id = ?1",
-            rusqlite::params![id, content_md, now],
+            "UPDATE meeting_summaries
+             SET content_md = ?2, content_json = ?3, created_at = ?4
+             WHERE id = ?1",
+            rusqlite::params![id, content_md, content_json, now],
         )?;
         conn.execute(
             "DELETE FROM meeting_summaries
@@ -3048,9 +3052,10 @@ pub fn insert_summary(
         return Ok(id);
     }
     conn.execute(
-        "INSERT INTO meeting_summaries (meeting_id, template, content_md, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![meeting_id, template, content_md, now],
+        "INSERT INTO meeting_summaries
+           (meeting_id, template, content_md, content_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![meeting_id, template, content_md, content_json, now],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -3085,7 +3090,7 @@ pub fn set_summary_content(
         return Err(anyhow!("meeting summary not found"));
     };
     conn.execute(
-        "UPDATE meeting_summaries SET content_md = ?2 WHERE id = ?1",
+        "UPDATE meeting_summaries SET content_md = ?2, content_json = NULL WHERE id = ?1",
         rusqlite::params![summary_id, content_md],
     )?;
 
@@ -3120,7 +3125,7 @@ pub fn find_meeting_by_event(conn: &Connection, event_id: &str) -> Result<Option
 
 pub fn list_summaries(conn: &Connection, meeting_id: i64) -> Result<Vec<Value>> {
     let mut stmt = conn.prepare(
-        "SELECT id, template, content_md, created_at FROM meeting_summaries
+        "SELECT id, template, content_md, content_json, created_at FROM meeting_summaries
          WHERE meeting_id = ?1
            AND id = (SELECT MAX(newer.id) FROM meeting_summaries newer
                      WHERE newer.meeting_id = meeting_summaries.meeting_id
@@ -3129,11 +3134,15 @@ pub fn list_summaries(conn: &Connection, meeting_id: i64) -> Result<Vec<Value>> 
     )?;
     let rows = stmt
         .query_map([meeting_id], |r| {
+            let content_json = r
+                .get::<_, Option<String>>(3)?
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
             Ok(json!({
                 "id": r.get::<_, i64>(0)?,
                 "template": r.get::<_, String>(1)?,
                 "content_md": r.get::<_, String>(2)?,
-                "created_at": r.get::<_, String>(3)?,
+                "content_json": content_json,
+                "created_at": r.get::<_, String>(4)?,
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -3279,110 +3288,64 @@ pub const DEFAULT_TEMPLATE: &str = "Meeting";
 const BUILTIN_TEMPLATES: &[(&str, &str)] = &[
     (
         "Meeting",
-        "General meeting notes. Use only sections with real content, in this order: \
-         'Overview' — a concise 2-4 sentence readout stating what materially changed \
-         or became clearer, why it matters when that rationale was stated, and the \
-         most consequential next move or unresolved condition. If nothing changed, \
-         say that plainly instead of merely listing the topics discussed. \
-         'Decisions' — explicit decisions and settled direction, including the \
-         decisive reasoning or tradeoff when stated; never repeat a task here. \
-         'Action Items' — every explicit commitment and anything the group said still \
-         needs to be done, checked, confirmed, reviewed, sent, or followed up; include \
-         ownerless work as Unassigned. \
-         'Key Discussion' — comprehensive, substantive bullets covering each topic \
-         or workstream that materially advanced, including the concrete facts, \
-         options, examples, constraints, feedback, and reasoning not already captured \
-         above. Use a short bold lead for each distinct topic, followed by enough \
-         context that someone who missed the meeting can understand what was discussed. \
-         'Open Questions & Risks' — unresolved questions, dependencies, objections, \
-         and risks that still need attention; do not repeat scheduled follow-ups or \
-         committed tasks here.",
+        "General meeting lens. Organize the detailed discussion by each substantive \
+         topic or workstream that advanced. Preserve operating sequences, maturity \
+         stages, examples, options, constraints, feedback, rationale, and dependencies. \
+         Use the workplan when the group established priorities or a definition of \
+         progress. Distinguish settled direction from actions and unresolved conditions.",
     ),
     (
         "1:1",
-        "One-on-one notes. Use only sections with real content, in this order: \
-         'Overview' — a concise paragraph with the most important update and how \
-         the conversation left it. \
-         'Updates & Wins' — concrete progress, changes, and wins shared. \
-         'Feedback & Support' — feedback, requests for help, and support offered, \
-         preserving the context and examples. \
-         'Blockers & Concerns' — problems, dependencies, and concerns raised. \
-         'Decisions & Commitments' — settled direction and explicit commitments. \
-         'Action Items' — concrete follow-ups. \
-         'To Revisit' — unresolved topics for the next conversation.",
+        "One-on-one lens. Organize the detailed discussion around updates and wins, \
+         feedback and support, blockers and concerns, career or operating context, and \
+         topics to revisit. Preserve the examples and rationale behind feedback. Use \
+         the workplan for prioritized objectives and definitions of progress. Capture \
+         both participants' commitments with grounded owners.",
     ),
     (
         "Standup",
-        "Daily standup notes. Sections, in this order: \
-         'Snapshot' — one or two sentences on overall progress and the most \
-         consequential blocker or change. \
-         'Since Last Time' — completed work and concrete progress, grouped by \
-         person or workstream when known. \
-         'Next' — stated next work, grouped by person or workstream when known. \
-         'Blockers' — active blockers, dependencies, and the stated owner of \
-         unblocking work. \
-         'Action Items' — follow-ups beyond the normal next-work updates.",
+        "Daily standup lens. Group detailed discussion by person or workstream and \
+         preserve since-last-time progress, next work, blockers, dependencies, and \
+         cross-team coordination. Keep routine status concise but fully capture material \
+         technical reasoning, changes in plan, and follow-ups beyond normal next work.",
     ),
     (
         "Interview",
-        "Interview notes (candidate, user research, or journalistic). Sections: \
-         'Overview' — a concise paragraph naming the subject, purpose, and most \
-         important evidence gathered without making an unsupported verdict. \
-         'Background & Context' — relevant history, role, behaviors, or situation. \
-         'Evidence & Themes' — substantive answers, examples, needs, and recurring \
-         patterns, with the question context when useful. \
-         'Gaps & Concerns' — missing evidence, contradictions, risks, and questions \
-         not answered. \
-         'Follow-ups' — validation steps, requests, and next interviews or actions.",
+        "Interview lens (candidate, user research, or journalistic). Organize detailed \
+         discussion around background and context, each evidence-backed theme, concrete \
+         answers and examples, needs or behaviors, contradictions, gaps, and unanswered \
+         questions. Preserve the question context when it changes the meaning. Do not \
+         make an unsupported verdict.",
     ),
     (
         "Lecture",
-        "Lecture or talk notes. Sections, in this order: \
-         'Thesis' — a concise paragraph with the central claim and how the talk \
-         supports it. \
-         'Key Ideas' — concepts and arguments with their definitions, evidence, \
-         and stated caveats. \
-         'Examples & References' — concrete examples, papers, books, or tools \
-         mentioned, each with why it came up. \
-         'Questions & Implications' — audience questions, unresolved points, and \
-         practical implications worth carrying forward.",
+        "Lecture or talk lens. Organize detailed discussion around the thesis, each key \
+         concept or argument, definitions, supporting evidence, caveats, examples, \
+         references, audience questions, and practical implications. Preserve why each \
+         example, paper, book, or tool was introduced.",
     ),
     (
         "Project Update",
-        "Project update notes. Use only sections with real content, in this order: \
-         'Status' — a concise paragraph stating whether the work is on track, what \
-         changed, and the latest outcome; do not infer a status not stated. \
-         'Progress' — completed work and measurable movement since the last update. \
-         'Decisions' — settled product, technical, scope, or sequencing choices. \
-         'Risks & Blockers' — active risks, dependencies, blockers, and mitigations. \
-         'Next Milestones' — stated upcoming checkpoints, deliverables, and dates. \
-         'Action Items' — concrete commitments and follow-ups.",
+        "Project update lens. Organize detailed discussion around current status, \
+         completed and measurable progress, product or technical workstreams, scope and \
+         sequencing choices, risks, blockers, mitigations, and upcoming milestones. Do \
+         not infer on-track status. Use the workplan for ordered milestones and their \
+         definitions of progress.",
     ),
     (
         "Client Call",
-        "Client or customer call notes. Use only sections with real content, in this order: \
-         'Outcome' — a concise paragraph with the purpose, what changed, and where \
-         the relationship or work now stands. \
-         'Client Priorities' — needs, goals, constraints, objections, and success \
-         criteria stated by the client. \
-         'Decisions' — decisions and agreements reached. \
-         'Commitments' — promises made by either side, including stated dates. \
-         'Risks & Open Questions' — unresolved concerns, dependencies, and gaps. \
-         'Action Items' — concrete next steps and follow-ups.",
+        "Client or customer call lens. Organize detailed discussion around the client's \
+         priorities, goals, needs, constraints, objections, success criteria, evidence, \
+         and relationship context. Distinguish mutual agreements from promises by either \
+         side, and preserve dates, dependencies, unresolved concerns, and next steps.",
     ),
     (
         "Brainstorm",
-        "Brainstorm notes. Use only sections with real content, in this order: \
-         'Goal' — a concise paragraph stating the problem or opportunity explored \
-         and where the session landed. \
-         'Strongest Ideas' — distinct ideas with the problem they solve and any \
-         stated evidence or advantage. \
-         'Constraints & Tradeoffs' — feasibility concerns, dependencies, risks, and \
-         meaningful objections. \
-         'Decisions' — ideas selected, rejected, combined, or deferred, with stated \
-         reasoning. \
-         'Experiments & Action Items' — concrete validation steps and owners. \
-         'Parking Lot' — promising ideas explicitly left for later.",
+        "Brainstorm lens. Organize detailed discussion around the problem or opportunity, \
+         every distinct substantive idea, the need it addresses, evidence or advantages, \
+         feasibility constraints, tradeoffs, objections, combinations, and deferred \
+         ideas. Preserve why ideas were selected or rejected. Use the workplan for \
+         experiments and concrete validation criteria.",
     ),
 ];
 

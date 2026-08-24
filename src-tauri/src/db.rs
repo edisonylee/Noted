@@ -8,7 +8,6 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::Result;
-use rand::{rngs::OsRng, RngCore};
 use rusqlite::{ffi::sqlite3_auto_extension, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -17,6 +16,38 @@ use sqlite_vec::sqlite3_vec_init;
 /// Managed Tauri state. rusqlite's `Connection` is `Send` but not `Sync`,
 /// so we wrap it in a `Mutex` to make the state `Send + Sync`.
 pub struct Db(pub Mutex<Connection>);
+
+const BASELINE_SCHEMA_VERSION: u32 = 1;
+const BASELINE_MIGRATION: crate::migrations::MigrationDescriptor<'static> =
+    crate::migrations::MigrationDescriptor::new(
+        BASELINE_SCHEMA_VERSION,
+        "legacy-additive-baseline",
+        "92aed657051490183fd931d523bc2146522f0e6094d176da9479b0be91d61659",
+    );
+const DIRECT_AUTHORITY_MIGRATION_V3: crate::migrations::MigrationDescriptor<'static> =
+    crate::migrations::MigrationDescriptor::new(
+        3,
+        "desktop-direct-authority-fixture-store",
+        "2725b90efe07a1e6703159632e20e68eea7486d67defdf10d9ae7b58690dabd0",
+    );
+const DIRECT_AUTHORITY_MIGRATION_V4: crate::migrations::MigrationDescriptor<'static> =
+    crate::migrations::MigrationDescriptor::new(
+        crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+        "desktop-direct-bootstrap-delivery-journal",
+        "68bc509b5c194479d733af8a036d9f924915152b48882a7b7ab0b11ea7cb5c15",
+    );
+const DIRECT_AUTHORITY_SCHEMA_STAMP: crate::migrations::DatabaseStamp =
+    crate::migrations::DatabaseStamp::new(
+        crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+        1,
+        crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+    );
+const DESKTOP_SCHEMA_CAPABILITIES: crate::migrations::ClientCapabilities =
+    crate::migrations::ClientCapabilities::new(
+        crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+        crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+        crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+    );
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS categories (
@@ -373,25 +404,10 @@ CREATE INDEX IF NOT EXISTS idx_agent_context_receipts_created
   ON agent_context_receipts(requested_at DESC);
 "#;
 
-/// Generate a UUIDv7-compatible public identifier without exposing a SQLite
-/// row id. The 48-bit timestamp keeps creation order while 74 random bits make
-/// identifiers unguessable for the local-agent boundary.
+/// Backward-compatible desktop entry point for the shared portable identifier
+/// generator. New cross-platform code should call `portable::new_uuid_v7`.
 pub fn new_public_id() -> String {
-    let timestamp_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    let mut bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut bytes);
-    let timestamp = timestamp_ms.to_be_bytes();
-    bytes[..6].copy_from_slice(&timestamp[2..]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x70;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
-    )
+    crate::portable::new_uuid_v7()
 }
 
 /// Register sqlite-vec as an auto extension (process-wide, must happen before
@@ -401,7 +417,73 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     unsafe {
         sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
     }
-    let conn = Connection::open(db_path)?;
+    let mut conn = Connection::open(db_path)?;
+    conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+    let schema_state = crate::migrations::inspect_database(&conn)?;
+    if let crate::migrations::DatabaseSchemaState::Stamped(stamp) = schema_state {
+        match crate::migrations::negotiate_schema(stamp, DESKTOP_SCHEMA_CAPABILITIES) {
+            crate::migrations::SchemaAccess::ReadWrite => {}
+            crate::migrations::SchemaAccess::ReadOnly => {
+                return Err(anyhow::anyhow!(
+                    "database schema {} requires writer protocol {}, but this app provides {}",
+                    stamp.schema_version,
+                    stamp.min_writer_version,
+                    DESKTOP_SCHEMA_CAPABILITIES.writer_version
+                ));
+            }
+            crate::migrations::SchemaAccess::Reject => {
+                return Err(anyhow::anyhow!(
+                    "database schema {} is not readable by this app",
+                    stamp.schema_version
+                ));
+            }
+        }
+        crate::migrations::verify_known_migrations(
+            &conn,
+            &[
+                BASELINE_MIGRATION,
+                crate::sync_journal::PORTABLE_MIGRATION,
+                DIRECT_AUTHORITY_MIGRATION_V3,
+                DIRECT_AUTHORITY_MIGRATION_V4,
+            ],
+        )?;
+    }
+
+    let requires_ordered_migration = match schema_state {
+        crate::migrations::DatabaseSchemaState::Unversioned => true,
+        crate::migrations::DatabaseSchemaState::Stamped(stamp) => {
+            stamp.schema_version < crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION
+        }
+    };
+    if requires_ordered_migration && database_has_active_meeting_capture(&conn)? {
+        return Err(anyhow::anyhow!(
+            "database schema migration is deferred while a meeting capture is marked recording; finish or recover the recording with the current app before upgrading"
+        ));
+    }
+
+    let recovery_path = match schema_state {
+        crate::migrations::DatabaseSchemaState::Unversioned if database_has_user_schema(&conn)? => {
+            let recovery_path = pre_migration_recovery_path(
+                db_path,
+                crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+            )?;
+            crate::backup::create_pre_migration_snapshot(&conn, &recovery_path)?;
+            Some(recovery_path)
+        }
+        crate::migrations::DatabaseSchemaState::Stamped(stamp)
+            if stamp.schema_version
+                < crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION =>
+        {
+            let recovery_path = pre_migration_recovery_path(
+                db_path,
+                crate::direct_authority_store::DIRECT_AUTHORITY_SCHEMA_VERSION,
+            )?;
+            crate::backup::create_pre_migration_snapshot(&conn, &recovery_path)?;
+            Some(recovery_path)
+        }
+        _ => None,
+    };
+
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
     conn.execute_batch(SCHEMA)?;
     // Migrations for DBs created before a column existed (additive only).
@@ -503,10 +585,168 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     initialize_semantic_folder_rules(&conn)?;
     crate::meeting::store::initialize_one_on_one_speakers(&conn)?;
     initialize_embedding_fingerprint(&conn, &crate::provider::active_embedding_fingerprint())?;
+    verify_converged_baseline(&conn)?;
+    if matches!(
+        schema_state,
+        crate::migrations::DatabaseSchemaState::Unversioned
+    ) {
+        crate::migrations::stamp_converged_schema(
+            &mut conn,
+            BASELINE_MIGRATION,
+            crate::migrations::DatabaseStamp::new(
+                BASELINE_SCHEMA_VERSION,
+                BASELINE_SCHEMA_VERSION,
+                BASELINE_SCHEMA_VERSION,
+            ),
+            env!("CARGO_PKG_VERSION"),
+        )?;
+    }
+    crate::sync_journal::apply_portable_migration(&mut conn)?;
+    crate::sync_journal::verify_portable_schema(&conn)?;
+    crate::migrations::apply_migration(
+        &mut conn,
+        DIRECT_AUTHORITY_MIGRATION_V3,
+        crate::migrations::DatabaseStamp::new(3, 1, 3),
+        env!("CARGO_PKG_VERSION"),
+        |transaction| {
+            crate::direct_authority_store::DirectAuthorityStore::install_schema_v3(transaction)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+        },
+    )?;
+    crate::migrations::apply_migration(
+        &mut conn,
+        DIRECT_AUTHORITY_MIGRATION_V4,
+        DIRECT_AUTHORITY_SCHEMA_STAMP,
+        env!("CARGO_PKG_VERSION"),
+        |transaction| {
+            crate::direct_authority_store::DirectAuthorityStore::install_schema_v4(transaction)
+                .and_then(|_| {
+                    crate::direct_authority_store::DirectAuthorityStore::verify_schema(transaction)
+                })
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+        },
+    )?;
+    crate::direct_authority_store::DirectAuthorityStore::verify_schema(&conn)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if let Some(path) = recovery_path {
+        conn.execute(
+            "INSERT INTO app_metadata(key, value)
+             VALUES ('last_pre_migration_recovery_path', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [path.to_string_lossy().as_ref()],
+        )?;
+    }
     // Note: the reserved catch-all "misc" is not pre-seeded — the classifier is
     // told about it by name in the prompt, and it's created on first real use
     // (so an unused misc never clutters the catalog/UI).
     Ok(conn)
+}
+
+fn database_has_user_schema(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sqlite_schema
+           WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'
+         )",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// This check intentionally runs before recovery creation, WAL setup, additive
+/// convergence, or any migration write. A recording marker can represent a
+/// live capture owned by another process or an interrupted session that the
+/// current binary must recover first; either way migration must leave it alone.
+fn database_has_active_meeting_capture(conn: &Connection) -> Result<bool> {
+    let has_meetings: bool = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sqlite_schema
+           WHERE type = 'table' AND name = 'meetings'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_meetings {
+        return Ok(false);
+    }
+    Ok(conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM meetings
+           WHERE lower(trim(COALESCE(status, ''))) = 'recording'
+         )",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+fn pre_migration_recovery_path(db_path: &Path, target_version: u32) -> Result<std::path::PathBuf> {
+    let parent = db_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("database path has no recovery directory"))?;
+    let recovery_dir = parent.join("migration-recovery");
+    std::fs::create_dir_all(&recovery_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&recovery_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let source_name = db_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("noted");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    Ok(recovery_dir.join(format!(
+        "{source_name}-pre-schema-v{target_version}-{}-{nonce}.db",
+        std::process::id()
+    )))
+}
+
+fn verify_converged_baseline(conn: &Connection) -> Result<()> {
+    let quick_check = conn
+        .prepare("PRAGMA quick_check")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if quick_check.as_slice() != ["ok"] {
+        return Err(anyhow::anyhow!(
+            "database quick_check failed after schema convergence: {}",
+            quick_check.join("; ")
+        ));
+    }
+    if conn
+        .prepare("PRAGMA foreign_key_check")?
+        .query([])?
+        .next()?
+        .is_some()
+    {
+        return Err(anyhow::anyhow!(
+            "database foreign_key_check failed after schema convergence"
+        ));
+    }
+    for (table, column) in [
+        ("notes", "trashed_at"),
+        ("entries", "event_date"),
+        ("note_folders", "kind"),
+        ("meetings", "public_id"),
+        ("app_metadata", "value"),
+    ] {
+        let present: bool = conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2
+             )",
+            rusqlite::params![table, column],
+            |row| row.get(0),
+        )?;
+        if !present {
+            return Err(anyhow::anyhow!(
+                "required schema column is missing after convergence: {table}.{column}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn backfill_meeting_public_ids(conn: &Connection) -> Result<()> {
@@ -599,7 +839,11 @@ fn seed_note_folders(conn: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
+    // A legacy restore must reproduce the same portable folder identities. Use
+    // the library's earliest durable row when one exists instead of migration
+    // wall-clock time; a genuinely empty new library still uses the current
+    // instant.
+    let now = canonical_folder_seed_timestamp(conn)?;
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "INSERT INTO note_folders (parent_id, name, kind, auto_rule, position, created_at)
@@ -664,7 +908,7 @@ fn seed_note_folder_structure_v2(conn: &Connection) -> Result<()> {
         .optional()?;
     let has_all_roots = work_id.is_some() && personal_id.is_some();
 
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = canonical_folder_seed_timestamp(conn)?;
     let tx = conn.unchecked_transaction()?;
     for (parent_id, names) in [
         (work_id, &["Symphony", "Side Projects", "Career"][..]),
@@ -708,6 +952,19 @@ fn seed_note_folder_structure_v2(conn: &Connection) -> Result<()> {
     }
     tx.commit()?;
     Ok(())
+}
+
+fn canonical_folder_seed_timestamp(conn: &Connection) -> Result<String> {
+    let timestamp: Option<String> = conn.query_row(
+        "SELECT MIN(created_at) FROM (
+           SELECT created_at FROM notes WHERE created_at IS NOT NULL AND trim(created_at) != ''
+           UNION ALL
+           SELECT created_at FROM categories WHERE created_at IS NOT NULL AND trim(created_at) != ''
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(timestamp.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()))
 }
 
 /// Give conventional meeting folders durable semantics once, without making
@@ -928,7 +1185,7 @@ fn ordinary_note_state(
     }
     if row.3 {
         return Err(anyhow::anyhow!(
-            "meeting notes must use the meeting Trash lifecycle"
+            "meeting-backed notes must use the meeting aggregate lifecycle"
         ));
     }
     Ok((row.0, row.1))
@@ -974,11 +1231,12 @@ pub fn trash_note(conn: &Connection, note_id: i64, now: &str) -> Result<bool> {
         rusqlite::params![note_id, now],
     )?;
     refresh_visible_note_aggregates(&tx)?;
+    crate::sync_journal::journal_note_write(&tx, note_id, now)?;
     tx.commit()?;
     Ok(true)
 }
 
-pub fn restore_note(conn: &Connection, note_id: i64) -> Result<bool> {
+pub fn restore_note(conn: &Connection, note_id: i64, now: &str) -> Result<bool> {
     let tx = conn.unchecked_transaction()?;
     let (trashed_at, _) = ordinary_note_state(&tx, note_id)?;
     if trashed_at.is_none() {
@@ -989,48 +1247,19 @@ pub fn restore_note(conn: &Connection, note_id: i64) -> Result<bool> {
         [note_id],
     )?;
     refresh_visible_note_aggregates(&tx)?;
+    crate::sync_journal::journal_note_write(&tx, note_id, now)?;
     tx.commit()?;
     Ok(true)
 }
 
-#[derive(Debug)]
-pub struct DeletedNote {
-    pub image_path: Option<String>,
-}
-
-/// Permanently remove an ordinary note only after it has entered Trash. Folder
-/// memberships and filing history cascade from `notes`; the remaining derived
-/// data has explicit cleanup because its foreign keys intentionally do not.
-pub fn delete_note_forever(conn: &mut Connection, note_id: i64) -> Result<Option<DeletedNote>> {
-    let tx = conn.transaction()?;
-    let (trashed_at, image_path) = ordinary_note_state(&tx, note_id)?;
-    if trashed_at.is_none() {
-        return Ok(None);
-    }
-
-    tx.execute(
-        "UPDATE entities SET home_note_id = NULL WHERE home_note_id = ?1",
-        [note_id],
-    )?;
-    tx.execute("DELETE FROM entity_mentions WHERE note_id = ?1", [note_id])?;
-    tx.execute("DELETE FROM embeddings WHERE note_id = ?1", [note_id])?;
-    tx.execute("DELETE FROM entries WHERE note_id = ?1", [note_id])?;
-    tx.execute("DELETE FROM notes WHERE id = ?1", [note_id])?;
-    let image_path = match image_path {
-        Some(path) => {
-            let still_referenced: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM notes WHERE image_path = ?1)",
-                [&path],
-                |row| row.get(0),
-            )?;
-            (!still_referenced).then_some(path)
-        }
-        None => None,
-    };
-    refresh_visible_note_aggregates(&tx)?;
-    tx.commit()?;
-
-    Ok(Some(DeletedNote { image_path }))
+/// Permanent deletion is intentionally unavailable until portable records have
+/// a purge-generation barrier. Retaining the tombstoned aggregate prevents an
+/// offline replica from resurrecting a note that this Mac physically removed.
+pub fn delete_note_forever(conn: &mut Connection, note_id: i64) -> Result<()> {
+    let _ = (conn, note_id);
+    Err(anyhow::anyhow!(
+        "permanent note deletion is unavailable until synchronized purge generations are implemented; leave the note in Trash"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1194,12 +1423,13 @@ pub fn create_note_folder(
     } else {
         auto_rule
     };
+    let tx = conn.unchecked_transaction()?;
     match parent_id {
         None if kind != "space" => {
             return Err(anyhow::anyhow!("a root item must be a space"));
         }
         Some(parent) => {
-            let exists = conn.query_row(
+            let exists = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM note_folders WHERE id = ?1)",
                 [parent],
                 |r| r.get::<_, bool>(0),
@@ -1214,33 +1444,39 @@ pub fn create_note_folder(
         None => {}
     }
 
-    let position: i64 = conn.query_row(
+    let position: i64 = tx.query_row(
         "SELECT COALESCE(MAX(position), -1) + 1
          FROM note_folders
          WHERE parent_id IS ?1",
         [parent_id],
         |r| r.get(0),
     )?;
-    conn.execute(
+    tx.execute(
         "INSERT INTO note_folders (parent_id, name, kind, auto_rule, position, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![parent_id, name, kind, auto_rule, position, now],
     )?;
-    Ok(conn.last_insert_rowid())
+    let folder_id = tx.last_insert_rowid();
+    crate::sync_journal::journal_folder_write(&tx, folder_id, now)?;
+    tx.commit()?;
+    Ok(folder_id)
 }
 
-pub fn rename_note_folder(conn: &Connection, folder_id: i64, name: &str) -> Result<()> {
+pub fn rename_note_folder(conn: &Connection, folder_id: i64, name: &str, now: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
         return Err(anyhow::anyhow!("folder name cannot be empty"));
     }
-    let changed = conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let changed = tx.execute(
         "UPDATE note_folders SET name = ?1 WHERE id = ?2",
         rusqlite::params![name, folder_id],
     )?;
     if changed == 0 {
         return Err(anyhow::anyhow!("folder not found"));
     }
+    crate::sync_journal::journal_folder_write(&tx, folder_id, now)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1253,6 +1489,7 @@ pub fn move_note_folder(
     folder_id: i64,
     parent_id: Option<i64>,
     before_id: Option<i64>,
+    now: &str,
 ) -> Result<()> {
     let (kind, old_parent): (String, Option<i64>) = conn
         .query_row(
@@ -1374,14 +1611,13 @@ pub fn move_note_folder(
             rusqlite::params![position as i64, id],
         )?;
     }
+    crate::sync_journal::journal_folder_write(&tx, folder_id, now)?;
     tx.commit()?;
     Ok(())
 }
 
 pub fn delete_note_folder(conn: &Connection, folder_id: i64) -> Result<()> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let tx = conn.unchecked_transaction()?;
-    let kind = tx
+    let kind = conn
         .query_row(
             "SELECT kind FROM note_folders WHERE id = ?1",
             [folder_id],
@@ -1394,87 +1630,9 @@ pub fn delete_note_folder(conn: &Connection, folder_id: i64) -> Result<()> {
             "Work and Personal contexts cannot be deleted"
         ));
     }
-
-    let affected_notes = {
-        let mut stmt = tx.prepare(
-            "WITH RECURSIVE subtree(id) AS (
-               SELECT id FROM note_folders WHERE id = ?1
-               UNION ALL
-               SELECT child.id FROM note_folders child
-               JOIN subtree parent ON child.parent_id = parent.id
-             )
-             SELECT DISTINCT i.note_id, i.folder_id
-             FROM note_folder_items i JOIN subtree s ON s.id = i.folder_id",
-        )?;
-        let rows = stmt.query_map([folder_id], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    let deleted_path = note_folder_path(&tx, folder_id)?;
-    for (note_id, previous_folder_id) in affected_notes {
-        let context = tx.query_row(
-            "SELECT filing_context FROM notes WHERE id = ?1",
-            [note_id],
-            |row| row.get::<_, Option<String>>(0),
-        )?;
-        let context = match context {
-            Some(context) => normalized_filing_context(&context)?,
-            // Old explicit memberships predate persisted context. Their
-            // actual folder ancestry is still authoritative at deletion time.
-            None => folder_filing_context(&tx, previous_folder_id)?,
-        };
-        let inbox_id = context_space_id(&tx, &context)?;
-        let reason = format!(
-            "Moved to {} / Inbox because {deleted_path} was deleted.",
-            if context == "work" {
-                "Work"
-            } else {
-                "Personal"
-            }
-        );
-        filing_transition(
-            &tx,
-            note_id,
-            Some(inbox_id),
-            "context",
-            &reason,
-            Some(&context),
-            None,
-            &now,
-        )?;
-        sync_linked_meeting_route(&tx, note_id, Some(inbox_id), "context", &now)?;
-    }
-
-    // Keep disabled rules visible for repair, and make unresolved automatic
-    // routes honest. Manual provenance remains manual even though deleting its
-    // destination naturally removes the folder membership via CASCADE.
-    tx.execute(
-        "WITH RECURSIVE subtree(id) AS (
-           SELECT id FROM note_folders WHERE id = ?1
-           UNION ALL
-           SELECT child.id FROM note_folders child JOIN subtree ON child.parent_id = subtree.id
-         )
-         UPDATE meeting_filing_rules SET folder_id = NULL, updated_at = ?2
-         WHERE folder_id IN (SELECT id FROM subtree)",
-        rusqlite::params![folder_id, now],
-    )?;
-    tx.execute(
-        "WITH RECURSIVE subtree(id) AS (
-           SELECT id FROM note_folders WHERE id = ?1
-           UNION ALL
-           SELECT child.id FROM note_folders child JOIN subtree ON child.parent_id = subtree.id
-         )
-         UPDATE meetings SET route_folder_id = NULL,
-                route_via = 'destination_missing', route_status = 'needs_filing',
-                route_updated_at = ?2
-         WHERE route_folder_id IN (SELECT id FROM subtree)
-           AND COALESCE(route_status, 'needs_filing') <> 'manual'",
-        rusqlite::params![folder_id, now],
-    )?;
-    tx.execute("DELETE FROM note_folders WHERE id = ?1", [folder_id])?;
-    tx.commit()?;
-    Ok(())
+    Err(anyhow::anyhow!(
+        "folder deletion is unavailable until synchronized folder lifecycle and purge generations are implemented"
+    ))
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
@@ -1726,6 +1884,22 @@ fn sync_linked_meeting_route(
     Ok(())
 }
 
+/// Meeting summaries are search projections of their owning meeting aggregate,
+/// so filing or entry edits must not publish them as independent portable
+/// Notes. Every other authority class passes through the ordinary Note writer,
+/// which rejects orphaned meeting rows and externally-owned mirrors fail-closed.
+fn journal_note_aggregate_write(conn: &Connection, note_id: i64, now: &str) -> Result<()> {
+    let is_meeting_projection: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meetings WHERE note_id = ?1)",
+        [note_id],
+        |row| row.get(0),
+    )?;
+    if !is_meeting_projection {
+        crate::sync_journal::journal_note_write(conn, note_id, now)?;
+    }
+    Ok(())
+}
+
 /// Move a note's one explicit filing. Every manual choice appends an audit
 /// event, even when the destination is unchanged, because confirming an
 /// automatic destination is itself a sticky human decision.
@@ -1785,6 +1959,7 @@ pub fn file_note(
         now,
     )?;
     sync_linked_meeting_route(&tx, note_id, folder_id, "manual", now)?;
+    journal_note_aggregate_write(&tx, note_id, now)?;
     tx.commit()?;
     Ok(receipt)
 }
@@ -1891,6 +2066,7 @@ pub fn undo_note_filing(conn: &Connection, event_id: i64, now: &str) -> Result<N
             }
         });
     sync_linked_meeting_route(&tx, note_id, from_folder_id, &restored_source, now)?;
+    journal_note_aggregate_write(&tx, note_id, now)?;
     tx.commit()?;
     Ok(receipt)
 }
@@ -1914,27 +2090,36 @@ pub fn refresh_note_text(conn: &Connection, note_id: i64, raw_text: &str) -> Res
 /// Save user-owned note fields without rewriting captured text to manufacture a
 /// display title. Body edits invalidate derived search and knowledge data;
 /// title-only edits only invalidate the semantic index.
-pub fn update_note(conn: &Connection, note_id: i64, title: &str, raw_text: &str) -> Result<()> {
-    let previous = conn
-        .query_row(
-            "SELECT raw_text FROM notes
-             WHERE id = ?1 AND (origin = 'capture' OR origin IS NULL)
-               AND trashed_at IS NULL",
-            [note_id],
-            |r| r.get::<_, String>(0),
-        )
+pub fn update_note(
+    conn: &Connection,
+    note_id: i64,
+    title: &str,
+    raw_text: &str,
+    now: &str,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let (trashed_at, _) = ordinary_note_state(&tx, note_id)?;
+    if trashed_at.is_some() {
+        return Err(anyhow::anyhow!("note not found"));
+    }
+    let previous = tx
+        .query_row("SELECT raw_text FROM notes WHERE id = ?1", [note_id], |r| {
+            r.get::<_, String>(0)
+        })
         .optional()?;
     let Some(previous) = previous else {
         return Err(anyhow::anyhow!("note not found"));
     };
-    conn.execute(
+    tx.execute(
         "UPDATE notes SET title = ?2, raw_text = ?3 WHERE id = ?1",
         rusqlite::params![note_id, title.trim(), raw_text],
     )?;
-    conn.execute("DELETE FROM embeddings WHERE note_id = ?1", [note_id])?;
+    tx.execute("DELETE FROM embeddings WHERE note_id = ?1", [note_id])?;
     if previous != raw_text {
-        clear_note_mentions(conn, note_id)?;
+        clear_note_mentions(&tx, note_id)?;
     }
+    crate::sync_journal::journal_note_write(&tx, note_id, now)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -2664,7 +2849,12 @@ fn save_note_in_transaction(
 pub fn save_note(conn: &mut Connection, input: SaveInput, now: &str) -> Result<i64> {
     let tx = conn.transaction()?;
     let note_id = save_note_in_transaction(&tx, &input, now)?;
-
+    // A generated meeting note is a search projection of its owning meeting,
+    // not a second canonical Note. Meeting summarization links it immediately
+    // after this call; it must never enter the ordinary-Note journal first.
+    if !input.source.eq_ignore_ascii_case("meeting") {
+        crate::sync_journal::journal_note_write(&tx, note_id, now)?;
+    }
     tx.commit()?;
     Ok(note_id)
 }
@@ -2821,6 +3011,9 @@ pub fn save_note_with_initial_filing_source(
         }
     }
 
+    if !input.source.eq_ignore_ascii_case("meeting") {
+        crate::sync_journal::journal_note_write(&tx, note_id, now)?;
+    }
     tx.commit()?;
     Ok(note_id)
 }
@@ -2895,24 +3088,30 @@ fn upsert_category(
 /// agent's `create_category` action — unlike `upsert_category`, this is standalone
 /// (not tied to saving a note) and never bumps a count.
 pub fn create_category(conn: &Connection, name: &str, description: &str, now: &str) -> Result<i64> {
-    if let Ok(id) = conn.query_row("SELECT id FROM categories WHERE name = ?1", [name], |r| {
+    let tx = conn.unchecked_transaction()?;
+    if let Ok(id) = tx.query_row("SELECT id FROM categories WHERE name = ?1", [name], |r| {
         r.get::<_, i64>(0)
     }) {
+        tx.commit()?;
         return Ok(id);
     }
-    conn.execute(
+    tx.execute(
         "INSERT INTO categories (name, description, schema_json, entry_count, created_at)
          VALUES (?1, ?2, ?3, 0, ?4)",
         rusqlite::params![name, description, default_schema().to_string(), now],
     )?;
-    Ok(conn.last_insert_rowid())
+    let category_id = tx.last_insert_rowid();
+    crate::sync_journal::journal_category_write(&tx, category_id, now)?;
+    tx.commit()?;
+    Ok(category_id)
 }
 
 /// Overwrite one entry's structured data in place — the only mutation path for
 /// entries (writes are otherwise append-only). Returns the entry's `note_id` so
 /// the caller can re-embed the note. Used by the chat agent's `edit_entry` action.
-pub fn update_entry_data(conn: &Connection, entry_id: i64, data: &Value) -> Result<i64> {
-    let (note_id, cur): (i64, String) = conn
+pub fn update_entry_data(conn: &Connection, entry_id: i64, data: &Value, now: &str) -> Result<i64> {
+    let tx = conn.unchecked_transaction()?;
+    let (note_id, cur): (i64, String) = tx
         .query_row(
             "SELECT e.note_id, e.data_json
              FROM entries e JOIN notes n ON n.id = e.note_id
@@ -2932,10 +3131,12 @@ pub fn update_entry_data(conn: &Connection, entry_id: i64, data: &Value) -> Resu
         }
         _ => data.clone(),
     };
-    conn.execute(
+    tx.execute(
         "UPDATE entries SET data_json = ?1 WHERE id = ?2",
         rusqlite::params![merged.to_string(), entry_id],
     )?;
+    journal_note_aggregate_write(&tx, note_id, now)?;
+    tx.commit()?;
     Ok(note_id)
 }
 

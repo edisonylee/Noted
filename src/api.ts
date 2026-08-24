@@ -734,6 +734,19 @@ export type Recap = {
 };
 export type RecapRow = Recap & { id: number; created_at: string };
 export type PhoneInfo = { url: string; lan_url: string; token: string; port: number };
+export type MobileAuthorityConfirmation = {
+  receiptId: string;
+  verificationCode: string;
+  scopes: string[];
+};
+export type MobileAuthorityInfo = {
+  active: boolean;
+  address: string;
+  port: number;
+  invitationJson: string;
+  invitationExpiresAtMs: number;
+  pendingConfirmation: MobileAuthorityConfirmation | null;
+};
 export type SystemSettings = {
   timeZone: string;
   resolvedTimeZone: string;
@@ -903,6 +916,10 @@ export const api = {
   listRecaps: () => invoke<RecapRow[]>("list_recaps"),
   exportDb: () => invoke<string>("export_db"),
   phoneInfo: () => invoke<PhoneInfo>("phone_info"),
+  mobileAuthorityStart: () => invoke<MobileAuthorityInfo>("mobile_authority_start"),
+  mobileAuthorityStatus: () => invoke<MobileAuthorityInfo | null>("mobile_authority_status"),
+  mobileAuthorityConfirm: (receiptId: string, verificationCode: string, approved: boolean) =>
+    invoke<MobileAuthorityInfo>("mobile_authority_confirm", { receiptId, verificationCode, approved }),
   // Themes are data-only, versioned token packs. DESIGN.md compilation and
   // assistant matching always use the local Ollama model, even in Balanced mode.
   themeState: () => invoke<ThemeState>("theme_state"),

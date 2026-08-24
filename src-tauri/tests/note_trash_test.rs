@@ -123,9 +123,10 @@ fn ordinary_note_trash_is_reversible_hidden_everywhere_and_dependency_safe() {
         1
     );
     assert!(db::delete_note_forever(&mut conn, note_id)
-        .unwrap()
-        .is_none());
-    assert!(!db::restore_note(&conn, note_id).unwrap());
+        .unwrap_err()
+        .to_string()
+        .contains("permanent note deletion is unavailable"));
+    assert!(!db::restore_note(&conn, note_id, "2026-08-06T13:59:00Z").unwrap());
 
     assert!(db::trash_note(&conn, note_id, "2026-08-06T14:00:00Z").unwrap());
     assert!(!db::trash_note(&conn, note_id, "2026-08-06T14:01:00Z").unwrap());
@@ -161,8 +162,14 @@ fn ordinary_note_trash_is_reversible_hidden_everywhere_and_dependency_safe() {
     assert!(db::schedule_blocks_for(&conn, "2026-08-06")
         .unwrap()
         .is_empty());
-    assert!(db::update_note(&conn, note_id, "Hidden", "Hidden").is_err());
-    assert!(db::update_entry_data(&conn, entry_id, &json!({"task": "Hidden"})).is_err());
+    assert!(db::update_note(&conn, note_id, "Hidden", "Hidden", "2026-08-06T14:02:00Z").is_err());
+    assert!(db::update_entry_data(
+        &conn,
+        entry_id,
+        &json!({"task": "Hidden"}),
+        "2026-08-06T14:02:00Z"
+    )
+    .is_err());
     assert!(db::file_note(&conn, note_id, Some(folder_id), "2026-08-06T14:02:00Z").is_err());
     assert_eq!(
         db::embedding_count(&conn).unwrap(),
@@ -187,7 +194,7 @@ fn ordinary_note_trash_is_reversible_hidden_everywhere_and_dependency_safe() {
         0
     );
 
-    assert!(db::restore_note(&conn, note_id).unwrap());
+    assert!(db::restore_note(&conn, note_id, "2026-08-06T14:30:00Z").unwrap());
     assert_eq!(db::list_notes(&conn).unwrap().len(), 1);
     assert!(db::list_trashed_notes(&conn).unwrap().is_empty());
     assert_eq!(
@@ -205,10 +212,10 @@ fn ordinary_note_trash_is_reversible_hidden_everywhere_and_dependency_safe() {
     );
 
     assert!(db::trash_note(&conn, note_id, "2026-08-06T15:00:00Z").unwrap());
-    let deleted = db::delete_note_forever(&mut conn, note_id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(deleted.image_path.as_deref(), Some(image_path.as_str()));
+    assert!(db::delete_note_forever(&mut conn, note_id)
+        .unwrap_err()
+        .to_string()
+        .contains("permanent note deletion is unavailable"));
     for (table, column) in [
         ("notes", "id"),
         ("entries", "note_id"),
@@ -218,10 +225,9 @@ fn ordinary_note_trash_is_reversible_hidden_everywhere_and_dependency_safe() {
         ("note_filing_events", "note_id"),
     ] {
         let sql = format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1");
-        assert_eq!(
-            scalar(&conn, &sql, note_id),
-            0,
-            "{table} dependency remains"
+        assert!(
+            scalar(&conn, &sql, note_id) > 0,
+            "{table} tombstone data was physically removed"
         );
     }
     assert_eq!(
@@ -230,7 +236,7 @@ fn ordinary_note_trash_is_reversible_hidden_everywhere_and_dependency_safe() {
             "SELECT home_note_id IS NOT NULL FROM entities WHERE id = ?1",
             launch
         ),
-        0
+        1
     );
     assert_eq!(
         scalar(
@@ -266,11 +272,21 @@ fn meeting_backed_notes_are_rejected_by_the_ordinary_note_lifecycle() {
     let trash_error = db::trash_note(&conn, note_id, "2026-08-06T14:00:00Z")
         .unwrap_err()
         .to_string();
-    assert!(trash_error.contains("meeting Trash lifecycle"));
-    assert!(db::restore_note(&conn, note_id)
+    assert!(trash_error.contains("meeting aggregate lifecycle"));
+    assert!(db::restore_note(&conn, note_id, "2026-08-06T14:00:00Z")
         .unwrap_err()
         .to_string()
-        .contains("meeting Trash lifecycle"));
+        .contains("meeting aggregate lifecycle"));
+    assert!(db::update_note(
+        &conn,
+        note_id,
+        "Edited projection",
+        "Edited projection",
+        "2026-08-06T14:00:00Z"
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("meeting-backed notes must use the meeting aggregate lifecycle"));
 
     conn.execute(
         "UPDATE notes SET trashed_at = '2026-08-06T14:00:00Z' WHERE id = ?1",
@@ -280,7 +296,7 @@ fn meeting_backed_notes_are_rejected_by_the_ordinary_note_lifecycle() {
     assert!(db::delete_note_forever(&mut conn, note_id)
         .unwrap_err()
         .to_string()
-        .contains("meeting Trash lifecycle"));
+        .contains("permanent note deletion is unavailable"));
     assert_eq!(
         scalar(&conn, "SELECT COUNT(*) FROM notes WHERE id = ?1", note_id),
         1

@@ -1,0 +1,33 @@
+{
+  "fixtureClass": "sanitized_record_crypto_v1",
+  "context": {
+    "version": 1,
+    "cipherSuite": "noted.record-aead.v1+aes256gcm+hkdfsha256",
+    "libraryId": "018f47a0-7b80-7000-8000-000000000101",
+    "recordId": "018f47a0-7b80-7000-8000-000000000102",
+    "recordKind": "note",
+    "schemaVersion": 1,
+    "baseRevision": 1,
+    "baseVersionId": "018f47a0-7b80-7000-8000-000000000103",
+    "proposedRevision": 2,
+    "versionId": "018f47a0-7b80-7000-8000-000000000104",
+    "mutationId": "018f47a0-7b80-7000-8000-000000000105",
+    "authorityGeneration": 7,
+    "purgeGeneration": 2,
+    "keyEpoch": 3,
+    "operation": "update"
+  },
+  "libraryKeyHex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "nonceHex": "000102030405060708090a0b",
+  "plaintextBase64": "c2FuaXRpemVkIGZpeHR1cmUgcmVjb3JkCg==",
+  "canonicalContextSha256Hex": "13994d2b99e95cdc7f34524ba3ab85b8534d9be7b67c984e1d91c7a017eb8cb6",
+  "hkdfSaltHex": "b90c7551612eef35bf49bb684cc189f9c2dc8b1e9f0bed915ccd446b7fa32733",
+  "hkdfInfoSha256Hex": "92bd9a8bfc3c26fc720d6ff74e8199aba836071272371e8694bb0f7f9e87a071",
+  "aadSha256Hex": "a049aa8d909a0da43ec8028cd56324f804873f71f4fe4d9d25f548b59074680e",
+  "derivedKeyHex": "4c3e89aba55956fda8c57dd3c0d7ea84a45148dd71269ac417c07015df0cc686",
+  "ciphertextBase64": "PdF5nRU8+V64Eqw5N09W9C3exnMiFKp41UI7wAj8TrXeDqa0MCuCl5k=",
+  "envelopeDigestHex": "0faf301847a513a4760f8a55459ea4e60db09af5940b6f4549613447685ec1cc",
+  "signatureMessageHex": "ae94e654d7308b58f7ae46362e9443fa184fec744952fc46db34aa47df28affc",
+  "signerPublicKeyX963Hex": "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+  "recordSignatureP1363Hex": "fda6417972b27e05d476d9192819c19685e97e9a9a80315f9182183dcd8d313ed46e2a98ad0a0e781735e67c9be3dc4b9075c834158a14312f3067bfa950df29"
+}

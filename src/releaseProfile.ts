@@ -27,6 +27,11 @@ export const releaseProfile = {
   // Paused until phone access is a real companion app instead of a LAN-served
   // remote view of the Mac interface.
   phoneLan: false,
+  // The native companion panel is bundled only by the standard local install
+  // script, together with the isolated sanitized-fixture authority. It stays
+  // out of ordinary and alpha frontend builds until personal-library sync is
+  // ready for production data.
+  iphoneCompanion: import.meta.env.VITE_NOTED_IPHONE_COMPANION === "1" && !isAlpha,
   diarization: !isAlpha,
   videoCapture: true,
   billing: !isAlpha,

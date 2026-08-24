@@ -1,12 +1,14 @@
 # Decision 004: Database concurrency and index generations
 
-Status: proposed for product-owner acceptance; Phase 0 spikes passed
+Status: accepted; Phase 0 spikes passed
 
 Date: 2026-08-06
 
 Owners: data architecture and retrieval
 
-Implementation status: contract and isolated tests only.
+Implementation status: the single-writer rule now covers M3 desktop and iPhone
+portable writes and their shadow outboxes. Bounded production retrieval readers
+and recording-load budgets remain later implementation work.
 
 ## Context
 
@@ -53,4 +55,3 @@ recording-write contention and latency tests before enabling agent retrieval.
 - Interrupted build: keep the prior active generation and resume or discard the
   building generation.
 - Fingerprint mismatch: never query across spaces; schedule a rebuild.
-

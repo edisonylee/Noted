@@ -1,12 +1,14 @@
 # Decision 003: Context records, source authority, and portability
 
-Status: proposed for product-owner acceptance
+Status: accepted
 
 Date: 2026-08-06
 
 Owners: product and data architecture
 
-Implementation status: Phase 0 contract only; no storage cutover has occurred.
+Implementation status: the M3 shadow portable registry and deterministic Notes,
+category, folder, and media-reference backfill are implemented. Existing domain
+tables remain authoritative; no storage cutover has occurred.
 
 ## Context
 
@@ -65,3 +67,7 @@ sync or a second primary platform, using measured portability, conflict, and
 transaction requirements. Do not change authority merely to make agent ingestion
 look simpler.
 
+The pre-multi-device revisit was completed on 2026-08-16 through Decisions 006,
+007, and the M3 implementation. Noted retains one SQLite replica per device and
+uses `ContextRecordV1` plus an immutable mutation journal as the interchange
+contract. A portable file does not become a live canonical source of truth.

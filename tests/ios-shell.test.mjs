@@ -1,0 +1,174 @@
+import assert from "node:assert/strict";
+import { readdir, readFile, stat } from "node:fs/promises";
+import test from "node:test";
+
+const root = new URL("../", import.meta.url);
+
+async function read(relativePath) {
+  return readFile(new URL(relativePath, root), "utf8");
+}
+
+test("iOS backend exports only bounded local notes and navigation commands", async () => {
+  const entry = await read("src-tauri/src/lib.rs");
+  const mobile = await read("src-tauri/src/mobile.rs");
+
+  assert.match(entry, /cfg\(not\(target_os = "ios"\)\)\]\s*include!\("desktop\.rs"\)/);
+  assert.match(entry, /cfg\(target_os = "ios"\)\]\s*mod mobile/);
+  for (const command of [
+    "mobile_health",
+    "get_mobile_notes_workspace",
+    "list_mobile_notes",
+    "create_mobile_note",
+    "update_mobile_note",
+    "delete_mobile_note",
+    "trash_mobile_note",
+    "restore_mobile_note",
+    "file_mobile_note",
+    "undo_mobile_note_filing",
+    "resolve_mobile_note_conflict",
+    "resolve_mobile_deep_link",
+    "export_mobile_notes",
+    "restore_mobile_notes_export",
+    "mobile_sync_now",
+  ]) {
+    assert.match(mobile, new RegExp(`\\b${command}\\b`));
+  }
+
+  for (const forbidden of [
+    "meeting_start",
+    "phone_info",
+    "get_provider_settings",
+    "agent_context_pending",
+    "chat",
+  ]) {
+    assert.equal(mobile.includes(forbidden), false, `${forbidden} leaked into the iOS registry`);
+  }
+
+  assert.match(mobile, /tauri_plugin_deep_link::init\(\)/);
+});
+
+test("mobile deep links are strict public-ID navigation hints", async () => {
+  const config = JSON.parse(await read("src-tauri/tauri.ios.conf.json"));
+  const capability = JSON.parse(await read("src-tauri/capabilities/mobile.json"));
+  const parser = await read("src-tauri/src/mobile_deep_link.rs");
+  const listener = await read("src/mobileDeepLinks.ts");
+
+  assert.deepEqual(config.plugins["deep-link"].mobile, [{ scheme: ["noted"], appLink: false }]);
+  assert.ok(capability.permissions.includes("deep-link:default"));
+  assert.ok(parser.includes("{MOBILE_DEEP_LINK_SCHEME}://library/{library_id}/notes/{record_id}"));
+  assert.match(parser, /raw\.contains\(\['\?', '#', '@', '%'\]\)/);
+  assert.match(listener, /resolve_mobile_deep_link/);
+  assert.match(listener, /noted:open-note/);
+  for (const forbidden of ["token=", "localStorage", "sessionStorage", "databasePath"]) {
+    assert.equal(listener.includes(forbidden), false, `${forbidden} must not appear in mobile link handling`);
+  }
+});
+
+test("mobile notes use an isolated on-device SQLite store", async () => {
+  const entry = await read("src-tauri/src/mobile.rs");
+  const store = await read("src-tauri/src/mobile_store.rs");
+
+  assert.match(entry, /noted-mobile\.sqlite3/);
+  assert.match(store, /CREATE TABLE IF NOT EXISTS mobile_notes/);
+  assert.match(store, /PRAGMA journal_mode = WAL/);
+  assert.match(store, /PRAGMA temp_store = MEMORY/);
+  assert.match(store, /MOBILE_STORE_LOCKED_ERROR/);
+  assert.match(store, /protected_data_became_unavailable/);
+  assert.match(store, /protected_data_became_available/);
+  assert.equal(store.includes("sqlite_vec"), false);
+});
+
+test("mobile note commands expose stable record IDs instead of SQLite row IDs", async () => {
+  const entry = await read("src-tauri/src/mobile.rs");
+  const store = await read("src-tauri/src/mobile_store.rs");
+  const shell = await read("src/MobileShell.tsx");
+
+  assert.match(entry, /record_id: String/);
+  assert.doesNotMatch(entry, /\bid: i64\b/);
+  assert.match(store, /pub record_id: String/);
+  assert.match(store, /serde\(rename_all = "camelCase"\)/);
+  assert.match(shell, /recordId: string/);
+  assert.match(shell, /\{ recordId: draft\.recordId \}/);
+  assert.doesNotMatch(shell, /\bid: number\b/);
+});
+
+test("desktop native dependencies are target-gated away from iOS", async () => {
+  const manifest = await read("src-tauri/Cargo.toml");
+  const desktopTable = manifest.indexOf("[target.'cfg(not(target_os = \"ios\"))'.dependencies]");
+  assert.notEqual(desktopTable, -1);
+
+  for (const dependency of ["sherpa-rs", "whisper-rs", "cpal", "tiny_http", "sqlite-vec"]) {
+    assert.ok(manifest.indexOf(dependency) > desktopTable, `${dependency} must remain desktop-only`);
+  }
+});
+
+test("generated iOS app requests no desktop recorder permissions", async () => {
+  const info = await read("src-tauri/gen/apple/tauri-app_iOS/Info.plist");
+  assert.equal(info.includes("NSMicrophoneUsageDescription"), false);
+  assert.equal(info.includes("NSAudioCaptureUsageDescription"), false);
+});
+
+test("iOS signing configuration is reproducible", async () => {
+  const config = JSON.parse(await read("src-tauri/tauri.ios.conf.json"));
+  const info = await read("src-tauri/Info.ios.plist");
+  const generatedProject = await read("src-tauri/gen/apple/project.yml");
+  const generatedPbxProject = await read("src-tauri/gen/apple/tauri-app.xcodeproj/project.pbxproj");
+
+  assert.equal(config.identifier, "com.noted.iphone");
+  assert.equal(config.bundle.iOS.developmentTeam, "MYGAYC672C");
+  assert.equal(config.bundle.iOS.minimumSystemVersion, "17.0");
+  assert.match(generatedProject, /deploymentTarget:\s*\n\s*iOS: 17\.0/);
+  assert.doesNotMatch(generatedPbxProject, /IPHONEOS_DEPLOYMENT_TARGET = 14\.0/);
+  assert.equal((generatedPbxProject.match(/IPHONEOS_DEPLOYMENT_TARGET = 17\.0/g) ?? []).length, 2);
+  assert.equal(config.bundle.iOS.infoPlist, "Info.ios.plist");
+  assert.match(info, /NSLocalNetworkUsageDescription/);
+  assert.match(info, /_noted-sync\._tcp/);
+  for (const forbidden of ["token", "secret", "libraryId", "deviceId", "databasePath"]) {
+    assert.equal(info.includes(forbidden), false, `${forbidden} leaked into iOS discovery metadata`);
+  }
+});
+
+test("native private-LAN sync never accepts a discovery pin or protocol body from JavaScript", async () => {
+  const mobile = await read("src-tauri/src/mobile.rs");
+  const transport = await read("src-tauri/src/direct_sync_transport/private_lan.rs");
+  const nativeBridge = await read("src-tauri/crates/noted-apple-security/src/mobile.rs");
+  const nativePlugin = await read("src-tauri/crates/noted-apple-security/ios/Sources/NotedAppleSecurityPlugin/NotedAppleSecurityPlugin.swift");
+
+  assert.match(mobile, /async fn mobile_sync_now/);
+  assert.match(mobile, /active_sync_profile\(\)/);
+  assert.match(mobile, /discover_private_lan_endpoints\(1_500\)/);
+  assert.match(mobile, /parse_manual_numeric/);
+  assert.match(mobile, /from_authenticated_activation\(\s*&profile/);
+  assert.match(mobile, /MobileNotesSyncOrchestrator::new/);
+  assert.doesNotMatch(mobile, /mobile_sync_now[\s\S]{0,250}spki|mobile_sync_now[\s\S]{0,250}request_body/);
+  assert.match(transport, /The caller cannot supply or override a pin through discovery metadata/);
+  assert.match(nativeBridge, /discoverPrivateLanEndpoints/);
+  assert.match(nativePlugin, /NWBrowser\.Descriptor\.bonjour\(type: "_noted-sync\._tcp"/);
+  assert.match(nativePlugin, /PrivateLanEndpointHintParser\.parse\(txt: txtRecord\.dictionary\)/);
+});
+
+test("mobile frontend bundle excludes desktop command surfaces", async () => {
+  const index = await read("dist-ios/index.html");
+  assert.match(index, /assets\/index-[^\"]+\.js/);
+
+  const assetsUrl = new URL("dist-ios/assets/", root);
+  const assets = await readdir(assetsUrl);
+  const scripts = assets.filter((name) => name.endsWith(".js"));
+  assert.equal(scripts.length, 1, "the iPhone app should emit one isolated JavaScript entry");
+
+  const scriptUrl = new URL(scripts[0], assetsUrl);
+  const script = await readFile(scriptUrl, "utf8");
+  const scriptSize = (await stat(scriptUrl)).size;
+  assert.ok(scriptSize < 300_000, `mobile entry unexpectedly grew to ${scriptSize} bytes`);
+
+  for (const forbidden of [
+    "meeting_start",
+    "phone_info",
+    "get_provider_settings",
+    "agent_context_pending",
+    "Ollama",
+    "Your companion is taking shape",
+  ]) {
+    assert.equal(script.includes(forbidden), false, `${forbidden} leaked into the mobile assets`);
+  }
+});

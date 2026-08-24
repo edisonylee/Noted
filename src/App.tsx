@@ -1015,8 +1015,8 @@ export default function App() {
           >
             {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
           </button>
-          {releaseProfile.phoneLan && (
-            <button className="icon-btn" onClick={() => setShowPhone(true)} title="Capture from your phone">
+          {releaseProfile.iphoneCompanion && (
+            <button className="icon-btn" onClick={() => setShowPhone(true)} title="Connect iPhone" aria-label="Connect iPhone">
               <Smartphone size={18} />
             </button>
           )}
@@ -1494,7 +1494,7 @@ export default function App() {
         onMutated={() => refresh().catch(handleErr)}
       />
 
-      {releaseProfile.phoneLan && showPhone && <PhonePanel onClose={() => setShowPhone(false)} />}
+      {releaseProfile.iphoneCompanion && showPhone && <PhonePanel onClose={() => setShowPhone(false)} />}
       <AgentContextApproval />
     </div>
   );

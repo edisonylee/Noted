@@ -1,23 +1,26 @@
 # iPhone feasibility preflight
 
-Status: blocked on full Xcode installation; source isolation work not started
+Status: native shell and first local Notes slice verified on physical hardware
 
-Date checked: 2026-08-14
+Date checked: 2026-08-16
 
-Related direction: [Decision 006](decisions/006-iphone-companion-direction.md)
-and [the mobile implementation plan](MOBILE_COMPANION_IMPLEMENTATION_PLAN.md).
+Related direction: [Decision 006](decisions/006-iphone-companion-direction.md),
+[Decision 007](decisions/007-mobile-sync-sequencing-and-provider-gate.md), and
+[the mobile implementation plan](MOBILE_COMPANION_IMPLEMENTATION_PLAN.md).
 
 ## Outcome
 
-The repository has the basic Tauri mobile entry shape, and this Apple Silicon
-Mac has ample disk space and current Rust, Swift, Bun, and Tauri tooling. It
-cannot generate, compile, sign, or install an iPhone shell yet because only the
-standalone Command Line Tools are installed. There is no iPhoneOS SDK, iOS Rust
-target, CocoaPods installation, signing identity, or provisioning profile.
+The native app compiles, installs, launches, and completes its Rust-to-webview
+startup health check in an iPhone 17 simulator. The signed app was installed on
+an iPhone 15 Pro and launched through CoreDevice. Its first real product slice
+provides local note creation, editing, tombstoned deletion, and search backed by
+an isolated WAL-mode SQLite database in the iOS application-data directory.
+File-backed store tests prove that saved notes survive a database close and
+reopen.
 
-Do not run `tauri ios init` until full Xcode is installed and opened once. The
-generated project would not be verifiable, and the current shared Rust startup
-still includes macOS-only services.
+The iOS build has its own frontend entry, Tauri config, capability manifest,
+Rust entry point, and command registry. macOS-only services and native
+dependencies are excluded at compile time instead of being hidden at runtime.
 
 ## Verified environment
 
@@ -29,11 +32,13 @@ still includes macOS-only services.
 | Bun | 1.3.14 |
 | Tauri CLI / crate | 2.11.2 |
 | Free disk | about 1.4 TiB |
-| Active developer directory | `/Library/Developer/CommandLineTools` |
-| Full Xcode / iPhoneOS SDK | missing |
-| Installed Rust targets | `aarch64-apple-darwin` only |
-| CocoaPods | missing |
-| Valid code-signing identities | none |
+| Active developer directory | `/Applications/Xcode.app/Contents/Developer` |
+| Full Xcode / iPhoneOS SDK | Xcode 26.6 / iOS 26.5 |
+| Installed Rust targets | macOS, iOS device, Apple Silicon simulator, Intel simulator |
+| CocoaPods | 1.17.0 |
+| Valid code-signing identity | Apple Development certificate for the configured personal team |
+| Simulator proof | iPhone 17: local Notes UI rendered; signed-boundary and store tests passed |
+| Physical-device proof | iPhone 15 Pro: signed Notes build installed and launched |
 
 Evidence commands:
 
@@ -56,11 +61,11 @@ security find-identity -v -p codesigning
 - The Vite configuration already honors `TAURI_DEV_HOST`.
 - Existing icon source assets are sufficient for the first shell spike.
 
-## Source blockers to isolate before the first iOS build
+## Source isolation proven by the first iOS build
 
-The first iPhone shell must have a separate config and a deliberately small
-command registry. Reusing the macOS startup verbatim would pull in unsupported or
-inappropriate behavior:
+The first iPhone shell now has a separate config and a deliberately small
+command registry. The following desktop behavior is excluded from the iOS
+compile and bundle:
 
 - global-shortcut imports, plugin construction, and registration;
 - the Unix agent broker and its desktop peer-credential assumptions;
@@ -74,21 +79,23 @@ inappropriate behavior:
 - the dormant LAN phone server and its broad historical dispatcher;
 - the legacy mobile shell, which is gated by `phoneLan` and includes Ask.
 
-The mobile shell should initially expose only startup diagnostics, mobile-local
-database migration/smoke commands, Keychain/Data Protection probes, and the
-first Notes vertical-slice commands. Desktop-only modules should be target-gated
-or moved behind a desktop entry builder rather than stubbed at runtime.
+The current iPhone registry exposes `mobile_health` plus five local Notes
+commands: list/search, create, update, and delete. The Notes database is isolated
+from the desktop database and intentionally excludes sqlite-vec. Cross-device
+record identity and synchronization are not implied by this local slice.
 
-## Owner prerequisite
+Keychain/Data Protection probes, a shared portable record schema, migration
+smoke tests against that schema, and synchronization remain unimplemented.
 
-1. Install the full Xcode application from Apple.
-2. Launch Xcode once, accept its license, let it install platform components,
-   and sign in with the Apple ID that will own development signing.
-3. Select the development team when Xcode offers one. A paid Apple Developer
-   Program membership is required later for TestFlight; a local device spike can
-   begin with an available personal team, subject to Apple's signing limits.
+## Completed signing setup
 
-After Xcode exists at `/Applications/Xcode.app`, run:
+Xcode is signed in, an Apple Development certificate is available, and the
+personal development team is recorded in `tauri.ios.conf.json` for the
+`com.noted.iphone` bundle identifier. A paid Apple Developer Program membership
+is still required later for TestFlight; personal-team installations remain
+subject to Apple's signing and reprovisioning limits.
+
+The completed toolchain setup was:
 
 ```sh
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
@@ -97,19 +104,29 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
 brew install cocoapods
 ```
 
-Re-run all evidence commands above. The preflight gate is open only when both
-`iphoneos` and `iphonesimulator` SDKs resolve and Xcode can see an eligible
-development team.
+The simulator, first physical-device, and basic local-persistence gates are open.
+The remaining M2 work is the Keychain/Data Protection, lifecycle, accessibility,
+and capability-isolation probe set described in the implementation plan.
 
-## First command after the gate opens
-
-Once the separate iOS config, dependency guards, and minimal entry registry are
-in place:
+## Reproducing the simulator proof
 
 ```sh
-bun run tauri ios init --ci --skip-targets-install
+bun run ios:check
+bun run tauri ios init --config src-tauri/tauri.ios.conf.json --ci --skip-targets-install
+bun run tauri ios build --debug --target aarch64-sim --no-sign --ci \
+  --config src-tauri/tauri.ios.conf.json
 ```
 
-Then compile the minimal shell for the simulator before attaching a physical
-iPhone. No synchronized schema migration or real library data should be included
-in this spike.
+## Reproducing the physical-device proof
+
+With the configured development team and a trusted iPhone connected:
+
+```sh
+bun run tauri ios build --debug --target aarch64 --ci \
+  --export-method debugging --config src-tauri/tauri.ios.conf.json
+xcrun devicectl device install app --device <device-id> \
+  src-tauri/gen/apple/build/tauri-app_iOS.xcarchive/Products/Applications/Noted.app
+xcrun devicectl device process launch --device <device-id> com.noted.iphone
+```
+
+No synchronized schema migration or real library data is included in this spike.

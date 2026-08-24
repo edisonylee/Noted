@@ -6,9 +6,13 @@ Date: 2026-08-14
 
 Owners: product, mobile, data architecture, and security
 
-Implementation status: M0 accepted; the first M1 quarantine checkpoint is
-implemented; M2 preflight is complete and blocked on full Xcode installation.
-No synchronized mobile data model has shipped.
+Implementation status: M0 accepted; the M1 quarantine checkpoint is implemented;
+the M2 native shell, simulator build, signed physical-device installation, and
+local-only Notes persistence are proven. The M3 portability implementation
+checkpoint is complete with deterministic migration, rollback, journal, FTS,
+and export/restore evidence. Physical platform-security/lifecycle probes and a
+recorder-load measurement remain release gates; M4 uses sanitized fixtures only.
+No synchronized transport has shipped.
 
 ## Context
 
@@ -23,6 +27,8 @@ listing or moving local intelligence onto the phone.
 
 The detailed product, protocol, migration, security, and rollout contract lives
 in [the mobile companion implementation plan](../MOBILE_COMPANION_IMPLEMENTATION_PLAN.md).
+The direct-first sync order, hosted-provider evaluation, and spending gate live
+in [Decision 007](007-mobile-sync-sequencing-and-provider-gate.md).
 
 ## Decision
 

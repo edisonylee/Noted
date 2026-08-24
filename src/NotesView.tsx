@@ -1235,24 +1235,6 @@ export function NotesView({
     }
   }
 
-  async function deleteFolder(folder: NoteFolderInfo) {
-    setMenuFolder(null);
-    const childCount = (folderChildren.get(folder.id) ?? []).length;
-    const removesSelectedFolder =
-      selectedFolderId != null && folderIsInside(selectedFolderId, folder.id);
-    const detail = childCount
-      ? " Its nested folders will also be removed. Your notes will not be deleted."
-      : " Your notes will not be deleted.";
-    if (!window.confirm(`Remove “${folder.name}”?${detail}`)) return;
-    try {
-      await api.deleteNoteFolder(folder.id);
-      if (removesSelectedFolder) setSelection("all");
-      await Promise.all([loadFolders(), loadMeetings(), loadTranscriptFacets()]);
-    } catch (error) {
-      setFolderError(String(error));
-    }
-  }
-
   async function moveFolderFromMenu(
     folder: NoteFolderInfo,
     parentId: number | null,
@@ -1516,6 +1498,15 @@ export function NotesView({
     const target = targetOverride ?? noteContextMenu;
     if (!target || (action === "trash" && !target.canTrash)) return false;
     setNoteContextMenu(null);
+
+    if (action === "delete" && target.kind === "note") {
+      showFolderMoveNotice({
+        kind: "error",
+        message:
+          "Permanent note deletion is paused until every synced device can honor the same purge generation. Leave it in Trash or restore it.",
+      });
+      return false;
+    }
 
     if (action === "trash" && !options.skipConfirmation) {
       const confirmed = window.confirm(
@@ -1911,14 +1902,12 @@ export function NotesView({
                   <RotateCcw size={14} /> Restore
                 </button>
                 <button
-                  className="note-edit-trigger danger"
-                  onClick={async () => {
-                    if (await runNoteContextAction("delete", openNoteTrashTarget)) {
-                      setOpenNote(null);
-                    }
-                  }}
+                  className="note-edit-trigger"
+                  type="button"
+                  disabled
+                  title="Permanent deletion will return after synchronized purge protection is available."
                 >
-                  <Trash2 size={14} /> Delete permanently
+                  <Trash2 size={14} /> Kept safely in Trash
                 </button>
               </>
             ) : !editingNote && (
@@ -2678,8 +2667,12 @@ export function NotesView({
                 </select>
               </label>
             )}
-            <button role="menuitem" className="danger" onClick={() => deleteFolder(folder)}>
-              Remove
+            <button
+              role="menuitem"
+              disabled
+              title="Folder removal will return after synchronized lifecycle and purge protection is available."
+            >
+              Remove unavailable
             </button>
           </div>
         )}
@@ -2814,15 +2807,27 @@ export function NotesView({
                 <RotateCcw size={14} aria-hidden="true" />
                 <span>Restore</span>
               </button>
-              <button
-                type="button"
-                role="menuitem"
-                className="danger"
-                onClick={() => void runNoteContextAction("delete")}
-              >
-                <Trash2 size={14} aria-hidden="true" />
-                <span>Delete permanently</span>
-              </button>
+              {noteContextMenu.kind === "meeting" ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="danger"
+                  onClick={() => void runNoteContextAction("delete")}
+                >
+                  <Trash2 size={14} aria-hidden="true" />
+                  <span>Delete permanently</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled
+                  title="Permanent deletion will return after synchronized purge protection is available."
+                >
+                  <Trash2 size={14} aria-hidden="true" />
+                  <span>Kept safely in Trash</span>
+                </button>
+              )}
             </>
           ) : (
             <>

@@ -14,8 +14,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "Building standard local noted…"
-bun run tauri build
+echo "Building standard local noted with the native iPhone companion preview…"
+VITE_NOTED_IPHONE_COMPANION=1 bun run tauri build --features sanitized-development-fixtures
 
 APP="src-tauri/target/release/bundle/macos/noted.app"
 if [ ! -d "$APP" ]; then

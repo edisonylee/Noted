@@ -40,12 +40,12 @@ fn stamp(conn: &mut Connection, version: u32, min_reader: u32, name: &str) -> Re
     )?;
     tx.execute(
         "INSERT OR REPLACE INTO app_metadata(key, value)
-         VALUES ('schema_version', ?1)",
+         VALUES ('phase0_schema_version', ?1)",
         [version.to_string()],
     )?;
     tx.execute(
         "INSERT OR REPLACE INTO app_metadata(key, value)
-         VALUES ('min_reader_version', ?1)",
+         VALUES ('phase0_min_reader_version', ?1)",
         [min_reader.to_string()],
     )?;
     tx.commit()?;
@@ -59,14 +59,14 @@ fn check_reader_compatibility(
 ) -> Result<()> {
     let schema: u32 = conn
         .query_row(
-            "SELECT value FROM app_metadata WHERE key = 'schema_version'",
+            "SELECT value FROM app_metadata WHERE key = 'phase0_schema_version'",
             [],
             |row| row.get::<_, String>(0),
         )?
         .parse()?;
     let min_reader: u32 = conn
         .query_row(
-            "SELECT value FROM app_metadata WHERE key = 'min_reader_version'",
+            "SELECT value FROM app_metadata WHERE key = 'phase0_min_reader_version'",
             [],
             |row| row.get::<_, String>(0),
         )?

@@ -142,7 +142,7 @@ fn seeded_baro_tree_auto_files_standups_and_accepts_manual_filing() {
 }
 
 #[test]
-fn folder_structure_seed_runs_once_and_respects_user_deletions() {
+fn folder_structure_seed_runs_once_while_physical_deletion_is_gated() {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -156,12 +156,21 @@ fn folder_structure_seed_runs_once_and_respects_user_deletions() {
     let conn = db::init(&path).unwrap();
     let seeded = db::list_note_folders(&conn).unwrap();
     let side_projects = by_name(&seeded, "Side Projects").id;
-    db::delete_note_folder(&conn, side_projects).unwrap();
+    let error = db::delete_note_folder(&conn, side_projects)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("folder deletion is unavailable"));
     drop(conn);
 
     let conn = db::init(&path).unwrap();
     let reopened = db::list_note_folders(&conn).unwrap();
-    assert!(reopened.iter().all(|folder| folder.name != "Side Projects"));
+    assert_eq!(
+        reopened
+            .iter()
+            .filter(|folder| folder.name == "Side Projects")
+            .count(),
+        1
+    );
     assert_eq!(
         reopened
             .iter()
@@ -196,14 +205,14 @@ fn folder_structure_upgrade_preserves_existing_folders_and_memberships() {
         "projects",
         "2026-08-06",
     );
-    db::file_note(&conn, note_id, Some(symphony_id), "2026-08-06T12:00:00Z").unwrap();
+    db::file_note(&conn, note_id, Some(symphony_id), "2026-08-06T14:01:00Z").unwrap();
     let partner_id = db::create_note_folder(
         &conn,
         Some(baro_id),
         "Partner Meetings",
         "folder",
         "",
-        "2026-08-06T12:01:00Z",
+        "2026-08-06T14:02:00Z",
     )
     .unwrap();
     conn.execute(
@@ -307,7 +316,7 @@ fn folders_can_be_reordered_and_nested_without_creating_cycles() {
         "Partner Meetings",
         "folder",
         "",
-        "2026-08-06T12:00:00Z",
+        "2026-08-20T12:00:00Z",
     )
     .unwrap();
     let planning = db::create_note_folder(
@@ -316,11 +325,18 @@ fn folders_can_be_reordered_and_nested_without_creating_cycles() {
         "Planning",
         "folder",
         "",
-        "2026-08-06T12:01:00Z",
+        "2026-08-20T12:01:00Z",
     )
     .unwrap();
 
-    db::move_note_folder(&conn, planning, Some(baro), Some(standups)).unwrap();
+    db::move_note_folder(
+        &conn,
+        planning,
+        Some(baro),
+        Some(standups),
+        "2026-08-20T12:10:00Z",
+    )
+    .unwrap();
     let folders = db::list_note_folders(&conn).unwrap();
     let baro_children: Vec<&str> = folders
         .iter()
@@ -336,14 +352,15 @@ fn folders_can_be_reordered_and_nested_without_creating_cycles() {
         ]
     );
 
-    db::move_note_folder(&conn, partner, Some(planning), None).unwrap();
+    db::move_note_folder(&conn, partner, Some(planning), None, "2026-08-20T12:11:00Z").unwrap();
     let folders = db::list_note_folders(&conn).unwrap();
     assert_eq!(
         by_name(&folders, "Partner Meetings").parent_id,
         Some(planning)
     );
 
-    let error = db::move_note_folder(&conn, planning, Some(partner), None).unwrap_err();
+    let error = db::move_note_folder(&conn, planning, Some(partner), None, "2026-08-20T12:12:00Z")
+        .unwrap_err();
     assert!(error.to_string().contains("cannot be moved inside itself"));
     let folders = db::list_note_folders(&conn).unwrap();
     assert_eq!(by_name(&folders, "Planning").parent_id, Some(baro));
@@ -352,7 +369,14 @@ fn folders_can_be_reordered_and_nested_without_creating_cycles() {
         Some(planning)
     );
 
-    let error = db::move_note_folder(&conn, planning, Some(personal), None).unwrap_err();
+    let error = db::move_note_folder(
+        &conn,
+        planning,
+        Some(personal),
+        None,
+        "2026-08-20T12:13:00Z",
+    )
+    .unwrap_err();
     assert!(error
         .to_string()
         .contains("cannot move between Work and Personal"));
@@ -746,7 +770,7 @@ fn pending_capture_context_round_trips_without_defaulting_legacy_rows() {
 }
 
 #[test]
-fn deleting_a_folder_rehomes_routed_notes_to_their_context_inbox() {
+fn deleting_a_folder_fails_closed_without_rehoming_or_history_changes() {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -799,8 +823,7 @@ fn deleting_a_folder_rehomes_routed_notes_to_their_context_inbox() {
     )
     .unwrap();
 
-    db::delete_note_folder(&conn, receipts).unwrap();
-    let current: (i64, String, String, Option<String>, i64) = conn
+    let before: (i64, String, String, Option<String>, Option<i64>) = conn
         .query_row(
             "SELECT i.folder_id, i.source, i.reason, n.filing_context, i.event_id
              FROM note_folder_items i JOIN notes n ON n.id = i.note_id
@@ -817,11 +840,7 @@ fn deleting_a_folder_rehomes_routed_notes_to_their_context_inbox() {
             },
         )
         .unwrap();
-    assert_eq!(current.0, personal);
-    assert_eq!(current.1, "context");
-    assert!(current.2.contains("was deleted"));
-    assert_eq!(current.3.as_deref(), Some("personal"));
-    let legacy_current: (i64, Option<String>) = conn
+    let legacy_before: (i64, Option<String>) = conn
         .query_row(
             "SELECT i.folder_id, n.filing_context
              FROM note_folder_items i JOIN notes n ON n.id = i.note_id
@@ -830,9 +849,61 @@ fn deleting_a_folder_rehomes_routed_notes_to_their_context_inbox() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(legacy_current, (personal, Some("personal".into())));
-    let undo_error = db::undo_note_filing(&conn, current.4, "2026-08-06T15:02:00Z").unwrap_err();
-    assert!(undo_error.to_string().contains("no longer exists"));
+    let event_count_before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM note_filing_events", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+
+    let error = db::delete_note_folder(&conn, receipts)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("folder deletion is unavailable"));
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM note_folders WHERE id = ?1",
+            [receipts],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    let after: (i64, String, String, Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT i.folder_id, i.source, i.reason, n.filing_context, i.event_id
+             FROM note_folder_items i JOIN notes n ON n.id = i.note_id
+             WHERE i.note_id = ?1",
+            [note_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    let legacy_after: (i64, Option<String>) = conn
+        .query_row(
+            "SELECT i.folder_id, n.filing_context
+             FROM note_folder_items i JOIN notes n ON n.id = i.note_id
+             WHERE i.note_id = ?1",
+            [legacy_note_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(after, before);
+    assert_eq!(legacy_after, legacy_before);
+    assert_eq!(after.0, receipts);
+    assert_eq!(legacy_after.0, receipts);
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM note_filing_events", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        event_count_before
+    );
 
     drop(conn);
     let _ = std::fs::remove_file(path);

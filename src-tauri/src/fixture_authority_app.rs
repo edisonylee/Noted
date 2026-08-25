@@ -23,7 +23,8 @@ use crate::{
         canonical_invitation_unsigned, AuthenticatedHpkeEnvelope, AuthenticatedHpkeSeal,
         BootstrapMetadataV1, Environment, FreshValuePurpose, Invitation, LibraryDataClass,
         LocalHpkeKey, LocalSigningKey, PairingCrypto, PairingRole, RecordKind,
-        BOOTSTRAP_KEY_PACKAGE_BYTES, PAIRING_PROTOCOL, PAIRING_SUITE,
+        BOOTSTRAP_KEY_PACKAGE_BYTES, MAX_INVITATION_LIFETIME_MS, PAIRING_PROTOCOL,
+        PAIRING_SUITE,
     },
     portable::new_uuid_v7,
 };
@@ -52,7 +53,6 @@ use zeroize::Zeroizing;
 
 const FIXTURE_LIBRARY_KEY: [u8; 32] = [0x31; 32];
 const FIXTURE_INSTANCE_NAME: &str = "Noted Fixture";
-const INVITATION_LIFETIME_MS: i64 = 10 * 60 * 1_000;
 
 #[derive(Clone, Copy)]
 struct SystemAuthorityClock;
@@ -367,9 +367,16 @@ pub async fn mobile_authority_start(
     state: State<'_, MobileAuthorityState>,
 ) -> Result<MobileAuthorityInfo, String> {
     let mut active = state.0.lock().await;
-    if let Some(authority) = active.as_ref() {
+    let now = system_now_ms().map_err(|_| "system clock is unavailable".to_string())?;
+    if let Some(authority) = active
+        .as_ref()
+        .filter(|authority| authority.info.invitation_expires_at_ms > now)
+    {
         return Ok(authority_info(authority));
     }
+    // Dropping the expired listener also invalidates the old Bonjour endpoint.
+    // A fresh authority below gets new keys, TLS identity, and invitation.
+    *active = None;
 
     let address = private_lan_ipv4()?;
     let directory = app
@@ -403,7 +410,6 @@ pub async fn mobile_authority_start(
         bindings.clone(),
     )
     .map_err(display_authority_error)?;
-    let now = system_now_ms().map_err(|_| "system clock is unavailable".to_string())?;
     let mut nonce = vec![0_u8; 32];
     RandOsRng.fill_bytes(&mut nonce);
     let mut invitation = Invitation {
@@ -419,7 +425,7 @@ pub async fn mobile_authority_start(
         authority_generation: descriptor.authority_generation,
         scope_ceiling: fixture_scopes(),
         created_at_ms: now,
-        expires_at_ms: now + INVITATION_LIFETIME_MS,
+        expires_at_ms: now + MAX_INVITATION_LIFETIME_MS,
         environment: Environment::Development,
         authority_role: PairingRole::MacAuthority,
         intended_client_role: PairingRole::IphoneCompanion,

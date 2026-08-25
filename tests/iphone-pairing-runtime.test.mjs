@@ -53,3 +53,18 @@ test("mobile commands expose pairing actions but never raw native crypto", async
     assert.equal(handler.includes(nativeMethod), false);
   }
 });
+
+test("desktop pairing uses the protocol lifetime and renews expired invitations", async () => {
+  const authority = await read("src-tauri/src/fixture_authority_app.rs");
+  const panel = await read("src/PhonePanel.tsx");
+
+  assert.match(authority, /now \+ MAX_INVITATION_LIFETIME_MS/);
+  assert.match(
+    authority,
+    /filter\(\|authority\| authority\.info\.invitation_expires_at_ms > now\)/,
+  );
+  assert.match(authority, /\*active = None;/);
+  assert.doesNotMatch(authority, /10 \* 60 \* 1_000/);
+  assert.match(panel, /const refresh = \(\) => api\.mobileAuthorityStart\(\)/);
+  assert.match(panel, /window\.setInterval\(\(\) => \{[\s\S]*void refresh\(\)/);
+});

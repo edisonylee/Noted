@@ -17,13 +17,17 @@ export function PhonePanel({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     let cancelled = false;
     let timer: number | undefined;
-    api.mobileAuthorityStart()
-      .then((next) => { if (!cancelled) setInfo(next); })
+    const refresh = () => api.mobileAuthorityStart()
+      .then((next) => {
+        if (!cancelled) {
+          setInfo(next);
+          setError(null);
+        }
+      })
       .catch((reason) => { if (!cancelled) setError(String(reason)); });
+    void refresh();
     timer = window.setInterval(() => {
-      void api.mobileAuthorityStatus().then((next) => {
-        if (!cancelled && next) setInfo(next);
-      }).catch(() => undefined);
+      void refresh();
     }, 1_000);
     return () => { cancelled = true; if (timer) window.clearInterval(timer); };
   }, []);

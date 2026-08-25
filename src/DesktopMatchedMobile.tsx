@@ -232,6 +232,7 @@ function PairingSheet({ onClose, onPaired }: { onClose: () => void; onPaired: ()
   const [status, setStatus] = useState<PairingStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const needsDiscard = error?.includes("live native identity requires recovery or explicit discard") ?? false;
 
   async function connect() {
     if (!pairingCode.trim() || busy) return;
@@ -272,6 +273,21 @@ function PairingSheet({ onClose, onPaired }: { onClose: () => void; onPaired: ()
     }
   }
 
+  async function discardFailedPairing() {
+    if (busy || !window.confirm("Discard the unfinished pairing on this iPhone and start again?")) return;
+    setBusy(true);
+    try {
+      await invoke<PairingStatus>("mobile_pairing_discard_fixture");
+      setStatus(null);
+      setPairingCode("");
+      setError(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="dm-pairing-layer" role="dialog" aria-modal="true" aria-label="Connect your Mac">
       <button type="button" className="dm-drawer-scrim" onClick={onClose} aria-label="Close pairing" />
@@ -283,6 +299,7 @@ function PairingSheet({ onClose, onPaired }: { onClose: () => void; onPaired: ()
             <label>Pairing code<textarea rows={4} value={pairingCode} onChange={(event) => setPairingCode(event.target.value)} placeholder="Paste from Noted on your Mac" /></label>
             <label>Mac address <span>Optional fallback</span><input value={manualAddress} onChange={(event) => setManualAddress(event.target.value)} placeholder="192.168.1.10:49152" inputMode="url" /></label>
             {error && <p className="dm-pairing-error">{error}</p>}
+            {needsDiscard && <button type="button" className="dm-pairing-reset" onClick={() => void discardFailedPairing()} disabled={busy}>Discard failed pairing</button>}
             <button type="button" className="dm-pairing-primary" onClick={() => void connect()} disabled={!pairingCode.trim() || busy}>{busy ? "Connecting…" : "Connect securely"}</button>
           </>
         ) : (

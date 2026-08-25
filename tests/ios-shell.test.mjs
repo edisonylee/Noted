@@ -159,6 +159,15 @@ test("migration recovery files follow the current iOS data container after reins
   );
 });
 
+test("the phone can explicitly discard an unfinished native pairing", async () => {
+  const shell = await read("src/DesktopMatchedMobile.tsx");
+
+  assert.match(shell, /mobile_pairing_discard_fixture/);
+  assert.match(shell, /Discard failed pairing/);
+  assert.match(shell, /Discard the unfinished pairing on this iPhone and start again\?/);
+  assert.match(shell, /setPairingCode\(""\)/);
+});
+
 test("mobile frontend bundle excludes desktop command surfaces", async () => {
   const index = await read("dist-ios/index.html");
   assert.match(index, /assets\/index-[^\"]+\.js/);

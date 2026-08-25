@@ -165,6 +165,8 @@ test("the phone can explicitly discard an unfinished native pairing", async () =
   assert.match(shell, /mobile_pairing_discard_fixture/);
   assert.match(shell, /Discard unfinished pairing/);
   assert.match(shell, /Clear the unfinished connection/);
+  assert.match(shell, /direct-sync endpoint is unavailable/);
+  assert.match(shell, /a different invitation cannot replace the durable pairing transcript/);
   assert.doesNotMatch(shell, /window\.confirm/);
   assert.match(shell, /setPairingCode\(""\)/);
 });

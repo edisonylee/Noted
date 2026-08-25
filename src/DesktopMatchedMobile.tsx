@@ -232,7 +232,11 @@ function PairingSheet({ onClose, onPaired }: { onClose: () => void; onPaired: ()
   const [status, setStatus] = useState<PairingStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const needsDiscard = error?.includes("live native identity requires recovery or explicit discard") ?? false;
+  const needsDiscard = [
+    "live native identity requires recovery or explicit discard",
+    "direct-sync endpoint is unavailable",
+    "a different invitation cannot replace the durable pairing transcript",
+  ].some((message) => error?.includes(message));
 
   async function connect() {
     if (!pairingCode.trim() || busy) return;

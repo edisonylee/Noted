@@ -42,7 +42,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use std::{
     collections::BTreeSet,
-    net::{IpAddr, Ipv4Addr},
+    net::{Ipv4Addr, SocketAddr, UdpSocket},
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -368,9 +368,13 @@ pub async fn mobile_authority_start(
 ) -> Result<MobileAuthorityInfo, String> {
     let mut active = state.0.lock().await;
     let now = system_now_ms().map_err(|_| "system clock is unavailable".to_string())?;
+    let address = private_lan_ipv4()?;
     if let Some(authority) = active
         .as_ref()
-        .filter(|authority| authority.info.invitation_expires_at_ms > now)
+        .filter(|authority| {
+            authority.info.invitation_expires_at_ms > now
+                && authority.info.address == address.to_string()
+        })
     {
         return Ok(authority_info(authority));
     }
@@ -378,7 +382,6 @@ pub async fn mobile_authority_start(
     // A fresh authority below gets new keys, TLS identity, and invitation.
     *active = None;
 
-    let address = private_lan_ipv4()?;
     let directory = app
         .path()
         .app_data_dir()
@@ -543,15 +546,20 @@ fn fixture_scopes() -> BTreeSet<RecordKind> {
 }
 
 fn private_lan_ipv4() -> Result<Ipv4Addr, String> {
-    local_ip_address::list_afinet_netifas()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .filter_map(|(_, address)| match address {
-            IpAddr::V4(address) if is_private_address(address) => Some(address),
-            _ => None,
-        })
-        .next()
-        .ok_or_else(|| "connect the Mac to a private Wi-Fi or Ethernet network".to_string())
+    // Ask the kernel which source address it would use for the default route.
+    // Enumerating interfaces on macOS commonly returns a VM bridge before Wi-Fi.
+    // UDP connect selects a route without sending a packet.
+    let route_probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .map_err(|error| error.to_string())?;
+    route_probe
+        .connect((Ipv4Addr::new(1, 1, 1, 1), 80))
+        .map_err(|error| error.to_string())?;
+    match route_probe.local_addr().map_err(|error| error.to_string())? {
+        SocketAddr::V4(address) if is_private_address(*address.ip()) => Ok(*address.ip()),
+        SocketAddr::V6(_) | SocketAddr::V4(_) => {
+            Err("connect the Mac to a private Wi-Fi or Ethernet network".to_string())
+        }
+    }
 }
 
 fn is_private_address(address: Ipv4Addr) -> bool {

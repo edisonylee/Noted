@@ -61,10 +61,21 @@ test("desktop pairing uses the protocol lifetime and renews expired invitations"
   assert.match(authority, /now \+ MAX_INVITATION_LIFETIME_MS/);
   assert.match(
     authority,
-    /filter\(\|authority\| authority\.info\.invitation_expires_at_ms > now\)/,
+    /authority\.info\.invitation_expires_at_ms > now/,
   );
   assert.match(authority, /\*active = None;/);
   assert.doesNotMatch(authority, /10 \* 60 \* 1_000/);
   assert.match(panel, /const refresh = \(\) => api\.mobileAuthorityStart\(\)/);
   assert.match(panel, /window\.setInterval\(\(\) => \{[\s\S]*void refresh\(\)/);
+});
+
+test("desktop pairing binds to the default-route address instead of a virtual bridge", async () => {
+  const authority = await read("src-tauri/src/fixture_authority_app.rs");
+
+  assert.match(authority, /UdpSocket::bind/);
+  assert.match(authority, /route_probe[\s\S]*\.connect/);
+  assert.match(authority, /route_probe[\s\S]*\.local_addr\(\)/);
+  assert.doesNotMatch(authority, /local_ip_address::local_ip\(\)/);
+  assert.doesNotMatch(authority, /local_ip_address::list_afinet_netifas\(\)/);
+  assert.match(authority, /authority\.info\.address == address\.to_string\(\)/);
 });

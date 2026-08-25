@@ -235,6 +235,7 @@ function PairingSheet({ onClose, onPaired }: { onClose: () => void; onPaired: ()
   const needsDiscard = [
     "live native identity requires recovery or explicit discard",
     "direct-sync endpoint is unavailable",
+    "no private-LAN endpoint candidates",
     "a different invitation cannot replace the durable pairing transcript",
   ].some((message) => error?.includes(message));
 
@@ -245,9 +246,14 @@ function PairingSheet({ onClose, onPaired }: { onClose: () => void; onPaired: ()
     try {
       const parsed = JSON.parse(pairingCode.trim()) as { invitationJson?: string; address?: string };
       if (!parsed.invitationJson) throw new Error("This pairing code is incomplete.");
+      const endpointAddress = (manualAddress.trim() || parsed.address || "").trim();
+      if (!endpointAddress) throw new Error("This pairing code has no Mac address.");
+      // Retain the authenticated invitation's endpoint for the approval poll.
+      // Bonjour is only a fallback and may be unavailable on managed networks.
+      setManualAddress(endpointAddress);
       const next = await invoke<PairingStatus>("mobile_pairing_connect_fixture", {
         invitationJson: parsed.invitationJson,
-        manualAddress: (manualAddress.trim() || parsed.address || "").trim() || null,
+        manualAddress: endpointAddress,
       });
       setStatus(next);
     } catch (reason) {

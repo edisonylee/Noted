@@ -163,8 +163,9 @@ test("the phone can explicitly discard an unfinished native pairing", async () =
   const shell = await read("src/DesktopMatchedMobile.tsx");
 
   assert.match(shell, /mobile_pairing_discard_fixture/);
-  assert.match(shell, /Discard failed pairing/);
-  assert.match(shell, /Discard the unfinished pairing on this iPhone and start again\?/);
+  assert.match(shell, /Discard unfinished pairing/);
+  assert.match(shell, /Clear the unfinished connection/);
+  assert.doesNotMatch(shell, /window\.confirm/);
   assert.match(shell, /setPairingCode\(""\)/);
 });
 

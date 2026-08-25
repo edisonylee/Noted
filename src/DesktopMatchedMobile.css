@@ -320,7 +320,10 @@
 .dm-pairing-primary:disabled { opacity: 0.45; }
 .dm-pairing-error { margin: 12px 0 0; color: #efaca4; font-size: 12px; }
 .dm-pairing-reset { width: 100%; min-height: 44px; margin-top: 12px; border: 1px solid #74413d; border-radius: 12px; color: #f3b2aa; background: #2c1b1a; font-weight: 600; }
-.dm-pairing-reset:disabled { opacity: 0.45; }
+.dm-pairing-recovery { padding: 18px; border: 1px solid #74413d; border-radius: 14px; background: #241918; }
+.dm-pairing-recovery > svg { width: 28px; height: 28px; margin-bottom: 12px; color: #f3b2aa; }
+.dm-pairing-recovery > strong { display: block; font-size: 17px; }
+.dm-pairing-recovery > p { margin: 8px 0 4px; color: #b9a3a0; font-size: 13px; line-height: 1.5; }
 .dm-pairing-kicker { margin: 24px 0 8px; color: #8c8c93; text-align: center; font-size: 10px; font-weight: 670; letter-spacing: 0.14em; }
 .dm-pairing-code { display: block; color: #fff; text-align: center; font-size: 43px; letter-spacing: 0.14em; }
 .dm-pairing-copy { max-width: 300px; margin: 12px auto 8px; text-align: center; }

@@ -274,7 +274,7 @@ function PairingSheet({ onClose, onPaired }: { onClose: () => void; onPaired: ()
   }
 
   async function discardFailedPairing() {
-    if (busy || !window.confirm("Discard the unfinished pairing on this iPhone and start again?")) return;
+    if (busy) return;
     setBusy(true);
     try {
       await invoke<PairingStatus>("mobile_pairing_discard_fixture");
@@ -293,13 +293,19 @@ function PairingSheet({ onClose, onPaired }: { onClose: () => void; onPaired: ()
       <button type="button" className="dm-drawer-scrim" onClick={onClose} aria-label="Close pairing" />
       <section className="dm-pairing-sheet">
         <header><span><Laptop /> Connect your Mac</span><button type="button" onClick={onClose} aria-label="Close"><X /></button></header>
-        {!status?.confirmation ? (
+        {needsDiscard ? (
+          <div className="dm-pairing-recovery">
+            <ShieldCheck />
+            <strong>Clear the unfinished connection</strong>
+            <p>The previous attempt stopped before approval. Remove only that unfinished security identity, then pair again with a fresh Mac code.</p>
+            <button type="button" className="dm-pairing-reset" onClick={() => void discardFailedPairing()}>Discard unfinished pairing</button>
+          </div>
+        ) : !status?.confirmation ? (
           <>
             <div className="dm-pairing-intro"><ShieldCheck /><div><strong>Private, local sync</strong><p>On your Mac, open Noted → iPhone, copy the pairing code, then paste it below. Both devices must be on the same Wi-Fi.</p></div></div>
             <label>Pairing code<textarea rows={4} value={pairingCode} onChange={(event) => setPairingCode(event.target.value)} placeholder="Paste from Noted on your Mac" /></label>
             <label>Mac address <span>Optional fallback</span><input value={manualAddress} onChange={(event) => setManualAddress(event.target.value)} placeholder="192.168.1.10:49152" inputMode="url" /></label>
             {error && <p className="dm-pairing-error">{error}</p>}
-            {needsDiscard && <button type="button" className="dm-pairing-reset" onClick={() => void discardFailedPairing()} disabled={busy}>Discard failed pairing</button>}
             <button type="button" className="dm-pairing-primary" onClick={() => void connect()} disabled={!pairingCode.trim() || busy}>{busy ? "Connecting…" : "Connect securely"}</button>
           </>
         ) : (

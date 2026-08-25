@@ -147,6 +147,18 @@ test("native private-LAN sync never accepts a discovery pin or protocol body fro
   assert.match(nativePlugin, /PrivateLanEndpointHintParser\.parse\(txt: txtRecord\.dictionary\)/);
 });
 
+test("migration recovery files follow the current iOS data container after reinstall", async () => {
+  const mobile = await read("src-tauri/src/mobile.rs");
+
+  assert.match(mobile, /fn reanchor_migration_recovery_path/);
+  assert.match(mobile, /parent\.join\("migration-recovery"\)\.join\(file_name\)/);
+  assert.match(mobile, /starts_with\("noted-mobile-pre-schema-v"\)/);
+  assert.doesNotMatch(
+    mobile,
+    /migration_recovery_path\(\)\s*\.map\(\|path\| path\.map\(PathBuf::from\)/,
+  );
+});
+
 test("mobile frontend bundle excludes desktop command surfaces", async () => {
   const index = await read("dist-ios/index.html");
   assert.match(index, /assets\/index-[^\"]+\.js/);

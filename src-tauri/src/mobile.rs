@@ -375,9 +375,35 @@ impl ProtectedMobileStore {
 }
 
 fn recovery_paths(store: &MobileStore) -> Result<Vec<PathBuf>, String> {
-    store
-        .migration_recovery_path()
-        .map(|path| path.map(PathBuf::from).into_iter().collect())
+    let Some(stored_path) = store.migration_recovery_path()? else {
+        return Ok(Vec::new());
+    };
+    Ok(vec![reanchor_migration_recovery_path(
+        store.path(),
+        Path::new(&stored_path),
+    )?])
+}
+
+/// iOS may assign a new data-container UUID when a development build is
+/// reinstalled while preserving the app's data. Migration rows created by an
+/// earlier build therefore cannot be trusted as durable absolute paths. Keep
+/// only the generated recovery filename and resolve it beneath the current
+/// database directory before asking the native protection layer to inspect it.
+fn reanchor_migration_recovery_path(
+    database_path: &Path,
+    stored_path: &Path,
+) -> Result<PathBuf, String> {
+    let parent = database_path
+        .parent()
+        .ok_or_else(|| "mobile database path has no parent directory".to_string())?;
+    let file_name = stored_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "mobile migration recovery path has no valid filename".to_string())?;
+    if !file_name.starts_with("noted-mobile-pre-schema-v") || !file_name.ends_with(".sqlite3") {
+        return Err("mobile migration recovery filename is invalid".to_string());
+    }
+    Ok(parent.join("migration-recovery").join(file_name))
 }
 
 fn existing_migration_recovery_paths(database_path: &Path) -> Result<Vec<PathBuf>, String> {
@@ -749,6 +775,32 @@ mod tests {
             active: Vec::new(),
             discarded: Vec::new(),
         }
+    }
+
+    #[test]
+    fn migration_recovery_path_follows_the_current_ios_container() {
+        let database = Path::new(
+            "/private/var/mobile/Containers/Data/Application/NEW/Library/Application Support/com.noted.iphone/noted-mobile.sqlite3",
+        );
+        let stale = Path::new(
+            "/private/var/mobile/Containers/Data/Application/OLD/Library/Application Support/com.noted.iphone/migration-recovery/noted-mobile-pre-schema-v8-1781-123-0.sqlite3",
+        );
+
+        assert_eq!(
+            reanchor_migration_recovery_path(database, stale).expect("reanchor recovery path"),
+            PathBuf::from(
+                "/private/var/mobile/Containers/Data/Application/NEW/Library/Application Support/com.noted.iphone/migration-recovery/noted-mobile-pre-schema-v8-1781-123-0.sqlite3",
+            )
+        );
+    }
+
+    #[test]
+    fn migration_recovery_path_rejects_unrecognized_filenames() {
+        let database = Path::new("/current/container/noted-mobile.sqlite3");
+        assert_eq!(
+            reanchor_migration_recovery_path(database, Path::new("/old/container/notes.sqlite3")),
+            Err("mobile migration recovery filename is invalid".to_string())
+        );
     }
 
     #[test]

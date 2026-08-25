@@ -13,6 +13,9 @@ export function PhonePanel({ onClose }: { onClose: () => void }) {
     invitationJson: info.invitationJson,
     address: `${info.address}:${info.port}`,
   }) : "", [info]);
+  const secondsRemaining = info
+    ? Math.max(0, Math.ceil((info.invitationExpiresAtMs - Date.now()) / 1_000))
+    : 0;
 
   useEffect(() => {
     let cancelled = false;
@@ -43,9 +46,26 @@ export function PhonePanel({ onClose }: { onClose: () => void }) {
   }, [pairingCode]);
 
   async function copyCode() {
-    await navigator.clipboard.writeText(pairingCode);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1_500);
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // Copying is the start of a pairing attempt. Renew here so the pasted
+      // code always receives the protocol's complete five-minute lifetime.
+      const fresh = await api.mobileAuthorityStart(true);
+      const freshCode = JSON.stringify({
+        invitationJson: fresh.invitationJson,
+        address: `${fresh.address}:${fresh.port}`,
+      });
+      setInfo(fresh);
+      await navigator.clipboard.writeText(freshCode);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1_500);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function confirm(approved: boolean) {
@@ -81,7 +101,7 @@ export function PhonePanel({ onClose }: { onClose: () => void }) {
             <p className="muted">Keep Noted open on both devices and use the same Wi-Fi. This development preview pairs securely with an isolated test library; it does not read your personal Mac library yet.</p>
             <div className="phone-pairing-code">
               {qr && <img className="qr" src={qr} alt="Noted iPhone pairing code" />}
-              <div><Smartphone /><strong>On your iPhone</strong><span>Tap Connect Mac, then paste the pairing code.</span><button type="button" onClick={() => void copyCode()}>{copied ? <Check /> : <Copy />}{copied ? "Copied" : "Copy pairing code"}</button></div>
+              <div><Smartphone /><strong>On your iPhone</strong><span>Tap Connect Mac, then paste the pairing code. The code is one-time and expires in {Math.floor(secondsRemaining / 60)}:{String(secondsRemaining % 60).padStart(2, "0")}.</span><button type="button" onClick={() => void copyCode()} disabled={busy}>{copied ? <Check /> : <Copy />}{copied ? "Fresh code copied" : busy ? "Generating…" : "Copy fresh code"}</button></div>
             </div>
             <code className="phone-url">{info.address}:{info.port}</code>
           </>

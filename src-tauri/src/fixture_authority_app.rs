@@ -332,9 +332,15 @@ impl FixtureAuthorityRequestHandler for ManagedAuthorityHandler {
                     body: result.exact_response_bytes,
                 }
             }
-            Err(_) => PairingTransportResponse {
+            Err(error) => PairingTransportResponse {
                 status: 400,
-                body: br#"{"error":{"code":"pairing_rejected"}}"#.to_vec(),
+                body: serde_json::to_vec(&serde_json::json!({
+                    "error": {
+                        "code": "pairing_rejected",
+                        "detail": error.to_string(),
+                    }
+                }))
+                .unwrap_or_else(|_| br#"{"error":{"code":"pairing_rejected"}}"#.to_vec()),
             },
         }
     }
@@ -365,18 +371,21 @@ pub struct MobileAuthorityInfo {
 pub async fn mobile_authority_start(
     app: AppHandle,
     state: State<'_, MobileAuthorityState>,
+    renew: Option<bool>,
 ) -> Result<MobileAuthorityInfo, String> {
     let mut active = state.0.lock().await;
     let now = system_now_ms().map_err(|_| "system clock is unavailable".to_string())?;
     let address = private_lan_ipv4()?;
-    if let Some(authority) = active
-        .as_ref()
-        .filter(|authority| {
-            authority.info.invitation_expires_at_ms > now
-                && authority.info.address == address.to_string()
-        })
-    {
-        return Ok(authority_info(authority));
+    if !renew.unwrap_or(false) {
+        if let Some(authority) = active
+            .as_ref()
+            .filter(|authority| {
+                authority.info.invitation_expires_at_ms > now
+                    && authority.info.address == address.to_string()
+            })
+        {
+            return Ok(authority_info(authority));
+        }
     }
     // Dropping the expired listener also invalidates the old Bonjour endpoint.
     // A fresh authority below gets new keys, TLS identity, and invitation.

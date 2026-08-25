@@ -916,7 +916,8 @@ export const api = {
   listRecaps: () => invoke<RecapRow[]>("list_recaps"),
   exportDb: () => invoke<string>("export_db"),
   phoneInfo: () => invoke<PhoneInfo>("phone_info"),
-  mobileAuthorityStart: () => invoke<MobileAuthorityInfo>("mobile_authority_start"),
+  mobileAuthorityStart: (renew = false) =>
+    invoke<MobileAuthorityInfo>("mobile_authority_start", { renew }),
   mobileAuthorityStatus: () => invoke<MobileAuthorityInfo | null>("mobile_authority_status"),
   mobileAuthorityConfirm: (receiptId: string, verificationCode: string, approved: boolean) =>
     invoke<MobileAuthorityInfo>("mobile_authority_confirm", { receiptId, verificationCode, approved }),

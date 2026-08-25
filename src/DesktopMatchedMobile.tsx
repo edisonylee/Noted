@@ -237,6 +237,7 @@ function PairingSheet({ onClose, onPaired }: { onClose: () => void; onPaired: ()
     "direct-sync endpoint is unavailable",
     "no private-LAN endpoint candidates",
     "a different invitation cannot replace the durable pairing transcript",
+    "could not be cleared automatically",
   ].some((message) => error?.includes(message));
 
   async function connect() {

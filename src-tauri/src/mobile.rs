@@ -778,6 +778,34 @@ mod tests {
     }
 
     #[test]
+    fn pairing_rejection_explains_expired_and_consumed_codes() {
+        let expired = br#"{"error":{"code":"pairing_rejected","detail":"direct pairing protocol error: pairing invitation expired"}}"#;
+        let consumed = br#"{"error":{"code":"pairing_rejected","detail":"direct pairing store error: pairing invitation already consumed"}}"#;
+
+        assert_eq!(
+            pairing_rejection_message(expired),
+            "This Mac pairing code expired before the connection completed."
+        );
+        assert_eq!(
+            pairing_rejection_message(consumed),
+            "This Mac pairing code was already used or replaced."
+        );
+    }
+
+    #[test]
+    fn pairing_rejection_preserves_safe_diagnostic_detail() {
+        let rejection = br#"{"error":{"code":"pairing_rejected","detail":"direct pairing protocol error: pairing binding mismatch: library id"}}"#;
+        assert_eq!(
+            pairing_rejection_message(rejection),
+            "The Mac rejected this pairing request: direct pairing protocol error: pairing binding mismatch: library id."
+        );
+        assert_eq!(
+            pairing_rejection_message(br#"{"error":{"code":"pairing_rejected"}}"#),
+            "The Mac rejected this pairing request."
+        );
+    }
+
+    #[test]
     fn migration_recovery_path_follows_the_current_ios_container() {
         let database = Path::new(
             "/private/var/mobile/Containers/Data/Application/NEW/Library/Application Support/com.noted.iphone/noted-mobile.sqlite3",
@@ -1281,9 +1309,43 @@ async fn mobile_pairing_connect_fixture(
         .await
         .map_err(|error| error.to_string())?;
     if response.status != 200 {
-        return Err("Mac rejected the pairing request".to_string());
+        let rejection = pairing_rejection_message(&response.body);
+        let cleanup = store.with_ready_store(|store| discard_fixture_pairing(&app, store));
+        return Err(match cleanup {
+            Ok(_) => format!(
+                "{rejection} The unfinished attempt on this iPhone was cleared automatically. Copy a fresh code from your Mac and paste it here."
+            ),
+            Err(error) => format!(
+                "{rejection} The unfinished iPhone attempt could not be cleared automatically: {error}"
+            ),
+        });
     }
     store.with_ready_store(|store| accept_server_hello(&app, store, &response.body, &transport))
+}
+
+fn pairing_rejection_message(body: &[u8]) -> String {
+    let detail = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")?
+                .get("detail")?
+                .as_str()
+                .map(str::to_owned)
+        });
+    match detail.as_deref() {
+        Some(value) if value.contains("invitation expired") => {
+            "This Mac pairing code expired before the connection completed.".to_string()
+        }
+        Some(value)
+            if value.contains("invitation already consumed")
+                || value.contains("invitation cancelled") =>
+        {
+            "This Mac pairing code was already used or replaced.".to_string()
+        }
+        Some(value) => format!("The Mac rejected this pairing request: {value}."),
+        None => "The Mac rejected this pairing request.".to_string(),
+    }
 }
 
 /// Poll for the Mac owner's approval, stage the authenticated bootstrap, send

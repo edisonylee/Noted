@@ -49,6 +49,7 @@ import {
   type DocumentTask,
   type StructuredDocument,
 } from "./editor/document";
+import { persistDailyTaskDocument } from "./dailyTaskPersistence";
 
 export type Block = {
   task: string;
@@ -1590,7 +1591,6 @@ export function TodayView({
     const revision = taskChangeRevisionRef.current;
     const targetDate = taskDayRef.current;
     const text = documentPlainText(snapshot);
-    const nextTodos = extractDocumentTasks(snapshot);
 
     // There is no reason to create an otherwise empty daily note, but clearing
     // an existing document must still be persisted.
@@ -1610,29 +1610,18 @@ export function TodayView({
 
     try {
       const entryId = taskEntryIdRef.current;
-      const data = {
-        task_doc_version: TASK_DOCUMENT_VERSION,
-        task_doc: snapshot,
-        todos: nextTodos,
-      };
-      if (entryId != null) {
-        await api.updateEntry(entryId, data);
-      } else {
-        taskAwaitingEntryRef.current = true;
-        await api.save({
-          raw_text: text,
-          source: "text",
-          event_date: targetDate,
-          entries: [
-            {
-              category: "schedule",
-              description: "daily schedule and tasks",
-              data: { blocks: taskBlocksRef.current, ...data },
-            },
-          ],
-        });
-        await taskOnSavedRef.current();
-      }
+      if (entryId == null) taskAwaitingEntryRef.current = true;
+      await persistDailyTaskDocument({
+        entryId,
+        targetDate,
+        document: snapshot,
+        blocks: taskBlocksRef.current,
+        persistence: {
+          updateEntry: api.updateEntry,
+          createEntry: api.save,
+          refreshEntries: taskOnSavedRef.current,
+        },
+      });
       taskPersistedRevisionRef.current = revision;
       if (taskChangeRevisionRef.current === revision) {
         if (taskMountedRef.current && taskDayRef.current === targetDate) setTaskSaveState("saved");

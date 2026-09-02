@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   EditorContent,
   NodeViewWrapper,
@@ -13,13 +13,16 @@ import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { Placeholder } from "@tiptap/extensions";
 import {
   Bold as BoldIcon,
+  Code2,
   ImageOff,
   ImagePlus,
   Italic as ItalicIcon,
   List,
+  ListTree,
   ListOrdered,
   ListTodo,
   Pilcrow,
+  Quote,
   Redo2,
   Strikethrough,
   Underline as UnderlineIcon,
@@ -121,6 +124,12 @@ function EditorButton({ label, icon: Icon, active, disabled = false, onClick, sh
   );
 }
 
+type DocumentHeading = {
+  level: number;
+  position: number;
+  text: string;
+};
+
 export function DocumentEditor({
   value,
   onChange,
@@ -128,6 +137,8 @@ export function DocumentEditor({
   ariaLabel = "Document editor",
   autoFocus = false,
   disabled = false,
+  variant = "compact",
+  pageHeader,
 }: {
   value: StructuredDocument;
   onChange: (document: StructuredDocument) => void;
@@ -135,6 +146,8 @@ export function DocumentEditor({
   ariaLabel?: string;
   autoFocus?: boolean;
   disabled?: boolean;
+  variant?: "compact" | "page";
+  pageHeader?: ReactNode;
 }) {
   const onChangeRef = useRef(onChange);
   const disabledRef = useRef(disabled);
@@ -150,10 +163,7 @@ export function DocumentEditor({
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
-        blockquote: false,
-        code: false,
-        codeBlock: false,
-        heading: false,
+        heading: { levels: [1, 2, 3] },
         horizontalRule: false,
       }),
       TaskList.configure({
@@ -289,103 +299,215 @@ export function DocumentEditor({
   const canUndo = editor?.can().undo() ?? false;
   const canRedo = editor?.can().redo() ?? false;
 
+  let textStyle = "paragraph";
+  if (editor?.isActive("heading", { level: 1 })) textStyle = "heading-1";
+  else if (editor?.isActive("heading", { level: 2 })) textStyle = "heading-2";
+  else if (editor?.isActive("heading", { level: 3 })) textStyle = "heading-3";
+
+  const headings: DocumentHeading[] = [];
+  editor?.state.doc.descendants((node, position) => {
+    if (node.type.name !== "heading") return;
+    const text = node.textContent.trim();
+    if (!text) return;
+    headings.push({
+      level: Number(node.attrs.level) || 1,
+      position,
+      text,
+    });
+  });
+
+  function setTextStyle(style: string) {
+    if (!editor) return;
+    if (style === "heading-1") editor.chain().focus().toggleHeading({ level: 1 }).run();
+    else if (style === "heading-2") editor.chain().focus().toggleHeading({ level: 2 }).run();
+    else if (style === "heading-3") editor.chain().focus().toggleHeading({ level: 3 }).run();
+    else editor.chain().focus().setParagraph().run();
+  }
+
+  const toolbar = (
+    <div className="document-editor-toolbar" role="toolbar" aria-label="Text formatting">
+      {variant === "page" ? (
+        <label className="document-editor-style">
+          <span className="sr-only">Text style</span>
+          <select
+            aria-label="Text style"
+            value={textStyle}
+            disabled={!editor || disabled}
+            onChange={(event) => setTextStyle(event.target.value)}
+          >
+            <option value="paragraph">Text</option>
+            <option value="heading-1">Heading 1</option>
+            <option value="heading-2">Heading 2</option>
+            <option value="heading-3">Heading 3</option>
+          </select>
+        </label>
+      ) : (
+        <>
+          <EditorButton
+            label="Paragraph"
+            icon={Pilcrow}
+            active={editor?.isActive("paragraph") && !editor?.isActive("taskList")}
+            disabled={!editor || disabled}
+            onClick={() => editor?.chain().focus().setParagraph().run()}
+          />
+          <span className="document-editor-divider" aria-hidden="true" />
+        </>
+      )}
+      <EditorButton
+        label="Bold"
+        icon={BoldIcon}
+        active={editor?.isActive("bold")}
+        disabled={!editor || disabled}
+        shortcut="⌘B"
+        onClick={() => editor?.chain().focus().toggleBold().run()}
+      />
+      <EditorButton
+        label="Italic"
+        icon={ItalicIcon}
+        active={editor?.isActive("italic")}
+        disabled={!editor || disabled}
+        shortcut="⌘I"
+        onClick={() => editor?.chain().focus().toggleItalic().run()}
+      />
+      <EditorButton
+        label="Underline"
+        icon={UnderlineIcon}
+        active={editor?.isActive("underline")}
+        disabled={!editor || disabled}
+        shortcut="⌘U"
+        onClick={() => editor?.chain().focus().toggleUnderline().run()}
+      />
+      <EditorButton
+        label="Strikethrough"
+        icon={Strikethrough}
+        active={editor?.isActive("strike")}
+        disabled={!editor || disabled}
+        shortcut="⌘⇧S"
+        onClick={() => editor?.chain().focus().toggleStrike().run()}
+      />
+      <span className="document-editor-divider" aria-hidden="true" />
+      <EditorButton
+        label="Checklist"
+        icon={ListTodo}
+        active={editor?.isActive("taskList")}
+        disabled={!editor || disabled}
+        onClick={() => editor?.chain().focus().toggleTaskList().run()}
+      />
+      <EditorButton
+        label="Bulleted list"
+        icon={List}
+        active={editor?.isActive("bulletList")}
+        disabled={!editor || disabled}
+        shortcut="⌘⇧8"
+        onClick={() => editor?.chain().focus().toggleBulletList().run()}
+      />
+      <EditorButton
+        label="Numbered list"
+        icon={ListOrdered}
+        active={editor?.isActive("orderedList")}
+        disabled={!editor || disabled}
+        shortcut="⌘⇧7"
+        onClick={() => editor?.chain().focus().toggleOrderedList().run()}
+      />
+      {variant === "page" && (
+        <>
+          <EditorButton
+            label="Quote"
+            icon={Quote}
+            active={editor?.isActive("blockquote")}
+            disabled={!editor || disabled}
+            onClick={() => editor?.chain().focus().toggleBlockquote().run()}
+          />
+          <EditorButton
+            label="Code block"
+            icon={Code2}
+            active={editor?.isActive("codeBlock")}
+            disabled={!editor || disabled}
+            onClick={() => editor?.chain().focus().toggleCodeBlock().run()}
+          />
+        </>
+      )}
+      <EditorButton
+        label="Add image"
+        icon={ImagePlus}
+        disabled={!editor || disabled || imageBusy}
+        onClick={() => imageInputRef.current?.click()}
+      />
+      <span className="document-editor-spacer" />
+      <EditorButton
+        label="Undo"
+        icon={Undo2}
+        disabled={!editor || disabled || !canUndo}
+        shortcut="⌘Z"
+        onClick={() => editor?.chain().focus().undo().run()}
+      />
+      <EditorButton
+        label="Redo"
+        icon={Redo2}
+        disabled={!editor || disabled || !canRedo}
+        shortcut="⌘⇧Z"
+        onClick={() => editor?.chain().focus().redo().run()}
+      />
+    </div>
+  );
+
+  const canvas = (
+    <div className={`document-editor-canvas${imageDragging ? " image-dragging" : ""}`}>
+      <EditorContent editor={editor} />
+      {imageDragging && <div className="document-editor-drop-hint">Drop image here</div>}
+    </div>
+  );
+
+  const imageStatus = (imageBusy || imageError) && (
+    <div className={`document-editor-image-status${imageError ? " error" : ""}`} role="status">
+      {imageError ?? "Adding image…"}
+    </div>
+  );
+
   return (
-    <div className={"document-editor" + (disabled ? " disabled" : "")}>
-      <div className="document-editor-toolbar" role="toolbar" aria-label="Text formatting">
-        <EditorButton
-          label="Paragraph"
-          icon={Pilcrow}
-          active={editor?.isActive("paragraph") && !editor?.isActive("taskList")}
-          disabled={!editor || disabled}
-          onClick={() => editor?.chain().focus().setParagraph().run()}
-        />
-        <span className="document-editor-divider" aria-hidden="true" />
-        <EditorButton
-          label="Checklist"
-          icon={ListTodo}
-          active={editor?.isActive("taskList")}
-          disabled={!editor || disabled}
-          onClick={() => editor?.chain().focus().toggleTaskList().run()}
-        />
-        <EditorButton
-          label="Bulleted list"
-          icon={List}
-          active={editor?.isActive("bulletList")}
-          disabled={!editor || disabled}
-          shortcut="⌘⇧8"
-          onClick={() => editor?.chain().focus().toggleBulletList().run()}
-        />
-        <EditorButton
-          label="Numbered list"
-          icon={ListOrdered}
-          active={editor?.isActive("orderedList")}
-          disabled={!editor || disabled}
-          shortcut="⌘⇧7"
-          onClick={() => editor?.chain().focus().toggleOrderedList().run()}
-        />
-        <EditorButton
-          label="Add image"
-          icon={ImagePlus}
-          disabled={!editor || disabled || imageBusy}
-          onClick={() => imageInputRef.current?.click()}
-        />
-        <span className="document-editor-divider" aria-hidden="true" />
-        <EditorButton
-          label="Bold"
-          icon={BoldIcon}
-          active={editor?.isActive("bold")}
-          disabled={!editor || disabled}
-          shortcut="⌘B"
-          onClick={() => editor?.chain().focus().toggleBold().run()}
-        />
-        <EditorButton
-          label="Italic"
-          icon={ItalicIcon}
-          active={editor?.isActive("italic")}
-          disabled={!editor || disabled}
-          shortcut="⌘I"
-          onClick={() => editor?.chain().focus().toggleItalic().run()}
-        />
-        <EditorButton
-          label="Underline"
-          icon={UnderlineIcon}
-          active={editor?.isActive("underline")}
-          disabled={!editor || disabled}
-          shortcut="⌘U"
-          onClick={() => editor?.chain().focus().toggleUnderline().run()}
-        />
-        <EditorButton
-          label="Strikethrough"
-          icon={Strikethrough}
-          active={editor?.isActive("strike")}
-          disabled={!editor || disabled}
-          shortcut="⌘⇧S"
-          onClick={() => editor?.chain().focus().toggleStrike().run()}
-        />
-        <span className="document-editor-spacer" />
-        <EditorButton
-          label="Undo"
-          icon={Undo2}
-          disabled={!editor || disabled || !canUndo}
-          shortcut="⌘Z"
-          onClick={() => editor?.chain().focus().undo().run()}
-        />
-        <EditorButton
-          label="Redo"
-          icon={Redo2}
-          disabled={!editor || disabled || !canRedo}
-          shortcut="⌘⇧Z"
-          onClick={() => editor?.chain().focus().redo().run()}
-        />
-      </div>
-      <div className={`document-editor-canvas${imageDragging ? " image-dragging" : ""}`}>
-        <EditorContent editor={editor} />
-        {imageDragging && <div className="document-editor-drop-hint">Drop image here</div>}
-      </div>
-      {(imageBusy || imageError) && (
-        <div className={`document-editor-image-status${imageError ? " error" : ""}`} role="status">
-          {imageError ?? "Adding image…"}
+    <div className={`document-editor ${variant}${disabled ? " disabled" : ""}`}>
+      {toolbar}
+      {variant === "page" ? (
+        <div className="document-editor-stage">
+          <div className="document-editor-stage-inner">
+            <aside className="document-editor-outline" aria-label="Document outline">
+              <div className="document-editor-outline-label">
+                <ListTree size={14} aria-hidden="true" />
+                <span>Outline</span>
+              </div>
+              {headings.length ? (
+                <nav>
+                  {headings.map((heading, index) => (
+                    <button
+                      key={`${heading.position}-${index}`}
+                      type="button"
+                      className={`level-${heading.level}`}
+                      title={heading.text}
+                      onClick={() => {
+                        editor?.chain().focus().setTextSelection(heading.position + 1).scrollIntoView().run();
+                      }}
+                    >
+                      {heading.text}
+                    </button>
+                  ))}
+                </nav>
+              ) : (
+                <p>Headings will appear here.</p>
+              )}
+            </aside>
+            <section className="document-editor-page" aria-label="Document page">
+              {pageHeader}
+              {canvas}
+              {imageStatus}
+            </section>
+            <div className="document-editor-balance" aria-hidden="true" />
+          </div>
         </div>
+      ) : (
+        <>
+          {canvas}
+          {imageStatus}
+        </>
       )}
       <input
         ref={imageInputRef}

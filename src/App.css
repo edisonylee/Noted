@@ -1205,6 +1205,14 @@ textarea.json.bad { border-color: var(--bad); }
   border-bottom: var(--border-width, 1px) solid var(--line);
 }
 .document-editor-toolbar::-webkit-scrollbar { display: none; }
+.document-editor-style { display: inline-flex; flex: none; margin-right: 4px; }
+.document-editor-style select {
+  width: 118px; height: 30px; padding: 0 27px 0 9px;
+  color: var(--ink-soft); background: transparent; border: 0; border-radius: 6px;
+  font: inherit; font-size: 12px; font-weight: 570;
+}
+.document-editor-style select:hover:not(:disabled) { background: var(--hover-soft); color: var(--ink); }
+.document-editor-style select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .document-editor-toolbar button {
   display: inline-grid; flex: none; place-items: center; width: 29px; height: 29px; padding: 0;
   color: var(--muted); background: transparent; border: 0; border-radius: 7px;
@@ -1239,6 +1247,12 @@ textarea.json.bad { border-color: var(--bad); }
 }
 .noted-document-content > *:first-child { margin-top: 0; }
 .noted-document-content p { min-height: 1.55em; margin: 0 0 4px; }
+.noted-document-content h1,
+.noted-document-content h2,
+.noted-document-content h3 { color: var(--ink); text-wrap: balance; }
+.noted-document-content h1 { margin: 38px 0 13px; font-size: 29px; font-weight: 680; line-height: 1.18; letter-spacing: -0.035em; }
+.noted-document-content h2 { margin: 30px 0 10px; font-size: 21px; font-weight: 660; line-height: 1.25; letter-spacing: -0.022em; }
+.noted-document-content h3 { margin: 24px 0 8px; font-size: 16px; font-weight: 660; line-height: 1.35; letter-spacing: -0.008em; }
 .noted-document-content strong { font-weight: 680; }
 .noted-document-content s {
   text-decoration-line: line-through; text-decoration-thickness: 1px;
@@ -1276,6 +1290,18 @@ textarea.json.bad { border-color: var(--bad); }
   text-decoration-skip-ink: none;
 }
 .noted-document-content li[data-type="taskItem"] ul[data-type="taskList"] { margin: 1px 0 2px; }
+.noted-document-content blockquote {
+  margin: 18px 0; padding: 2px 0 2px 18px; border-left: 2px solid var(--line-strong);
+  color: var(--ink-soft);
+}
+.noted-document-content blockquote p { margin: 0; }
+.noted-document-content pre {
+  margin: 16px 0; overflow-x: auto; padding: 14px 16px;
+  background: var(--surface-2); border: var(--border-width, 1px) solid var(--line);
+  border-radius: 5px; color: var(--ink-soft); font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6;
+  white-space: pre;
+}
+.noted-document-content code { font-family: var(--font-mono); }
 .noted-editor-image {
   display: block; width: fit-content; max-width: 100%; margin: 9px 0 11px;
   border-radius: var(--r-md); cursor: default;
@@ -1293,11 +1319,60 @@ textarea.json.bad { border-color: var(--bad); }
   border-radius: var(--r-md); font-size: 12px;
 }
 .noted-editor-image-placeholder.failed { color: var(--error-ink); }
-.noted-document-content p.is-editor-empty:first-child::before,
-.noted-document-content p.is-empty::before {
+.noted-document-content :is(p, h1, h2, h3).is-editor-empty:first-child::before,
+.noted-document-content :is(p, h1, h2, h3).is-empty::before {
   content: attr(data-placeholder); float: left; height: 0; color: var(--faint); pointer-events: none;
 }
 .noted-document-content ::selection { background: var(--accent-tint); }
+
+/* Page documents use the same editor engine as tasks and meeting notes, but
+   their chrome follows a true document workspace: command bar, navigator,
+   centered page, and background are separate layers. */
+.document-editor.page { border-top: 0; background: var(--canvas); }
+.document-editor.page > .document-editor-toolbar {
+  position: relative; z-index: 4; min-height: 48px; padding: 8px 14px;
+  background: var(--surface); border-top: var(--border-width, 1px) solid var(--line);
+  border-bottom: var(--border-width, 1px) solid var(--line);
+}
+.document-editor-stage {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin;
+  background: var(--canvas);
+}
+.document-editor-stage-inner {
+  display: grid; grid-template-columns: minmax(164px, 1fr) minmax(0, 868px) minmax(164px, 1fr);
+  align-items: start; width: 100%; min-height: 100%; padding: 28px 0 84px;
+}
+.document-editor-outline {
+  position: sticky; top: 28px; grid-column: 1; justify-self: end; width: 176px;
+  padding: 6px 20px 24px 8px; color: var(--muted);
+}
+.document-editor-outline-label {
+  display: flex; align-items: center; gap: 7px; margin-bottom: 9px;
+  color: var(--ink-soft); font-size: 11.5px; font-weight: 640;
+}
+.document-editor-outline nav { display: flex; flex-direction: column; gap: 1px; }
+.document-editor-outline button {
+  width: 100%; min-height: 28px; padding: 5px 7px; overflow: hidden;
+  color: var(--muted); background: transparent; border: 0; border-radius: 5px;
+  font: inherit; font-size: 11.5px; line-height: 1.35; text-align: left; text-overflow: ellipsis; white-space: nowrap;
+}
+.document-editor-outline button.level-2 { padding-left: 17px; }
+.document-editor-outline button.level-3 { padding-left: 27px; color: var(--faint); }
+.document-editor-outline button:hover { color: var(--ink); background: var(--hover-soft); }
+.document-editor-outline button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.document-editor-outline p { margin: 0; padding-right: 5px; color: var(--faint); font-size: 11px; line-height: 1.45; }
+.document-editor-page {
+  grid-column: 2; min-height: 980px; overflow: hidden;
+  background: var(--surface); border: var(--border-width, 1px) solid var(--line); border-radius: 2px;
+  box-shadow: 0 2px 5px rgba(27, 25, 22, 0.045);
+}
+.document-editor-balance { grid-column: 3; }
+.document-editor.page .document-editor-canvas { flex: none; min-height: 650px; overflow: visible; }
+.document-editor.page .noted-document-content {
+  width: 100%; min-height: 650px; padding: 28px 54px 110px;
+  font-size: 15.5px; line-height: 1.68;
+}
+.document-editor.page .document-editor-image-status { padding: 0 54px 24px; }
 .today-task-error { flex: none; margin: 8px 0 2px; font-size: 12px; }
 
 /* Inline row editing on the agenda */
@@ -4228,12 +4303,12 @@ a.cal-btn { text-decoration: none; }
 
 .note-detail { width: 100%; max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
 .note-document {
-  flex: 1; min-height: 0; width: 100%; max-width: 940px; margin: 0 auto;
-  display: flex; flex-direction: column; gap: 12px;
+  flex: 1; min-height: 0; width: 100%; margin: 0;
+  display: flex; flex-direction: column; gap: 0;
 }
 .note-document-head {
   flex: none; display: grid; grid-template-columns: 34px minmax(0, 1fr) auto;
-  align-items: flex-start; gap: 12px; padding: 0 4px;
+  align-items: center; gap: 10px; min-height: 44px; padding: 0 3px 6px;
 }
 .note-document-back {
   display: inline-grid; place-items: center; width: 32px; height: 32px; padding: 0;
@@ -4241,16 +4316,26 @@ a.cal-btn { text-decoration: none; }
 }
 .note-document-back:hover { color: var(--ink); background: var(--hover-soft); }
 .note-document-back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.note-document-heading { min-width: 0; }
+.note-document-breadcrumb {
+  display: flex; min-width: 0; align-items: center; gap: 6px;
+  color: var(--muted); font-size: 12px;
+}
+.note-document-breadcrumb > svg:first-child { flex: none; color: var(--ink-soft); }
+.note-document-breadcrumb strong {
+  min-width: 0; overflow: hidden; color: var(--ink-soft); font-weight: 590;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.note-document-breadcrumb > svg:not(:first-child) { flex: none; color: var(--faint); }
+.note-document-page-head { padding: 58px 54px 0; }
 .note-document-title {
   display: block; width: 100%; min-width: 0; padding: 0; border: 0; outline: 0;
   background: transparent; color: var(--ink); font: inherit;
-  font-size: 31px; font-weight: 660; line-height: 1.14; letter-spacing: -0.035em;
+  font-size: 39px; font-weight: 670; line-height: 1.08; letter-spacing: -0.045em;
 }
 .note-document-title::placeholder { color: var(--faint); opacity: 1; }
 .note-document-meta {
   display: flex; align-items: center; flex-wrap: wrap; gap: 0;
-  min-height: 18px; margin-top: 5px; color: var(--muted); font-size: 11.5px;
+  min-height: 18px; margin-bottom: 12px; color: var(--muted); font-size: 11.5px;
 }
 .note-document-kind { display: inline-flex; align-items: center; gap: 4px; color: var(--ink-soft); font-weight: 580; }
 .note-document-meta span + span::before { content: "·"; margin: 0 7px; color: var(--faint); }
@@ -4260,18 +4345,8 @@ a.cal-btn { text-decoration: none; }
   color: var(--faint); font-size: 11.5px; white-space: nowrap;
 }
 .note-document-save-state.error { color: var(--error-ink); }
-.note-document-page {
-  flex: 1; min-height: 0; overflow: hidden; border-radius: 10px;
-  background: var(--surface);
-  box-shadow: 0 5px 13px -11px color-mix(in srgb, var(--ink) 34%, transparent), inset 0 1px color-mix(in srgb, var(--surface) 70%, white);
-}
-.note-document-page .document-editor { border-top: 0; }
-.note-document-page .document-editor-toolbar { min-height: 45px; padding: 7px 22px; }
-.note-document-page .noted-document-content {
-  width: min(100%, 760px); box-sizing: border-box; margin: 0 auto;
-  padding: 31px 42px 90px; font-size: 15.5px; line-height: 1.62;
-}
-.note-document-error { flex: none; margin: -3px 4px 0 48px; color: var(--error-ink); font-size: 12px; }
+.note-document-page-head .note-filed-placement { margin-top: 13px; }
+.note-document-error { flex: none; margin: 7px 4px 0 48px; color: var(--error-ink); font-size: 12px; }
 .note-document > .note-detail-entries { flex: none; margin: 0 4px 12px 48px; }
 .note-document > .note-filing-message { margin: -5px 4px 0 auto; }
 .note-detail-head { display: flex; align-items: flex-start; gap: 12px; }
@@ -4332,10 +4407,20 @@ a.cal-btn { text-decoration: none; }
 }
 .note-entry-label { color: var(--muted); font-size: 11.5px; font-weight: 620; }
 
+@media (max-width: 1240px) {
+  .document-editor-stage-inner {
+    grid-template-columns: minmax(18px, 1fr) minmax(0, 868px) minmax(18px, 1fr);
+  }
+  .document-editor-outline { display: none; }
+}
+
 @media (max-width: 980px) {
   .notes-view { gap: 22px; }
   .spaces { width: 215px; }
   .note-row-categories { max-width: 135px; }
+  .document-editor-stage-inner { grid-template-columns: minmax(0, 1fr); padding: 20px 18px 68px; }
+  .document-editor-page { grid-column: 1; }
+  .document-editor-balance { display: none; }
 }
 
 @media (max-width: 780px) {
@@ -4349,8 +4434,9 @@ a.cal-btn { text-decoration: none; }
   .notes-list-head { flex-wrap: wrap; }
   .notes-list-head .notes-search { flex-basis: 100%; min-width: 0; }
   .notes-context-actions { gap: 8px; }
-  .note-document-title { font-size: 27px; }
-  .note-document-page .noted-document-content { padding: 26px 28px 72px; }
+  .note-document-page-head { padding: 44px 38px 0; }
+  .note-document-title { font-size: 35px; }
+  .document-editor.page .noted-document-content { padding: 26px 38px 82px; }
   .search-tool-buttons { width: 100%; justify-content: flex-end; }
   .search-filter-grid { grid-template-columns: 1fr; gap: 11px; }
   .search-filter-values { max-height: 112px; }
@@ -4387,9 +4473,13 @@ a.cal-btn { text-decoration: none; }
     grid-template-columns: 32px minmax(0, 1fr); gap: 9px; padding: 0;
   }
   .note-document-head-actions { grid-column: 2; justify-content: space-between; padding-top: 0; }
-  .note-document-page { margin-right: -10px; margin-left: -10px; border-radius: 0; }
-  .note-document-page .document-editor-toolbar { padding-right: 16px; padding-left: 16px; }
-  .note-document-page .noted-document-content { padding: 24px 20px 64px; }
+  .note-document-breadcrumb span { display: none; }
+  .document-editor.page > .document-editor-toolbar { padding-right: 8px; padding-left: 8px; }
+  .document-editor-stage-inner { padding: 0 0 56px; }
+  .document-editor-page { border-right: 0; border-left: 0; }
+  .note-document-page-head { padding: 36px 22px 0; }
+  .note-document-title { font-size: 31px; }
+  .document-editor.page .noted-document-content { padding: 24px 22px 68px; }
   .note-document > .note-detail-entries { margin-left: 41px; }
   .note-document-head-actions .note-file-select { margin-left: 0; }
   .note-file-select { margin-left: 44px; }

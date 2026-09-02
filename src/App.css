@@ -3731,12 +3731,17 @@ a.cal-btn { text-decoration: none; }
   width: 100%; max-width: 1100px;
 }
 .notes-library-shell {
-  flex: none; min-height: 0; display: flex; align-items: stretch; gap: 8px; min-width: 28px;
+  /* The wrapper owns state, not geometry. Its children join the Notes layout
+     directly so collapsing the library cannot leave an empty control rail. */
+  display: contents;
 }
 .notes-library-toggle {
-  position: sticky; top: 26px; z-index: 2; align-self: flex-start;
-  flex: none; width: 28px; height: 28px;
+  /* Pair the two sidebar controls on the native titlebar axis. The global
+     sidebar toggle occupies 76-104px; this one follows with a 4px gap. */
+  position: fixed; top: 4px; left: 108px; z-index: 60;
+  width: 28px; height: 28px; color: var(--muted);
 }
+.notes-library-toggle:hover { color: var(--ink); }
 .spaces {
   flex: none; align-self: stretch; width: 244px; min-height: 0; overflow: hidden;
   display: flex; flex-direction: column; gap: 2px; position: sticky; top: 26px;
@@ -4276,7 +4281,6 @@ a.cal-btn { text-decoration: none; }
 
 @media (max-width: 780px) {
   .notes-view { gap: 16px; }
-  .notes-library-shell { gap: 6px; }
   .spaces { width: 170px; }
   .notes-list { width: auto; }
   .notes-context { min-height: 0; }
@@ -4490,13 +4494,10 @@ a.cal-btn { text-decoration: none; }
   background: var(--canvas);
 }
 
-/* Notes owns its two scrolling panes. This keeps the library rail—and its
-   recoverable Trash target—inside the exact space above the assistant footer. */
+/* Notes owns its two scrolling panes. This keeps the library and its
+   recoverable Trash target inside the exact space above the assistant footer. */
 .app.side:not(.homemode) .main-col .content:has(> .notes-view) { overflow: hidden; }
 .app.side:not(.homemode) .main-col .content:has(> .meeting-page.recording) { overflow: hidden; }
-.app.side:not(.homemode) .content:has(> .notes-view) .notes-library-shell {
-  align-self: stretch; height: 100%; max-height: 100%; min-height: 0; overflow: hidden;
-}
 .app.side:not(.homemode) .content:has(> .notes-view) .spaces {
   position: relative; top: auto; align-self: stretch; height: 100%; max-height: 100%;
 }

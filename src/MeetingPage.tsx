@@ -45,6 +45,7 @@ import {
   type RangeEvent,
 } from "./api";
 import { releaseProfile } from "./releaseProfile";
+import { easternDay, formatDay } from "./day";
 import { DocumentEditor } from "./editor/DocumentEditor";
 import {
   documentPlainText,
@@ -72,6 +73,16 @@ function fmtClock(min: number | null): string {
   const ampm = h >= 12 ? "pm" : "am";
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return m === 0 ? `${h12}${ampm}` : `${h12}:${String(m).padStart(2, "0")}${ampm}`;
+}
+
+function fmtMeetingDay(day: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return day;
+  const sameYear = day.slice(0, 4) === easternDay().slice(0, 4);
+  return formatDay(day, {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
 }
 
 type SpeakerCandidate = {
@@ -1492,6 +1503,7 @@ export function MeetingPage({
               ))}
           </div>
           <div className="meeting-meta">
+            {ev?.date && <time dateTime={ev.date}>{fmtMeetingDay(ev.date)}</time>}
             {ev?.start_min != null && (
               <span>
                 {fmtClock(ev.start_min)}

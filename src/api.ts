@@ -400,6 +400,7 @@ export type RangeEvent = {
   associated_emails?: string[]; // source account + organizer + creator + attendee identities
   attendee_count: number; // real total (rooms excluded)
   ical_uid?: string | null;
+  recurring_event_id?: string | null; // Google series id; present on recurring instances
 };
 // Fields the Calendar view's create/edit forms submit.
 export type EventInput = {

@@ -1505,6 +1505,10 @@ fn map_event(it: &Value, cal: &GcalCalendar, account: &str) -> Option<Value> {
         "attendee_emails": attendee_emails,
         "associated_emails": associated_emails,
         "ical_uid": it.get("iCalUID").and_then(|s| s.as_str()),
+        // Unlike iCalUID, recurringEventId is present only on an expanded
+        // instance of a recurring series. Meeting titles use it to add a date
+        // automatically without cluttering one-off event names.
+        "recurring_event_id": it.get("recurringEventId").and_then(|s| s.as_str()),
         "attendees": attendees,
         "attendee_count": attendee_count,
     });
@@ -2382,6 +2386,7 @@ mod tests {
             "organizer": { "email": "khai@x.com", "displayName": "Khai" },
             "creator": { "email": "assistant@x.com", "displayName": "Assistant" },
             "iCalUID": "event-123@google.com",
+            "recurringEventId": "event-123",
             "attendees": [
                 { "email": "khai@x.com", "displayName": "Khai", "responseStatus": "accepted" },
                 { "email": "me@x.com", "self": true, "responseStatus": "needsAction" },
@@ -2395,6 +2400,7 @@ mod tests {
         assert_eq!(ev["organizer_email"], "khai@x.com");
         assert_eq!(ev["creator_email"], "assistant@x.com");
         assert_eq!(ev["ical_uid"], "event-123@google.com");
+        assert_eq!(ev["recurring_event_id"], "event-123");
         assert_eq!(
             ev["associated_emails"],
             json!(["me@x.com", "khai@x.com", "assistant@x.com"])

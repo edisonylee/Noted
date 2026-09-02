@@ -253,14 +253,57 @@ function noteTitle(note: NoteRow): string {
   return line.replace(/^#+\s*/, "").slice(0, 90);
 }
 
-function datedNoteTitle(note: NoteRow): string {
-  const sameYear = note.event_date.slice(0, 4) === easternDay().slice(0, 4);
-  const date = formatDay(note.event_date, {
+function datedTitle(title: string, day: string): string {
+  const sameYear = day.slice(0, 4) === easternDay().slice(0, 4);
+  const date = formatDay(day, {
     month: "short",
     day: "numeric",
     ...(sameYear ? {} : { year: "numeric" }),
   });
-  return `${date} · ${noteTitle(note)}`;
+  const prefix = `${date} · `;
+  return title.startsWith(prefix) ? title : `${prefix}${title}`;
+}
+
+function datedNoteTitle(note: NoteRow): string {
+  return datedTitle(noteTitle(note), note.event_date);
+}
+
+function meetingSeriesKey(meeting: MeetingListRow): string | null {
+  const value = meeting.event_json?.ical_uid?.trim().toLocaleLowerCase();
+  return value || null;
+}
+
+function meetingDay(meeting: MeetingListRow): string | null {
+  const eventDay = meeting.event_json?.date;
+  if (eventDay && /^\d{4}-\d{2}-\d{2}$/.test(eventDay)) return eventDay;
+  if (!meeting.started_at) return null;
+  const started = new Date(meeting.started_at);
+  return Number.isFinite(started.getTime()) ? easternDay(started) : null;
+}
+
+function isRecurringMeeting(
+  meeting: MeetingListRow,
+  recurringSeriesKeys: ReadonlySet<string>
+): boolean {
+  const seriesKey = meetingSeriesKey(meeting);
+  return Boolean(meeting.event_json?.recurring_event_id) ||
+    (seriesKey != null && recurringSeriesKeys.has(seriesKey));
+}
+
+function displayedMeetingTitle(
+  meeting: MeetingListRow,
+  recurringSeriesKeys: ReadonlySet<string>,
+  standupNoteIds: ReadonlySet<number>,
+  notesById: ReadonlyMap<number, NoteRow>
+): string {
+  const linkedNote = meeting.note_id == null ? undefined : notesById.get(meeting.note_id);
+  const title = linkedNote ? noteTitle(linkedNote) : meeting.title;
+  const shouldDate =
+    (meeting.note_id != null && standupNoteIds.has(meeting.note_id)) ||
+    isRecurringMeeting(meeting, recurringSeriesKeys);
+  if (!shouldDate) return meeting.title;
+  const day = meetingDay(meeting) ?? linkedNote?.event_date;
+  return day ? datedTitle(title, day) : title;
 }
 
 function folderParentPath(folder: NoteFolderInfo, folders: NoteFolderInfo[]): string {
@@ -285,9 +328,18 @@ function scheduleNoteTitle(note: NoteRow): string {
   return `${month} ${ordinalDay(day)}${yearLabel} — Schedule`;
 }
 
-function displayedNoteTitle(note: NoteRow, standupNoteIds: Set<number>): string {
+function displayedNoteTitle(
+  note: NoteRow,
+  standupNoteIds: ReadonlySet<number>,
+  meetingByNoteId?: ReadonlyMap<number, MeetingListRow>,
+  recurringSeriesKeys: ReadonlySet<string> = new Set()
+): string {
   if (isScheduleNote(note)) return scheduleNoteTitle(note);
   if (standupNoteIds.has(note.id)) return datedNoteTitle(note);
+  const meeting = meetingByNoteId?.get(note.id);
+  if (meeting && isRecurringMeeting(meeting, recurringSeriesKeys)) {
+    return datedTitle(noteTitle(note), meetingDay(meeting) ?? note.event_date);
+  }
   return noteTitle(note);
 }
 
@@ -1029,6 +1081,29 @@ export function NotesView({
       ),
     [folders]
   );
+  const notesById = useMemo(
+    () => new Map([...notes, ...trashedNotes].map((note) => [note.id, note])),
+    [notes, trashedNotes]
+  );
+  const meetingByNoteId = useMemo(
+    () =>
+      new Map(
+        [...meetings, ...trashedMeetings].flatMap((meeting) =>
+          meeting.note_id == null ? [] : [[meeting.note_id, meeting] as const]
+        )
+      ),
+    [meetings, trashedMeetings]
+  );
+  const recurringSeriesKeys = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const meeting of [...meetings, ...trashedMeetings]) {
+      const key = meetingSeriesKey(meeting);
+      if (key) counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return new Set(
+      [...counts.entries()].filter(([, count]) => count > 1).map(([key]) => key)
+    );
+  }, [meetings, trashedMeetings]);
   const selectedFolderChildren = useMemo(
     () =>
       selectedFolder == null
@@ -2035,7 +2110,12 @@ export function NotesView({
       ? undefined
       : meetings.find((meeting) => meeting.id === meetingId);
     const canMove = !inTrash && !isScheduleNote(note);
-    const label = displayedNoteTitle(note, standupNoteIds);
+    const label = displayedNoteTitle(
+      note,
+      standupNoteIds,
+      meetingByNoteId,
+      recurringSeriesKeys
+    );
     const contextTarget: Omit<NoteContextTarget, "x" | "y"> = {
       kind: meetingId == null ? "note" : "meeting",
       id: meetingId ?? note.id,
@@ -2099,11 +2179,17 @@ export function NotesView({
   const renderMeetingRow = (meeting: MeetingListRow) => {
     const inTrash = trashView;
     const canMove = !inTrash && meeting.note_id != null;
+    const label = displayedMeetingTitle(
+      meeting,
+      recurringSeriesKeys,
+      standupNoteIds,
+      notesById
+    );
     const contextTarget: Omit<NoteContextTarget, "x" | "y"> = {
       kind: "meeting",
       id: meeting.id,
       noteId: meeting.note_id,
-      label: meeting.title,
+      label,
       trashed: inTrash,
       canTrash: meeting.status !== "recording" && meeting.status !== "summarizing",
     };
@@ -2133,7 +2219,7 @@ export function NotesView({
               ? {
                   kind: "note",
                   noteId: meeting.note_id as number,
-                  label: meeting.title,
+                  label,
                   trashTarget: contextTarget,
                 }
               : undefined
@@ -2155,23 +2241,7 @@ export function NotesView({
         }
       >
         <AudioLines size={14} className="note-row-icon" />
-        <span className="note-row-title">
-          {meeting.note_id != null && standupNoteIds.has(meeting.note_id)
-            ? datedNoteTitle(
-                libraryNotes.find((note) => note.id === meeting.note_id) ?? {
-                  id: meeting.note_id,
-                  title: meeting.title,
-                  raw_text: meeting.title,
-                  source: "meeting",
-                  event_date: meeting.started_at
-                    ? easternDay(new Date(meeting.started_at))
-                    : easternDay(),
-                  created_at: meeting.started_at ?? "",
-                  entries: [],
-                }
-              )
-            : meeting.title}
-        </span>
+        <span className="note-row-title">{label}</span>
         <span className="note-row-categories">
           {inTrash
             ? "in trash"

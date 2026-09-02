@@ -939,7 +939,7 @@ export const api = {
   generateRecap: (period: "day" | "week") => invoke<Recap>("generate_recap", { period }),
   backfillRecaps: () => invoke<void>("backfill_recaps"),
   listRecaps: () => invoke<RecapRow[]>("list_recaps"),
-  exportDb: () => invoke<string>("export_db"),
+  exportDb: (destination: string) => invoke<string>("export_db", { destination }),
   phoneInfo: () => invoke<PhoneInfo>("phone_info"),
   mobileAuthorityStart: (renew = false) =>
     invoke<MobileAuthorityInfo>("mobile_authority_start", { renew }),

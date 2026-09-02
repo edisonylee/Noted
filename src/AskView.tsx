@@ -35,6 +35,7 @@ import { isThemeRequest, proposeTheme } from "./themeRequests";
 import { useTheme } from "./useTheme";
 import type { FilingContext } from "./filingContext";
 import { usePreferredName } from "./usePreferredName";
+import { askHeading } from "./personalization";
 
 type Msg = {
   role: "user" | "assistant";
@@ -377,9 +378,7 @@ export function AskView({
   if (messages.length === 0) {
     return (
       <div className="ask-view ask-home">
-        <h1 className="ask-hero">
-          {preferredName ? `Hi ${preferredName}, ask anything` : "Ask anything"}
-        </h1>
+        <h1 className="ask-hero">{askHeading(preferredName ?? "")}</h1>
         {composer}
         <div className="ask-recipes">
           <span className="ask-recipes-label">Recipes</span>

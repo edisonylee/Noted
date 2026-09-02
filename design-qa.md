@@ -4,7 +4,7 @@
 
 ## Evidence
 
-- Source visual truth: `/Users/edison/.codex/generated_images/01a000c2-3176-7b50-ab1b-71855b66c62a/exec-69df5d3b-df3b-47e3-b94b-c8c882a668d1.png`
+- Source visual truth: retained with the original QA task artifacts
 - Implementation screenshot: `/private/tmp/noted-adaptive-schedule-implementation.png`
 - Focused source crop: `/private/tmp/noted-adaptive-schedule-source-morning.png`
 - Focused implementation crop: `/private/tmp/noted-adaptive-schedule-implementation-morning.png`
@@ -69,21 +69,21 @@ The morning crops confirm that 8:00, 9:00, 9:45, and 10:00 events all occupy the
 
 ## Comparison target
 
-- Source visual truth paths:
-  - `/Users/edison/.codex/generated_images/01a000c3-c169-7f11-a6cb-aedfb6a19c01/exec-3343cbfe-0c91-4df6-9a1c-776073007a79.png` (Home)
-  - `/Users/edison/.codex/generated_images/01a000c3-c169-7f11-a6cb-aedfb6a19c01/exec-687cf370-7981-4420-b2a5-9d87ee43cdf8.png` (Schedule)
-  - `/Users/edison/.codex/generated_images/01a000c3-c169-7f11-a6cb-aedfb6a19c01/exec-0970f2bc-19e7-47f5-89ec-f50c1fc5ab03.png` (Notes)
+- Source visual truth artifacts:
+  - Home
+  - Schedule
+  - Notes
   - `/private/tmp/noted-desktop-calendar.jpeg` (Calendar desktop source)
 - Implementation screenshot paths:
   - `/private/tmp/noted-mobile-home-final.png`
   - `/private/tmp/noted-mobile-schedule-final-2.png`
   - `/private/tmp/noted-mobile-calendar-final.png`
   - `/private/tmp/noted-mobile-notes-final.png`
-- Combined comparison evidence:
-  - `/Users/edison/.codex/generated_images/01a000c3-c169-7f11-a6cb-aedfb6a19c01/exec-86b11702-335d-481f-9123-46d3babfefe0.png` (Home and first Schedule pass)
-  - `/Users/edison/.codex/generated_images/01a000c3-c169-7f11-a6cb-aedfb6a19c01/exec-d4b33271-faac-4136-a78e-af67323688d6.png` (revised Schedule pass)
-  - `/Users/edison/.codex/generated_images/01a000c3-c169-7f11-a6cb-aedfb6a19c01/exec-a97caf62-ad26-4a12-9816-891e91e7ae88.png` (Notes)
-  - `/Users/edison/.codex/generated_images/01a000c3-c169-7f11-a6cb-aedfb6a19c01/exec-9c779c53-c49c-4678-9251-828fe1786a13.png` (Calendar desktop-to-mobile adaptation)
+- Combined comparison evidence retained with the original QA task artifacts:
+  - Home and first Schedule pass
+  - Revised Schedule pass
+  - Notes
+  - Calendar desktop-to-mobile adaptation
 
 ## Viewport and normalization
 

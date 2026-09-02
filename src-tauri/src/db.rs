@@ -584,6 +584,7 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     initialize_meeting_transcript_index(&conn)?;
     seed_note_folders(&conn)?;
     seed_note_folder_structure_v2(&conn)?;
+    remove_empty_legacy_personal_folder_seed(&conn)?;
     initialize_semantic_folder_rules(&conn)?;
     crate::meeting::store::initialize_one_on_one_speakers(&conn)?;
     initialize_embedding_fingerprint(&conn, &crate::provider::active_embedding_fingerprint())?;
@@ -827,8 +828,8 @@ fn initialize_meeting_transcript_index(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Give the notes library a useful first filing tree once. The metadata
-/// marker means deleting or renaming any of these later is respected.
+/// Give every notes library neutral Work and Personal roots once. Child
+/// folders are user-owned and must never encode one developer's projects.
 fn seed_note_folders(conn: &Connection) -> Result<()> {
     let seeded: Option<String> = conn
         .query_row(
@@ -852,22 +853,10 @@ fn seed_note_folders(conn: &Connection) -> Result<()> {
          VALUES (NULL, 'Work', 'space', '', 0, ?1)",
         [&now],
     )?;
-    let work_id = tx.last_insert_rowid();
     tx.execute(
         "INSERT INTO note_folders (parent_id, name, kind, auto_rule, position, created_at)
          VALUES (NULL, 'Personal', 'space', '', 1, ?1)",
         [&now],
-    )?;
-    tx.execute(
-        "INSERT INTO note_folders (parent_id, name, kind, auto_rule, position, created_at)
-         VALUES (?1, 'Baro', 'folder', '', 0, ?2)",
-        rusqlite::params![work_id, now],
-    )?;
-    let baro_id = tx.last_insert_rowid();
-    tx.execute(
-        "INSERT INTO note_folders (parent_id, name, kind, auto_rule, position, created_at)
-         VALUES (?1, 'Daily Standup Meeting Notes', 'folder', 'daily_standup', 0, ?2)",
-        rusqlite::params![baro_id, now],
     )?;
     tx.execute(
         "INSERT INTO app_metadata (key, value) VALUES ('note_folders_v1_seeded', '1')",
@@ -877,9 +866,8 @@ fn seed_note_folders(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Add the agreed Work and Personal organization once. Folder placement stays
-/// user-owned: this creates empty destinations but does not guess where notes
-/// belong. The marker also means later renames or deletions are respected.
+/// Retain the historical marker without creating opinionated child folders.
+/// Existing libraries remain user-owned; new libraries receive only roots.
 fn seed_note_folder_structure_v2(conn: &Connection) -> Result<()> {
     let seeded: Option<String> = conn
         .query_row(
@@ -910,48 +898,102 @@ fn seed_note_folder_structure_v2(conn: &Connection) -> Result<()> {
         .optional()?;
     let has_all_roots = work_id.is_some() && personal_id.is_some();
 
-    let now = canonical_folder_seed_timestamp(conn)?;
     let tx = conn.unchecked_transaction()?;
-    for (parent_id, names) in [
-        (work_id, &["Symphony", "Side Projects", "Career"][..]),
-        (
-            personal_id,
-            &[
-                "Health",
-                "Finances",
-                "Home",
-                "Relationships",
-                "Travel",
-                "Personal Learning",
-            ][..],
-        ),
-    ] {
-        let Some(parent_id) = parent_id else {
-            continue;
-        };
-        for name in names {
-            tx.execute(
-                "INSERT OR IGNORE INTO note_folders
-                   (parent_id, name, kind, auto_rule, position, created_at)
-                 VALUES (
-                   ?1,
-                   ?2,
-                   'folder',
-                   '',
-                   (SELECT COALESCE(MAX(position), -1) + 1
-                    FROM note_folders WHERE parent_id IS ?1),
-                   ?3
-                 )",
-                rusqlite::params![parent_id, name, now],
-            )?;
-        }
-    }
     if has_all_roots {
         tx.execute(
             "INSERT INTO app_metadata (key, value) VALUES ('note_folders_v2_seeded', '1')",
             [],
         )?;
     }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Old development builds accidentally shipped a complete personal folder
+/// template. Remove that exact signature only from untouched libraries. Any
+/// real content, meeting, filing rule, added folder, missing folder, or rename
+/// makes the cleanup a no-op so user organization is never guessed at or lost.
+fn remove_empty_legacy_personal_folder_seed(conn: &Connection) -> Result<()> {
+    const MARKER: &str = "note_folders_personal_seed_cleanup_v1";
+    let finished: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_metadata WHERE key = ?1",
+            [MARKER],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if finished.is_some() {
+        return Ok(());
+    }
+
+    let (content_count, folder_count, filing_rule_count): (i64, i64, i64) = conn.query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM notes) + (SELECT COUNT(*) FROM meetings),
+           (SELECT COUNT(*) FROM note_folders),
+           (SELECT COUNT(*) FROM meeting_filing_rules)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+
+    let legacy_signature_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM note_folders child
+         JOIN note_folders root ON root.id = child.parent_id
+         WHERE root.parent_id IS NULL
+           AND (
+             (root.name = 'Work' COLLATE NOCASE AND child.name IN
+               ('Baro', 'Symphony', 'Side Projects', 'Career'))
+             OR
+             (root.name = 'Personal' COLLATE NOCASE AND child.name IN
+               ('Health', 'Finances', 'Home', 'Relationships', 'Travel', 'Personal Learning'))
+           )",
+        [],
+        |row| row.get(0),
+    )?;
+    let has_standup_child: bool = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM note_folders standup
+           JOIN note_folders baro ON baro.id = standup.parent_id
+           JOIN note_folders work ON work.id = baro.parent_id
+           WHERE work.parent_id IS NULL
+             AND work.name = 'Work' COLLATE NOCASE
+             AND baro.name = 'Baro' COLLATE NOCASE
+             AND standup.name = 'Daily Standup Meeting Notes' COLLATE NOCASE
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let tx = conn.unchecked_transaction()?;
+    if content_count == 0
+        && folder_count == 13
+        && filing_rule_count == 0
+        && legacy_signature_count == 10
+        && has_standup_child
+    {
+        tx.execute(
+            "DELETE FROM note_folders
+             WHERE parent_id IN (
+               SELECT id FROM note_folders
+               WHERE parent_id IS NULL AND name = 'Work' COLLATE NOCASE
+             )
+             AND name IN ('Baro', 'Symphony', 'Side Projects', 'Career')",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM note_folders
+             WHERE parent_id IN (
+               SELECT id FROM note_folders
+               WHERE parent_id IS NULL AND name = 'Personal' COLLATE NOCASE
+             )
+             AND name IN
+               ('Health', 'Finances', 'Home', 'Relationships', 'Travel', 'Personal Learning')",
+            [],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO app_metadata (key, value) VALUES (?1, '1')",
+        [MARKER],
+    )?;
     tx.commit()?;
     Ok(())
 }

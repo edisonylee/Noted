@@ -12,6 +12,19 @@ fn test_db(name: &str) -> (std::path::PathBuf, rusqlite::Connection) {
         nonce
     ));
     let conn = db::init(&path).unwrap();
+    let work = folder_id(&conn, "Work");
+    let personal = folder_id(&conn, "Personal");
+    let baro = create_folder(&conn, work, "Baro");
+    db::create_note_folder(
+        &conn,
+        Some(baro),
+        "Daily Standup Meeting Notes",
+        "folder",
+        "daily_standup",
+        "2026-08-06T12:00:00Z",
+    )
+    .unwrap();
+    create_folder(&conn, personal, "Health");
     (path, conn)
 }
 
@@ -667,8 +680,8 @@ fn live_destination_is_manual_and_survives_the_first_note_link() {
     assert_eq!(meeting["filing_context"], "personal");
 
     let note_id = note(&conn, "Weekly reflection");
+    store::set_note_id(&conn, meeting_id, note_id).unwrap();
     db::file_note(&conn, note_id, Some(health), "2026-08-06T12:02:00Z").unwrap();
-    store::set_note_id_and_apply_route(&conn, meeting_id, note_id, "2026-08-06T12:03:00Z").unwrap();
 
     let filing: (i64, String) = conn
         .query_row(
@@ -694,8 +707,8 @@ fn completed_meeting_destination_moves_its_linked_note() {
     let meeting_id =
         store::create_meeting(&conn, "Planning", None, None, "2026-08-06T12:00:00Z").unwrap();
     let note_id = note(&conn, "Planning");
-    db::file_note(&conn, note_id, Some(baro), "2026-08-06T12:01:00Z").unwrap();
     store::set_note_id(&conn, meeting_id, note_id).unwrap();
+    db::file_note(&conn, note_id, Some(baro), "2026-08-06T12:01:00Z").unwrap();
 
     store::set_filing_destination(&conn, meeting_id, health, "2026-08-06T12:02:00Z").unwrap();
 

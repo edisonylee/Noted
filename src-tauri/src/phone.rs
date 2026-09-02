@@ -454,7 +454,7 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "generate_recap" => crate::generate_recap(a, sarg(b, "period")).await,
         "backfill_recaps" => crate::backfill_recaps(a).await.map(|_| Value::Null),
         "list_recaps" => crate::list_recaps(a).await,
-        "export_db" => crate::export_db(a).await.map(|s| json!(s)),
+        "export_db" => Err("backups can only be created from the desktop app".into()),
         "phone_info" => Ok(crate::phone_info(a)),
         "read_inbox_image" => crate::read_inbox_image(a, sarg(b, "path")).await,
         "voice_status" => Ok(crate::voice_status(a)),

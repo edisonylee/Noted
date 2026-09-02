@@ -482,7 +482,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
   }
   async function addVault() {
     if (!vaultPath.trim()) {
-      setVaultMsg("Type the vault's folder path into the field above first — e.g. /Users/you/Brain/work");
+      setVaultMsg("Type the vault's folder path into the field above first — e.g. /path/to/Brain/work");
       return;
     }
     setVaultBusy("adding");

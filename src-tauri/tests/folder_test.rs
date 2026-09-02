@@ -24,8 +24,54 @@ fn by_name<'a>(folders: &'a [db::NoteFolderInfo], name: &str) -> &'a db::NoteFol
     folders.iter().find(|folder| folder.name == name).unwrap()
 }
 
+fn add_filing_fixture(conn: &rusqlite::Connection) {
+    let folders = db::list_note_folders(conn).unwrap();
+    let work = by_name(&folders, "Work").id;
+    let personal = by_name(&folders, "Personal").id;
+    let baro = db::create_note_folder(
+        conn,
+        Some(work),
+        "Baro",
+        "folder",
+        "",
+        "2026-07-01T12:00:00Z",
+    )
+    .unwrap();
+    db::create_note_folder(
+        conn,
+        Some(baro),
+        "Daily Standup Meeting Notes",
+        "folder",
+        "daily_standup",
+        "2026-07-01T12:01:00Z",
+    )
+    .unwrap();
+    for name in ["Symphony", "Side Projects", "Career"] {
+        db::create_note_folder(conn, Some(work), name, "folder", "", "2026-07-01T12:02:00Z")
+            .unwrap();
+    }
+    for name in [
+        "Health",
+        "Finances",
+        "Home",
+        "Relationships",
+        "Travel",
+        "Personal Learning",
+    ] {
+        db::create_note_folder(
+            conn,
+            Some(personal),
+            name,
+            "folder",
+            "",
+            "2026-07-01T12:03:00Z",
+        )
+        .unwrap();
+    }
+}
+
 #[test]
-fn seeded_baro_tree_auto_files_standups_and_accepts_manual_filing() {
+fn fresh_library_is_neutral_then_user_folders_support_automatic_and_manual_filing() {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -37,6 +83,16 @@ fn seeded_baro_tree_auto_files_standups_and_accepts_manual_filing() {
     ));
     let mut conn = db::init(&path).unwrap();
 
+    let defaults = db::list_note_folders(&conn).unwrap();
+    assert_eq!(
+        defaults
+            .iter()
+            .map(|folder| (folder.name.as_str(), folder.kind.as_str(), folder.parent_id))
+            .collect::<Vec<_>>(),
+        vec![("Work", "space", None), ("Personal", "space", None)]
+    );
+
+    add_filing_fixture(&conn);
     let seeded = db::list_note_folders(&conn).unwrap();
     let work = by_name(&seeded, "Work");
     let baro = by_name(&seeded, "Baro");
@@ -142,7 +198,7 @@ fn seeded_baro_tree_auto_files_standups_and_accepts_manual_filing() {
 }
 
 #[test]
-fn folder_structure_seed_runs_once_while_physical_deletion_is_gated() {
+fn user_folder_persists_across_reopen_while_physical_deletion_is_gated() {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -155,7 +211,16 @@ fn folder_structure_seed_runs_once_while_physical_deletion_is_gated() {
 
     let conn = db::init(&path).unwrap();
     let seeded = db::list_note_folders(&conn).unwrap();
-    let side_projects = by_name(&seeded, "Side Projects").id;
+    let work = by_name(&seeded, "Work").id;
+    let side_projects = db::create_note_folder(
+        &conn,
+        Some(work),
+        "Side Projects",
+        "folder",
+        "",
+        "2026-08-01T12:00:00Z",
+    )
+    .unwrap();
     let error = db::delete_note_folder(&conn, side_projects)
         .unwrap_err()
         .to_string();
@@ -171,16 +236,100 @@ fn folder_structure_seed_runs_once_while_physical_deletion_is_gated() {
             .count(),
         1
     );
-    assert_eq!(
-        reopened
-            .iter()
-            .filter(|folder| folder.name == "Career")
-            .count(),
-        1
-    );
+    assert!(!reopened.iter().any(|folder| folder.name == "Career"));
 
     drop(conn);
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn legacy_personal_seed_is_removed_only_from_an_untouched_library() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let empty_path = std::env::temp_dir().join(format!(
+        "noted_folder_cleanup_empty_{}_{}.db",
+        std::process::id(),
+        nonce
+    ));
+    let conn = db::init(&empty_path).unwrap();
+    add_filing_fixture(&conn);
+    conn.execute(
+        "DELETE FROM app_metadata WHERE key = 'note_folders_personal_seed_cleanup_v1'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let conn = db::init(&empty_path).unwrap();
+    let folders = db::list_note_folders(&conn).unwrap();
+    assert_eq!(folders.len(), 2);
+    assert!(folders.iter().all(|folder| folder.parent_id.is_none()));
+    drop(conn);
+
+    let populated_path = std::env::temp_dir().join(format!(
+        "noted_folder_cleanup_populated_{}_{}.db",
+        std::process::id(),
+        nonce
+    ));
+    let mut conn = db::init(&populated_path).unwrap();
+    add_filing_fixture(&conn);
+    save(
+        &mut conn,
+        "Keep my existing filing structure.",
+        "projects",
+        "2026-08-06",
+    );
+    conn.execute(
+        "DELETE FROM app_metadata WHERE key = 'note_folders_personal_seed_cleanup_v1'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let conn = db::init(&populated_path).unwrap();
+    let folders = db::list_note_folders(&conn).unwrap();
+    assert!(folders.iter().any(|folder| folder.name == "Baro"));
+    assert!(folders.iter().any(|folder| folder.name == "Health"));
+    drop(conn);
+
+    let customized_path = std::env::temp_dir().join(format!(
+        "noted_folder_cleanup_customized_{}_{}.db",
+        std::process::id(),
+        nonce
+    ));
+    let conn = db::init(&customized_path).unwrap();
+    add_filing_fixture(&conn);
+    let folders = db::list_note_folders(&conn).unwrap();
+    let baro = by_name(&folders, "Baro").id;
+    db::create_note_folder(
+        &conn,
+        Some(baro),
+        "My custom project",
+        "folder",
+        "",
+        "2026-08-06T15:00:00Z",
+    )
+    .unwrap();
+    conn.execute(
+        "DELETE FROM app_metadata WHERE key = 'note_folders_personal_seed_cleanup_v1'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let conn = db::init(&customized_path).unwrap();
+    let folders = db::list_note_folders(&conn).unwrap();
+    assert!(folders.iter().any(|folder| folder.name == "Baro"));
+    assert!(folders
+        .iter()
+        .any(|folder| folder.name == "My custom project"));
+    drop(conn);
+
+    let _ = std::fs::remove_file(empty_path);
+    let _ = std::fs::remove_file(populated_path);
+    let _ = std::fs::remove_file(customized_path);
 }
 
 #[test]
@@ -197,8 +346,25 @@ fn folder_structure_upgrade_preserves_existing_folders_and_memberships() {
 
     let mut conn = db::init(&path).unwrap();
     let seeded = db::list_note_folders(&conn).unwrap();
-    let symphony_id = by_name(&seeded, "Symphony").id;
-    let baro_id = by_name(&seeded, "Baro").id;
+    let work_id = by_name(&seeded, "Work").id;
+    let symphony_id = db::create_note_folder(
+        &conn,
+        Some(work_id),
+        "Symphony",
+        "folder",
+        "",
+        "2026-08-06T14:00:00Z",
+    )
+    .unwrap();
+    let baro_id = db::create_note_folder(
+        &conn,
+        Some(work_id),
+        "Baro",
+        "folder",
+        "",
+        "2026-08-06T14:00:30Z",
+    )
+    .unwrap();
     let note_id = save(
         &mut conn,
         "Personal product roadmap and release plan.",
@@ -306,6 +472,7 @@ fn folders_can_be_reordered_and_nested_without_creating_cycles() {
         nonce
     ));
     let conn = db::init(&path).unwrap();
+    add_filing_fixture(&conn);
     let seeded = db::list_note_folders(&conn).unwrap();
     let baro = by_name(&seeded, "Baro").id;
     let personal = by_name(&seeded, "Personal").id;
@@ -397,6 +564,7 @@ fn new_notes_route_to_the_selected_context_and_only_work_standups_auto_file() {
         nonce
     ));
     let mut conn = db::init(&path).unwrap();
+    add_filing_fixture(&conn);
     let folders = db::list_note_folders(&conn).unwrap();
     let work = by_name(&folders, "Work").id;
     let personal = by_name(&folders, "Personal").id;
@@ -610,6 +778,7 @@ fn manual_filing_is_sticky_and_undo_restores_folder_and_context() {
         nonce
     ));
     let mut conn = db::init(&path).unwrap();
+    add_filing_fixture(&conn);
     let folders = db::list_note_folders(&conn).unwrap();
     let standups = by_name(&folders, "Daily Standup Meeting Notes").id;
     let health = by_name(&folders, "Health").id;

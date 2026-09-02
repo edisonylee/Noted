@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { api, type SystemSettings } from "./api";
 import { configureAppTimeZone } from "./day";
+import { readDisplayName, writeDisplayName } from "./personalization";
 
 const COMMON_TIME_ZONES = [
   ["America/Los_Angeles", "Pacific Time (Los Angeles)"],
@@ -45,6 +46,8 @@ function timeZonePreview(value: string): string {
 export function SystemSettingsPanel() {
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [timeZonePreference, setTimeZonePreference] = useState("system");
+  const [displayName, setDisplayName] = useState(() => readDisplayName());
+  const [displayNameSaved, setDisplayNameSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,6 +75,13 @@ export function SystemSettingsPanel() {
     }
   }
 
+  function savePersonalization(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setDisplayName(writeDisplayName(displayName));
+    setDisplayNameSaved(true);
+    window.setTimeout(() => setDisplayNameSaved(false), 1800);
+  }
+
   return (
     <>
       <h3>General</h3>
@@ -81,6 +91,31 @@ export function SystemSettingsPanel() {
       </p>
 
       <div className="settings-fields system-settings-fields">
+        <section className="settings-group">
+          <header className="settings-group-head">
+            <h4>Personalization</h4>
+            <p>Your name stays on this device. Leave it blank for a neutral greeting.</p>
+          </header>
+          <form className="settings-inline-form" onSubmit={savePersonalization}>
+            <label className="field">
+              <span className="field-label">Display name</span>
+              <input
+                value={displayName}
+                onChange={(event) => {
+                  setDisplayName(event.target.value);
+                  setDisplayNameSaved(false);
+                }}
+                placeholder="Optional"
+                autoComplete="name"
+                maxLength={80}
+              />
+              <span className="field-hint">
+                {displayNameSaved ? "Saved on this device." : "Used only in greetings."}
+              </span>
+            </label>
+            <button type="submit" className="ghost-btn">Save name</button>
+          </form>
+        </section>
         <section className="settings-group">
           <header className="settings-group-head">
             <h4>Time zone</h4>

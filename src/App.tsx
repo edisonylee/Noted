@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { save } from "@tauri-apps/plugin-dialog";
 import { listen } from "./events";
 import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, ListTodo, Loader, MessageCircle, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Square, StickyNote, Sun, Video } from "lucide-react";
 import { SettingsModal } from "./Settings";
@@ -651,9 +652,15 @@ export default function App() {
   }, []);
 
   async function onBackup() {
-    setBackupMsg("backing up…");
     try {
-      const path = await api.exportDb();
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const destination = await save({
+        defaultPath: `noted-backup-${timestamp}.db`,
+        filters: [{ name: "Noted database", extensions: ["db"] }],
+      });
+      if (!destination) return;
+      setBackupMsg("backing up…");
+      const path = await api.exportDb(destination);
       setBackupMsg(`backed up to ${path}`);
     } catch (e) {
       setBackupMsg(`backup failed: ${e}`);

@@ -42,6 +42,7 @@ import type {
   MobileWorkspace,
   WorkspaceSyncState,
 } from "./MobileShell";
+import { homeHeading, readDisplayName } from "./personalization";
 import "./DesktopMatchedMobile.css";
 
 type PrimaryTab = "home" | "schedule" | "calendar" | "notes";
@@ -180,13 +181,11 @@ function HomeScreen({
         <button type="button" aria-label="Settings"><Settings /></button>
       </header>
       <div className="dm-weatherbar">
-        <span><CloudSun /><strong>65°</strong> Overcast</span>
-        <span>Thu, Aug 20</span>
-        <span>H 67° L 54°</span>
-        <span>San Francisco</span>
+        <span><CloudSun /> Weather not configured</span>
+        <span>Choose a city on your Mac</span>
       </div>
       <div className="dm-home__body">
-        <h1>Hi Edison</h1>
+        <h1>{homeHeading(readDisplayName())}</h1>
         <form className="dm-capture" onSubmit={(event) => { event.preventDefault(); onCapture(); }}>
           <label htmlFor="dm-capture-input">Capture a note</label>
           <textarea

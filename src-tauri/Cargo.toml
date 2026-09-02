@@ -72,6 +72,7 @@ noted-apple-security = { path = "crates/noted-apple-security" }
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 hyper = { version = "1", default-features = false, features = ["server"] }
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 printpdf = "0.7"

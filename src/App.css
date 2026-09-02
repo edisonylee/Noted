@@ -3654,6 +3654,11 @@ a.cal-btn { text-decoration: none; }
 .settings-body .settings-actions .field-hint { display: inline-flex; align-items: center; gap: 4px; color: var(--good); margin-right: auto; }
 .settings-body .settings-actions .settings-error { color: var(--bad); }
 .system-settings-fields { gap: 0; margin-top: 8px; }
+.settings-inline-form {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end;
+  gap: 12px; max-width: 560px;
+}
+.settings-inline-form .ghost-btn { min-height: 36px; justify-content: center; }
 .assistant-settings { gap: 0; margin-top: 8px; }
 .assistant-shortcut-row {
   display: flex; align-items: center; justify-content: space-between; gap: 20px;
@@ -3816,6 +3821,8 @@ a.cal-btn { text-decoration: none; }
   .settings-page .settings-nav-label { grid-column: 1 / -1; }
   .settings-group-head { flex-direction: column; gap: 4px; }
   .settings-group-head p { text-align: left; }
+  .settings-inline-form { grid-template-columns: 1fr; }
+  .settings-inline-form .ghost-btn { justify-self: start; }
 }
 .record-prompt.status::before { background: var(--good); }
 

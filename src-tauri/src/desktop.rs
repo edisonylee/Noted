@@ -2145,18 +2145,22 @@ async fn backfill_entities(app: tauri::AppHandle) -> Result<i64, String> {
     Ok(added)
 }
 
-/// One-click plaintext, database-only backup on the Desktop. This intentionally
-/// includes sensitive rows and omits referenced media; it is not an encrypted or
-/// complete recovery archive. Returns the validated snapshot path.
+/// User-directed plaintext, database-only backup on the Desktop. This includes
+/// sensitive rows and omits referenced media; it is not an encrypted or complete
+/// recovery archive. Returns the validated snapshot path chosen in the save panel.
 #[tauri::command]
-async fn export_db(app: tauri::AppHandle) -> Result<String, String> {
-    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
-    let mut dest_dir = std::path::PathBuf::from(&home).join("Desktop");
-    if !dest_dir.exists() {
-        dest_dir = std::path::PathBuf::from(&home);
+async fn export_db(app: tauri::AppHandle, destination: String) -> Result<String, String> {
+    let trimmed = destination.trim();
+    if trimmed.is_empty() {
+        return Err("choose where to save the backup".into());
     }
-    let ts = now_local().format("%Y%m%d-%H%M%S-%6f");
-    let dest = dest_dir.join(format!("noted-backup-{ts}.db"));
+    let dest = std::path::PathBuf::from(trimmed);
+    if !dest.is_absolute() {
+        return Err("choose an absolute backup destination".into());
+    }
+    if dest.file_name().is_none() {
+        return Err("choose a backup file, not a folder".into());
+    }
 
     // Keep the one application writer locked through VACUUM INTO, independent
     // validation, fsync, and publication so no app write can race the snapshot.
@@ -4809,6 +4813,7 @@ async fn process_pending_inner(app: &tauri::AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()

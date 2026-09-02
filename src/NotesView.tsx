@@ -3153,7 +3153,7 @@ export function NotesView({
           aria-label={`${libraryOpen ? "Collapse" : "Show"} library`}
           aria-expanded={libraryOpen}
         >
-          {libraryOpen ? <PanelLeftClose size={15} /> : <PanelLeftOpen size={15} />}
+          {libraryOpen ? <PanelLeftClose size={17} /> : <PanelLeftOpen size={17} />}
         </button>
 
         {libraryOpen && (

@@ -142,7 +142,7 @@ export function NoteDocumentEditor({
   }
 
   return (
-    <main className="note-document" aria-label="Note editor">
+    <main className="note-document" aria-label="Document editor">
       <header className="note-document-head">
         <button
           className="note-document-back"
@@ -163,7 +163,7 @@ export function NoteDocumentEditor({
               markDirty();
             }}
             placeholder="Untitled"
-            aria-label="Note title"
+            aria-label="Document title"
             autoFocus
           />
           <div className="note-document-meta">{metadata}</div>
@@ -190,7 +190,7 @@ export function NoteDocumentEditor({
             markDirty();
           }}
           placeholder="Start writing…"
-          ariaLabel="Note content"
+          ariaLabel="Document content"
         />
       </section>
       {saveError && <div className="note-document-error" role="alert">{saveError}</div>}

@@ -446,6 +446,17 @@ function meetingIdOf(note: NoteRow): number | null {
   return null;
 }
 
+function isDocumentNote(
+  note: NoteRow,
+  linkedMeetingNoteIds: ReadonlySet<number>
+): boolean {
+  return (
+    !isScheduleNote(note) &&
+    meetingIdOf(note) == null &&
+    !linkedMeetingNoteIds.has(note.id)
+  );
+}
+
 function folderPath(folderId: number, folders: NoteFolderInfo[]): string {
   const byId = new Map(folders.map((folder) => [folder.id, folder]));
   const names: string[] = [];
@@ -1031,6 +1042,10 @@ export function NotesView({
     () => scopedNotes.filter((note) => !isScheduleNote(note)),
     [scopedNotes]
   );
+  const documentNotes = useMemo(
+    () => libraryNotes.filter((note) => isDocumentNote(note, listedMeetingNoteIds)),
+    [libraryNotes, listedMeetingNoteIds]
+  );
   const inboxNoteIds = useMemo(
     () => new Set((activeSpace?.explicit_filings ?? []).map((filing) => filing.note_id)),
     [activeSpace]
@@ -1135,6 +1150,7 @@ export function NotesView({
   const list = useMemo(() => {
     let rows: NoteRow[];
     if (selection === "all") rows = libraryNotes;
+    else if (selection === "documents") rows = documentNotes;
     else if (selection === "meeting-trash") rows = trashedNotes;
     else if (selection === "inbox") rows = inboxNotes;
     else if (selection === "schedule") rows = scheduleNotes;
@@ -1169,6 +1185,7 @@ export function NotesView({
     );
   }, [
     libraryNotes,
+    documentNotes,
     inboxNotes,
     needsFilingNotes,
     query,
@@ -1245,6 +1262,7 @@ export function NotesView({
 
   const currentLabel = useMemo(() => {
     if (selection === "all") return "All Notes";
+    if (selection === "documents") return "Documents";
     if (selection === "inbox") return "Inbox";
     if (selection === "meetings") return "Meetings";
     if (selection === "needs-filing") return "Needs filing";
@@ -1975,6 +1993,10 @@ export function NotesView({
           note={openNote}
           metadata={(
             <>
+              <span className="note-document-kind">
+                <FileText size={12} aria-hidden="true" />
+                Document
+              </span>
               <span>{relativeDay(openNote.event_date)}</span>
               {noteCats(openNote).map((category) => (
                 <span key={category}>{category}</span>
@@ -2243,10 +2265,8 @@ export function NotesView({
 
   const renderNoteRow = (note: NoteRow) => {
     const inTrash = trashView;
-    const meetingId = meetingIdOf(note);
-    const linkedMeeting = meetingId == null
-      ? undefined
-      : meetings.find((meeting) => meeting.id === meetingId);
+    const linkedMeeting = meetingByNoteId.get(note.id);
+    const meetingId = meetingIdOf(note) ?? linkedMeeting?.id ?? null;
     const canMove = !inTrash && !isScheduleNote(note);
     const label = displayedNoteTitle(
       note,
@@ -2307,7 +2327,9 @@ export function NotesView({
       )}
       <span className="note-row-title">{label}</span>
       {!isScheduleNote(note) && (
-        <span className="note-row-categories">{noteCats(note).slice(0, 2).join(" · ")}</span>
+        <span className="note-row-categories">
+          {meetingId != null ? "Meeting" : "Document"}
+        </span>
       )}
       <span className="note-row-date">{relativeDay(note.event_date)}</span>
     </button>
@@ -2382,19 +2404,19 @@ export function NotesView({
         <span className="note-row-title">{label}</span>
         <span className="note-row-categories">
           {inTrash
-            ? "in trash"
+            ? "Meeting · In trash"
             : meeting.status === "recording"
-              ? "recording"
+              ? "Meeting · Recording"
               : meeting.status === "summarizing"
-                ? "enhancing notes"
+                ? "Meeting · Enhancing notes"
                 : needsFilingView ||
                     (meeting.route_status === "needs_filing" && currentFolderId == null)
-                  ? "needs a folder"
+                  ? "Meeting · Needs a folder"
                   : meeting.summary_count > 0
-                    ? "meeting notes"
+                    ? "Meeting · Notes"
                     : meeting.segment_count > 0
-                      ? "transcript"
-                      : "meeting"}
+                      ? "Meeting · Transcript"
+                      : "Meeting"}
         </span>
         <span className="note-row-date">
           {meeting.started_at
@@ -2951,6 +2973,8 @@ export function NotesView({
       ? `${visibleCount} ${visibleCount === 1 ? "item" : "items"}`
     : meetingOnlyView
       ? `${visibleCount} ${visibleCount === 1 ? "meeting" : "meetings"}`
+    : selection === "documents"
+      ? `${visibleCount} ${visibleCount === 1 ? "document" : "documents"}`
     : `${visibleCount} ${visibleCount === 1 ? "note" : "notes"}`;
   const emptyMessage = transcriptSearchPending
     ? "Searching transcripts…"
@@ -2960,6 +2984,8 @@ export function NotesView({
     ? "Nothing matches."
     : selection === "meetings"
       ? "No meetings recorded yet."
+      : selection === "documents"
+        ? "No documents yet. Create one when you want a focused place to write."
       : selection === "inbox"
         ? `No notes are saved directly to ${activeSpaceLabel}.`
         : selection === "needs-filing"
@@ -3179,6 +3205,14 @@ export function NotesView({
               <FileText size={14} />
               <span className="space-label">All Notes</span>
               <span className="space-n">{libraryNotes.length}</span>
+            </button>
+            <button
+              className={selection === "documents" ? "on" : ""}
+              onClick={() => setSelection("documents")}
+            >
+              <PenLine size={14} />
+              <span className="space-label">Documents</span>
+              <span className="space-n">{documentNotes.length}</span>
             </button>
             <button
               className={selection === "inbox" ? "on" : ""}
@@ -3414,6 +3448,9 @@ export function NotesView({
                 when you want more organization.
               </p>
             )}
+            {selection === "documents" && (
+              <p>Writing, separate from recorded meetings.</p>
+            )}
           </div>
           <div className="notes-context-actions">
             <span className="notes-context-count">{countLabel}</span>
@@ -3425,7 +3462,7 @@ export function NotesView({
                 disabled={creatingNote}
               >
                 <Plus size={14} aria-hidden="true" />
-                <span>{creatingNote ? "Creating…" : "New note"}</span>
+                <span>{creatingNote ? "Creating…" : "New document"}</span>
               </button>
             )}
           </div>
@@ -3440,6 +3477,8 @@ export function NotesView({
               placeholder={
                 selection === "all"
                   ? "Search notes and transcripts…"
+                  : selection === "documents"
+                    ? "Search documents…"
                   : selection === "meetings"
                     ? "Search meeting names and transcripts…"
                     : selection === "needs-filing"

@@ -4694,6 +4694,10 @@ a.cal-btn { text-decoration: none; }
   min-height: 0;
 }
 .app.side:not(.homemode) .main-col .content {
+  /* Give the flex item an explicit zero basis so tall, internally scrolling
+     workspaces cannot use their page height to push the footer off-screen. */
+  flex: 1 1 0;
+  height: 0;
   min-height: 0;
   overflow-y: auto;
   /* Keep the workspace gutter inside the scrollport so content retains its
@@ -4705,6 +4709,8 @@ a.cal-btn { text-decoration: none; }
 }
 .app.side:not(.homemode) .status {
   flex: none;
+  position: relative;
+  z-index: 6;
   margin-top: 0;
   background: var(--canvas);
 }

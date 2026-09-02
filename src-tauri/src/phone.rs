@@ -350,6 +350,19 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         .await
         .map(|id| json!(id)),
         "list_notes" => crate::list_notes(a).await,
+        "create_note_document" => {
+            let folder_id = b.get("folderId").and_then(|v| v.as_i64());
+            crate::create_note_document(
+                a,
+                sarg(b, "title"),
+                sarg(b, "rawText"),
+                sarg(b, "documentJson"),
+                sarg(b, "filingContext"),
+                folder_id,
+            )
+            .await
+            .map(|id| json!(id))
+        }
         "note_trash_list" => crate::note_trash_list(a).await,
         "note_trash" => crate::note_trash(a, iarg(b, "noteId"))
             .await
@@ -361,7 +374,13 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
             .await
             .map(|_| Value::Null),
         "update_note" => {
-            crate::update_note(a, iarg(b, "noteId"), sarg(b, "title"), sarg(b, "rawText"))
+            crate::update_note(
+                a,
+                iarg(b, "noteId"),
+                sarg(b, "title"),
+                sarg(b, "rawText"),
+                oarg(b, "documentJson"),
+            )
                 .await
                 .map(|_| Value::Null)
         }

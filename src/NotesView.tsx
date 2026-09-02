@@ -51,7 +51,9 @@ import {
 } from "./api";
 import { DataView } from "./DataView";
 import { MeetingPage } from "./MeetingPage";
+import { NoteDocumentEditor } from "./NoteDocumentEditor";
 import { easternDay, formatDay, relativeDay } from "./day";
+import { emptyDocument } from "./editor/document";
 import {
   hasStoredFilingContext,
   isFilingContext,
@@ -480,7 +482,7 @@ export function NotesView({
 }: {
   notes: NoteRow[];
   cats: CategoryInfo[];
-  onChanged?: () => void;
+  onChanged?: () => void | Promise<void>;
 }) {
   const [selection, setSelection] = useState("all");
   const [query, setQuery] = useState("");
@@ -549,6 +551,8 @@ export function NotesView({
   const [editBody, setEditBody] = useState("");
   const [savingNote, setSavingNote] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
+  const [creatingNote, setCreatingNote] = useState(false);
+  const [createNoteError, setCreateNoteError] = useState<string | null>(null);
   const [libraryOpen, setLibraryOpenState] = useState(
     () => localStorage.getItem("noted-library") !== "closed"
   );
@@ -1251,6 +1255,43 @@ export function NotesView({
     return categories.find((category) => category.id === selection)?.label ?? "Notes";
   }, [categories, selectedFolder, selection]);
 
+  async function createDocumentNote() {
+    if (creatingNote) return;
+    setCreatingNote(true);
+    setCreateNoteError(null);
+    const document = emptyDocument();
+    const documentJson = JSON.stringify(document);
+    const activeContext = activeSpace?.name.trim().toLowerCase();
+    const context = isFilingContext(activeContext) ? activeContext : filingContext;
+    const folderId = selectedFolder?.kind === "folder" ? selectedFolder.id : null;
+    try {
+      const id = await api.createNoteDocument("", "", documentJson, context, folderId);
+      const createdAt = new Date().toISOString();
+      setEditingNote(false);
+      setOpenNote({
+        id,
+        title: "",
+        raw_text: "",
+        document_json: documentJson,
+        source: "text",
+        entries: [],
+        event_date: easternDay(),
+        created_at: createdAt,
+        trashed_at: null,
+      });
+      try {
+        await onChanged?.();
+      } catch {
+        // The document is already open and durable. A later library refresh
+        // repairs the index without interrupting writing.
+      }
+    } catch (error) {
+      setCreateNoteError(String(error));
+    } finally {
+      setCreatingNote(false);
+    }
+  }
+
   function selectSpace(space: NoteFolderInfo) {
     setActiveSpaceIdState(space.id);
     localStorage.setItem("noted-active-space", String(space.id));
@@ -1532,10 +1573,7 @@ export function NotesView({
     if (!note) return;
     setOpenMeeting(null);
     setOpenNote(note);
-    setEditTitle(note.title.trim() || displayedNoteTitle(note, standupNoteIds));
-    setEditBody(note.raw_text);
-    setEditError(null);
-    setEditingNote(true);
+    setEditingNote(false);
   }
 
   async function moveNoteFromContextMenu(folder: NoteFolderInfo) {
@@ -1899,6 +1937,103 @@ export function NotesView({
       explicitPlacement.filing.source === "manual" &&
       explicitPlacement.filing.reason.startsWith("Chosen before saving:");
     const filingTargetLabel = (folder: NoteFolderInfo) => filingTargetPath(folder, folders);
+
+    if (!scheduleNote && !trashedNote) {
+      const placement = explicitPlacement ? (
+        <div className="note-filed-placement">
+          <strong>{filingTargetLabel(explicitPlacement.folder)}</strong>
+          <span>{explicitPlacement.filing.reason}</span>
+          {explicitPlacement.filing.event_id != null &&
+            explicitPlacement.filing.source !== "context" &&
+            explicitPlacement.filing.source !== "undo" &&
+            !explicitPlacementUndoIsNoop && (
+              <button
+                type="button"
+                onClick={() => void undoFiling(explicitPlacement.filing.event_id!)}
+                disabled={filing}
+                aria-label={`Undo filing this note in ${filingTargetLabel(explicitPlacement.folder)}`}
+              >
+                Undo
+              </button>
+            )}
+        </div>
+      ) : smartPlacement ? (
+        <div className="note-filed-placement smart">
+          <strong>{filingTargetLabel(smartPlacement)}</strong>
+          <span>Legacy smart match. Choose a folder to make its home explicit.</span>
+        </div>
+      ) : (
+        <div className="note-filed-placement unfiled">
+          <strong>Inbox</strong>
+          <span>This note stays in {activeSpaceLabel} until you move it.</span>
+        </div>
+      );
+
+      return (
+        <NoteDocumentEditor
+          key={openNote.id}
+          note={openNote}
+          metadata={(
+            <>
+              <span>{relativeDay(openNote.event_date)}</span>
+              {noteCats(openNote).map((category) => (
+                <span key={category}>{category}</span>
+              ))}
+            </>
+          )}
+          placement={placement}
+          controls={(
+            <label className="note-file-select">
+              <span className="sr-only">Move note to a folder</span>
+              <select
+                value=""
+                disabled={filing}
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (value) void fileOpenNote(Number(value));
+                }}
+              >
+                <option value="">Move to…</option>
+                {filingTargets
+                  .filter((folder) => folder.id !== explicitPlacement?.folder.id)
+                  .map((folder) => (
+                    <option key={folder.id} value={folder.id}>
+                      {filingTargetLabel(folder)}
+                    </option>
+                  ))}
+              </select>
+            </label>
+          )}
+          onBack={() => {
+            setEditingNote(false);
+            setOpenNote(null);
+          }}
+          onSaved={async (updated) => {
+            setOpenNote(updated);
+            await onChanged?.();
+          }}
+        >
+          {filingMsg && <div className="note-filing-message">{filingMsg}</div>}
+          {openNote.entries.some(
+            (entry) => entry.data && Object.keys(entry.data).length > 0
+          ) && (
+            <section className="note-detail-entries" aria-label="Extracted context">
+              {openNote.entries.map(
+                (entry, index) =>
+                  entry.data &&
+                  Object.keys(entry.data).length > 0 && (
+                    <div key={entry.id ?? index} className="note-entry-card">
+                      <span className="note-entry-label">{entry.category ?? "Entry"}</span>
+                      <DataView value={entry.data} />
+                    </div>
+                  )
+              )}
+            </section>
+          )}
+        </NoteDocumentEditor>
+      );
+    }
+
     return (
       <div className="note-detail">
         <header className="note-detail-head">
@@ -2100,7 +2235,10 @@ export function NotesView({
   const open = (note: NoteRow) => {
     const meetingId = meetingIdOf(note);
     if (meetingId != null) setOpenMeeting({ id: meetingId });
-    else setOpenNote(note);
+    else {
+      setEditingNote(false);
+      setOpenNote(note);
+    }
   };
 
   const renderNoteRow = (note: NoteRow) => {
@@ -2793,6 +2931,7 @@ export function NotesView({
         ? visibleFolderChildren.length + list.length
         : list.length;
   const visibleCount = listedCount + (transcriptSearchActive ? visibleTranscriptHits.length : 0);
+  const canCreateNote = !meetingOnlyView && !needsFilingView && !trashView;
   const countLabel = transcriptSearchActive
     ? `${visibleCount}${visibleTranscriptHits.length === 200 ? "+" : ""} ${
         visibleCount === 1 ? "result" : "results"
@@ -3276,8 +3415,24 @@ export function NotesView({
               </p>
             )}
           </div>
-          <span className="notes-context-count">{countLabel}</span>
+          <div className="notes-context-actions">
+            <span className="notes-context-count">{countLabel}</span>
+            {canCreateNote && (
+              <button
+                className="notes-new-note"
+                type="button"
+                onClick={() => void createDocumentNote()}
+                disabled={creatingNote}
+              >
+                <Plus size={14} aria-hidden="true" />
+                <span>{creatingNote ? "Creating…" : "New note"}</span>
+              </button>
+            )}
+          </div>
         </div>
+        {createNoteError && (
+          <div className="notes-create-error" role="alert">{createNoteError}</div>
+        )}
         <div className="notes-list-head">
           <label className="notes-search">
             <Search size={14} />

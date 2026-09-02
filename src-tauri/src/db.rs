@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS notes (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   title        TEXT NOT NULL DEFAULT '',
   raw_text     TEXT NOT NULL,
+  document_json TEXT,                    -- rich formatting for the same note; raw_text remains searchable
   source       TEXT NOT NULL DEFAULT 'text',
   image_path   TEXT,
   category_id  INTEGER REFERENCES categories(id),
@@ -490,6 +491,7 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     ensure_column(&conn, "entries", "event_date", "TEXT")?;
     ensure_column(&conn, "entities", "relationship", "TEXT")?;
     ensure_column(&conn, "notes", "title", "TEXT")?;
+    ensure_column(&conn, "notes", "document_json", "TEXT")?;
     // Brain-sync columns (additive; legacy rows read as capture-origin via COALESCE).
     ensure_column(&conn, "notes", "origin", "TEXT")?;
     ensure_column(&conn, "notes", "source_path", "TEXT")?;
@@ -1080,6 +1082,7 @@ pub struct NoteRow {
     pub id: i64,
     pub title: String,
     pub raw_text: String,
+    pub document_json: Option<String>,
     pub source: String,
     pub entries: Vec<NoteEntry>,
     pub event_date: String,
@@ -1112,7 +1115,7 @@ fn list_notes_by_trash(conn: &Connection, trashed: bool) -> Result<Vec<NoteRow>>
     // falling back to the save day for any legacy rows without one. Meeting
     // notes keep their separate meeting-owned Trash lifecycle.
     let mut stmt = conn.prepare(
-        "SELECT n.id, COALESCE(n.title, ''), n.raw_text, n.source,
+        "SELECT n.id, COALESCE(n.title, ''), n.raw_text, n.document_json, n.source,
                 COALESCE(MAX(e.event_date), date(n.created_at)) AS event_date,
                 json_group_array(json_object('id', e.id, 'category', c.name, 'data', json(e.data_json))) AS entries,
                 n.created_at, n.trashed_at
@@ -1135,16 +1138,17 @@ fn list_notes_by_trash(conn: &Connection, trashed: bool) -> Result<Vec<NoteRow>>
                   n.id DESC",
     )?;
     let rows = stmt.query_map([trashed], |r| {
-        let entries_str: String = r.get(5)?;
+        let entries_str: String = r.get(6)?;
         Ok(NoteRow {
             id: r.get(0)?,
             title: r.get(1)?,
             raw_text: r.get(2)?,
-            source: r.get(3)?,
-            event_date: r.get(4)?,
+            document_json: r.get(3)?,
+            source: r.get(4)?,
+            event_date: r.get(5)?,
             entries: parse_note_entries(&entries_str),
-            created_at: r.get(6)?,
-            trashed_at: r.get(7)?,
+            created_at: r.get(7)?,
+            trashed_at: r.get(8)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2097,6 +2101,20 @@ pub fn update_note(
     raw_text: &str,
     now: &str,
 ) -> Result<()> {
+    update_note_with_document(conn, note_id, title, raw_text, None, now)
+}
+
+/// Save the searchable plain text and the formatting document atomically.
+/// Callers without a rich document use `update_note`, which preserves any
+/// existing document JSON for backward compatibility.
+pub fn update_note_with_document(
+    conn: &Connection,
+    note_id: i64,
+    title: &str,
+    raw_text: &str,
+    document_json: Option<&str>,
+    now: &str,
+) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     let (trashed_at, _) = ordinary_note_state(&tx, note_id)?;
     if trashed_at.is_some() {
@@ -2111,8 +2129,12 @@ pub fn update_note(
         return Err(anyhow::anyhow!("note not found"));
     };
     tx.execute(
-        "UPDATE notes SET title = ?2, raw_text = ?3 WHERE id = ?1",
-        rusqlite::params![note_id, title.trim(), raw_text],
+        "UPDATE notes
+         SET title = ?2,
+             raw_text = ?3,
+             document_json = COALESCE(?4, document_json)
+         WHERE id = ?1",
+        rusqlite::params![note_id, title.trim(), raw_text, document_json],
     )?;
     tx.execute("DELETE FROM embeddings WHERE note_id = ?1", [note_id])?;
     if previous != raw_text {
@@ -2121,6 +2143,70 @@ pub fn update_note(
     crate::sync_journal::journal_note_write(&tx, note_id, now)?;
     tx.commit()?;
     Ok(())
+}
+
+/// Create an ordinary user-authored note directly in the Notes workspace.
+/// It intentionally has no model-generated entries or category: folders are
+/// the user's organization, while raw_text remains the searchable projection
+/// of the rich document.
+pub fn create_document_note(
+    conn: &mut Connection,
+    title: &str,
+    raw_text: &str,
+    document_json: &str,
+    filing_context: &str,
+    requested_folder_id: Option<i64>,
+    now: &str,
+) -> Result<i64> {
+    let filing_context = normalized_filing_context(filing_context)?;
+    let tx = conn.transaction()?;
+    let context_id = context_space_id(&tx, &filing_context)?;
+    if let Some(folder_id) = requested_folder_id {
+        if !folder_is_in_context(&tx, folder_id, &filing_context)? {
+            return Err(anyhow::anyhow!(
+                "note folder must be inside the selected context"
+            ));
+        }
+    }
+
+    tx.execute(
+        "INSERT INTO notes
+           (title, raw_text, document_json, source, category_id, created_at, filing_context)
+         VALUES (?1, ?2, ?3, 'text', NULL, ?4, ?5)",
+        rusqlite::params![title.trim(), raw_text, document_json, now, filing_context],
+    )?;
+    let note_id = tx.last_insert_rowid();
+    let context_label = if filing_context == "work" {
+        "Work"
+    } else {
+        "Personal"
+    };
+    filing_transition(
+        &tx,
+        note_id,
+        Some(context_id),
+        "context",
+        &format!("Created in {context_label} / Inbox."),
+        Some(&filing_context),
+        None,
+        now,
+    )?;
+    if let Some(folder_id) = requested_folder_id {
+        let path = note_folder_path(&tx, folder_id)?;
+        filing_transition(
+            &tx,
+            note_id,
+            Some(folder_id),
+            "manual",
+            &format!("Created in {path}."),
+            Some(&filing_context),
+            None,
+            now,
+        )?;
+    }
+    crate::sync_journal::journal_note_write(&tx, note_id, now)?;
+    tx.commit()?;
+    Ok(note_id)
 }
 
 // ---------------------------------------------------------------------------

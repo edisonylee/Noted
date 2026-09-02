@@ -43,6 +43,7 @@ import type {
   WorkspaceSyncState,
 } from "./MobileShell";
 import "./DesktopMatchedMobile.css";
+import { usePreferredName } from "./usePreferredName";
 
 type PrimaryTab = "home" | "schedule" | "calendar" | "notes";
 type NotesView = "all" | "inbox" | "meetings" | "needsFiling" | "trash";
@@ -173,6 +174,7 @@ function HomeScreen({
   onSync: () => void;
   onConnect: () => void;
 }) {
+  const preferredName = usePreferredName();
   return (
     <section className="dm-screen dm-home">
       <header className="dm-brandbar">
@@ -186,7 +188,7 @@ function HomeScreen({
         <span>San Francisco</span>
       </div>
       <div className="dm-home__body">
-        <h1>Hi Edison</h1>
+        <h1>{preferredName ? `Hi ${preferredName}` : "Welcome"}</h1>
         <form className="dm-capture" onSubmit={(event) => { event.preventDefault(); onCapture(); }}>
           <label htmlFor="dm-capture-input">Capture a note</label>
           <textarea

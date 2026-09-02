@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-APP_BINARY="/Applications/noted.app/Contents/MacOS/tauri-app"
+APP_BINARY="/Applications/noted.app/Contents/MacOS/noted"
 WATCHED_PATHS=(
   src
   src-tauri
@@ -20,7 +20,7 @@ WATCHED_PATHS=(
 
 # A live Tauri development session already hot-reloads frontend changes and
 # rebuilds Rust changes. Do not interrupt it by replacing/relaunching the app.
-if pgrep -f '[t]auri dev|src-tauri/target/debug/tauri-app' >/dev/null 2>&1; then
+if pgrep -f '[t]auri dev|src-tauri/target/debug/(tauri-app|noted)' >/dev/null 2>&1; then
   echo "Tauri dev is running; the installed app update is deferred."
   exit 0
 fi

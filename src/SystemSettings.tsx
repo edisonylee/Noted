@@ -1,7 +1,7 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useState } from "react";
 import { api, type SystemSettings } from "./api";
 import { configureAppTimeZone } from "./day";
-import { readDisplayName, writeDisplayName } from "./personalization";
+import { configurePreferredName } from "./usePreferredName";
 
 const COMMON_TIME_ZONES = [
   ["America/Los_Angeles", "Pacific Time (Los Angeles)"],
@@ -46,9 +46,10 @@ function timeZonePreview(value: string): string {
 export function SystemSettingsPanel() {
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [timeZonePreference, setTimeZonePreference] = useState("system");
-  const [displayName, setDisplayName] = useState(() => readDisplayName());
-  const [displayNameSaved, setDisplayNameSaved] = useState(false);
+  const [preferredName, setPreferredName] = useState("");
   const [saving, setSaving] = useState(false);
+  const [nameSaving, setNameSaving] = useState(false);
+  const [nameSaved, setNameSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -56,6 +57,7 @@ export function SystemSettingsPanel() {
       .then((next) => {
         setSettings(next);
         setTimeZonePreference(next.timeZone);
+        setPreferredName(next.preferredName ?? "");
       })
       .catch((reason) => setError(String(reason)));
   }, []);
@@ -75,45 +77,79 @@ export function SystemSettingsPanel() {
     }
   }
 
-  function savePersonalization(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setDisplayName(writeDisplayName(displayName));
-    setDisplayNameSaved(true);
-    window.setTimeout(() => setDisplayNameSaved(false), 1800);
+  async function savePreferredName() {
+    if (!settings || nameSaving) return;
+    setNameSaving(true);
+    setNameSaved(false);
+    setError(null);
+    try {
+      const next = await api.systemSettingsSet(settings.timeZone, preferredName);
+      setSettings(next);
+      setPreferredName(next.preferredName ?? "");
+      configurePreferredName(next.preferredName);
+      setNameSaved(true);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setNameSaving(false);
+    }
   }
 
   return (
     <>
       <h3>General</h3>
       <p className="settings-sub">
-        Set the calendar day and wall clock Noted uses for schedules, journals, captures,
-        greetings, and connected calendars.
+        Personalize Noted and set the calendar day and wall clock used for schedules,
+        journals, captures, greetings, and connected calendars.
       </p>
 
       <div className="settings-fields system-settings-fields">
         <section className="settings-group">
           <header className="settings-group-head">
             <h4>Personalization</h4>
-            <p>Your name stays on this device. Leave it blank for a neutral greeting.</p>
+            <p>
+              Optionally choose how Noted greets you. This stays in your local settings.
+            </p>
           </header>
-          <form className="settings-inline-form" onSubmit={savePersonalization}>
+          <form
+            className="preferred-name-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void savePreferredName();
+            }}
+          >
             <label className="field">
-              <span className="field-label">Display name</span>
-              <input
-                value={displayName}
-                onChange={(event) => {
-                  setDisplayName(event.target.value);
-                  setDisplayNameSaved(false);
-                }}
-                placeholder="Optional"
-                autoComplete="name"
-                maxLength={80}
-              />
+              <span className="field-label">Preferred name</span>
+              <div className="preferred-name-row">
+                <input
+                  value={preferredName}
+                  onChange={(event) => {
+                    setPreferredName(event.target.value);
+                    setNameSaved(false);
+                  }}
+                  placeholder="What should Noted call you?"
+                  autoComplete="name"
+                  maxLength={80}
+                  disabled={!settings || nameSaving}
+                />
+                <button
+                  className="ghost-btn"
+                  type="submit"
+                  disabled={
+                    !settings ||
+                    nameSaving ||
+                    preferredName.trim() === (settings.preferredName ?? "")
+                  }
+                >
+                  {nameSaving ? "Saving…" : "Save"}
+                </button>
+              </div>
               <span className="field-hint">
-                {displayNameSaved ? "Saved on this device." : "Used only in greetings."}
+                {nameSaved
+                  ? "Preferred name saved."
+                  : "Leave this blank for a neutral greeting."}
               </span>
             </label>
-            <button type="submit" className="ghost-btn">Save name</button>
           </form>
         </section>
         <section className="settings-group">

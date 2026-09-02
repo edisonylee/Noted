@@ -34,7 +34,8 @@ import { DataView } from "./DataView";
 import { isThemeRequest, proposeTheme } from "./themeRequests";
 import { useTheme } from "./useTheme";
 import type { FilingContext } from "./filingContext";
-import { askHeading, readDisplayName } from "./personalization";
+import { usePreferredName } from "./usePreferredName";
+import { askHeading } from "./personalization";
 
 type Msg = {
   role: "user" | "assistant";
@@ -115,6 +116,7 @@ export function AskView({
   onFilingContextChange?: (context: FilingContext) => void;
 }) {
   const { themes, previewTheme, clearPreview, activateTheme } = useTheme();
+  const preferredName = usePreferredName();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [asking, setAsking] = useState(false);
@@ -376,7 +378,7 @@ export function AskView({
   if (messages.length === 0) {
     return (
       <div className="ask-view ask-home">
-        <h1 className="ask-hero">{askHeading(readDisplayName())}</h1>
+        <h1 className="ask-hero">{askHeading(preferredName ?? "")}</h1>
         {composer}
         <div className="ask-recipes">
           <span className="ask-recipes-label">Recipes</span>

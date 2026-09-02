@@ -753,6 +753,7 @@ export type SystemSettings = {
   timeZone: string;
   resolvedTimeZone: string;
   systemTimeZone: string;
+  preferredName: string | null;
 };
 
 export type ReminderSettings = {
@@ -809,8 +810,11 @@ export const api = {
     invoke<AgentContextReceipt[]>("agent_context_receipts"),
   health: () => invoke<Health>("health"),
   systemSettingsGet: () => invoke<SystemSettings>("system_settings_get"),
-  systemSettingsSet: (timeZone: string) =>
-    invoke<SystemSettings>("system_settings_set", { timeZone }),
+  systemSettingsSet: (timeZone: string, preferredName?: string) =>
+    invoke<SystemSettings>("system_settings_set", {
+      timeZone,
+      ...(preferredName === undefined ? {} : { preferredName }),
+    }),
   reminderSettingsGet: () => invoke<ReminderSettings>("reminder_settings_get"),
   reminderSettingsSet: (settings: ReminderSettings) =>
     invoke<ReminderSettings>("reminder_settings_set", { settings }),

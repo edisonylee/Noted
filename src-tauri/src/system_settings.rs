@@ -11,12 +11,15 @@ const FALLBACK_TIME_ZONE: &str = "America/New_York";
 struct StoredSettings {
     #[serde(default = "default_time_zone")]
     time_zone: String,
+    #[serde(default)]
+    preferred_name: Option<String>,
 }
 
 impl Default for StoredSettings {
     fn default() -> Self {
         Self {
             time_zone: default_time_zone(),
+            preferred_name: None,
         }
     }
 }
@@ -27,6 +30,7 @@ pub struct SystemSettings {
     pub time_zone: String,
     pub resolved_time_zone: String,
     pub system_time_zone: String,
+    pub preferred_name: Option<String>,
 }
 
 static SETTINGS: OnceLock<RwLock<StoredSettings>> = OnceLock::new();
@@ -107,7 +111,31 @@ fn snapshot() -> SystemSettings {
         time_zone: stored.time_zone,
         resolved_time_zone: resolved,
         system_time_zone: system,
+        preferred_name: stored.preferred_name,
     }
+}
+
+fn normalize_preferred_name(value: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > 80 {
+        return Err(anyhow!("preferred name must be 80 characters or fewer"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(anyhow!("preferred name cannot contain control characters"));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn persist(dir: &Path, stored: &StoredSettings) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let path = config_path(dir);
+    let tmp = dir.join(format!("{CONFIG_FILE}.tmp"));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(stored)?)?;
+    std::fs::rename(tmp, path)?;
+    Ok(())
 }
 
 /// Load the preference before any database, capture, or calendar work computes
@@ -134,17 +162,19 @@ pub fn time_zone() -> chrono_tz::Tz {
     *time_zone_cell().read().unwrap()
 }
 
-pub fn set_time_zone(dir: &Path, preference: &str) -> Result<SystemSettings> {
+pub fn update(
+    dir: &Path,
+    preference: &str,
+    preferred_name: Option<&str>,
+) -> Result<SystemSettings> {
     let preference = preference.trim();
     let (_, zone) = resolve_time_zone(preference)?;
-    let stored = StoredSettings {
-        time_zone: preference.to_string(),
-    };
-    std::fs::create_dir_all(dir)?;
-    let path = config_path(dir);
-    let tmp = dir.join(format!("{CONFIG_FILE}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&stored)?)?;
-    std::fs::rename(tmp, path)?;
+    let mut stored = settings_cell().read().unwrap().clone();
+    stored.time_zone = preference.to_string();
+    if let Some(preferred_name) = preferred_name {
+        stored.preferred_name = normalize_preferred_name(preferred_name)?;
+    }
+    persist(dir, &stored)?;
     *settings_cell().write().unwrap() = stored;
     *time_zone_cell().write().unwrap() = zone;
     Ok(snapshot())
@@ -170,5 +200,16 @@ mod tests {
             resolve_time_zone("America/Los_Angeles").unwrap().0,
             "America/Los_Angeles"
         );
+    }
+
+    #[test]
+    fn preferred_name_is_trimmed_and_optional() {
+        assert_eq!(
+            normalize_preferred_name("  Chris  ").unwrap().as_deref(),
+            Some("Chris")
+        );
+        assert_eq!(normalize_preferred_name("   ").unwrap(), None);
+        assert!(normalize_preferred_name(&"x".repeat(81)).is_err());
+        assert!(normalize_preferred_name("Chris\nRollet").is_err());
     }
 }

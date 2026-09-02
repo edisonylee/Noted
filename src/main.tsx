@@ -6,6 +6,7 @@ import { RecordPrompt } from "./RecordPrompt";
 import { api, isDesktop } from "./api";
 import { configureAppTimeZone } from "./day";
 import { ThemeProvider } from "./useTheme";
+import { configurePreferredName } from "./usePreferredName";
 import "./App.css";
 
 // The record-prompt popup is a second webview onto the same bundle — it must
@@ -42,6 +43,7 @@ async function start() {
     try {
       const settings = await api.systemSettingsGet();
       configureAppTimeZone(settings.resolvedTimeZone);
+      configurePreferredName(settings.preferredName);
     } catch {
       // Offline phone sessions use the last resolved zone cached by day.ts.
     }

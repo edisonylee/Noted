@@ -89,9 +89,11 @@ async fn system_settings_get() -> Result<system_settings::SystemSettings, String
 async fn system_settings_set(
     app: tauri::AppHandle,
     time_zone: String,
+    preferred_name: Option<String>,
 ) -> Result<system_settings::SystemSettings, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    system_settings::set_time_zone(&dir, &time_zone).map_err(|e| e.to_string())
+    system_settings::update(&dir, &time_zone, preferred_name.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

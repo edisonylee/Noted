@@ -179,6 +179,7 @@ export type NoteRow = {
   id: number;
   title: string;
   raw_text: string;
+  document_json: string | null;
   source: string;
   entries: NoteEntry[];
   event_date: string;
@@ -862,8 +863,27 @@ export const api = {
   kgReindexMeetings: () =>
     invoke<{ meetings: number; mentions: number; name_suggestions: number }>("kg_reindex_meetings"),
   listNotes: () => invoke<NoteRow[]>("list_notes"),
+  createNoteDocument: (
+    title: string,
+    rawText: string,
+    documentJson: string,
+    filingContext: "work" | "personal",
+    folderId?: number | null,
+  ) => invoke<number>("create_note_document", {
+    title,
+    rawText,
+    documentJson,
+    filingContext,
+    folderId,
+  }),
   updateNote: (noteId: number, title: string, rawText: string) =>
     invoke<void>("update_note", { noteId, title, rawText }),
+  updateNoteDocument: (
+    noteId: number,
+    title: string,
+    rawText: string,
+    documentJson: string,
+  ) => invoke<void>("update_note", { noteId, title, rawText, documentJson }),
   noteTrashList: () => invoke<NoteRow[]>("note_trash_list"),
   noteTrash: (noteId: number) => invoke<void>("note_trash", { noteId }),
   noteRestore: (noteId: number) => invoke<void>("note_restore", { noteId }),

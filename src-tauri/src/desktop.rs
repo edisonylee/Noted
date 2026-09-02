@@ -1004,15 +1004,20 @@ async fn update_note(
     note_id: i64,
     title: String,
     raw_text: String,
+    document_json: Option<String>,
 ) -> Result<(), String> {
+    if let Some(document) = document_json.as_deref() {
+        validate_note_document(document)?;
+    }
     let embed_text = {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
-        db::update_note(
+        db::update_note_with_document(
             &conn,
             note_id,
             &title,
             &raw_text,
+            document_json.as_deref(),
             &chrono::Utc::now().to_rfc3339(),
         )
         .map_err(|e| e.to_string())?;
@@ -1024,6 +1029,49 @@ async fn update_note(
         let _ = db::insert_embedding(&conn, note_id, &normalize(v));
     }
     Ok(())
+}
+
+fn validate_note_document(document_json: &str) -> Result<(), String> {
+    let document: Value = serde_json::from_str(document_json)
+        .map_err(|error| format!("invalid note document: {error}"))?;
+    if document.get("type").and_then(Value::as_str) != Some("doc") {
+        return Err("invalid note document: root type must be doc".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn create_note_document(
+    app: tauri::AppHandle,
+    title: String,
+    raw_text: String,
+    document_json: String,
+    filing_context: String,
+    folder_id: Option<i64>,
+) -> Result<i64, String> {
+    validate_note_document(&document_json)?;
+    let note_id = {
+        let state = app.state::<Db>();
+        let mut conn = state.0.lock().unwrap();
+        db::create_document_note(
+            &mut conn,
+            &title,
+            &raw_text,
+            &document_json,
+            &filing_context,
+            folder_id,
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .map_err(|error| error.to_string())?
+    };
+    if !raw_text.trim().is_empty() {
+        if let Ok(vector) = ollama::embed(&raw_text).await {
+            let state = app.state::<Db>();
+            let conn = state.0.lock().unwrap();
+            let _ = db::insert_embedding(&conn, note_id, &normalize(vector));
+        }
+    }
+    Ok(note_id)
 }
 
 #[tauri::command]
@@ -4999,6 +5047,7 @@ pub fn run() {
             save_entry,
             quick_capture,
             list_notes,
+            create_note_document,
             note_trash_list,
             note_trash,
             note_restore,

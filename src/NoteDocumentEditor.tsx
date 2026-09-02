@@ -4,7 +4,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { ArrowLeft, Loader } from "lucide-react";
+import { ArrowLeft, ChevronRight, FileText, Loader } from "lucide-react";
 import { api, type NoteRow } from "./api";
 import { DocumentEditor } from "./editor/DocumentEditor";
 import {
@@ -153,21 +153,11 @@ export function NoteDocumentEditor({
         >
           <ArrowLeft size={17} aria-hidden="true" />
         </button>
-        <div className="note-document-heading">
-          <input
-            className="note-document-title"
-            value={title}
-            onChange={(event) => {
-              titleRef.current = event.target.value;
-              setTitle(event.target.value);
-              markDirty();
-            }}
-            placeholder="Untitled"
-            aria-label="Document title"
-            autoFocus
-          />
-          <div className="note-document-meta">{metadata}</div>
-          {placement}
+        <div className="note-document-breadcrumb" aria-label="Current document">
+          <FileText size={14} aria-hidden="true" />
+          <span>Documents</span>
+          <ChevronRight size={13} aria-hidden="true" />
+          <strong>{title.trim() || "Untitled"}</strong>
         </div>
         <div className="note-document-head-actions">
           <span className={`note-document-save-state ${saveState}`} role="status" aria-live="polite">
@@ -180,19 +170,36 @@ export function NoteDocumentEditor({
         </div>
       </header>
 
-      <section className="note-document-page" aria-label="Document">
-        <DocumentEditor
-          value={document}
-          onChange={(next) => {
-            if (documentFingerprint(next) === documentFingerprint(documentRef.current)) return;
-            documentRef.current = next;
-            setDocument(next);
-            markDirty();
-          }}
-          placeholder="Start writing…"
-          ariaLabel="Document content"
-        />
-      </section>
+      <DocumentEditor
+        value={document}
+        onChange={(next) => {
+          if (documentFingerprint(next) === documentFingerprint(documentRef.current)) return;
+          documentRef.current = next;
+          setDocument(next);
+          markDirty();
+        }}
+        placeholder="Start writing…"
+        ariaLabel="Document content"
+        variant="page"
+        pageHeader={(
+          <header className="note-document-page-head">
+            <div className="note-document-meta">{metadata}</div>
+            <input
+              className="note-document-title"
+              value={title}
+              onChange={(event) => {
+                titleRef.current = event.target.value;
+                setTitle(event.target.value);
+                markDirty();
+              }}
+              placeholder="Untitled"
+              aria-label="Document title"
+              autoFocus
+            />
+            {placement}
+          </header>
+        )}
+      />
       {saveError && <div className="note-document-error" role="alert">{saveError}</div>}
       {children}
     </main>

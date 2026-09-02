@@ -6,17 +6,25 @@ import {
   useEditor,
   type NodeViewProps,
 } from "@tiptap/react";
-import type { JSONContent } from "@tiptap/core";
+import { Extension, type JSONContent } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Image } from "@tiptap/extension-image";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
+import { TextAlign } from "@tiptap/extension-text-align";
+import { TextStyleKit } from "@tiptap/extension-text-style";
 import { Placeholder } from "@tiptap/extensions";
 import {
+  AlignJustify,
+  AlignLeft,
   Bold as BoldIcon,
   Code2,
+  Highlighter,
   ImageOff,
   ImagePlus,
+  IndentDecrease,
+  IndentIncrease,
   Italic as ItalicIcon,
+  Link2,
   List,
   ListTree,
   ListOrdered,
@@ -24,9 +32,12 @@ import {
   Pilcrow,
   Quote,
   Redo2,
+  RemoveFormatting,
   Strikethrough,
   Underline as UnderlineIcon,
+  Unlink2,
   Undo2,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { api } from "../api";
@@ -35,6 +46,56 @@ import { documentFingerprint, type StructuredDocument } from "./document";
 
 const MAX_EDITOR_IMAGE_BYTES = 25 * 1024 * 1024;
 const EDITOR_IMAGE_EXTENSIONS = /\.(avif|gif|heic|heif|jpe?g|png|webp)$/i;
+const MAX_BLOCK_INDENT = 6;
+
+const FONT_FAMILIES = [
+  { label: "Default", value: "" },
+  { label: "Arial", value: "Arial, Helvetica, sans-serif" },
+  { label: "Georgia", value: "Georgia, 'Times New Roman', serif" },
+  { label: "Times", value: "'Times New Roman', Times, serif" },
+  { label: "Mono", value: "'SFMono-Regular', Consolas, 'Liberation Mono', monospace" },
+];
+
+const FONT_SIZES = ["12", "14", "16", "18", "20", "24", "32", "40", "48"];
+
+const BlockIndent = Extension.create({
+  name: "blockIndent",
+  addGlobalAttributes() {
+    return [
+      {
+        types: ["paragraph", "heading"],
+        attributes: {
+          indent: {
+            default: 0,
+            parseHTML: (element) => {
+              const parsed = Number.parseInt(element.getAttribute("data-indent") ?? "0", 10);
+              return Number.isFinite(parsed) ? Math.max(0, Math.min(MAX_BLOCK_INDENT, parsed)) : 0;
+            },
+            renderHTML: (attributes) => {
+              const indent = Number(attributes.indent) || 0;
+              if (!indent) return {};
+              return {
+                "data-indent": String(indent),
+                style: `margin-left: ${indent * 2}em`,
+              };
+            },
+          },
+        },
+      },
+    ];
+  },
+});
+
+function colorInputValue(value: unknown, fallback: string) {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+}
+
+function normalizeLinkHref(value: string) {
+  const href = value.trim();
+  if (!href) return "";
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("/") || href.startsWith("#")) return href;
+  return `https://${href}`;
+}
 
 function StoredImageView({ node, selected }: NodeViewProps) {
   const localPath = typeof node.attrs.localPath === "string" ? node.attrs.localPath : "";
@@ -153,7 +214,10 @@ export function DocumentEditor({
   const disabledRef = useRef(disabled);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const insertImagesRef = useRef<(files: File[], position?: number) => void>(() => {});
+  const linkInputRef = useRef<HTMLInputElement>(null);
   const [toolbarRevision, setToolbarRevision] = useState(0);
+  const [linkEditorOpen, setLinkEditorOpen] = useState(false);
+  const [linkHref, setLinkHref] = useState("");
   const [imageBusy, setImageBusy] = useState(false);
   const [imageDragging, setImageDragging] = useState(false);
   const [imageError, setImageError] = useState<string | null>(null);
@@ -165,7 +229,17 @@ export function DocumentEditor({
       StarterKit.configure({
         heading: { levels: [1, 2, 3] },
         horizontalRule: false,
+        link: {
+          defaultProtocol: "https",
+          enableClickSelection: true,
+          openOnClick: false,
+        },
       }),
+      TextStyleKit,
+      TextAlign.configure({
+        types: ["heading", "paragraph"],
+      }),
+      BlockIndent,
       TaskList.configure({
         HTMLAttributes: { class: "noted-task-list" },
       }),
@@ -292,11 +366,42 @@ export function DocumentEditor({
     return () => window.cancelAnimationFrame(frame);
   }, [autoFocus, editor]);
 
+  useEffect(() => {
+    if (!linkEditorOpen) return;
+    const frame = window.requestAnimationFrame(() => {
+      linkInputRef.current?.focus();
+      linkInputRef.current?.select();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [linkEditorOpen]);
+
+  useEffect(() => {
+    if (!editor || variant !== "page") return;
+    const openWithShortcut = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k" || !editor.isFocused) return;
+      event.preventDefault();
+      setLinkHref(String(editor.getAttributes("link").href ?? ""));
+      setLinkEditorOpen(true);
+    };
+    window.addEventListener("keydown", openWithShortcut);
+    return () => window.removeEventListener("keydown", openWithShortcut);
+  }, [editor, variant]);
+
   // Selection changes update this counter so active marks and undo availability
   // stay accurate without making the document value itself a toolbar concern.
   void toolbarRevision;
   const canUndo = editor?.can().undo() ?? false;
   const canRedo = editor?.can().redo() ?? false;
+  const textStyleAttributes = editor?.getAttributes("textStyle") ?? {};
+  const activeBlockType = editor?.isActive("heading") ? "heading" : "paragraph";
+  const activeBlockAttributes = editor?.getAttributes(activeBlockType) ?? {};
+  const currentIndent = Number(activeBlockAttributes.indent) || 0;
+  const currentFontFamily = typeof textStyleAttributes.fontFamily === "string" ? textStyleAttributes.fontFamily : "";
+  const currentFontSize = typeof textStyleAttributes.fontSize === "string" ? textStyleAttributes.fontSize : "";
+  const currentLineHeight = typeof textStyleAttributes.lineHeight === "string" ? textStyleAttributes.lineHeight : "";
+  const currentTextColor = colorInputValue(textStyleAttributes.color, "#1b1916");
+  const currentHighlightColor = colorInputValue(textStyleAttributes.backgroundColor, "#fff0a8");
+  const currentTextAlign = typeof activeBlockAttributes.textAlign === "string" ? activeBlockAttributes.textAlign : "left";
 
   let textStyle = "paragraph";
   if (editor?.isActive("heading", { level: 1 })) textStyle = "heading-1";
@@ -323,23 +428,93 @@ export function DocumentEditor({
     else editor.chain().focus().setParagraph().run();
   }
 
+  function changeIndent(direction: -1 | 1) {
+    if (!editor) return;
+    if (editor.isActive("taskItem")) {
+      if (direction > 0) editor.chain().focus().sinkListItem("taskItem").run();
+      else editor.chain().focus().liftListItem("taskItem").run();
+      return;
+    }
+    if (editor.isActive("listItem")) {
+      if (direction > 0) editor.chain().focus().sinkListItem("listItem").run();
+      else editor.chain().focus().liftListItem("listItem").run();
+      return;
+    }
+    const nextIndent = Math.max(0, Math.min(MAX_BLOCK_INDENT, currentIndent + direction));
+    editor.chain().focus().updateAttributes(activeBlockType, { indent: nextIndent }).run();
+  }
+
+  function openLinkEditor() {
+    if (!editor) return;
+    setLinkHref(String(editor.getAttributes("link").href ?? ""));
+    setLinkEditorOpen(true);
+  }
+
+  function applyLink() {
+    if (!editor) return;
+    const href = normalizeLinkHref(linkHref);
+    if (href) editor.chain().focus().extendMarkRange("link").setLink({ href }).run();
+    else editor.chain().focus().extendMarkRange("link").unsetLink().run();
+    setLinkEditorOpen(false);
+  }
+
+  function removeLink() {
+    editor?.chain().focus().extendMarkRange("link").unsetLink().run();
+    setLinkEditorOpen(false);
+  }
+
   const toolbar = (
     <div className="document-editor-toolbar" role="toolbar" aria-label="Text formatting">
       {variant === "page" ? (
-        <label className="document-editor-style">
-          <span className="sr-only">Text style</span>
-          <select
-            aria-label="Text style"
-            value={textStyle}
-            disabled={!editor || disabled}
-            onChange={(event) => setTextStyle(event.target.value)}
-          >
-            <option value="paragraph">Text</option>
-            <option value="heading-1">Heading 1</option>
-            <option value="heading-2">Heading 2</option>
-            <option value="heading-3">Heading 3</option>
-          </select>
-        </label>
+        <div className="document-editor-type-controls">
+          <label className="document-editor-select text-style">
+            <span className="sr-only">Text style</span>
+            <select
+              aria-label="Text style"
+              value={textStyle}
+              disabled={!editor || disabled}
+              onChange={(event) => setTextStyle(event.target.value)}
+            >
+              <option value="paragraph">Text</option>
+              <option value="heading-1">Heading 1</option>
+              <option value="heading-2">Heading 2</option>
+              <option value="heading-3">Heading 3</option>
+            </select>
+          </label>
+          <label className="document-editor-select font-family">
+            <span className="sr-only">Font family</span>
+            <select
+              aria-label="Font family"
+              value={currentFontFamily}
+              disabled={!editor || disabled}
+              onChange={(event) => {
+                const family = event.target.value;
+                if (family) editor?.chain().focus().setFontFamily(family).run();
+                else editor?.chain().focus().unsetFontFamily().run();
+              }}
+            >
+              {FONT_FAMILIES.map((family) => (
+                <option key={family.label} value={family.value}>{family.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="document-editor-select font-size">
+            <span className="sr-only">Font size</span>
+            <select
+              aria-label="Font size"
+              value={currentFontSize}
+              disabled={!editor || disabled}
+              onChange={(event) => {
+                const size = event.target.value;
+                if (size) editor?.chain().focus().setFontSize(size).run();
+                else editor?.chain().focus().unsetFontSize().run();
+              }}
+            >
+              <option value="">Size</option>
+              {FONT_SIZES.map((size) => <option key={size} value={`${size}px`}>{size}</option>)}
+            </select>
+          </label>
+        </div>
       ) : (
         <>
           <EditorButton
@@ -384,7 +559,92 @@ export function DocumentEditor({
         shortcut="⌘⇧S"
         onClick={() => editor?.chain().focus().toggleStrike().run()}
       />
+      {variant === "page" && (
+        <>
+          <label className="document-editor-color" title="Text color">
+            <span className="document-editor-color-letter" aria-hidden="true">A</span>
+            <i style={{ backgroundColor: currentTextColor }} aria-hidden="true" />
+            <input
+              type="color"
+              value={currentTextColor}
+              disabled={!editor || disabled}
+              aria-label="Text color"
+              onChange={(event) => editor?.chain().focus().setColor(event.target.value).run()}
+            />
+          </label>
+          <label className="document-editor-color" title="Highlight color">
+            <Highlighter size={15} strokeWidth={1.9} aria-hidden="true" />
+            <i style={{ backgroundColor: currentHighlightColor }} aria-hidden="true" />
+            <input
+              type="color"
+              value={currentHighlightColor}
+              disabled={!editor || disabled}
+              aria-label="Highlight color"
+              onChange={(event) => editor?.chain().focus().setBackgroundColor(event.target.value).run()}
+            />
+          </label>
+          <EditorButton
+            label="Add or edit link"
+            icon={Link2}
+            active={editor?.isActive("link") || linkEditorOpen}
+            disabled={!editor || disabled}
+            shortcut="⌘K"
+            onClick={openLinkEditor}
+          />
+        </>
+      )}
       <span className="document-editor-divider" aria-hidden="true" />
+      {variant === "page" && (
+        <>
+          <label className="document-editor-select alignment">
+            <span className="sr-only">Text alignment</span>
+            {currentTextAlign === "justify" ? <AlignJustify size={14} aria-hidden="true" /> : <AlignLeft size={14} aria-hidden="true" />}
+            <select
+              aria-label="Text alignment"
+              value={currentTextAlign}
+              disabled={!editor || disabled}
+              onChange={(event) => editor?.chain().focus().setTextAlign(event.target.value).run()}
+            >
+              <option value="left">Left</option>
+              <option value="center">Center</option>
+              <option value="right">Right</option>
+              <option value="justify">Justify</option>
+            </select>
+          </label>
+          <label className="document-editor-select line-height">
+            <span className="sr-only">Line spacing</span>
+            <select
+              aria-label="Line spacing"
+              value={currentLineHeight}
+              disabled={!editor || disabled}
+              onChange={(event) => {
+                const height = event.target.value;
+                if (height) editor?.chain().focus().setLineHeight(height).run();
+                else editor?.chain().focus().unsetLineHeight().run();
+              }}
+            >
+              <option value="">Spacing</option>
+              <option value="1">1.0</option>
+              <option value="1.15">1.15</option>
+              <option value="1.5">1.5</option>
+              <option value="2">2.0</option>
+            </select>
+          </label>
+          <EditorButton
+            label="Decrease indent"
+            icon={IndentDecrease}
+            disabled={!editor || disabled || (!editor.isActive("listItem") && !editor.isActive("taskItem") && currentIndent === 0)}
+            onClick={() => changeIndent(-1)}
+          />
+          <EditorButton
+            label="Increase indent"
+            icon={IndentIncrease}
+            disabled={!editor || disabled || (!editor.isActive("listItem") && !editor.isActive("taskItem") && currentIndent >= MAX_BLOCK_INDENT)}
+            onClick={() => changeIndent(1)}
+          />
+          <span className="document-editor-divider" aria-hidden="true" />
+        </>
+      )}
       <EditorButton
         label="Checklist"
         icon={ListTodo}
@@ -424,6 +684,12 @@ export function DocumentEditor({
             disabled={!editor || disabled}
             onClick={() => editor?.chain().focus().toggleCodeBlock().run()}
           />
+          <EditorButton
+            label="Clear formatting"
+            icon={RemoveFormatting}
+            disabled={!editor || disabled}
+            onClick={() => editor?.chain().focus().unsetAllMarks().unsetTextAlign().updateAttributes(activeBlockType, { indent: 0 }).run()}
+          />
         </>
       )}
       <EditorButton
@@ -447,6 +713,53 @@ export function DocumentEditor({
         shortcut="⌘⇧Z"
         onClick={() => editor?.chain().focus().redo().run()}
       />
+      {variant === "page" && linkEditorOpen && (
+        <form
+          className="document-editor-link-row"
+          onSubmit={(event) => {
+            event.preventDefault();
+            applyLink();
+          }}
+        >
+          <Link2 size={14} aria-hidden="true" />
+          <label htmlFor="document-editor-link">Link</label>
+          <input
+            id="document-editor-link"
+            ref={linkInputRef}
+            value={linkHref}
+            inputMode="url"
+            placeholder="https://example.com"
+            aria-label="Link address"
+            onChange={(event) => setLinkHref(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setLinkEditorOpen(false);
+                editor?.commands.focus();
+              }
+            }}
+          />
+          <button type="submit" className="document-editor-link-apply">Apply</button>
+          {editor?.isActive("link") && (
+            <button type="button" onClick={removeLink}>
+              <Unlink2 size={14} aria-hidden="true" />
+              <span>Remove</span>
+            </button>
+          )}
+          <button
+            type="button"
+            className="document-editor-link-close"
+            aria-label="Close link editor"
+            title="Close"
+            onClick={() => {
+              setLinkEditorOpen(false);
+              editor?.commands.focus();
+            }}
+          >
+            <X size={14} aria-hidden="true" />
+          </button>
+        </form>
+      )}
     </div>
   );
 

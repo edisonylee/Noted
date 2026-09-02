@@ -180,7 +180,6 @@ export function DocumentEditor({
       StoredImage,
       Placeholder.configure({
         placeholder,
-        includeChildren: true,
         showOnlyCurrent: true,
       }),
     ],

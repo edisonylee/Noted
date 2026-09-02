@@ -1319,8 +1319,7 @@ textarea.json.bad { border-color: var(--bad); }
   border-radius: var(--r-md); font-size: 12px;
 }
 .noted-editor-image-placeholder.failed { color: var(--error-ink); }
-.noted-document-content :is(p, h1, h2, h3).is-editor-empty:first-child::before,
-.noted-document-content :is(p, h1, h2, h3).is-empty::before {
+.noted-document-content :is(p, h1, h2, h3).is-editor-empty:first-child::before {
   content: attr(data-placeholder); float: left; height: 0; color: var(--faint); pointer-events: none;
 }
 .noted-document-content ::selection { background: var(--accent-tint); }

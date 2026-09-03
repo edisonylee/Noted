@@ -887,7 +887,9 @@ export default function App() {
             ? " calmode"
             : view === "journal"
               ? " journalmode"
-              : "")
+              : view === "knowledge"
+                ? " graphmode"
+                : "")
       }
     >
       {reconnectingOverlay}
@@ -1390,6 +1392,11 @@ export default function App() {
                       <input
                         className="entity-name"
                         value={e.name}
+                        // Grow with the name being typed. `size` rather than CSS
+                        // field-sizing, which the WebKit view cannot be relied on
+                        // to support; max-width keeps a long name from pushing
+                        // the chip's type and remove controls off the row.
+                        size={Math.min(22, Math.max(5, e.name.length + 1))}
                         onChange={(ev) => updateEntity(i, { name: ev.target.value })}
                         spellCheck={false}
                       />

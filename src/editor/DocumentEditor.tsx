@@ -14,8 +14,6 @@ import { TextAlign } from "@tiptap/extension-text-align";
 import { TextStyleKit } from "@tiptap/extension-text-style";
 import { Placeholder } from "@tiptap/extensions";
 import {
-  AlignJustify,
-  AlignLeft,
   Bold as BoldIcon,
   Code2,
   Highlighter,
@@ -27,6 +25,7 @@ import {
   Link2,
   List,
   ListTree,
+  MoreHorizontal,
   ListOrdered,
   ListTodo,
   Pilcrow,
@@ -185,7 +184,15 @@ function EditorButton({ label, icon: Icon, active, disabled = false, onClick, sh
   );
 }
 
+/**
+ * One jump target in the outline.
+ *
+ * Checklist items count: plenty of documents here are structured entirely by
+ * their checkboxes and carry no headings at all, and an outline that ignores
+ * them is a column of dead space next to a document that clearly has structure.
+ */
 type DocumentHeading = {
+  kind: "heading" | "task";
   level: number;
   position: number;
   text: string;
@@ -217,6 +224,9 @@ export function DocumentEditor({
   const linkInputRef = useRef<HTMLInputElement>(null);
   const [toolbarRevision, setToolbarRevision] = useState(0);
   const [linkEditorOpen, setLinkEditorOpen] = useState(false);
+  // Colour and block controls live behind this rather than on the main bar:
+  // fourteen always-visible controls made the common ones harder to find.
+  const [moreOpen, setMoreOpen] = useState(false);
   const [linkHref, setLinkHref] = useState("");
   const [imageBusy, setImageBusy] = useState(false);
   const [imageDragging, setImageDragging] = useState(false);
@@ -410,15 +420,34 @@ export function DocumentEditor({
 
   const headings: DocumentHeading[] = [];
   editor?.state.doc.descendants((node, position) => {
-    if (node.type.name !== "heading") return;
-    const text = node.textContent.trim();
+    const isHeading = node.type.name === "heading";
+    const isTask = node.type.name === "taskItem";
+    if (!isHeading && !isTask) return;
+    // A task's textContent includes its nested paragraphs; the first line is
+    // the item itself and is what the reader is scanning for.
+    const text = (isTask ? node.textContent.split("\n")[0] : node.textContent).trim();
     if (!text) return;
     headings.push({
-      level: Number(node.attrs.level) || 1,
+      kind: isHeading ? "heading" : "task",
+      level: isHeading ? Number(node.attrs.level) || 1 : 1,
       position,
       text,
     });
   });
+
+  // Words and reading time. Journal already shows a live word count; a document
+  // editor is the place it is most expected, and it was the one view without it.
+  // It lives in the toolbar rather than under the page: the page card is taller
+  // than the viewport, so a footer there is below the fold and never seen.
+  const words = editor?.state.doc.textBetween(0, editor.state.doc.content.size, " ", " ").trim();
+  const wordCount = words ? words.split(/\s+/).length : 0;
+  const stats =
+    variant === "page" ? (
+      <p className="document-editor-stats" aria-live="off">
+        {wordCount === 1 ? "1 word" : `${wordCount.toLocaleString()} words`}
+        {wordCount >= 200 && ` · ${Math.max(1, Math.round(wordCount / 220))} min read`}
+      </p>
+    ) : null;
 
   function setTextStyle(style: string) {
     if (!editor) return;
@@ -561,28 +590,6 @@ export function DocumentEditor({
       />
       {variant === "page" && (
         <>
-          <label className="document-editor-color" title="Text color">
-            <span className="document-editor-color-letter" aria-hidden="true">A</span>
-            <i style={{ backgroundColor: currentTextColor }} aria-hidden="true" />
-            <input
-              type="color"
-              value={currentTextColor}
-              disabled={!editor || disabled}
-              aria-label="Text color"
-              onChange={(event) => editor?.chain().focus().setColor(event.target.value).run()}
-            />
-          </label>
-          <label className="document-editor-color" title="Highlight color">
-            <Highlighter size={15} strokeWidth={1.9} aria-hidden="true" />
-            <i style={{ backgroundColor: currentHighlightColor }} aria-hidden="true" />
-            <input
-              type="color"
-              value={currentHighlightColor}
-              disabled={!editor || disabled}
-              aria-label="Highlight color"
-              onChange={(event) => editor?.chain().focus().setBackgroundColor(event.target.value).run()}
-            />
-          </label>
           <EditorButton
             label="Add or edit link"
             icon={Link2}
@@ -596,9 +603,10 @@ export function DocumentEditor({
       <span className="document-editor-divider" aria-hidden="true" />
       {variant === "page" && (
         <>
+          {/* No leading icon here: the select already names the alignment, and
+              80px cannot fit an icon plus "Justify" — the two collided. */}
           <label className="document-editor-select alignment">
             <span className="sr-only">Text alignment</span>
-            {currentTextAlign === "justify" ? <AlignJustify size={14} aria-hidden="true" /> : <AlignLeft size={14} aria-hidden="true" />}
             <select
               aria-label="Text alignment"
               value={currentTextAlign}
@@ -671,6 +679,62 @@ export function DocumentEditor({
       {variant === "page" && (
         <>
           <EditorButton
+            label="More formatting"
+            icon={MoreHorizontal}
+            active={moreOpen}
+            disabled={!editor || disabled}
+            onClick={() => setMoreOpen((open) => !open)}
+          />
+        </>
+      )}
+      <EditorButton
+        label="Add image"
+        icon={ImagePlus}
+        disabled={!editor || disabled || imageBusy}
+        onClick={() => imageInputRef.current?.click()}
+      />
+      <span className="document-editor-spacer" />
+      {stats}
+      <EditorButton
+        label="Undo"
+        icon={Undo2}
+        disabled={!editor || disabled || !canUndo}
+        shortcut="⌘Z"
+        onClick={() => editor?.chain().focus().undo().run()}
+      />
+      <EditorButton
+        label="Redo"
+        icon={Redo2}
+        disabled={!editor || disabled || !canRedo}
+        shortcut="⌘⇧Z"
+        onClick={() => editor?.chain().focus().redo().run()}
+      />
+      {variant === "page" && moreOpen && (
+        <div className="document-editor-more-row" role="group" aria-label="More formatting">
+          <label className="document-editor-color" title="Text color">
+            <span className="document-editor-color-letter" aria-hidden="true">A</span>
+            <i style={{ backgroundColor: currentTextColor }} aria-hidden="true" />
+            <input
+              type="color"
+              value={currentTextColor}
+              disabled={!editor || disabled}
+              aria-label="Text color"
+              onChange={(event) => editor?.chain().focus().setColor(event.target.value).run()}
+            />
+          </label>
+          <label className="document-editor-color" title="Highlight color">
+            <Highlighter size={15} strokeWidth={1.9} aria-hidden="true" />
+            <i style={{ backgroundColor: currentHighlightColor }} aria-hidden="true" />
+            <input
+              type="color"
+              value={currentHighlightColor}
+              disabled={!editor || disabled}
+              aria-label="Highlight color"
+              onChange={(event) => editor?.chain().focus().setBackgroundColor(event.target.value).run()}
+            />
+          </label>
+          <span className="document-editor-divider" aria-hidden="true" />
+          <EditorButton
             label="Quote"
             icon={Quote}
             active={editor?.isActive("blockquote")}
@@ -690,29 +754,8 @@ export function DocumentEditor({
             disabled={!editor || disabled}
             onClick={() => editor?.chain().focus().unsetAllMarks().unsetTextAlign().updateAttributes(activeBlockType, { indent: 0 }).run()}
           />
-        </>
+        </div>
       )}
-      <EditorButton
-        label="Add image"
-        icon={ImagePlus}
-        disabled={!editor || disabled || imageBusy}
-        onClick={() => imageInputRef.current?.click()}
-      />
-      <span className="document-editor-spacer" />
-      <EditorButton
-        label="Undo"
-        icon={Undo2}
-        disabled={!editor || disabled || !canUndo}
-        shortcut="⌘Z"
-        onClick={() => editor?.chain().focus().undo().run()}
-      />
-      <EditorButton
-        label="Redo"
-        icon={Redo2}
-        disabled={!editor || disabled || !canRedo}
-        shortcut="⌘⇧Z"
-        onClick={() => editor?.chain().focus().redo().run()}
-      />
       {variant === "page" && linkEditorOpen && (
         <form
           className="document-editor-link-row"
@@ -782,18 +825,22 @@ export function DocumentEditor({
       {variant === "page" ? (
         <div className="document-editor-stage">
           <div className="document-editor-stage-inner">
+            {/* No outline column for a document with no structure yet: a
+                permanent "headings will appear here" placeholder is a column of
+                nothing. The grid keeps the page centred either way. */}
+            {headings.length > 0 && (
             <aside className="document-editor-outline" aria-label="Document outline">
               <div className="document-editor-outline-label">
                 <ListTree size={14} aria-hidden="true" />
                 <span>Outline</span>
               </div>
-              {headings.length ? (
+              {(
                 <nav>
                   {headings.map((heading, index) => (
                     <button
                       key={`${heading.position}-${index}`}
                       type="button"
-                      className={`level-${heading.level}`}
+                      className={heading.kind === "task" ? "task" : `level-${heading.level}`}
                       title={heading.text}
                       onClick={() => {
                         editor?.chain().focus().setTextSelection(heading.position + 1).scrollIntoView().run();
@@ -803,14 +850,27 @@ export function DocumentEditor({
                     </button>
                   ))}
                 </nav>
-              ) : (
-                <p>Headings will appear here.</p>
               )}
             </aside>
+            )}
             <section className="document-editor-page" aria-label="Document page">
               {pageHeader}
               {canvas}
               {imageStatus}
+              {/* The page is taller than its content, and that gap used to be
+                  inert — you had to aim at the last line to keep writing. Clicking
+                  anywhere below now continues the document, as in every other
+                  page-style editor. mousedown (not click) so the caret lands
+                  before the browser starts its own selection. */}
+              <div
+                className="document-editor-page-tail"
+                aria-hidden="true"
+                onMouseDown={(event) => {
+                  if (disabled) return;
+                  event.preventDefault();
+                  editor?.chain().focus("end").run();
+                }}
+              />
             </section>
             <div className="document-editor-balance" aria-hidden="true" />
           </div>

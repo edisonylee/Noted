@@ -692,10 +692,15 @@ textarea.json.bad { border-color: var(--bad); }
   background: var(--surface-2); border: var(--border-width, 1px) solid var(--line); border-radius: 99px;
   padding: 3px 4px 3px 10px;
 }
-.entity-name {
-  background: none; border: none; outline: none; color: var(--ink);
-  font-size: 13px; font-weight: 500; width: 9ch; min-width: 5ch;
+/* Scoped to the chip: `.entity-name` is also a heading on the entity page and
+   in Self, and an unscoped 9ch width shrank those headings to a nine-character
+   column. The input still sizes to the chip, but can no longer clip a name the
+   user is in the middle of typing. */
+.entity-chip .entity-name {
+  background: none; border: none; color: var(--ink);
+  font-size: 13px; font-weight: 500; max-width: 22ch;
 }
+.entity-chip .entity-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 3px; }
 .entity-type {
   background: none; border: none; outline: none; color: var(--accent);
   font-size: 11.5px; cursor: pointer;
@@ -1212,11 +1217,11 @@ textarea.json.bad { border-color: var(--bad); }
   color: var(--ink-soft); background: transparent; border: 0; border-radius: 6px;
   font: inherit; font-size: 12px; font-weight: 570;
 }
-.document-editor-select.text-style select { width: 104px; }
-.document-editor-select.font-family select { width: 96px; }
-.document-editor-select.font-size select { width: 63px; }
-.document-editor-select.alignment select { width: 80px; padding-left: 26px; }
-.document-editor-select.line-height select { width: 78px; }
+.document-editor-select.text-style select { min-width: 104px; }
+.document-editor-select.font-family select { min-width: 96px; }
+.document-editor-select.font-size select { min-width: 63px; }
+.document-editor-select.alignment select { min-width: 88px; }
+.document-editor-select.line-height select { min-width: 78px; }
 .document-editor-select > svg { position: absolute; z-index: 1; left: 8px; color: var(--muted); pointer-events: none; }
 .document-editor-select select:hover:not(:disabled) { background: var(--hover-soft); color: var(--ink); }
 .document-editor-select select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -1354,6 +1359,14 @@ textarea.json.bad { border-color: var(--bad); }
   background: var(--surface); border-top: var(--border-width, 1px) solid var(--line);
   border-bottom: var(--border-width, 1px) solid var(--line);
 }
+/* Overflow formatting, using the same expanding-row idiom as the link editor
+   rather than a floating popover — no positioning or click-outside to get
+   wrong, and it reads as part of the toolbar. */
+.document-editor-more-row {
+  display: flex; flex: 1 0 100%; align-items: center; gap: 4px; min-width: 0; min-height: 39px;
+  margin: 5px -2px -4px; padding: 6px 4px 0; border-top: var(--border-width, 1px) solid var(--line);
+}
+
 .document-editor-link-row {
   display: flex; flex: 1 0 100%; align-items: center; gap: 7px; min-width: 0; min-height: 39px;
   margin: 5px -2px -4px; padding: 6px 4px 0; border-top: var(--border-width, 1px) solid var(--line);
@@ -1403,15 +1416,27 @@ textarea.json.bad { border-color: var(--bad); }
 }
 .document-editor-outline button.level-2 { padding-left: 17px; }
 .document-editor-outline button.level-3 { padding-left: 27px; color: var(--faint); }
+/* Checklist items read as a peer of a heading, marked so the two are still
+   distinguishable at a glance. */
+.document-editor-outline button.task { padding-left: 17px; color: var(--faint); }
+.document-editor-outline button.task::before { content: "◦"; margin-right: 6px; color: var(--muted); }
 .document-editor-outline button:hover { color: var(--ink); background: var(--hover-soft); }
 .document-editor-outline button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .document-editor-outline p { margin: 0; padding-right: 5px; color: var(--faint); font-size: 11px; line-height: 1.45; }
 .document-editor-page {
   grid-column: 2; min-height: 980px; overflow: hidden;
+  display: flex; flex-direction: column;
   background: var(--surface); border: var(--border-width, 1px) solid var(--line); border-radius: 2px;
   box-shadow: 0 2px 5px rgba(27, 25, 22, 0.045);
 }
 .document-editor-balance { grid-column: 3; }
+/* Fills whatever page height the content leaves, so the whole card continues
+   the document on click rather than only the last line. */
+.document-editor-page-tail { flex: 1 1 auto; min-height: 120px; cursor: text; }
+.document-editor-stats {
+  flex: none; margin: 0 4px 0 0; color: var(--faint);
+  font-size: 11.5px; white-space: nowrap; user-select: none;
+}
 .document-editor.page .document-editor-canvas { flex: none; min-height: 650px; overflow: visible; }
 .document-editor.page .noted-document-content {
   width: 100%; min-height: 650px; padding: 28px 54px 110px;
@@ -2275,17 +2300,31 @@ a.today-allday-event:focus-visible { outline: 2px solid var(--accent); outline-o
 .people-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; }
 
 /* ── Knowledge search + per-entity page ───────────────────────────────────── */
-.kn-search { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; }
+/* One height for every control in the row: the input's padding-derived height
+   and the select's did not agree, so they sat visibly out of line. */
+.kn-search { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; --kn-field-h: 38px; }
 .kn-search-icon { color: var(--faint); flex-shrink: 0; }
 .kn-search input {
-  flex: 1; min-width: 0; font: inherit; font-size: 14px; color: var(--ink);
-  background: var(--surface-2); border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm); padding: 9px 12px;
+  flex: 1; min-width: 0; height: var(--kn-field-h); font: inherit; font-size: 14px; color: var(--ink);
+  background: var(--surface-2); border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm); padding: 0 12px;
 }
 .kn-search input:focus { outline: none; border-color: var(--accent); }
-.kn-search select {
-  background: var(--surface-2); border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm);
-  color: var(--muted); font-size: 12.5px; padding: 8px 8px; outline: none; cursor: pointer;
+/* The chrome sits on the label so the corners actually round: a native select
+   paints its own background and ignores border-radius. The chevron is a real
+   icon rather than a background image, so it follows the active theme's colour
+   instead of being baked into a data URI. */
+.kn-select {
+  position: relative; display: inline-flex; align-items: center; flex: none;
+  height: var(--kn-field-h); background: var(--surface-2);
+  border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm);
 }
+.kn-select select {
+  appearance: none; -webkit-appearance: none;
+  height: 100%; border: 0; background: transparent; color: var(--muted);
+  font: inherit; font-size: 13px; padding: 0 26px 0 10px; outline: none; cursor: pointer;
+}
+.kn-select > svg { position: absolute; right: 8px; color: var(--faint); pointer-events: none; }
+.kn-select:focus-within { border-color: var(--accent); }
 .kn-results { display: flex; flex-direction: column; gap: 2px; }
 .kn-result {
   display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
@@ -3853,7 +3892,14 @@ a.cal-btn { text-decoration: none; }
 }
 .side-nav button:hover { color: var(--ink); background: var(--hover-soft); }
 .side-nav button.on { background: var(--hover-soft); color: var(--ink); font-weight: 570; }
-.side-foot { display: flex; gap: 4px; padding: 8px 8px 0; border-top: var(--border-width, 1px) solid var(--line); }
+/* Centred so the row sits under the record pill above it, which is itself
+   centred within the same 8px inset. Left-aligned, the group's centre landed
+   well left of the pill's and read as misaligned. Centring also keeps it
+   balanced when the iPhone button is absent from a release profile. */
+.side-foot {
+  display: flex; justify-content: center; gap: 4px; padding: 8px 8px 0;
+  border-top: var(--border-width, 1px) solid var(--line);
+}
 .sidebar .rec-pill { margin: 0 8px 10px; justify-content: center; }
 .main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 100vh; }
 .app.calmode .main-col, .app.journalmode .main-col { min-height: 0; height: 100%; }
@@ -4431,10 +4477,17 @@ a.cal-btn { text-decoration: none; }
 .note-filed-placement button:hover:not(:disabled) { background: var(--hover-soft); }
 .note-filed-placement.smart strong,
 .note-filed-placement.unfiled strong { color: var(--muted); }
+/* Matches the document toolbar's selects, which sit directly below it: same
+   height, type and colour, so the header and the toolbar read as one system.
+   The border stays — unlike the toolbar's, this control sits alone in a header
+   and needs the affordance. */
 .note-file-select select {
-  max-width: 190px; border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm);
-  padding: 6px 27px 6px 9px; background: var(--surface-2); color: var(--muted); font: inherit; font-size: 12px;
+  max-width: 190px; height: 30px; border: var(--border-width, 1px) solid var(--line);
+  border-radius: var(--r-sm); padding: 0 27px 0 9px; background: var(--surface-2);
+  color: var(--ink-soft); font: inherit; font-size: 12px; font-weight: 570;
 }
+.note-file-select select:hover:not(:disabled) { color: var(--ink); background: var(--hover-soft); }
+.note-file-select select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .note-filing-message { align-self: flex-end; margin-top: -12px; color: var(--muted); font-size: 11.5px; }
 .note-detail-controls { display: flex; align-items: center; gap: 6px; }
 .note-edit-trigger {
@@ -4822,8 +4875,18 @@ body.vibrant .app.homemode .main-col {
 }
 .kn-graph-search input { border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; font-size: 13px; width: 130px; }
 .kn-graph-msg { margin-top: -2px; }
+/* Full-height canvas, following the calmode/journalmode pattern rather than
+   guessing at the chrome above it: `100vh - 240px` made the container taller
+   than the space it actually had, pushing the legend below the fold. The floor
+   keeps the canvas usable if an ancestor ever loses its height. */
+.app.graphmode { height: 100%; }
+.app.graphmode .content { padding-bottom: 14px; min-height: 0; }
+.app.graphmode .knowledge { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+/* A flex column stretches its children, which blew the pill group out to the
+   full width. Only the canvas should stretch. */
+.app.graphmode .kn-tabs { align-self: flex-start; }
 .kn-graph {
-  flex: 1; position: relative; min-height: calc(100vh - 240px);
+  flex: 1; position: relative; min-height: 320px;
   border: var(--border-width, 1px) solid var(--line);
   border-radius: var(--r-lg); overflow: hidden; background: var(--canvas);
 }

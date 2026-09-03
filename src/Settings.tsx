@@ -3,7 +3,7 @@ import { appDataDir, join } from "@tauri-apps/api/path";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { X, Check, ChevronDown, ChevronUp, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, CalendarDays, Download, Mic, AudioLines, Plus, RefreshCw, Trash2, FolderPlus, FolderOpen, Laptop, Gauge, Cloud, KeyRound, Palette, Boxes, BookType, MessageCircle, Bot, Copy, ShieldCheck, BellRing, Settings2 } from "lucide-react";
-import { api, isDesktop, type AgentAccessStatus, type AgentClientSetup, type AgentContextReceipt, type BrainVaultStatus, type ByokConfig, type CloudProvider, type GcalStatus, type MeetingFilingBackfillPreview, type MeetingFilingRule, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type NoteFolderInfo, type ProviderId, type ProviderMode, type ProviderSettings, type ReminderSettings } from "./api";
+import { api, isDesktop, type AppleCalStatus, type AgentAccessStatus, type AgentClientSetup, type AgentContextReceipt, type BrainVaultStatus, type ByokConfig, type CloudProvider, type GcalStatus, type MeetingFilingBackfillPreview, type MeetingFilingRule, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type NoteFolderInfo, type ProviderId, type ProviderMode, type ProviderSettings, type ReminderSettings } from "./api";
 import { ThemesSettings } from "./ThemesSettings";
 import { TranscriptVocabularySettings } from "./TranscriptVocabularySettings";
 import { releaseProfile } from "./releaseProfile";
@@ -45,6 +45,96 @@ type SettingsSectionEntry = {
 // Storage, embeddings, chat, meetings, and Brain Vault stay local.
 // Rendered two ways: `page` (desktop — a real Settings view with a section
 // nav) or as the compact modal (mobile).
+/**
+ * Apple Calendar: read-only, local, no account to connect.
+ *
+ * The only actions are granting macOS access and choosing which calendars show,
+ * so this deliberately has none of the account/sync machinery the Google panel
+ * needs — there is nothing to authenticate and nothing to push.
+ */
+/**
+ * Apple Calendar: read-only, local, no account to connect.
+ *
+ * This panel owns **access** only. Which calendars are visible is a filtering
+ * concern and lives with Google's filters in the Calendar view, so the same
+ * switch is never offered in two places.
+ */
+function AppleCalendarSettings() {
+  const [status, setStatus] = useState<AppleCalStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    api
+      .applecalStatus()
+      .then((s) => live && setStatus(s))
+      .catch((e) => live && setError(String(e)));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  // Not macOS: the whole panel is meaningless, so show nothing rather than a
+  // permanently disabled control.
+  if (status?.access === "unsupported") return null;
+
+  async function grant() {
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await api.applecalRequestAccess());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const access = status?.access;
+  const granted = access === "granted";
+  // Every non-granted state except "not yet asked" needs System Settings:
+  // write_only is a real EventKit grant that still cannot read events.
+  const needsSystemSettings =
+    access === "denied" || access === "restricted" || access === "write_only";
+
+  return (
+    <section className="settings-group calendar-connection-settings">
+      <header className="settings-group-head">
+        <h4>Apple Calendar</h4>
+        <p>
+          Read your Mac's calendars — iCloud, Exchange, or local — with no account to connect.
+          Nothing is sent anywhere and Noted never edits these events.
+        </p>
+      </header>
+
+      {error && <div className="conn-detail" role="status">{error}</div>}
+
+      {granted ? (
+        <span className="field-hint">
+          {status && status.calendars.length > 0
+            ? `Connected — ${status.calendars.length} calendar${status.calendars.length === 1 ? "" : "s"}. Choose which ones appear from the filter menu in Calendar.`
+            : "Connected, but this Mac has no calendars yet."}
+        </span>
+      ) : (
+        <>
+          <span className="field-hint">
+            {needsSystemSettings
+              ? "Calendar access is turned off for Noted. Enable it in System Settings › Privacy & Security › Calendars, then reopen Settings."
+              : "Grant access to show your Apple Calendar events in Calendar, Today, and meeting detection."}
+          </span>
+          {!needsSystemSettings && (
+            <button className="ghost-btn test-btn" onClick={() => void grant()} disabled={busy}>
+              {busy ? <Loader2 size={14} className="spin" /> : <CalendarDays size={14} />}
+              Allow calendar access
+            </button>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 export function SettingsModal({ onClose, page = false }: { onClose: () => void; page?: boolean }) {
   const [section, setSection] = useState<SettingsSection>("system");
   const [savedHint, setSavedHint] = useState(false);
@@ -1876,6 +1966,8 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
             )}
           </button>
           </section>
+
+          <AppleCalendarSettings />
         </div>
 
           </>

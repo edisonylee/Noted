@@ -237,7 +237,7 @@ async fn fetch_calendar(app: &tauri::AppHandle, start: &str, end: &str) -> Vec<R
     let Ok(dir) = app.path().app_data_dir() else {
         return Vec::new();
     };
-    crate::gcal::events_range(&dir, start, end)
+    crate::calendar::events_range(&dir, start, end)
         .await
         .map(calendar_items)
         .unwrap_or_default()

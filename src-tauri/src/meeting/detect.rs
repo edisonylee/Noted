@@ -155,7 +155,7 @@ async fn call_events(app: &tauri::AppHandle) -> Vec<Value> {
         return Vec::new();
     };
     let today = crate::today_local();
-    match crate::gcal::events_range(&dir, &today, &today).await {
+    match crate::calendar::events_range(&dir, &today, &today).await {
         Ok(events) => events
             .into_iter()
             .filter(|e| {

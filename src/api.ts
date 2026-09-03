@@ -309,6 +309,35 @@ export type GcalStatus = {
   accounts: GcalAccountInfo[];
 };
 
+/**
+ * Apple Calendar (EventKit) — read-only, and local: no OAuth, no tokens.
+ *
+ * `access` is the macOS permission state. `write_only` is a real EventKit
+ * state that cannot read events, so it is no more useful here than `denied`;
+ * `unsupported` means this build is not on macOS.
+ */
+export type AppleCalAccess =
+  | "granted"
+  | "denied"
+  | "restricted"
+  | "write_only"
+  | "not_determined"
+  | "unsupported";
+
+export type AppleCalendarInfo = {
+  id: string;
+  name: string;
+  color: string;
+  source: string; // the EventKit account: iCloud, Google, On My Mac…
+  enabled: boolean;
+};
+
+export type AppleCalStatus = {
+  access: AppleCalAccess;
+  account: string; // the label Apple events carry in RangeEvent.account
+  calendars: AppleCalendarInfo[];
+};
+
 // Deterministic meeting filing. Rules match exact Google identities and run
 // in priority order; they never rely on model inference or broad domains.
 export type MeetingFilingRule = {
@@ -1055,6 +1084,12 @@ export const api = {
   gcalSetCalendarEnabled: (account: string, calendarId: string, enabled: boolean) =>
     invoke<GcalStatus>("gcal_set_calendar_enabled", { account, calendarId, enabled }),
   gcalRefreshCalendars: () => invoke<GcalStatus>("gcal_refresh_calendars"),
+  // Apple Calendar is read-only, so there is no create/update/delete pair here.
+  // Its events arrive merged into gcalEventsRange.
+  applecalStatus: () => invoke<AppleCalStatus>("applecal_status"),
+  applecalRequestAccess: () => invoke<AppleCalStatus>("applecal_request_access"),
+  applecalSetCalendarEnabled: (calendarId: string, enabled: boolean) =>
+    invoke<AppleCalStatus>("applecal_set_calendar_enabled", { calendarId, enabled }),
   gcalSetSyncAccount: (email: string) => invoke<GcalStatus>("gcal_set_sync_account", { email }),
   gcalContacts: () => invoke<GcalContact[]>("gcal_contacts"),
   gcalEventsRange: (startDate: string, endDate: string) =>

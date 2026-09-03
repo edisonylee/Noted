@@ -6,5 +6,11 @@
   <string>noted transcribes what you say into your daily log, fully on your device.</string>
   <key>NSAudioCaptureUsageDescription</key>
   <string>During meetings, noted transcribes your system audio output locally on this Mac.</string>
+  <!-- macOS 14+ asks for full access; the pre-14 key is kept for older systems,
+       since the deployment target is 10.15. noted only reads. -->
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>noted shows your Apple Calendar events alongside your day and uses them to recognize meetings. It only reads them.</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>noted shows your Apple Calendar events alongside your day and uses them to recognize meetings. It only reads them.</string>
 </dict>
 </plist>

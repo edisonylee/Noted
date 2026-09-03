@@ -603,12 +603,38 @@ export type MeetingsCfg = {
   default_template: string;
   vocabulary: string[];
   asr_engine: "whisper" | "parakeet" | "hosted";
-  /** macOS voice-processing (AEC) on the mic — strips speaker playback from the mic signal. */
+  /**
+   * macOS voice-processing (AEC) on the mic — strips speaker playback from the
+   * mic signal. Defaults off: voice processing seizes the input device, so a
+   * call app sharing the mic would record silence. Recording yields to a live
+   * call even when this is on (see `MicAecState`).
+   */
   mic_aec: boolean;
   /** Record the meeting app's window as video (ScreenCaptureKit, macOS 15+). */
   record_video: boolean;
   /** Days before the launch-time sweep deletes window videos; 0 = keep forever. */
   video_keep_days: number;
+};
+
+/**
+ * How the mic is being captured for the active recording ("meeting-mic-aec").
+ *
+ * - `active` — macOS voice processing is on; speaker bleed is cancelled.
+ * - `off_by_choice` — the user turned echo cancellation off.
+ * - `yielded` — a call app holds the mic, so voice processing was skipped to
+ *   avoid muting the user in that call; `app` is that app's name.
+ * - `unavailable` — it was wanted but could not run (odd device, denied
+ *   component), so the raw mic is recording.
+ *
+ * Every state but `active` means the far side may be picked up as you when
+ * recording on speakers.
+ */
+export type MicAecState = "active" | "off_by_choice" | "yielded" | "unavailable";
+
+export type MeetingMicAec = {
+  meetingId: number;
+  state: MicAecState;
+  app: string | null;
 };
 
 // ── Permissioned local agent access (vendor-neutral MCP) ───────────────────

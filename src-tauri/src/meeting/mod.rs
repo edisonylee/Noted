@@ -106,7 +106,13 @@ pub struct MeetingsCfg {
     /// macOS voice-processing (AEC) on the mic: the OS subtracts what the
     /// speakers play from the mic signal, so the other side of a call never
     /// lands on the "me" channel. Off = raw cpal mic.
-    #[serde(default = "d_true")]
+    ///
+    /// Defaults **off**. Voice processing seizes the input device, so turning it
+    /// on while a call app is using the mic makes that app record silence — the
+    /// user is muted to everyone else, with no symptom on their own screen.
+    /// `capture::decide_mic_aec` yields to a live call even when this is on;
+    /// the safe default means a fresh install never depends on that.
+    #[serde(default)]
     pub mic_aec: bool,
     /// Record the meeting app's WINDOW as video (ScreenCaptureKit, macOS 15+;
     /// follows the window even when covered or on another Space). Needs the
@@ -374,6 +380,29 @@ pub fn engine_spec(app: &tauri::AppHandle) -> Result<asr::EngineSpec> {
     })
 }
 
+/// Bridge the capture thread's echo-cancellation decision to the UI.
+///
+/// Capture reports *what happened*; deciding how to say it is the UI's job, so
+/// this emits the state and the app name and leaves the wording to the frontend.
+fn aec_notifier(app: tauri::AppHandle, meeting_id: i64) -> capture::AecNotify {
+    Arc::new(move |decision: capture::MicAec| {
+        let (state, bundle) = match &decision {
+            capture::MicAec::Active => ("active", None),
+            capture::MicAec::OffByChoice => ("off_by_choice", None),
+            capture::MicAec::Unavailable => ("unavailable", None),
+            capture::MicAec::YieldedTo { bundle } => ("yielded", Some(bundle.clone())),
+        };
+        let _ = app.emit(
+            "meeting-mic-aec",
+            json!({
+                "meetingId": meeting_id,
+                "state": state,
+                "app": bundle.as_deref().map(detect::app_label),
+            }),
+        );
+    })
+}
+
 /// Begin recording. `event_json` is the calendar-event snapshot when started
 /// from Coming Up / a calendar prompt; `source_bundle` is the mic-holding app
 /// when started from a mic-detection prompt (drives auto-stop).
@@ -519,9 +548,17 @@ pub fn start(
     }
     {
         let (b, s) = (me.clone(), stop.clone());
-        let aec = capture_mode == CaptureMode::Online && cfg().mic_aec;
+        let mcfg = cfg();
+        // Echo cancellation only means anything when the far side is playing
+        // through the speakers, so it is an online-call concern. An in-person
+        // recording has nothing to cancel and nothing to warn about.
+        let online = capture_mode == CaptureMode::Online;
+        let plan = capture::MicPlan::new(online && mcfg.mic_aec, mcfg.ignore_bundles.clone());
         let log = audio_dir.as_ref().map(|d| d.join("capture.log"));
-        threads.push(std::thread::spawn(move || capture::run_mic(b, s, aec, log)));
+        let notify = online.then(|| aec_notifier(app.clone(), id));
+        threads.push(std::thread::spawn(move || {
+            capture::run_mic(b, s, plan, log, notify)
+        }));
     }
     // Window video rides along when enabled (its own dir derivation — audio
     // retention off shouldn't disable video). Fire-and-forget: the worker

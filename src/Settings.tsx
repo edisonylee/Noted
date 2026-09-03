@@ -2114,8 +2114,10 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
               Echo cancellation on the microphone
               <em>
                 macOS voice processing removes what your speakers are playing from the mic, so
-                the other side of a call never shows up as you — essential without headphones.
-                Applies from the next recording.
+                the other side of a call never shows up as you — worth it when you record on
+                speakers rather than headphones. It takes over the microphone, so Noted skips it
+                whenever a call app is already using the mic; that app keeps your voice and the
+                recording falls back to the raw mic. Applies from the next recording.
               </em>
             </span>
           </label>

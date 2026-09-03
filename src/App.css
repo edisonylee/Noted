@@ -3125,6 +3125,9 @@ a.cal-btn { text-decoration: none; }
 .meeting-folder-empty { margin: 0; padding: 18px 12px 20px; color: var(--muted); font-size: 12px; text-align: center; }
 .meeting-hint { margin: 0; color: var(--muted); font-size: 13px; }
 .meeting-export-status { align-self: flex-end; color: var(--good); border: 1px solid color-mix(in srgb, var(--good) 32%, transparent); background: color-mix(in srgb, var(--good) 8%, transparent); border-radius: 8px; padding: 7px 10px; }
+/* Speaker-labelling caveat while echo cancellation is off — advisory, not an
+   error: the recording is fine, only the "me" vs "them" split is softer. */
+.meeting-mic-aec { color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); border-radius: 8px; padding: 7px 10px; }
 .meeting-status { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
 .meeting-context { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .meeting-context select {

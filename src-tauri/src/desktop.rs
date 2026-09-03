@@ -3326,9 +3326,10 @@ async fn meeting_capture_probe(
     }
     {
         let (b, s) = (me.clone(), stop.clone());
-        let aec = meeting::cfg().mic_aec;
+        let mcfg = meeting::cfg();
+        let plan = meeting::capture::MicPlan::new(mcfg.mic_aec, mcfg.ignore_bundles.clone());
         threads.push(std::thread::spawn(move || {
-            meeting::capture::run_mic(b, s, aec, None)
+            meeting::capture::run_mic(b, s, plan, None, None)
         }));
     }
     tokio::time::sleep(std::time::Duration::from_secs(secs)).await;

@@ -113,8 +113,27 @@ pub(crate) fn mic_users() -> Vec<String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn mic_users() -> Vec<String> {
+pub(crate) fn mic_users() -> Vec<String> {
     Vec::new()
+}
+
+/// Bundle ids of apps on the microphone that could plausibly be a call: the raw
+/// mic users minus the daemons and user-ignored bundles that never are.
+///
+/// This is the single definition of "something else is using the mic". Meeting
+/// detection prompts on it, and the mic capture yields voice processing to it
+/// (see `capture::decide_mic_aec`) — those two must agree, or we would prompt
+/// to record a call while holding the input device that call needs.
+pub(crate) fn call_apps_on_mic(ignore: &[String]) -> Vec<String> {
+    mic_users()
+        .into_iter()
+        .filter(|bundle| !ignored(bundle, ignore))
+        .collect()
+}
+
+/// Human-readable app name for a bundle id ("us.zoom.xos" -> "Zoom").
+pub(crate) fn app_label(bundle: &str) -> String {
+    attribution(bundle).1
 }
 
 fn ignored(bundle: &str, ignore: &[String]) -> bool {
@@ -295,7 +314,7 @@ fn run(app: tauri::AppHandle) {
             guard.as_ref().map(|a| a.id)
         };
 
-        let users = mic_users();
+        let call_apps = call_apps_on_mic(&cfg.ignore_bundles);
 
         if recording_id != last_recording {
             adopted_source = None;
@@ -334,17 +353,14 @@ fn run(app: tauri::AppHandle) {
             // No known source app? Adopt the first non-ignored one that holds
             // the mic during this recording (that's the call).
             if source.is_none() && adopted_source.is_none() {
-                adopted_source = users
-                    .iter()
-                    .find(|u| !ignored(u, &cfg.ignore_bundles))
-                    .cloned();
+                adopted_source = call_apps.first().cloned();
             }
             let mut stop_reason: Option<&str> = None;
             if silence_ms > SILENCE_STOP_MS {
                 stop_reason = Some("15 minutes of silence");
             }
             if let Some(src) = source.as_ref().or(adopted_source.as_ref()) {
-                if users.iter().any(|u| u == src) {
+                if call_apps.iter().any(|u| u == src) {
                     source_last_seen = now;
                 } else if source_last_seen > 0
                     && now.saturating_sub(source_last_seen) > 60_000
@@ -417,7 +433,7 @@ fn run(app: tauri::AppHandle) {
                     .is_some_and(|p| match p["kind"].as_str() {
                         Some("mic") => p["bundleId"]
                             .as_str()
-                            .is_some_and(|b| !users.iter().any(|u| u == b)),
+                            .is_some_and(|b| !call_apps.iter().any(|u| u == b)),
                         Some("calendar") => p["event"]["start_min"]
                             .as_i64()
                             .is_some_and(|start| nmin > start + ADJACENCY_MIN),
@@ -430,11 +446,8 @@ fn run(app: tauri::AppHandle) {
 
         // ── Mic prompt: an app held the mic ≥15s ─────────────────────────
         let cooldown = app.state::<DetectState>();
-        mic_first_seen.retain(|b, _| users.contains(b));
-        for bundle in &users {
-            if ignored(bundle, &cfg.ignore_bundles) {
-                continue;
-            }
+        mic_first_seen.retain(|b, _| call_apps.contains(b));
+        for bundle in &call_apps {
             let first = *mic_first_seen.entry(bundle.clone()).or_insert(now);
             if now.saturating_sub(first) < DEBOUNCE_MS {
                 continue;

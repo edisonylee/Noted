@@ -37,6 +37,7 @@ import {
   localFileUrl,
   type MeetingConversation,
   type MeetingDetail,
+  type MeetingMicAec,
   type MeetingSegment,
   type MeetingSpeaker,
   type MeetingTemplate,
@@ -425,6 +426,28 @@ function displayMeetingFolderPath(path: string): string {
   return path.split(" / ").join(" › ");
 }
 
+/**
+ * What to tell the user about echo cancellation during a recording.
+ *
+ * Returns null when voice processing is doing its job — there is nothing to warn
+ * about and a permanent banner would just be noise. Otherwise it explains the
+ * cost, because without it the far side of a call can be picked up by the mic
+ * and attributed to you in the transcript.
+ */
+function micAecNotice(info: MeetingMicAec | null): string | null {
+  if (!info || info.state === "active") return null;
+  const consequence =
+    "Speaker audio can be picked up by your mic and transcribed as you — use headphones for clean speaker labels.";
+  switch (info.state) {
+    case "yielded":
+      return `Echo cancellation is off so ${info.app ?? "another app"} keeps your microphone — turning it on here would mute you for everyone else on the call. ${consequence}`;
+    case "unavailable":
+      return `Echo cancellation could not start on this microphone, so it is recording raw. ${consequence}`;
+    default:
+      return `Echo cancellation is off. ${consequence}`;
+  }
+}
+
 export function MeetingPage({
   id,
   event,
@@ -508,6 +531,8 @@ export function MeetingPage({
 
   const recording = detail?.status === "recording";
   const summarizing = detail?.status === "summarizing" || generating != null;
+  // How the mic is being captured right now, reported by the capture thread.
+  const [micAec, setMicAec] = useState<MeetingMicAec | null>(null);
 
   const load = useCallback(async () => {
     if (id == null) return;
@@ -616,6 +641,7 @@ export function MeetingPage({
 
   // Live updates: segments stream in; stopped/summarized refresh the page.
   useEffect(() => {
+    setMicAec(null); // a different meeting decides its own capture strategy
     if (id == null) return;
     const subs = [
       listen<MeetingSegment & { meetingId: number }>("meeting-segment", (e) => {
@@ -640,6 +666,13 @@ export function MeetingPage({
           );
         },
       ),
+      // Echo cancellation is decided at capture time, not from settings alone:
+      // a live call keeps the mic, so the answer can differ from the toggle and
+      // can change mid-recording.
+      listen<MeetingMicAec>("meeting-mic-aec", (e) => {
+        if (e.payload.meetingId !== id) return;
+        setMicAec(e.payload);
+      }),
       listen<{ meetingId: number }>("meeting-stopped", (e) => {
         if (e.payload.meetingId === id) load();
       }),
@@ -1722,6 +1755,11 @@ export function MeetingPage({
       </header>
 
       {exportMsg && <div className="meeting-hint meeting-export-status" role="status">{exportMsg}</div>}
+      {recording && micAecNotice(micAec) && (
+        <div className="meeting-hint meeting-mic-aec" role="status">
+          {micAecNotice(micAec)}
+        </div>
+      )}
       {error && <div className="error">{error}</div>}
       {detail?.status === "failed" && (
         <div className="meeting-failure" role="status">

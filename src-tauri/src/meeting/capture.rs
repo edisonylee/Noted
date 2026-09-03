@@ -175,26 +175,127 @@ fn vpio_needs_raw_fallback(elapsed_ms: u64, nonzero_callbacks: u64) -> bool {
 // cpal stream when VPIO can't initialize (odd devices, denied component).
 // ---------------------------------------------------------------------------
 
+/// How the microphone ended up being captured, so the caller can tell the user.
+///
+/// macOS voice processing (VoiceProcessingIO) gives us hardware echo
+/// cancellation, but it seizes the input device: while it runs, any *other* app
+/// on that mic records silence. Muting the user in their own call is a far worse
+/// failure than a little speaker bleed on our transcript, so a live call always
+/// wins the device and this reports which way it went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MicAec {
+    /// Voice processing is on: echo cancelled, nothing else wanted the mic.
+    Active,
+    /// The user turned echo cancellation off in Settings.
+    OffByChoice,
+    /// Another app holds the mic, so we yielded the device and captured raw.
+    YieldedTo { bundle: String },
+    /// Voice processing was wanted but could not run — an odd input device, a
+    /// denied audio component, or a session that produced only zeros. Captured
+    /// raw, so the same speaker-bleed caveat applies.
+    Unavailable,
+}
+
+impl MicAec {
+    /// Whether this decision runs the VoiceProcessingIO path.
+    pub fn uses_voice_processing(&self) -> bool {
+        matches!(self, MicAec::Active)
+    }
+}
+
+/// Decide how to capture the mic. Pure so the policy is testable without
+/// CoreAudio: `call_apps` comes from `detect::call_apps_on_mic`.
+pub fn decide_mic_aec(aec_requested: bool, call_apps: &[String]) -> MicAec {
+    if !aec_requested {
+        return MicAec::OffByChoice;
+    }
+    match call_apps.first() {
+        Some(bundle) => MicAec::YieldedTo {
+            bundle: bundle.clone(),
+        },
+        None => MicAec::Active,
+    }
+}
+
+/// Everything `run_mic` needs to pick and re-evaluate a capture strategy.
+/// Plain data: no config or Tauri types reach the audio threads.
+#[derive(Debug, Clone, Default)]
+pub struct MicPlan {
+    /// The user's echo-cancellation preference (Settings -> Meetings).
+    pub aec_requested: bool,
+    /// Bundles that are never call apps (`MeetingsCfg::ignore_bundles`).
+    pub ignore_bundles: Vec<String>,
+}
+
+impl MicPlan {
+    pub fn new(aec_requested: bool, ignore_bundles: Vec<String>) -> Self {
+        Self {
+            aec_requested,
+            ignore_bundles,
+        }
+    }
+
+    /// The decision as of right now.
+    fn decide(&self) -> MicAec {
+        decide_mic_aec(
+            self.aec_requested,
+            &super::detect::call_apps_on_mic(&self.ignore_bundles),
+        )
+    }
+}
+
+/// Notified whenever the capture strategy is settled or changes mid-recording,
+/// so the caller can surface it. Kept as a callback so this module stays free of
+/// Tauri and of any opinion about how the user is told.
+pub type AecNotify = Arc<dyn Fn(MicAec) + Send + Sync>;
+
 pub fn run_mic(
     buf: Arc<ChannelBuf>,
     stop: Arc<AtomicBool>,
-    aec: bool,
+    plan: MicPlan,
     log_path: Option<std::path::PathBuf>,
+    notify: Option<AecNotify>,
 ) {
+    // Report the opening decision once, then again only when it changes, so the
+    // UI is not re-notified on every internal session rebuild.
+    let mut announced: Option<MicAec> = None;
+    let mut announce = |decision: &MicAec| {
+        if announced.as_ref() == Some(decision) {
+            return;
+        }
+        announced = Some(decision.clone());
+        capture_log(log_path.as_deref(), &format!("mic capture: {decision:?}"));
+        if let Some(notify) = notify.as_ref() {
+            notify(decision.clone());
+        }
+    };
+
     while !stop.load(Ordering::Relaxed) {
-        let result = if aec && cfg!(target_os = "macos") {
+        let decision = plan.decide();
+        announce(&decision);
+        let result = if decision.uses_voice_processing() && cfg!(target_os = "macos") {
             #[cfg(target_os = "macos")]
             {
-                match vp::vp_session(&buf, &stop) {
+                match vp::vp_session(&buf, &stop, &plan.ignore_bundles) {
                     Err(e) if !vp::started(&e) => {
-                        // VPIO either failed to start or produced an all-zero
-                        // stream. Never let a healthy-looking callback loop
-                        // silently erase the user's entire mic channel.
+                        // VPIO either failed to start, produced an all-zero
+                        // stream, or yielded the device to a call app that
+                        // joined mid-recording. Never let a healthy-looking
+                        // callback loop silently erase the user's mic channel,
+                        // and never hold the device a live call needs.
                         eprintln!("[noted] mic AEC unavailable, using raw mic: {e}");
                         capture_log(
                             log_path.as_deref(),
                             &format!("mic AEC unavailable; raw fallback: {e}"),
                         );
+                        // Report what is actually running now. A call app
+                        // taking the mic is a yield; anything else means voice
+                        // processing simply could not run — never re-announce
+                        // it as Active while the raw mic is what is recording.
+                        announce(&match plan.decide() {
+                            yielded @ MicAec::YieldedTo { .. } => yielded,
+                            _ => MicAec::Unavailable,
+                        });
                         mic_session(&buf, &stop)
                     }
                     r => r,
@@ -275,6 +376,10 @@ mod vp {
     /// stall) — rebuild VPIO. Anything else is an init failure — fall back.
     const STARTED: &str = "started:";
 
+    /// How often to re-check whether a call app has taken the mic. Enumerating
+    /// CoreAudio processes is much heavier than the rest of the watchdog tick.
+    const CALL_SCAN_MS: u64 = 1_000;
+
     pub fn started(e: &anyhow::Error) -> bool {
         e.to_string().starts_with(STARTED)
     }
@@ -339,8 +444,20 @@ mod vp {
 
     /// One VPIO lifetime: build → run until stop / stall / device change.
     /// Ok(()) = clean stop; Err("started:…") = rebuild; other Err = fall back.
-    pub fn vp_session(buf: &Arc<ChannelBuf>, stop: &Arc<AtomicBool>) -> Result<()> {
+    pub fn vp_session(
+        buf: &Arc<ChannelBuf>,
+        stop: &Arc<AtomicBool>,
+        ignore_bundles: &[String],
+    ) -> Result<()> {
         let e = |what: &'static str| move |err| anyhow!("vp {what}: {err:?}");
+
+        // A call that starts after we do would otherwise capture silence: VPIO
+        // already holds the input device. Bail before touching the device at
+        // all — the error is deliberately not {STARTED}-class so run_mic falls
+        // straight through to the raw mic instead of rebuilding VPIO.
+        if let Some(bundle) = super::super::detect::call_apps_on_mic(ignore_bundles).first() {
+            return Err(anyhow!("yielding mic to {bundle}"));
+        }
 
         // Do not race the system-tap aggregate while Zoom/CoreAudio is moving
         // between speaker, headset, and Bluetooth call profiles.
@@ -430,6 +547,7 @@ mod vp {
 
         buf.last_callback.store(epoch_ms(), Ordering::Relaxed);
         let session_started = epoch_ms();
+        let mut last_call_scan = epoch_ms();
         let result = loop {
             if stop.load(Ordering::Relaxed) {
                 break Ok(());
@@ -452,6 +570,22 @@ mod vp {
             let stale_ms = epoch_ms().saturating_sub(buf.last_callback.load(Ordering::Relaxed));
             if stale_ms > 10_000 {
                 break Err(anyhow!("{STARTED} no callbacks for {stale_ms}ms"));
+            }
+            // A call app joined the mic after we started. We are holding the
+            // input device it needs, so it is recording silence right now —
+            // release it. Not {STARTED}-class: run_mic must fall back to the
+            // raw mic, not rebuild VPIO and seize the device again.
+            //
+            // Enumerating CoreAudio processes is far heavier than the atomics
+            // around it, so poll it about once a second rather than on every
+            // 250ms tick; the pre-flight check already covers the common case
+            // of the call being up before we start.
+            if epoch_ms().saturating_sub(last_call_scan) >= CALL_SCAN_MS {
+                last_call_scan = epoch_ms();
+                if let Some(bundle) = super::super::detect::call_apps_on_mic(ignore_bundles).first()
+                {
+                    break Err(anyhow!("yielding mic to {bundle}"));
+                }
             }
             if let Ok(uid) = ca::System::default_input_device().and_then(|d| d.uid()) {
                 if !uid.equal(&input_uid) {
@@ -974,6 +1108,60 @@ mod macos {
 mod tests {
     use super::*;
 
+    fn bundles(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn voice_processing_runs_only_when_nothing_else_holds_the_mic() {
+        assert_eq!(decide_mic_aec(true, &[]), MicAec::Active);
+        assert!(decide_mic_aec(true, &[]).uses_voice_processing());
+    }
+
+    #[test]
+    fn a_live_call_always_wins_the_input_device() {
+        // The regression this exists for: VoiceProcessingIO seizes the mic, so
+        // enabling echo cancellation used to mute the user in their own call.
+        let decision = decide_mic_aec(true, &bundles(&["us.zoom.xos"]));
+        assert_eq!(
+            decision,
+            MicAec::YieldedTo {
+                bundle: "us.zoom.xos".to_string()
+            }
+        );
+        assert!(
+            !decision.uses_voice_processing(),
+            "must not hold the device a call needs"
+        );
+    }
+
+    #[test]
+    fn only_a_live_voice_processing_session_counts_as_echo_cancelled() {
+        // Everything except Active runs the raw mic, so all of them carry the
+        // speaker-bleed caveat the UI warns about.
+        for decision in [
+            MicAec::OffByChoice,
+            MicAec::Unavailable,
+            MicAec::YieldedTo {
+                bundle: "us.zoom.xos".to_string(),
+            },
+        ] {
+            assert!(!decision.uses_voice_processing(), "{decision:?}");
+        }
+        assert!(MicAec::Active.uses_voice_processing());
+    }
+
+    #[test]
+    fn the_user_switch_wins_over_detection() {
+        // Off means off: never quietly re-enable voice processing just because
+        // no call happens to be running.
+        assert_eq!(decide_mic_aec(false, &[]), MicAec::OffByChoice);
+        assert_eq!(
+            decide_mic_aec(false, &bundles(&["us.zoom.xos"])),
+            MicAec::OffByChoice
+        );
+    }
+
     #[test]
     fn callback_frames_use_live_bytes_and_channels() {
         // 512 stereo f32 frames = 4096 bytes. A stale mono format would call
@@ -1018,13 +1206,16 @@ mod tests {
     /// and asserts callbacks arrived. Grabs the actual microphone (and needs
     /// the host terminal's mic permission), so it stays ignored:
     ///   cargo test --lib vp_smoke -- --ignored --nocapture
+    ///
+    /// Quit any call app first: the session now yields the input device to one
+    /// rather than muting it, so a running Zoom makes this fail by design.
     #[test]
     #[ignore]
     fn vp_smoke() {
         let buf = ChannelBuf::new();
         let stop = Arc::new(AtomicBool::new(false));
         let (b, s) = (buf.clone(), stop.clone());
-        let t = std::thread::spawn(move || vp::vp_session(&b, &s));
+        let t = std::thread::spawn(move || vp::vp_session(&b, &s, &[]));
         std::thread::sleep(Duration::from_secs(3));
         stop.store(true, Ordering::Relaxed);
         t.join().unwrap().expect("vp session failed");

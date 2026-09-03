@@ -666,6 +666,13 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
             sarg(b, "calendarId"),
             b.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
         ),
+        "applecal_status" => crate::applecal_status(),
+        "applecal_request_access" => crate::applecal_request_access(a).await,
+        "applecal_set_calendar_enabled" => crate::applecal_set_calendar_enabled(
+            a,
+            sarg(b, "calendarId"),
+            b.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+        ),
         "set_byok_settings" => Err("this action runs on the desktop app only".into()),
         "list_byok_models" => Err("this action runs on the desktop app only".into()),
         "test_byok_settings" => Err("this action runs on the desktop app only".into()),

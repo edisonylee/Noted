@@ -3910,13 +3910,36 @@ a.cal-btn { text-decoration: none; }
   flex: 1; min-height: 0; display: flex; gap: 34px; align-items: stretch;
   width: 100%; max-width: 1100px;
 }
-.documents-view { max-width: 1040px; }
+.documents-view { max-width: 1180px; gap: 30px; }
 .documents-view .notes-list { max-width: 920px; margin: 0 auto; }
+.document-files {
+  width: 224px; box-sizing: border-box; padding: 14px 10px 10px;
+  border-radius: 10px; background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+}
+.document-files .spaces-scroll { padding-right: 2px; }
+.document-files .space-switcher { margin: 0 1px 14px; }
+.document-files .space-switcher-trigger { min-height: 45px; padding: 0 5px; }
+.document-files .space-switcher-copy strong { font-size: 16px; }
+.document-files-label {
+  margin: 0 9px 5px; color: var(--ink-soft); font-size: 12px; font-weight: 630;
+}
+.document-file-views { margin-bottom: 2px; }
+.document-folder-head { margin-top: 19px; }
+.document-folders-empty {
+  margin: 5px 10px 0 29px; color: var(--faint); font-size: 10.5px; line-height: 1.45;
+}
+.document-files .spaces-trash-wrap {
+  margin: 0 -1px -1px; padding: 9px 1px 0; background: transparent;
+}
 .documents-masthead {
   display: flex; align-items: flex-end; justify-content: space-between; gap: 28px;
   min-height: 122px; margin: 0 2px 24px; padding: 8px 4px 0;
 }
 .documents-masthead-copy { min-width: 0; }
+.documents-breadcrumb {
+  color: var(--accent); font-size: 11.5px; font-weight: 560;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .documents-masthead h1 {
   margin: 11px 0 6px; color: var(--ink); font-size: 38px; font-weight: 660;
   line-height: 1.05; letter-spacing: -0.045em;
@@ -3924,19 +3947,6 @@ a.cal-btn { text-decoration: none; }
 .documents-masthead p {
   max-width: 520px; margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.5;
 }
-.documents-space-switcher { position: relative; z-index: 5; width: max-content; }
-.documents-space-switcher > button {
-  display: inline-flex; align-items: center; gap: 4px; min-height: 25px; padding: 2px 3px;
-  border: none; border-radius: 5px; background: none; color: var(--accent);
-  font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer;
-}
-.documents-space-switcher > button:hover { color: var(--ink); background: var(--hover-soft); }
-.documents-space-switcher > button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.documents-space-switcher > button > svg {
-  transition: transform var(--duration-fast) var(--ease);
-}
-.documents-space-switcher > button[aria-expanded="true"] > svg { transform: rotate(180deg); }
-.documents-space-switcher .space-switcher-menu { top: 29px; right: auto; width: 206px; }
 .documents-masthead-actions {
   flex: none; display: flex; align-items: center; gap: 13px; padding-bottom: 3px;
 }
@@ -4566,6 +4576,7 @@ a.cal-btn { text-decoration: none; }
 @media (max-width: 980px) {
   .notes-view { gap: 22px; }
   .spaces { width: 215px; }
+  .document-files { width: 205px; }
   .note-row-categories { max-width: 135px; }
   .document-editor-stage-inner { grid-template-columns: minmax(0, 1fr); padding: 20px 18px 68px; }
   .document-editor-page { grid-column: 1; }
@@ -4575,6 +4586,7 @@ a.cal-btn { text-decoration: none; }
 @media (max-width: 780px) {
   .notes-view { gap: 16px; }
   .spaces { width: 170px; }
+  .document-files { width: 172px; padding-left: 7px; padding-right: 7px; }
   .notes-list { width: auto; }
   .notes-context { min-height: 0; }
   .notes-context-count, .note-row-categories { display: none; }

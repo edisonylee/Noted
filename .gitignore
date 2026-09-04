@@ -28,3 +28,7 @@ src-tauri/resources/noted-fluid-diarizer
 
 # Claude Code runtime artifacts
 .claude/scheduled_tasks.lock
+
+# Team service runtime data
+team.sqlite*
+services/team/*.sqlite*

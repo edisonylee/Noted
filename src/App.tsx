@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "./events";
-import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, ListTodo, Loader, MessageCircle, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Square, StickyNote, Sun, Video } from "lucide-react";
+import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, ListTodo, Loader, MessageCircle, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Square, StickyNote, Sun, Users, Video } from "lucide-react";
 import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg, type Img } from "./image";
@@ -17,6 +17,7 @@ import { PhonePanel } from "./PhonePanel";
 import { FloatingChat } from "./FloatingChat";
 import { KnowledgeView } from "./Knowledge";
 import { parseBlocks, TodayView } from "./Today";
+import { TeamWorkspace } from "./teams/TeamWorkspace";
 import { MeetingPage } from "./MeetingPage";
 import { releaseProfile } from "./releaseProfile";
 import { ComingUp } from "./ComingUp";
@@ -37,7 +38,7 @@ import {
 import "./App.css";
 
 type Phase = "idle" | "thinking" | "review";
-type View = "today" | "ask" | "capture" | "notes" | "calendar" | "journal" | "knowledge" | "settings";
+type View = "team" | "today" | "ask" | "capture" | "notes" | "calendar" | "journal" | "knowledge" | "settings";
 
 // Journal is parked while the meeting recorder + knowledge graph stabilize;
 // the view, commands, and data all stay — this only hides the nav entry.
@@ -931,6 +932,9 @@ export default function App() {
               <BookOpen size={16} /> Journal
             </button>
           )}
+          <button className={view === "team" ? "on" : ""} onClick={() => setView("team")}>
+            <Users size={16} /> Team
+          </button>
           <button className={view === "knowledge" ? "on" : ""} onClick={() => setView("knowledge")}>
             <Network size={16} /> Knowledge
           </button>
@@ -1050,6 +1054,8 @@ export default function App() {
               }}
             />
           </WeatherHome>
+        ) : view === "team" ? (
+          <TeamWorkspace />
         ) : view === "notes" ? (
           <NotesView notes={notes} cats={cats} onChanged={() => refresh().catch(handleErr)} />
         ) : view === "calendar" ? (

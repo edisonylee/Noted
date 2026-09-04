@@ -19,7 +19,11 @@
     "tauri:ios:dev": "tauri ios dev --config src-tauri/tauri.ios.conf.json",
     "tauri:alpha": "NOTED_RELEASE_PROFILE=alpha VITE_NOTED_PROFILE=alpha tauri build --config src-tauri/tauri.alpha.conf.json",
     "app:update": "bash scripts/install-app.sh",
-    "app:update:if-needed": "bash scripts/update-app-if-needed.sh"
+    "app:update:if-needed": "bash scripts/update-app-if-needed.sh",
+    "team:serve": "bun services/team/server.ts",
+    "team:test": "bun test services/team/server.test.ts",
+    "team:preview": "vite --config vite.team.config.ts",
+    "team:demo": "bun scripts/team-demo.ts"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.9",

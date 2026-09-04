@@ -28,6 +28,7 @@ pub mod reminders;
 pub mod sync_journal;
 pub mod system_settings;
 pub mod themes;
+pub mod teams;
 pub mod voice;
 
 use db::{Db, SaveInput};
@@ -2819,6 +2820,47 @@ async fn meeting_delete_forever(app: tauri::AppHandle, id: i64) -> Result<(), St
 }
 
 #[tauri::command]
+fn team_status(app: tauri::AppHandle) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    Ok(teams::status(&dir))
+}
+#[tauri::command]
+async fn team_connect(app: tauri::AppHandle, server: String, mode: String, secret: String, organization: String, name: String) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    teams::connect(&dir, &server, &mode, &secret, &organization, &name).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn team_disconnect(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    teams::disconnect(&dir).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn team_request(app: tauri::AppHandle, method: String, path: String, body: Option<Value>) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    teams::request(&dir, &method, &path, body).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn team_ask(app: tauri::AppHandle, org: String, body: Value) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    teams::ask(&dir, &org, body).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn team_publish_meeting(app: tauri::AppHandle, org: String, id: i64, space_id: String, folder_ids: Vec<String>, summary_id: Option<i64>, include_transcript: bool, source_key: String, reviewed_content: Value) -> Result<Value, String> {
+    if org.is_empty() || !org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') { return Err("Invalid workspace".into()); }
+    let mut payload = {
+        let db = app.state::<Db>();
+        let conn = db.0.lock().unwrap();
+        let meeting = meeting::store::get_meeting(&conn, id).map_err(|e| e.to_string())?;
+        teams::publication(&meeting, &source_key, &space_id, &folder_ids, summary_id, include_transcript).map_err(|e| e.to_string())?
+    };
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    teams::verify_review(&payload, &reviewed_content).map_err(|e| e.to_string())?;
+    let version = reviewed_content["accessVersion"].as_u64().ok_or("Review the workspace audience before publishing")?;
+    payload["expected_access_version"] = json!(version);
+    teams::request(&dir, "POST", &format!("/v1/orgs/{org}/notes"), Some(payload)).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn meeting_get(app: tauri::AppHandle, id: i64) -> Result<Value, String> {
     let state = app.state::<Db>();
     let conn = state.0.lock().unwrap();
@@ -5113,6 +5155,12 @@ pub fn run() {
             meeting_restore,
             meeting_delete_forever,
             meeting_get,
+            team_status,
+            team_connect,
+            team_disconnect,
+            team_request,
+            team_ask,
+            team_publish_meeting,
             meeting_set_notes,
             meeting_set_title,
             meeting_set_filing_destination,

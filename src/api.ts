@@ -776,6 +776,15 @@ export type Trends = {
 };
 
 export const api = {
+  teamStatus: () => invoke<import("./teams/types").TeamSession>("team_status"),
+  teamConnect: (server: string, mode: string, secret: string, organization = "", name = "") =>
+    invoke<import("./teams/types").TeamOrg[]>("team_connect", { server, mode, secret, organization, name }),
+  teamDisconnect: () => invoke<void>("team_disconnect"),
+  teamRequest: <T>(method: string, path: string, body?: unknown) => invoke<T>("team_request", { method, path, body }),
+  teamAsk: (org: string, body: unknown) => invoke<import("./teams/types").TeamAnswer>("team_ask", { org, body }),
+  teamPublishMeeting: (args: { org: string; id: number; spaceId: string; folderIds: string[]; summaryId: number | null; includeTranscript: boolean; sourceKey: string; reviewedContent: { title: string; summary: string; transcript: string; accessVersion: number } }) =>
+    invoke<import("./teams/types").TeamNote>("team_publish_meeting", args),
+
   // Vendor-neutral local MCP clients. All content release still requires an
   // exact approval in the trusted desktop app.
   agentAccessStatus: () => invoke<AgentAccessStatus>("agent_access_status"),

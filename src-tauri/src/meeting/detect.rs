@@ -32,6 +32,15 @@ const ADJACENCY_MIN: i64 = 15;
 const SILENCE_STOP_MS: u64 = 15 * 60_000;
 const CAL_REFRESH_MS: u64 = 300_000;
 
+/// A muted call can release its microphone while remote speech continues.
+/// Require both source absence and quiet audio before treating it as ended.
+fn source_call_ended(now: u64, last_seen: u64, elapsed_ms: u64, silence_ms: u64) -> bool {
+    last_seen > 0
+        && now.saturating_sub(last_seen) > 60_000
+        && elapsed_ms > 60_000
+        && silence_ms > 60_000
+}
+
 /// Payload for the currently displayed prompt — the prompt window fetches it
 /// on mount (a fresh webview can't receive an event emitted before it loaded).
 pub struct PendingPrompt(pub Mutex<Option<Value>>);
@@ -154,7 +163,16 @@ async fn call_events(app: &tauri::AppHandle) -> Vec<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::ignored;
+    use super::{ignored, source_call_ended};
+
+    #[test]
+    fn muted_calls_keep_recording_remote_speech() {
+        assert!(!source_call_ended(180_000, 1, 180_000, 2_000));
+        assert!(!source_call_ended(180_000, 1, 180_000, 60_000));
+        assert!(source_call_ended(180_000, 1, 180_000, 60_001));
+        assert!(!source_call_ended(180_000, 170_000, 180_000, 90_000));
+        assert!(!source_call_ended(180_000, 0, 180_000, 90_000));
+    }
 
     #[test]
     fn apple_audio_daemons_are_never_treated_as_calls() {
@@ -308,7 +326,8 @@ fn run(app: tauri::AppHandle) {
             let (stopping, source, silence_ms, elapsed_ms, sched_end, ev_date) = {
                 let state = app.state::<MeetingState>();
                 let guard = state.0.lock().unwrap();
-                let a = guard.as_ref().unwrap();
+                // stop() can finish between the earlier ID snapshot and this lock.
+                let Some(a) = guard.as_ref() else { continue };
                 let sig =
                     a.me.last_signal
                         .load(Ordering::Relaxed)
@@ -346,10 +365,7 @@ fn run(app: tauri::AppHandle) {
             if let Some(src) = source.as_ref().or(adopted_source.as_ref()) {
                 if users.iter().any(|u| u == src) {
                     source_last_seen = now;
-                } else if source_last_seen > 0
-                    && now.saturating_sub(source_last_seen) > 60_000
-                    && elapsed_ms > 60_000
-                {
+                } else if source_call_ended(now, source_last_seen, elapsed_ms, silence_ms) {
                     stop_reason = Some("call app released the microphone");
                 }
             }

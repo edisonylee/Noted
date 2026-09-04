@@ -59,6 +59,8 @@ import {
   writeFilingContext,
   type FilingContext,
 } from "./filingContext";
+import { MdBlock } from "./MeetingMarkdownView";
+import { PublishMeeting } from "./teams/PublishMeeting";
 import { meetingMarkdown, transcriptMarkdown } from "./meetingMarkdown";
 
 function mmss(ms: number): string {
@@ -138,100 +140,7 @@ async function copyText(text: string): Promise<void> {
   }
 }
 
-// Minimal markdown for our deterministic Meeting Pack output: hierarchy,
-// tables, bullets, checkboxes, bold text, and grounded source jumps.
-function MdBlock({ md, onSource }: { md: string; onSource?: (source: string) => void }) {
-  const sourcePattern = /^\[(?:(\d{2,}:\d{2})(?:-\d{2,}:\d{2})?|(notes))\]$/i;
-  const inline = (s: string) => {
-    const parts = s.split(/(\*\*[^*]+\*\*|\[(?:\d{2,}:\d{2}(?:-\d{2,}:\d{2})?|notes)\])/gi);
-    return parts.map((part, i) => {
-      const bold = part.startsWith("**") && part.endsWith("**");
-      const content = bold ? part.slice(2, -2) : part;
-      const sourceMatch = content.match(sourcePattern);
-      const source = sourceMatch?.[1] ?? sourceMatch?.[2];
-      if (source) {
-        const label = source.toLowerCase() === "notes" ? "My notes" : content.slice(1, -1);
-        if (!onSource) {
-          return <span key={i} className="summary-source static">{label}</span>;
-        }
-        return (
-          <button
-            key={i}
-            type="button"
-            className="summary-source"
-            onClick={() => onSource(source)}
-            aria-label={source.toLowerCase() === "notes" ? "Open My Notes" : `Open transcript at ${source}`}
-          >
-            {label}
-          </button>
-        );
-      }
-      return bold ? <strong key={i}>{content}</strong> : part;
-    });
-  };
-  const lines = md.split("\n");
-  const out: React.ReactNode[] = [];
-  let list: React.ReactNode[] = [];
-  let key = 0;
-  const flush = () => {
-    if (list.length) {
-      out.push(<ul key={key++}>{list}</ul>);
-      list = [];
-    }
-  };
-  const tableCells = (line: string) => line.trim().replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
-  const tableDivider = (line: string) => {
-    const cells = tableCells(line);
-    return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
-  };
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex];
-    const t = line.trim();
-    if (t.startsWith("|") && lines[lineIndex + 1] && tableDivider(lines[lineIndex + 1])) {
-      flush();
-      const headers = tableCells(t);
-      const rows: string[][] = [];
-      let rowIndex = lineIndex + 2;
-      while (rowIndex < lines.length && lines[rowIndex].trim().startsWith("|")) {
-        rows.push(tableCells(lines[rowIndex]));
-        rowIndex += 1;
-      }
-      out.push(
-        <div className="meeting-pack-table-wrap" key={key++}>
-          <table className="meeting-pack-table">
-            <thead><tr>{headers.map((header, index) => <th key={index}>{inline(header)}</th>)}</tr></thead>
-            <tbody>{rows.map((row, rowKey) => (
-              <tr key={rowKey}>{headers.map((_, cellKey) => <td key={cellKey}>{inline(row[cellKey] ?? "")}</td>)}</tr>
-            ))}</tbody>
-          </table>
-        </div>
-      );
-      lineIndex = rowIndex - 1;
-    } else if (t.startsWith("### ")) {
-      flush();
-      out.push(<h4 key={key++}>{t.slice(4)}</h4>);
-    } else if (t.startsWith("## ")) {
-      flush();
-      out.push(<h3 key={key++}>{t.slice(3)}</h3>);
-    } else if (t.startsWith("- [ ] ") || t.startsWith("- [x] ")) {
-      list.push(
-        <li key={key++} className="todo">
-          <span className="box">{t[3] === "x" ? <Check size={11} /> : null}</span>
-          <span>{inline(t.slice(6))}</span>
-        </li>
-      );
-    } else if (t.startsWith("- ")) {
-      list.push(<li key={key++}>{inline(t.slice(2))}</li>);
-    } else if (t === "") {
-      flush();
-    } else {
-      flush();
-      out.push(<p key={key++}>{inline(t)}</p>);
-    }
-  }
-  flush();
-  return <div className="md">{out}</div>;
-}
+
 
 const TEMPLATE_COPY: Record<string, { label: string; description: string }> = {
   Meeting: { label: "General", description: "Comprehensive timeline, discussion, decisions, actions, and risks" },
@@ -470,6 +379,7 @@ export function MeetingPage({
   const [playingSeg, setPlayingSeg] = useState<number | null>(null);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
+  const [publishOpen, setPublishOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
@@ -1672,6 +1582,12 @@ export function MeetingPage({
             </button>
             {shareOpen && (
               <div className="meeting-share-menu" role="menu">
+                {isDesktop && summaries.length > 0 && !detail?.trashed_at && (
+                  <button onClick={() => { setShareOpen(false); setPublishOpen(true); }}>
+                    <Users size={15} />
+                    <span><strong>Publish to team</strong><small>Choose a workspace and review what’s shared</small></span>
+                  </button>
+                )}
                 <button onClick={() => void copyMarkdown("meeting")}>
                   <Copy size={15} />
                   <span><strong>Copy meeting Markdown</strong><small>Current summary, notes, and transcript</small></span>
@@ -2228,6 +2144,7 @@ export function MeetingPage({
           ) : null}
         </div>
       )}
+      {publishOpen && detail && <PublishMeeting meeting={detail} summaryId={typeof tab === "number" ? summaries[tab]?.id ?? null : null} onClose={() => setPublishOpen(false)} />}
       <article className="meeting-print" aria-hidden="true">
         <header>
           <span className="print-kicker">NOTED / MEETING NOTES</span>

@@ -21,6 +21,7 @@
     "app:update": "bash scripts/install-app.sh",
     "app:update:if-needed": "bash scripts/update-app-if-needed.sh",
     "team:serve": "bun services/team/server.ts",
+    "team:mcp": "bun services/team/mcp.ts",
     "team:test": "bun test services/team/server.test.ts",
     "team:preview": "vite --config vite.team.config.ts",
     "team:demo": "bun scripts/team-demo.ts"

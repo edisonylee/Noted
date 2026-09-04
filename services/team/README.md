@@ -120,3 +120,37 @@ The service uses [Bun’s SQLite API](https://bun.sh/docs/runtime/sqlite) and
 [HTTP server](https://bun.sh/docs/runtime/http/server). It adds no runtime package
 dependency. Service-only development dependencies have their own lockfile.
 See [the parity audit](../../docs/GRANOLA_PARITY.md) for explicit remaining work.
+
+## Read-only API and MCP
+
+An administrator first enables **Allow approved workspace integrations** in a
+space’s access settings. Then **Integrations → Create read-only key** chooses
+specific spaces, an expiry, and whether transcripts are included. Both approvals
+are required. Turning space access off blocks all keys for that space immediately;
+revoking one key affects only that integration. A workspace key survives its
+creator leaving, so offboarding should also review the workspace’s integrations.
+The publication preview discloses when a destination permits integrations.
+
+Use `Authorization: Bearer <integration-key>` with these GET endpoints:
+
+- `/v1/api/spaces`: approved spaces only.
+- `/v1/api/folders`: folders in those spaces.
+- `/v1/api/notes?q=phrase&space=id&folder=id&offset=0`: metadata and summary
+  excerpts, with `next_offset` pagination. Folder scope includes descendants.
+  Without transcript permission, transcript-only matches are excluded.
+- `/v1/api/notes/{id}`: a published summary and, if separately granted, transcript.
+  Trashed or out-of-scope meetings return 404. Member/session/admin routes reject
+  integration keys; integration routes reject writes and member session keys.
+
+For a client that supports local stdio MCP servers, configure Bun to run the
+absolute path to `services/team/mcp.ts`, with `NOTED_TEAM_SERVER` and
+`NOTED_TEAM_API_KEY` provided through the client’s protected environment/secret
+configuration. Keep the key out of tracked configuration. This adapter exposes
+`list_team_spaces`, `search_team_meetings` and `get_team_meeting`. Source reads
+are bounded to 15,000 characters per passage with a continuation offset.
+
+The adapter follows the official [stdio transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+and [tool contract](https://modelcontextprotocol.io/specification/2025-11-25/server/tools).
+It does not install itself in any client, access the local vault, use a member’s
+Keychain session, or expose write tools. Hosted OAuth MCP and webhook delivery
+are not implemented.

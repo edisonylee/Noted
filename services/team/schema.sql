@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS recipes (id TEXT PRIMARY KEY, org_id TEXT NOT NULL RE
 CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), actor_id TEXT NOT NULL REFERENCES users(id), action TEXT NOT NULL, target_id TEXT NOT NULL, at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS saved_answers (id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), user_id TEXT NOT NULL REFERENCES users(id), question TEXT NOT NULL, answer TEXT NOT NULL, limited INTEGER NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS answer_sources (answer_id TEXT NOT NULL REFERENCES saved_answers(id) ON DELETE CASCADE, note_id TEXT NOT NULL REFERENCES notes(id), revision INTEGER NOT NULL, citation TEXT NOT NULL, PRIMARY KEY(answer_id,note_id));
+CREATE TABLE IF NOT EXISTS integration_keys (id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), name TEXT NOT NULL, hash TEXT NOT NULL UNIQUE, transcripts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, expires_at INTEGER NOT NULL, revoked_at TEXT);
+CREATE TABLE IF NOT EXISTS integration_spaces (key_id TEXT NOT NULL REFERENCES integration_keys(id) ON DELETE CASCADE, space_id TEXT NOT NULL REFERENCES spaces(id), PRIMARY KEY(key_id,space_id));
 CREATE INDEX IF NOT EXISTS answers_owner ON saved_answers(org_id,user_id,created_at);
 CREATE INDEX IF NOT EXISTS notes_space_date ON notes(space_id,occurred_at);
 CREATE INDEX IF NOT EXISTS members_user ON members(user_id);

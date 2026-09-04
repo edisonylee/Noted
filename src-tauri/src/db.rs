@@ -268,6 +268,8 @@ CREATE TABLE IF NOT EXISTS meetings (
   route_via      TEXT,                    -- source_account|organizer|creator|attendee|manual
   route_status   TEXT NOT NULL DEFAULT 'needs_filing', -- matched|needs_filing|manual
   route_updated_at TEXT,
+  summary_error  TEXT,                    -- last note-generation failure; cleared after success
+  summary_retry_count INTEGER NOT NULL DEFAULT 0, -- bounds automatic recovery attempts
   trashed_at     TEXT,                    -- reversible removal; NULL = visible
   created_at     TEXT NOT NULL
 );
@@ -582,6 +584,13 @@ pub fn init(db_path: &Path) -> Result<Connection> {
         "TEXT NOT NULL DEFAULT 'needs_filing'",
     )?;
     ensure_column(&conn, "meetings", "route_updated_at", "TEXT")?;
+    ensure_column(&conn, "meetings", "summary_error", "TEXT")?;
+    ensure_column(
+        &conn,
+        "meetings",
+        "summary_retry_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     // Future conversation pace uses speech-only VAD time. Historical rows stay
     // NULL so the UI can withhold pace instead of presenting padded spans as
     // precise articulation timing.

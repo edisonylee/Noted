@@ -1708,6 +1708,30 @@ pub async fn run(
     meeting_id: i64,
     template_name: Option<String>,
 ) -> Result<String> {
+    {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        store::mark_summary_attempt(&conn, meeting_id)?;
+    }
+    let result = run_inner(app, meeting_id, template_name).await;
+    if let Err(error) = &result {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        if let Err(persist_error) = store::mark_summary_failed(&conn, meeting_id, &error.to_string())
+        {
+            eprintln!(
+                "[noted] failed to persist meeting summary error for {meeting_id}: {persist_error}"
+            );
+        }
+    }
+    result
+}
+
+async fn run_inner(
+    app: &tauri::AppHandle,
+    meeting_id: i64,
+    template_name: Option<String>,
+) -> Result<String> {
     // Snapshot everything under one short lock.
     let (meeting, segments, template, prompt) = {
         let state = app.state::<Db>();
@@ -1934,23 +1958,23 @@ pub async fn run(
                 if route_status == Some("manual") { "manual" } else { "rule" }
             }),
         });
-        match serde_json::from_value::<crate::SaveArgs>(save_json) {
-            Ok(args) => match crate::save_entry(app.clone(), args).await {
-                Ok(note_id) => {
-                    let state = app.state::<Db>();
-                    let conn = state.0.lock().unwrap();
-                    if let Err(error) =
-                        store::set_note_id_and_apply_route(&conn, meeting_id, note_id, &now)
-                    {
-                        eprintln!("[noted] meeting route filing failed: {error}");
-                        // Preserve the core meeting → note link even if a
-                        // destination disappeared during summarization.
-                        let _ = store::set_note_id(&conn, meeting_id, note_id);
-                    }
-                }
-                Err(e) => eprintln!("[noted] meeting note filing failed: {e}"),
-            },
-            Err(e) => eprintln!("[noted] meeting note args invalid: {e}"),
+        let args = serde_json::from_value::<crate::SaveArgs>(save_json)
+            .map_err(|error| anyhow!("meeting note data was invalid: {error}"))?;
+        let note_id = crate::save_entry(app.clone(), args)
+            .await
+            .map_err(|error| anyhow!("meeting note could not be saved: {error}"))?;
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        if let Err(error) = store::set_note_id_and_apply_route(&conn, meeting_id, note_id, &now) {
+            eprintln!("[noted] meeting route filing failed: {error}");
+            // The route application is transactional. Preserve the projection
+            // link so a retry cannot create a duplicate document; its broad
+            // save destination remains visible and can be re-filed separately.
+            store::set_note_id(&conn, meeting_id, note_id).map_err(|link_error| {
+                anyhow!(
+                    "meeting note was saved but could not be linked: {link_error}; route error: {error}"
+                )
+            })?;
         }
     } else if template == super::cfg().default_template {
         // A refreshed primary summary (including a speaker repair) must also
@@ -1973,7 +1997,7 @@ pub async fn run(
     {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
-        store::set_status(&conn, meeting_id, "done")?;
+        store::mark_summary_succeeded(&conn, meeting_id)?;
     }
     let _ = app.emit(
         "meeting-summarized",

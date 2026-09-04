@@ -704,12 +704,6 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("[noted] meeting summarize failed: {e}");
-                let db = h.state::<Db>();
-                let conn = db.0.lock().unwrap();
-                // Capture already succeeded: preserve the meeting as a usable
-                // transcript even when optional note generation fails.
-                let _ = store::set_status(&conn, id, "done");
-                drop(conn);
                 let _ = h.emit(
                     "meeting-summarized",
                     json!({ "meetingId": id, "summaryFailed": true }),
@@ -758,12 +752,18 @@ fn rediarize_interrupted(app: &tauri::AppHandle, id: i64) {
 /// gets its speaker labels rebuilt from the retained audio, then summarized;
 /// empty ones are marked failed.
 pub fn reconcile(app: &tauri::AppHandle) {
-    let stuck = {
+    const MAX_SUMMARY_RECOVERY_ATTEMPTS: i64 = 3;
+    let (stuck, stranded) = {
         let db = app.state::<Db>();
         let conn = db.0.lock().unwrap();
-        store::list_stuck(&conn).unwrap_or_default()
+        (
+            store::list_stuck(&conn).unwrap_or_default(),
+            store::list_summary_recovery_candidates(&conn, MAX_SUMMARY_RECOVERY_ATTEMPTS)
+                .unwrap_or_default(),
+        )
     };
     let now = chrono::Utc::now().to_rfc3339();
+    let mut recover = Vec::new();
     for (id, segments) in stuck {
         let db = app.state::<Db>();
         let conn = db.0.lock().unwrap();
@@ -773,12 +773,27 @@ pub fn reconcile(app: &tauri::AppHandle) {
         }
         let _ = store::mark_interrupted(&conn, id, &now, "summarizing");
         drop(conn);
-        println!("[noted] recovering interrupted meeting {id} ({segments} segments)");
-        let h = app.clone();
-        tauri::async_runtime::spawn(async move {
+        recover.push((id, segments, true));
+    }
+    for (id, segments) in stranded {
+        if !recover.iter().any(|(candidate, _, _)| *candidate == id) {
+            recover.push((id, segments, false));
+        }
+    }
+    if recover.is_empty() {
+        return;
+    }
+
+    // Local inference is intentionally sequential. Launching every stranded
+    // meeting at once makes large transcripts contend for the same model and
+    // turns a recoverable failure into another failure storm.
+    let h = app.clone();
+    tauri::async_runtime::spawn(async move {
+        for (id, segments, interrupted) in recover {
+            println!("[noted] recovering meeting {id} ({segments} segments)");
             // Labels first (blocking: onnx over the whole WAV), so the
             // summary and the reloaded transcript see speaker names.
-            if crate::release_profile::diarization() {
+            if interrupted && crate::release_profile::diarization() {
                 let h2 = h.clone();
                 let _ = tauri::async_runtime::spawn_blocking(move || {
                     rediarize_interrupted(&h2, id);
@@ -789,18 +804,14 @@ pub fn reconcile(app: &tauri::AppHandle) {
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("[noted] recovery summarize failed for {id}: {e}");
-                    let db = h.state::<Db>();
-                    let conn = db.0.lock().unwrap();
-                    let _ = store::set_status(&conn, id, "done");
-                    drop(conn);
                     let _ = h.emit(
                         "meeting-summarized",
                         json!({ "meetingId": id, "summaryFailed": true }),
                     );
                 }
             }
-        });
-    }
+        }
+    });
 }
 
 /// Live status for polling (phone bridge has no event channel).

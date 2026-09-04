@@ -82,6 +82,56 @@ fn work_event(attendees: serde_json::Value) -> serde_json::Value {
 }
 
 #[test]
+fn stranded_transcripts_are_retried_with_a_bounded_failure_count() {
+    let (path, conn) = test_db("summary_recovery");
+    let id =
+        store::create_meeting(&conn, "Daily Stand Up", None, None, "2026-09-03T16:00:00Z").unwrap();
+    store::set_ended(&conn, id, "2026-09-03T16:20:00Z", "done").unwrap();
+
+    // Empty/abandoned rows are not valid recovery work.
+    assert!(store::list_summary_recovery_candidates(&conn, 3)
+        .unwrap()
+        .is_empty());
+
+    store::insert_segment(&conn, id, "me", 0, 1_000, "Yesterday I shipped the fix.").unwrap();
+    assert_eq!(
+        store::list_summary_recovery_candidates(&conn, 3).unwrap(),
+        vec![(id, 1)]
+    );
+
+    for attempt in 1..=3 {
+        store::mark_summary_attempt(&conn, id).unwrap();
+        store::mark_summary_failed(&conn, id, "local model unavailable").unwrap();
+        let (status, error, retries): (String, Option<String>, i64) = conn
+            .query_row(
+                "SELECT status, summary_error, summary_retry_count FROM meetings WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(error.as_deref(), Some("local model unavailable"));
+        assert_eq!(retries, attempt);
+    }
+
+    assert!(store::list_summary_recovery_candidates(&conn, 3)
+        .unwrap()
+        .is_empty());
+    store::mark_summary_succeeded(&conn, id).unwrap();
+    let (status, error): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, summary_error FROM meetings WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "done");
+    assert_eq!(error, None);
+    drop(conn);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn priority_routes_exact_normalized_identity_and_owner_aliases_are_not_attendees() {
     let (path, conn) = test_db("priority");
     let baro = folder_id(&conn, "Baro");

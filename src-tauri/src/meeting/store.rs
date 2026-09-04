@@ -692,6 +692,50 @@ pub fn set_status(conn: &Connection, id: i64, status: &str) -> Result<()> {
     Ok(())
 }
 
+/// Begin one note-generation attempt. Meetings that already own a document
+/// stay usable while an additional template is generated; missing projections
+/// return to the explicit in-progress state.
+pub fn mark_summary_attempt(conn: &Connection, id: i64) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE meetings
+         SET status = CASE WHEN note_id IS NULL THEN 'summarizing' ELSE status END,
+             summary_error = NULL
+         WHERE id = ?1 AND trashed_at IS NULL",
+        [id],
+    )?;
+    if changed == 0 {
+        return Err(anyhow!("meeting not found"));
+    }
+    Ok(())
+}
+
+/// Persist a failed note-generation attempt instead of disguising it as done.
+/// The bounded counter only applies while the primary document is still
+/// missing; failures of optional extra templates must not hide an existing one.
+pub fn mark_summary_failed(conn: &Connection, id: i64, error: &str) -> Result<()> {
+    let error: String = error.chars().take(2_000).collect();
+    conn.execute(
+        "UPDATE meetings
+         SET status = CASE WHEN note_id IS NULL THEN 'failed' ELSE status END,
+             summary_error = ?2,
+             summary_retry_count = CASE
+               WHEN note_id IS NULL THEN COALESCE(summary_retry_count, 0) + 1
+               ELSE COALESCE(summary_retry_count, 0)
+             END
+         WHERE id = ?1",
+        rusqlite::params![id, error],
+    )?;
+    Ok(())
+}
+
+pub fn mark_summary_succeeded(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE meetings SET status = 'done', summary_error = NULL WHERE id = ?1",
+        [id],
+    )?;
+    Ok(())
+}
+
 pub fn set_ended(conn: &Connection, id: i64, ended_at: &str, status: &str) -> Result<()> {
     conn.execute(
         "UPDATE meetings SET ended_at = ?2, status = ?3 WHERE id = ?1",
@@ -709,6 +753,35 @@ pub fn list_stuck(conn: &Connection) -> Result<Vec<(i64, i64)>> {
     )?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Completed-looking meetings whose transcript survived but whose searchable
+/// document never did. These were stranded by older builds that converted a
+/// summary failure into `done`. Retry only a few times across app launches so
+/// an unavailable model cannot create an endless startup loop.
+pub fn list_summary_recovery_candidates(
+    conn: &Connection,
+    max_attempts: i64,
+) -> Result<Vec<(i64, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT m.id,
+                (SELECT COUNT(*) FROM meeting_segments s WHERE s.meeting_id = m.id)
+         FROM meetings m
+         WHERE m.note_id IS NULL
+           AND m.trashed_at IS NULL
+           AND m.status IN ('done', 'failed')
+           AND COALESCE(m.summary_retry_count, 0) < ?1
+           AND EXISTS (
+             SELECT 1 FROM meeting_segments s WHERE s.meeting_id = m.id
+           )
+         ORDER BY m.id",
+    )?;
+    let rows = stmt
+        .query_map([max_attempts], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }

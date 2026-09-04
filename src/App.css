@@ -3912,14 +3912,7 @@ a.cal-btn { text-decoration: none; }
 }
 .documents-view { max-width: 1180px; gap: 30px; }
 .documents-view .notes-list { max-width: 920px; margin: 0 auto; }
-.document-files {
-  width: 224px; box-sizing: border-box; padding: 14px 10px 10px;
-  border-radius: 10px; background: color-mix(in srgb, var(--surface-2) 72%, transparent);
-}
-.document-files .spaces-scroll { padding-right: 2px; }
-.document-files .space-switcher { margin: 0 1px 14px; }
-.document-files .space-switcher-trigger { min-height: 45px; padding: 0 5px; }
-.document-files .space-switcher-copy strong { font-size: 16px; }
+.document-files { width: 224px; }
 .document-files-label {
   margin: 0 9px 5px; color: var(--ink-soft); font-size: 12px; font-weight: 630;
 }
@@ -3927,9 +3920,6 @@ a.cal-btn { text-decoration: none; }
 .document-folder-head { margin-top: 19px; }
 .document-folders-empty {
   margin: 5px 10px 0 29px; color: var(--faint); font-size: 10.5px; line-height: 1.45;
-}
-.document-files .spaces-trash-wrap {
-  margin: 0 -1px -1px; padding: 9px 1px 0; background: transparent;
 }
 .documents-masthead {
   display: flex; align-items: flex-end; justify-content: space-between; gap: 28px;
@@ -4586,7 +4576,7 @@ a.cal-btn { text-decoration: none; }
 @media (max-width: 780px) {
   .notes-view { gap: 16px; }
   .spaces { width: 170px; }
-  .document-files { width: 172px; padding-left: 7px; padding-right: 7px; }
+  .document-files { width: 172px; }
   .notes-list { width: auto; }
   .notes-context { min-height: 0; }
   .notes-context-count, .note-row-categories { display: none; }

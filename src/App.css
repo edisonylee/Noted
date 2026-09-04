@@ -3910,6 +3910,7 @@ a.cal-btn { text-decoration: none; }
   flex: 1; min-height: 0; display: flex; gap: 34px; align-items: stretch;
   width: 100%; max-width: 1100px;
 }
+.notes-view:has(.notes-library-toggle-reveal) { gap: 10px; }
 .documents-view { max-width: 1180px; gap: 30px; }
 .documents-view .notes-list { max-width: 920px; margin: 0 auto; }
 .document-files { width: 224px; }
@@ -3951,12 +3952,12 @@ a.cal-btn { text-decoration: none; }
   display: contents;
 }
 .notes-library-toggle {
-  /* Pair the two sidebar controls on the native titlebar axis. The global
-     sidebar toggle occupies 76-104px; this one follows with a 4px gap. */
-  position: fixed; top: 4px; left: 108px; z-index: 60;
-  width: 28px; height: 28px; color: var(--muted);
+  flex: none; width: 28px; height: 28px; color: var(--muted);
 }
 .notes-library-toggle:hover { color: var(--ink); }
+.notes-library-toggle-reveal {
+  flex: none; align-self: flex-start; width: 32px; height: 50px;
+}
 .spaces {
   flex: none; align-self: stretch; width: 244px; min-height: 0; overflow: hidden;
   display: flex; flex-direction: column; gap: 2px; position: sticky; top: 26px;
@@ -3967,11 +3968,14 @@ a.cal-btn { text-decoration: none; }
   overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; scrollbar-width: thin;
 }
 .space-switcher { position: relative; z-index: 5; margin: 0 2px 13px; }
+.space-switcher-row { display: flex; align-items: flex-start; gap: 4px; }
 .space-switcher-trigger {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
   width: 100%; min-height: 50px; padding: 0 4px; border: none; background: none;
   color: var(--ink); text-align: left;
 }
+.space-switcher-row .space-switcher-trigger { flex: 1; min-width: 0; width: auto; }
+.space-switcher-row .notes-library-toggle { margin-top: 1px; }
 .space-switcher-trigger:hover .space-switcher-copy strong { color: var(--ink-soft); }
 .space-switcher-trigger:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 5px; }
 .space-switcher-trigger > svg {
@@ -3988,7 +3992,7 @@ a.cal-btn { text-decoration: none; }
 }
 .space-switcher-copy small { color: var(--muted); font-size: 11.5px; line-height: 1.2; }
 .space-switcher-menu {
-  position: absolute; top: 48px; left: -2px; right: 0; z-index: 10;
+  position: absolute; top: 48px; left: -2px; right: 32px; z-index: 10;
   display: flex; flex-direction: column; gap: 2px; padding: 5px;
   border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-md);
   background: var(--surface); box-shadow: 0 10px 24px rgba(27, 25, 22, .11);

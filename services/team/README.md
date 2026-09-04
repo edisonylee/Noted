@@ -65,7 +65,7 @@ policy. The server operator is a trusted administrator with filesystem access.
    to team**. Select the audience and summary. The transcript starts unchecked.
    Review content and publish. Background local changes invalidate the preview.
 3. Team members can search, select meetings, ask across folders/spaces, open
-   sources, and save answers privately. Summaries can be edited by editors;
+   sources, and continue private conversations from **Chat history**. Conversations save automatically; individual answers can also be bookmarked. Summaries can be edited by editors;
    concurrent stale edits are rejected. Shared edits do not alter local originals.
 4. Use workspace settings to invite members, adjust roles, manage groups, share
    prompts, transfer ownership or revoke access. Removing someone preserves
@@ -92,7 +92,8 @@ policy. The server operator is a trusted administrator with filesystem access.
 - Answers send authorized excerpts to the native app’s selected model provider.
   Local mode uses the local model. Hosted/BYOK behavior follows existing provider
   settings; there is currently no workspace policy to constrain that selection.
-- Saved answers belong to the querying account; other members and workspace
+- Conversations retain their original workspace/folder/selection scope. Each supports 20 answers, with up to six recent turns supplied to the model. Source revisions and access are rechecked before generation, after generation and transactionally when appending. Concurrent updates from another device are rejected. History is paginated; deleting a conversation keeps shared meetings and separately saved answers. Changed, trashed, moved-out-of-scope or inaccessible evidence blocks reopening or continuing that conversation.
+- Conversations and saved answers belong to the querying account; other members and workspace
   admins cannot read them through the API. The server operator can inspect its
   database. Opening an answer rechecks every source and its revision. Changed,
   trashed or inaccessible evidence hides the answer and its question in the list.

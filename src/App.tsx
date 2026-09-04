@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "./events";
 import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, ListTodo, Loader, MessageCircle, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Square, StickyNote, Sun, Users, Video } from "lucide-react";
 import { SettingsModal } from "./Settings";
@@ -17,7 +17,6 @@ import { PhonePanel } from "./PhonePanel";
 import { FloatingChat } from "./FloatingChat";
 import { KnowledgeView } from "./Knowledge";
 import { parseBlocks, TodayView } from "./Today";
-import { TeamWorkspace } from "./teams/TeamWorkspace";
 import { MeetingPage } from "./MeetingPage";
 import { releaseProfile } from "./releaseProfile";
 import { ComingUp } from "./ComingUp";
@@ -36,6 +35,8 @@ import {
   type FilingContext,
 } from "./filingContext";
 import "./App.css";
+
+const TeamWorkspace = lazy(() => import("./teams/TeamWorkspace").then(module => ({ default: module.TeamWorkspace })));
 
 type Phase = "idle" | "thinking" | "review";
 type View = "team" | "today" | "ask" | "capture" | "notes" | "calendar" | "journal" | "knowledge" | "settings";
@@ -1055,7 +1056,9 @@ export default function App() {
             />
           </WeatherHome>
         ) : view === "team" ? (
-          <TeamWorkspace />
+          <Suspense fallback={<p role="status">Opening team workspace…</p>}>
+            <TeamWorkspace />
+          </Suspense>
         ) : view === "notes" ? (
           <NotesView notes={notes} cats={cats} onChanged={() => refresh().catch(handleErr)} />
         ) : view === "calendar" ? (

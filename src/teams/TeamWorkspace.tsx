@@ -32,10 +32,10 @@ import type {
   TeamFolder,
   TeamNote,
   TeamNoteRow,
-  TeamAnswer,
 } from "./types";
 import { TeamDialog } from "./TeamDialog";
 import { SavedAnswers } from "./SavedAnswers";
+import { TeamChat } from "./TeamChat";
 import { TeamAdministration } from "./TeamAdministration";
 import "./teams.css";
 
@@ -364,35 +364,32 @@ function TeamLibrary({ org }: { org: string }) {
   const [noteId, setNoteId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [question, setQuestion] = useState("");
-  const [answer, setAnswer] = useState<TeamAnswer | null>(null);
-  const [asking, setAsking] = useState(false);
-  const [answerQuestion, setAnswerQuestion] = useState(""),
-    [saved, setSaved] = useState(false),
-    [saving, setSaving] = useState(false);
+  const [conversationId, setConversationId] = useState<string | null>(null);
   const [editor, setEditor] = useState<
     "space" | "folder" | "editFolder" | null
   >(null);
   const [accessEpoch, setAccessEpoch] = useState(0);
   const accessVersion = useRef<number | null>(null);
   const loadedAccessEpoch = useRef(0);
-  const requestVersion = useRef(0),
-    scopeVersion = useRef(0);
+  const requestVersion = useRef(0);
   const refresh = useCallback(async () => {
     const next = await team.request<TeamSnapshot>("GET", orgPath(org));
-    if (accessVersion.current != null && next.access_version < accessVersion.current) {
-      throw new Error("Workspace access changed. Refresh again for the current version.");
+    if (
+      accessVersion.current != null &&
+      next.access_version < accessVersion.current
+    ) {
+      throw new Error(
+        "Workspace access changed. Refresh again for the current version.",
+      );
     }
     if (
       accessVersion.current != null &&
       accessVersion.current !== next.access_version
     ) {
       ++requestVersion.current;
-      ++scopeVersion.current;
       setRows([]);
       setSelected([]);
-      setAnswer(null);
-      setAsking(false);
+      setConversationId(null);
       setAccessEpoch((v) => v + 1);
     }
     accessVersion.current = next.access_version;
@@ -423,7 +420,7 @@ function TeamLibrary({ org }: { org: string }) {
       } catch (e) {
         if (requestVersion.current === version) {
           setRows([]);
-          setAnswer(null);
+          setConversationId(null);
           setError(String(e));
         }
       } finally {
@@ -436,20 +433,17 @@ function TeamLibrary({ org }: { org: string }) {
     refresh().catch((e) => setError(String(e)));
   }, [refresh]);
   useEffect(() => {
-    ++scopeVersion.current;
     ++requestVersion.current;
     setRows([]);
     setSelected([]);
-    setAnswer(null);
+    setConversationId(null);
     setNoteId(null);
-    setAsking(false);
     const timer = window.setTimeout(() => {
       if (view === "notes" || view === "trash") void loadRows();
     }, 180);
     return () => {
       clearTimeout(timer);
       ++requestVersion.current;
-      ++scopeVersion.current;
     };
   }, [loadRows, view]);
   useEffect(() => {
@@ -467,18 +461,16 @@ function TeamLibrary({ org }: { org: string }) {
               setSpace("");
               setFolder("");
               setNoteId(null);
-              setAnswer(null);
+              setConversationId(null);
             }
           })
           .catch((e) => {
-            ++scopeVersion.current;
             ++requestVersion.current;
             setData(null);
             setRows([]);
             setSelected([]);
-            setAsking(false);
             setNoteId(null);
-            setAnswer(null);
+            setConversationId(null);
             setError(String(e));
           });
     };
@@ -489,31 +481,6 @@ function TeamLibrary({ org }: { org: string }) {
       window.removeEventListener("focus", check);
     };
   }, [refresh, space]);
-  const ask = async (e?: FormEvent) => {
-    e?.preventDefault();
-    if (!question.trim() || asking) return;
-    const version = scopeVersion.current;
-    setAsking(true);
-    setAnswer(null);
-    setSaved(false);
-    setError("");
-    try {
-      const result = await team.ask(org, {
-        question,
-        space_id: space,
-        folder_id: folder,
-        note_ids: selected,
-      });
-      if (version === scopeVersion.current) {
-        setAnswer(result);
-        setAnswerQuestion(question);
-      }
-    } catch (e) {
-      if (version === scopeVersion.current) setError(String(e));
-    } finally {
-      if (version === scopeVersion.current) setAsking(false);
-    }
-  };
   const navigate = (nextSpace = "", nextFolder = "") => {
     setSpace(nextSpace);
     setFolder(nextFolder);
@@ -522,10 +489,8 @@ function TeamLibrary({ org }: { org: string }) {
     setNoteId(null);
   };
   const changeSelection = (ids: string[]) => {
-    ++scopeVersion.current;
     setSelected(ids);
-    setAnswer(null);
-    setAsking(false);
+    setConversationId(null);
   };
   const currentSpace = data?.spaces.find((s) => s.id === space);
   const currentFolder = data?.folders.find((f) => f.id === folder);
@@ -705,105 +670,18 @@ function TeamLibrary({ org }: { org: string }) {
                   )}
               </header>
               {view === "notes" && (
-                <section className="team-ask" aria-label="Ask shared meetings">
-                  <form onSubmit={ask}>
-                    <label className="sr-only" htmlFor="team-question">
-                      Ask shared meetings
-                    </label>
-                    <textarea
-                      id="team-question"
-                      rows={2}
-                      placeholder={`What would you like to know about ${currentFolder?.name ?? currentSpace?.name ?? "your team’s meetings"}?`}
-                      value={question}
-                      maxLength={6000}
-                      onChange={(e) => setQuestion(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                          e.preventDefault();
-                          void ask();
-                        }
-                      }}
-                    />
-                    <div className="team-ask-footer">
-                      <span>
-                        {selected.length
-                          ? `${selected.length} selected ${selected.length === 1 ? "meeting" : "meetings"}`
-                          : scopeName}
-                      </span>
-                      <button
-                        className="team-primary"
-                        disabled={
-                          asking || !question.trim() || rows.length === 0
-                        }
-                      >
-                        {asking ? <Loader size={15} className="spin" /> : null}
-                        {asking ? "Reading sources…" : "Ask"}
-                      </button>
-                    </div>
-                  </form>
-                  {!!data.recipes.filter((r) => r.kind === "recipe").length && (
-                    <div className="team-recipe-shortcuts">
-                      {data.recipes
-                        .filter((r) => r.kind === "recipe")
-                        .slice(0, 4)
-                        .map((r) => (
-                          <button
-                            key={r.id}
-                            onClick={() => setQuestion(r.prompt)}
-                          >
-                            {r.name}
-                            <ChevronRight size={12} />
-                          </button>
-                        ))}
-                    </div>
-                  )}
-                  {answer && (
-                    <div className="team-answer">
-                      <MdBlock md={answer.answer} />
-                      <button
-                        className="team-text-button"
-                        disabled={saved || saving || !answer.sources.length}
-                        onClick={async () => {
-                          if (saving) return;
-                          setSaving(true);
-                          try {
-                            await team.request(
-                              "POST",
-                              orgPath(org, "/answers"),
-                              { ...answer, question: answerQuestion },
-                            );
-                            setSaved(true);
-                          } catch (e) {
-                            setError(String(e));
-                          } finally {
-                            setSaving(false);
-                          }
-                        }}
-                      >
-                        {saved
-                          ? "Saved to your answers"
-                          : saving
-                            ? "Saving…"
-                            : "Save answer"}
-                      </button>
-                      <div className="team-sources">
-                        {answer.sources.map((s) => (
-                          <button key={s.id} onClick={() => setNoteId(s.id)}>
-                            <span>[{s.citation}]</span>
-                            {s.title}
-                          </button>
-                        ))}
-                      </div>
-                      {answer.limited && (
-                        <p className="team-muted">
-                          This answer uses a limited selection of excerpts.
-                          Narrow the folder or select meetings for a closer
-                          review.
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </section>
+                <TeamChat
+                  key={accessEpoch}
+                  org={org}
+                  data={data}
+                  space={space}
+                  folder={folder}
+                  selected={selected}
+                  scopeName={scopeName}
+                  id={conversationId}
+                  onConversation={setConversationId}
+                  onSource={setNoteId}
+                />
               )}
               <div className="team-list-tools">
                 <label>

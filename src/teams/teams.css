@@ -828,3 +828,35 @@
   background: var(--hover-soft);
   border-radius: 5px;
 }
+
+.team-chat-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.team-chat-tools > .team-muted {
+  margin-right: auto;
+}
+.team-chat-turn {
+  margin: 24px 0;
+  border-top: 1px solid var(--line);
+  padding-top: 20px;
+}
+.team-chat-turn h2 {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  margin: 0 0 12px;
+}
+.team-chat-turn .team-answer {
+  border: 0;
+  padding: 0;
+}
+.team-chat-privacy {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  margin: 10px 0 0;
+}

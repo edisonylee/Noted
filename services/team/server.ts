@@ -195,6 +195,24 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
       }
       if (resource === "context" && method === "POST")
         return respond(store.context(user, org, body));
+      if (resource === "conversations") {
+        if (!id && method === "GET")
+          return respond(
+            store.conversations(
+              user,
+              org,
+              Number(url.searchParams.get("offset") ?? 0),
+            ),
+          );
+        if (!id && method === "POST")
+          return respond(store.appendConversation(user, org, body), 201);
+        if (id && method === "GET")
+          return respond(store.conversation(user, org, id));
+        if (id && method === "DELETE") {
+          store.deleteConversation(user, org, id);
+          return respond({});
+        }
+      }
       if (resource === "answers") {
         if (!id && method === "GET") return respond(store.answers(user, org));
         if (!id && method === "POST")

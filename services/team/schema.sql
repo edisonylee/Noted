@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS answer_sources (answer_id TEXT NOT NULL REFERENCES sa
 CREATE TABLE IF NOT EXISTS integration_keys (id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), name TEXT NOT NULL, hash TEXT NOT NULL UNIQUE, transcripts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, expires_at INTEGER NOT NULL, revoked_at TEXT);
 CREATE TABLE IF NOT EXISTS integration_spaces (key_id TEXT NOT NULL REFERENCES integration_keys(id) ON DELETE CASCADE, space_id TEXT NOT NULL REFERENCES spaces(id), PRIMARY KEY(key_id,space_id));
 CREATE INDEX IF NOT EXISTS answers_owner ON saved_answers(org_id,user_id,created_at);
+CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id), user_id TEXT NOT NULL REFERENCES users(id), scope_json TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS conversation_turns (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, position INTEGER NOT NULL, question TEXT NOT NULL, answer TEXT NOT NULL, limited INTEGER NOT NULL, created_at TEXT NOT NULL, UNIQUE(conversation_id,position));
+CREATE TABLE IF NOT EXISTS conversation_sources (turn_id TEXT NOT NULL REFERENCES conversation_turns(id) ON DELETE CASCADE, note_id TEXT NOT NULL REFERENCES notes(id), revision INTEGER NOT NULL, citation TEXT NOT NULL, PRIMARY KEY(turn_id,note_id));
+CREATE INDEX IF NOT EXISTS conversations_owner ON conversations(org_id,user_id,updated_at);
 CREATE INDEX IF NOT EXISTS notes_space_date ON notes(space_id,occurred_at);
 CREATE INDEX IF NOT EXISTS members_user ON members(user_id);
 CREATE INDEX IF NOT EXISTS spaces_org ON spaces(org_id);

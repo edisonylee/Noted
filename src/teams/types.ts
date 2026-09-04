@@ -76,4 +76,23 @@ export type TeamAnswer = {
   answer: string;
   sources: TeamSource[];
   limited: boolean;
+  conversation?: TeamConversation;
+};
+export type TeamTurn = Omit<TeamAnswer, "conversation"> & {
+  id: string;
+  question: string;
+  created_at: string;
+};
+export type TeamConversation = {
+  id: string;
+  revision: number;
+  scope: { space_id: string; folder_id: string; note_ids: string[] };
+  turns: TeamTurn[];
+  updated_at: string;
+};
+export type TeamConversationRow = {
+  id: string;
+  question: string;
+  updated_at: string;
+  available: boolean;
 };

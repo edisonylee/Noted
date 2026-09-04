@@ -8,6 +8,8 @@ import type {
   TeamNoteRow,
   TeamSource,
   TeamRecipe,
+  TeamConversation,
+  TeamTurn,
 } from "../../src/teams/types";
 
 type Row = Record<string, string | number | null>;
@@ -767,10 +769,48 @@ export class TeamStore {
   }
   context(user: string, org: string, body: Record<string, unknown>) {
     const question = text(body.question, "question", 6000);
+    const conversation = body.conversation_id
+      ? this.conversation(
+          user,
+          org,
+          text(body.conversation_id, "conversation", 100),
+        )
+      : null;
+    const requested = conversation?.scope ?? body;
     const selected =
-      body.note_ids == null ? [] : ids(body.note_ids, "meetings", 40);
-    const space = typeof body.space_id === "string" ? body.space_id : "",
-      folder = typeof body.folder_id === "string" ? body.folder_id : "";
+      requested.note_ids == null ? [] : ids(requested.note_ids, "meetings", 40);
+    const space =
+        typeof requested.space_id === "string" ? requested.space_id : "",
+      folder =
+        typeof requested.folder_id === "string" ? requested.folder_id : "";
+    const history = conversation?.turns.slice(-6) ?? [];
+    const promptHistory: {
+      question: string;
+      answer: string;
+      sources: { id: string; citation: string }[];
+    }[] = [];
+    let historyLimited = (conversation?.turns.length ?? 0) > history.length;
+    for (const turn of [...history].reverse()) {
+      const previous = {
+        question: turn.question.slice(0, 800),
+        answer: turn.answer.slice(0, 1800),
+        sources: turn.sources.map((source) => ({
+          id: source.id,
+          citation: source.citation,
+        })),
+      };
+      if (JSON.stringify([previous, ...promptHistory]).length > 6000) {
+        historyLimited = true;
+        break;
+      }
+      historyLimited ||=
+        previous.question.length < turn.question.length ||
+        previous.answer.length < turn.answer.length;
+      promptHistory.unshift(previous);
+    }
+    const previousIds = [
+      ...new Set(history.flatMap((t) => t.sources.map((s) => s.id))),
+    ];
     // Resolve scope before reading any content. Exact selected IDs never bypass it.
     const scope = this.noteScope(user, org, space, folder);
     const stop = new Set(
@@ -779,7 +819,12 @@ export class TeamStore {
       ),
     );
     const terms = [
-      ...new Set(question.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []),
+      ...new Set(
+        [question, ...history.slice(-2).map((t) => t.question)]
+          .join(" ")
+          .toLowerCase()
+          .match(/[\p{L}\p{N}]{3,}/gu) ?? [],
+      ),
     ]
       .filter((t) => !stop.has(t))
       .slice(0, 24);
@@ -800,12 +845,18 @@ export class TeamStore {
     // Rank inside the authorized SQL scope across the whole library, not just
     // the latest list page. Fetch full text only for the selected candidates.
     const candidates = this.all<{ id: string }>(
-      `SELECT n.id, ${scores.join("+") || "0"} AS score FROM notes n WHERE ${where} ORDER BY score DESC,n.occurred_at DESC,n.id LIMIT 12`,
+      `SELECT n.id, ${scores.join("+") || "0"}${previousIds.length ? `+(n.id IN(${previousIds.map(() => "?").join(",")}))` : ""} AS score FROM notes n WHERE ${where} ORDER BY score DESC,n.occurred_at DESC,n.id LIMIT 12`,
       ...terms.flatMap((t) => [t, t, t]),
+      ...previousIds,
       ...scope.values,
       ...selected,
     );
-    let remaining = 20_000;
+    // Reserve room for the question and bounded history in the local model's
+    // context window. Stored conversations keep complete answers separately.
+    let remaining = Math.max(
+      4000,
+      20_000 - question.length - JSON.stringify(promptHistory).length,
+    );
     let truncated = false;
     const sources: TeamSource[] = [];
     for (const { id } of candidates) {
@@ -841,7 +892,211 @@ export class TeamStore {
         excerpt,
       });
     }
-    return { sources, limited: total > sources.length || truncated };
+    return {
+      sources,
+      limited: total > sources.length || truncated || historyLimited,
+      conversation_revision: conversation?.revision ?? 0,
+      // Old citations refer to that turn's source map, not the current excerpts.
+      history: promptHistory,
+    };
+  }
+  conversation(user: string, org: string, id: string): TeamConversation {
+    this.role(user, org);
+    const row = this.get(
+      "SELECT * FROM conversations WHERE id=? AND org_id=? AND user_id=?",
+      id,
+      org,
+      user,
+    );
+    if (!row) fail(404, "Conversation not found");
+    const scope = JSON.parse(
+      String(row.scope_json),
+    ) as TeamConversation["scope"];
+    let allowed: ReturnType<TeamStore["noteScope"]>;
+    try {
+      allowed = this.noteScope(user, org, scope.space_id, scope.folder_id);
+    } catch (error) {
+      if (!(error instanceof TeamError)) throw error;
+      fail(
+        410,
+        "This conversation's sources changed or access was removed. Start a new conversation.",
+      );
+    }
+    const turns = this.all(
+      "SELECT * FROM conversation_turns WHERE conversation_id=? ORDER BY position",
+      id,
+    ).map((t) => {
+      const sources = this.all(
+        "SELECT * FROM conversation_sources WHERE turn_id=? ORDER BY length(citation),citation",
+        t.id,
+      ).map((s) => {
+        const note = this.get(
+          `SELECT n.id,n.title,n.revision FROM notes n WHERE n.id=? AND ${allowed.sql} AND n.trashed_at IS NULL`,
+          s.note_id,
+          ...allowed.values,
+        );
+        if (!note || note.revision !== s.revision)
+          fail(
+            410,
+            "This conversation's sources changed or access was removed. Start a new conversation.",
+          );
+        return {
+          id: String(note.id),
+          title: String(note.title),
+          revision: Number(note.revision),
+          citation: String(s.citation),
+          excerpt: "",
+        };
+      });
+      return {
+        id: String(t.id),
+        question: String(t.question),
+        answer: String(t.answer),
+        limited: !!t.limited,
+        created_at: String(t.created_at),
+        sources,
+      } satisfies TeamTurn;
+    });
+    return {
+      id,
+      revision: Number(row.revision),
+      scope,
+      turns,
+      updated_at: String(row.updated_at),
+    };
+  }
+  conversations(user: string, org: string, offset = 0) {
+    this.role(user, org);
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100_000)
+      fail(400, "Invalid offset");
+    const rows = this.all(
+      "SELECT id,updated_at FROM conversations WHERE org_id=? AND user_id=? ORDER BY updated_at DESC,id LIMIT 30 OFFSET ?",
+      org,
+      user,
+      offset,
+    );
+    return {
+      conversations: rows.map((row) => {
+        try {
+          const c = this.conversation(user, org, String(row.id));
+          return {
+            id: c.id,
+            question: c.turns[0]?.question ?? "New conversation",
+            updated_at: c.updated_at,
+            available: true,
+          };
+        } catch (error) {
+          if (!(error instanceof TeamError) || error.status !== 410)
+            throw error;
+          return {
+            id: String(row.id),
+            question: "Sources changed or access removed",
+            updated_at: String(row.updated_at),
+            available: false,
+          };
+        }
+      }),
+      next_offset: rows.length === 30 ? offset + rows.length : null,
+    };
+  }
+  appendConversation(user: string, org: string, body: Record<string, unknown>) {
+    this.role(user, org);
+    const question = text(body.question, "question", 6000),
+      answer = text(body.answer, "answer", 20_000);
+    const existing = body.conversation_id
+      ? text(body.conversation_id, "conversation", 100)
+      : null;
+    return this.db.transaction(() => {
+      // Re-read authority, the conversation and the exact source revisions in the
+      // same transaction that appends the turn. Concurrent Mac requests cannot fork it.
+      const packet = this.context(user, org, body);
+      if (body.expected_revision !== packet.conversation_revision)
+        fail(
+          409,
+          "The conversation changed on another device. Reopen it before asking again.",
+        );
+      if (packet.conversation_revision >= 20)
+        fail(
+          400,
+          "This conversation has reached 20 answers. Start a new conversation.",
+        );
+      if (
+        !packet.sources.length ||
+        !Array.isArray(body.sources) ||
+        body.sources.length !== packet.sources.length ||
+        !packet.sources.every((source, i) => {
+          const supplied = (body.sources as unknown[])[i] as Record<
+            string,
+            unknown
+          > | null;
+          return (
+            supplied &&
+            supplied.id === source.id &&
+            supplied.revision === source.revision &&
+            supplied.citation === source.citation
+          );
+        })
+      )
+        fail(
+          409,
+          "Shared sources changed while answering. Ask again for the current version.",
+        );
+      const id = existing ?? uid(),
+        at = now(),
+        turn = uid();
+      if (!existing) {
+        const scope = {
+          space_id: typeof body.space_id === "string" ? body.space_id : "",
+          folder_id: typeof body.folder_id === "string" ? body.folder_id : "",
+          note_ids:
+            body.note_ids == null ? [] : ids(body.note_ids, "meetings", 40),
+        };
+        this.run(
+          "INSERT INTO conversations VALUES(?,?,?,?,?,?,?)",
+          id,
+          org,
+          user,
+          JSON.stringify(scope),
+          0,
+          at,
+          at,
+        );
+      }
+      this.run(
+        "INSERT INTO conversation_turns VALUES(?,?,?,?,?,?,?)",
+        turn,
+        id,
+        packet.conversation_revision + 1,
+        question,
+        answer,
+        packet.limited ? 1 : 0,
+        at,
+      );
+      for (const source of packet.sources)
+        this.run(
+          "INSERT INTO conversation_sources VALUES(?,?,?,?)",
+          turn,
+          source.id,
+          source.revision,
+          source.citation,
+        );
+      this.run(
+        "UPDATE conversations SET revision=revision+1,updated_at=? WHERE id=?",
+        at,
+        id,
+      );
+      return this.conversation(user, org, id);
+    })();
+  }
+  deleteConversation(user: string, org: string, id: string) {
+    this.role(user, org);
+    const result = this.run(
+      "DELETE FROM conversations WHERE id=? AND org_id=? AND user_id=?",
+      id,
+      org,
+      user,
+    );
+    if (!result.changes) fail(404, "Conversation not found");
   }
   recipes(user: string, org: string): TeamRecipe[] {
     this.role(user, org);

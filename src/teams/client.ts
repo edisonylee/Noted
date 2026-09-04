@@ -1,5 +1,5 @@
 import { api } from "../api";
-import type { TeamOrg, TeamAnswer } from "./types";
+import type { TeamOrg, TeamAnswer, TeamConversation } from "./types";
 
 // This transport exists only in the dedicated, loopback-only development preview.
 // Product builds always use the native Keychain-backed command surface.
@@ -89,12 +89,24 @@ export const team = {
     const packet = await previewRequest<{
       sources: TeamAnswer["sources"];
       limited: boolean;
+      conversation_revision: number;
     }>("POST", `/v1/orgs/${org}/context`, body);
-    return {
-      ...packet,
-      answer:
-        "Source retrieval is working. Open this workspace in the desktop app to generate an answer with your configured model.",
-    };
+    const answer = packet.sources.length
+      ? "Source retrieval is working. Open this workspace in the desktop app to generate an answer with your configured model."
+      : "There are no shared meetings in this scope yet.";
+    const conversation = packet.sources.length
+      ? await previewRequest<TeamConversation>(
+          "POST",
+          `/v1/orgs/${org}/conversations`,
+          {
+            ...(body as Record<string, unknown>),
+            answer,
+            sources: packet.sources,
+            expected_revision: packet.conversation_revision,
+          },
+        )
+      : undefined;
+    return { ...packet, answer, conversation };
   },
 };
 export const orgPath = (org: string, path = "") =>

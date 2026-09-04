@@ -657,3 +657,271 @@ describe("explicit integration access", () => {
     }
   });
 });
+
+describe("private team conversations", () => {
+  test("long answers stay intact in history while model input and history pages remain bounded", () => {
+    const { s, owner, org, publish } = fixture();
+    const note = publish(owner),
+      question = "What happened at launch?";
+    let current = s.appendConversation(owner, org, {
+      question,
+      note_ids: [note.id],
+      answer: "detail ".repeat(2800),
+      sources: s.context(owner, org, { question, note_ids: [note.id] }).sources,
+      expected_revision: 0,
+    });
+    for (let i = 0; i < 4; i++) {
+      const context = s.context(owner, org, {
+        question,
+        conversation_id: current.id,
+      });
+      current = s.appendConversation(owner, org, {
+        question,
+        conversation_id: current.id,
+        answer: "detail ".repeat(2800),
+        sources: context.sources,
+        expected_revision: current.revision,
+      });
+    }
+    const longQuestion = "launch ".repeat(850);
+    const context = s.context(owner, org, {
+      question: longQuestion,
+      conversation_id: current.id,
+    });
+    expect(JSON.stringify(context.history).length).toBeLessThanOrEqual(6000);
+    expect(context.limited).toBe(true);
+    expect(current.turns[0].answer.length).toBe(19599);
+    expect(
+      longQuestion.length +
+        JSON.stringify(context.history).length +
+        context.sources.reduce((sum, source) => sum + source.excerpt.length, 0),
+    ).toBeLessThan(20500);
+    for (let i = 0; i < 30; i++)
+      s.appendConversation(owner, org, {
+        question,
+        answer: "Friday [S1]",
+        sources: s.context(owner, org, { question }).sources,
+        expected_revision: 0,
+      });
+    const first = s.conversations(owner, org),
+      second = s.conversations(owner, org, first.next_offset!);
+    expect(first.conversations).toHaveLength(30);
+    expect(second.conversations).toHaveLength(1);
+    expect(second.next_offset).toBeNull();
+    expect(
+      new Set(
+        [...first.conversations, ...second.conversations].map((row) => row.id),
+      ).size,
+    ).toBe(31);
+  });
+  test("follow-ups retain scope and history without exposing another account's conversations", () => {
+    const { s, owner, org, space, join, publish } = fixture();
+    const member = join("Taylor").id;
+    const note = publish(owner);
+    const question = "What is the launch decision?";
+    const context = s.context(member, org, { question, note_ids: [note.id] });
+    const first = s.appendConversation(member, org, {
+      question,
+      answer: "Launch is Friday. [S1]",
+      note_ids: [note.id],
+      sources: context.sources,
+      expected_revision: 0,
+    });
+    expect(first.revision).toBe(1);
+    expect(first.scope.note_ids).toEqual([note.id]);
+    expect(s.conversations(owner, org).conversations).toEqual([]);
+    expect(() => s.conversation(owner, org, first.id)).toThrow(
+      "Conversation not found",
+    );
+    expect(() => s.deleteConversation(owner, org, first.id)).toThrow(
+      "Conversation not found",
+    );
+    const followup = s.context(member, org, {
+      question: "Who owns that?",
+      conversation_id: first.id,
+      // Changing these cannot silently broaden an existing conversation.
+      space_id: space,
+      note_ids: [],
+    });
+    expect(followup.history[0].answer).toContain("Friday");
+    expect(followup.sources.map((source) => source.id)).toEqual([note.id]);
+    expect(followup.history[0].sources[0].id).toBe(note.id);
+    const second = s.appendConversation(member, org, {
+      conversation_id: first.id,
+      question: "Who owns that?",
+      answer: "Taylor. [S1]",
+      sources: followup.sources,
+      expected_revision: 1,
+    });
+    expect(second.turns).toHaveLength(2);
+    expect(() =>
+      s.appendConversation(member, org, {
+        conversation_id: first.id,
+        question: "Who owns that?",
+        answer: "stale",
+        sources: followup.sources,
+        expected_revision: 1,
+      }),
+    ).toThrow("changed on another device");
+    s.deleteConversation(member, org, first.id);
+    expect(s.conversations(member, org).conversations).toEqual([]);
+    expect(s.note(member, org, note.id).summary).toContain("Friday");
+    expect(s.all("SELECT * FROM conversation_sources")).toHaveLength(0);
+  });
+  test("revocation and source edits hide the whole conversation including its question", () => {
+    const { s, owner, org, join, publish } = fixture();
+    const member = join("Taylor").id;
+    const restricted = s.createSpace(owner, org, {
+      name: "Private research",
+      visibility: "restricted",
+    }).id;
+    s.grant(owner, org, restricted, {
+      kind: "member",
+      id: member,
+      role: "viewer",
+    });
+    const note = publish(owner, restricted, "Secret research");
+    const question = "What are the secret research decisions?";
+    const packet = s.context(member, org, { question, space_id: restricted });
+    const conversation = s.appendConversation(member, org, {
+      question,
+      space_id: restricted,
+      answer: "Private answer",
+      sources: packet.sources,
+      expected_revision: 0,
+    });
+    s.grant(owner, org, restricted, {
+      kind: "member",
+      id: member,
+      role: "remove",
+    });
+    expect(() => s.conversation(member, org, conversation.id)).toThrow();
+    const listing = s.conversations(member, org);
+    expect(listing.conversations[0].available).toBe(false);
+    expect(JSON.stringify(listing)).not.toContain("secret research");
+    expect(() =>
+      s.context(member, org, {
+        question: "And the owner?",
+        conversation_id: conversation.id,
+      }),
+    ).toThrow();
+    expect(() =>
+      s.appendConversation(member, org, {
+        question,
+        conversation_id: conversation.id,
+        answer: "late answer",
+        sources: packet.sources,
+        expected_revision: 1,
+      }),
+    ).toThrow();
+    s.grant(owner, org, restricted, {
+      kind: "member",
+      id: member,
+      role: "viewer",
+    });
+    expect(s.conversation(member, org, conversation.id).turns).toHaveLength(1);
+    s.updateNote(owner, org, note.id, {
+      revision: note.revision,
+      title: note.title,
+      summary: "Revised decision",
+    });
+    expect(() => s.conversation(member, org, conversation.id)).toThrow(
+      "sources changed",
+    );
+    s.deleteConversation(member, org, conversation.id);
+    expect(s.conversations(member, org).conversations).toEqual([]);
+  });
+  test("appending rechecks exact sources, bounds history, and rejects cross-workspace access", () => {
+    const { s, owner, org, publish } = fixture();
+    const note = publish(owner);
+    const question = "Launch?";
+    const packet = s.context(owner, org, { question, note_ids: [note.id] });
+    expect(() =>
+      s.appendConversation(owner, org, {
+        question,
+        answer: "forged source",
+        expected_revision: 0,
+        sources: [{ ...packet.sources[0], revision: 99 }],
+        note_ids: [note.id],
+      }),
+    ).toThrow("Shared sources changed");
+    let c = s.appendConversation(owner, org, {
+      question,
+      answer: "Friday [S1]",
+      expected_revision: 0,
+      sources: packet.sources,
+      note_ids: [note.id],
+    });
+    for (let i = 1; i < 20; i++) {
+      const next = s.context(owner, org, {
+        question: `Follow-up ${i}?`,
+        conversation_id: c.id,
+      });
+      expect(next.history.length).toBe(Math.min(6, i));
+      c = s.appendConversation(owner, org, {
+        question: `Follow-up ${i}?`,
+        answer: "Friday [S1]",
+        expected_revision: i,
+        sources: next.sources,
+        conversation_id: c.id,
+      });
+    }
+    expect(c.turns).toHaveLength(20);
+    expect(() =>
+      s.appendConversation(owner, org, {
+        question,
+        answer: "too many",
+        expected_revision: 20,
+        sources: packet.sources,
+        conversation_id: c.id,
+      }),
+    ).toThrow("20 answers");
+    const other = s.createOrg(owner, "Elsewhere");
+    expect(() => s.conversation(owner, other, c.id)).toThrow(
+      "Conversation not found",
+    );
+    expect(() => s.conversations(owner, org, -1)).toThrow("Invalid offset");
+  });
+  test("conversation HTTP routes accept member sessions and reject integration keys and malformed routes", async () => {
+    const { s, owner, org, space, token, publish } = fixture();
+    publish(owner);
+    const handler = createHandler(s);
+    const call = (path: string, method = "GET", body?: unknown, key = token) =>
+      handler(
+        new Request(`http://localhost/v1/orgs/${org}/${path}`, {
+          method,
+          headers: {
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+          },
+          body: body ? JSON.stringify(body) : undefined,
+        }),
+      );
+    const packet = s.context(owner, org, { question: "Launch?" });
+    const created = await call("conversations", "POST", {
+      question: "Launch?",
+      answer: "Friday [S1]",
+      expected_revision: 0,
+      sources: packet.sources,
+    });
+    expect(created.status).toBe(201);
+    const c = await created.json();
+    expect((await call(`conversations/${c.id}`)).status).toBe(200);
+    expect((await call(`conversations/${c.id}/unexpected`)).status).toBe(404);
+    expect((await call("conversations?offset=bad")).status).toBe(400);
+    s.updateSpace(owner, org, space, {
+      name: "Team knowledge",
+      visibility: "team",
+      api_enabled: true,
+    });
+    const key = s.createIntegrationKey(owner, org, {
+      name: "Reader",
+      space_ids: [space],
+    }).token;
+    expect(
+      (await call(`conversations/${c.id}`, "GET", undefined, key)).status,
+    ).toBe(401);
+    expect((await call(`conversations/${c.id}`, "DELETE")).status).toBe(200);
+    expect((await call(`conversations/${c.id}`)).status).toBe(404);
+  });
+});

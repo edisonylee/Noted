@@ -3905,11 +3905,46 @@ a.cal-btn { text-decoration: none; }
 .app.calmode .main-col, .app.journalmode .main-col { min-height: 0; height: 100%; }
 .main-col .content { padding-top: 26px; }
 
-/* ── Notes workspace: user-owned folders + automatic categories ──────────── */
+/* ── Library + Documents: shared records, purpose-built workspaces ───────── */
 .notes-view {
   flex: 1; min-height: 0; display: flex; gap: 34px; align-items: stretch;
   width: 100%; max-width: 1100px;
 }
+.documents-view { max-width: 1040px; }
+.documents-view .notes-list { max-width: 920px; margin: 0 auto; }
+.documents-masthead {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 28px;
+  min-height: 122px; margin: 0 2px 24px; padding: 8px 4px 0;
+}
+.documents-masthead-copy { min-width: 0; }
+.documents-masthead h1 {
+  margin: 11px 0 6px; color: var(--ink); font-size: 38px; font-weight: 660;
+  line-height: 1.05; letter-spacing: -0.045em;
+}
+.documents-masthead p {
+  max-width: 520px; margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.5;
+}
+.documents-space-switcher { position: relative; z-index: 5; width: max-content; }
+.documents-space-switcher > button {
+  display: inline-flex; align-items: center; gap: 4px; min-height: 25px; padding: 2px 3px;
+  border: none; border-radius: 5px; background: none; color: var(--accent);
+  font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer;
+}
+.documents-space-switcher > button:hover { color: var(--ink); background: var(--hover-soft); }
+.documents-space-switcher > button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.documents-space-switcher > button > svg {
+  transition: transform var(--duration-fast) var(--ease);
+}
+.documents-space-switcher > button[aria-expanded="true"] > svg { transform: rotate(180deg); }
+.documents-space-switcher .space-switcher-menu { top: 29px; right: auto; width: 206px; }
+.documents-masthead-actions {
+  flex: none; display: flex; align-items: center; gap: 13px; padding-bottom: 3px;
+}
+.documents-masthead-actions > span {
+  color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums;
+}
+.documents-view .note-row { min-height: 45px; padding-top: 10px; padding-bottom: 10px; }
+.documents-view .note-row-categories { max-width: 320px; }
 .notes-library-shell {
   /* The wrapper owns state, not geometry. Its children join the Notes layout
      directly so collapsing the library cannot leave an empty control rail. */
@@ -4548,6 +4583,10 @@ a.cal-btn { text-decoration: none; }
   .notes-list-head { flex-wrap: wrap; }
   .notes-list-head .notes-search { flex-basis: 100%; min-width: 0; }
   .notes-context-actions { gap: 8px; }
+  .documents-masthead { min-height: 104px; margin-bottom: 18px; }
+  .documents-masthead h1 { font-size: 33px; }
+  .documents-masthead p { max-width: 390px; }
+  .documents-view .note-row-categories { display: block; max-width: 175px; }
   .note-document-page-head { padding: 44px 38px 0; }
   .note-document-title { font-size: 35px; }
   .document-editor.page .noted-document-content { padding: 26px 38px 82px; }
@@ -4564,6 +4603,9 @@ a.cal-btn { text-decoration: none; }
   .notes-context-count, .note-row-categories { display: none; }
   .notes-context { align-items: center; }
   .notes-new-note { min-height: 34px; }
+  .documents-masthead { align-items: flex-start; flex-direction: column; gap: 14px; }
+  .documents-masthead-actions { width: 100%; justify-content: space-between; }
+  .documents-view .note-row-categories { display: none; }
   .notes-list-head { flex-wrap: wrap; }
   .notes-list-head .notes-search { flex-basis: 100%; }
   .search-tool-buttons { width: 100%; padding-left: 0; }

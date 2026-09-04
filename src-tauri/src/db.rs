@@ -64,10 +64,12 @@ CREATE TABLE IF NOT EXISTS notes (
   title        TEXT NOT NULL DEFAULT '',
   raw_text     TEXT NOT NULL,
   document_json TEXT,                    -- rich formatting for the same note; raw_text remains searchable
+  note_kind    TEXT NOT NULL DEFAULT 'capture', -- capture|document; formatting is not a content type
   source       TEXT NOT NULL DEFAULT 'text',
   image_path   TEXT,
   category_id  INTEGER REFERENCES categories(id),
   created_at   TEXT NOT NULL,
+  updated_at   TEXT,                     -- last user content edit; legacy rows fall back to created_at
   -- Provenance: 'capture' for notes the user logged; 'brain:<vault>' for notes
   -- mirrored from an Obsidian brain vault. Capture-listing views filter to
   -- capture-origin so imported brain notes never pollute the daily log/trends.
@@ -492,6 +494,14 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     ensure_column(&conn, "entities", "relationship", "TEXT")?;
     ensure_column(&conn, "notes", "title", "TEXT")?;
     ensure_column(&conn, "notes", "document_json", "TEXT")?;
+    let had_note_kind = has_column(&conn, "notes", "note_kind")?;
+    ensure_column(
+        &conn,
+        "notes",
+        "note_kind",
+        "TEXT NOT NULL DEFAULT 'capture'",
+    )?;
+    ensure_column(&conn, "notes", "updated_at", "TEXT")?;
     // Brain-sync columns (additive; legacy rows read as capture-origin via COALESCE).
     ensure_column(&conn, "notes", "origin", "TEXT")?;
     ensure_column(&conn, "notes", "source_path", "TEXT")?;
@@ -579,6 +589,41 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     // Meeting Pack v2 keeps a structured source of truth next to the Markdown
     // projection used by search, older clients, and user edits.
     ensure_column(&conn, "meeting_summaries", "content_json", "TEXT")?;
+    // Before note_kind existed, editor-created documents were the rich records
+    // without extraction entries or a meeting owner. Perform that inference
+    // exactly once so rich formatting added to a capture never changes its
+    // content type.
+    if !had_note_kind {
+        conn.execute(
+            "UPDATE notes
+             SET note_kind = 'document'
+             WHERE document_json IS NOT NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM meetings WHERE meetings.note_id = notes.id
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM entries WHERE entries.note_id = notes.id
+               )",
+            [],
+        )?;
+    }
+    // Repair rows from the short-lived formatting-only classification. A
+    // document is authored directly and therefore never owns extraction rows
+    // or acts as a meeting projection.
+    conn.execute(
+        "UPDATE notes
+         SET note_kind = 'capture'
+         WHERE note_kind = 'document'
+           AND (
+             EXISTS (SELECT 1 FROM entries WHERE entries.note_id = notes.id)
+             OR EXISTS (SELECT 1 FROM meetings WHERE meetings.note_id = notes.id)
+           )",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE notes SET updated_at = created_at WHERE updated_at IS NULL",
+        [],
+    )?;
     backfill_meeting_public_ids(&conn)?;
     initialize_meeting_filing_provenance(&conn)?;
     initialize_meeting_transcript_index(&conn)?;
@@ -1045,16 +1090,19 @@ fn inferred_folder_rule(name: &str) -> &'static str {
 /// the CREATE TABLE already includes it. ALTER adds it nullable; new writes always
 /// populate it and reads COALESCE legacy NULLs.
 fn ensure_column(conn: &Connection, table: &str, col: &str, decl: &str) -> Result<()> {
+    if !has_column(conn, table, col)? {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {col} {decl};"))?;
+    }
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, col: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let has = stmt
         .query_map([], |r| r.get::<_, String>(1))?
         .filter_map(|x| x.ok())
         .any(|name| name == col);
-    drop(stmt);
-    if !has {
-        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {col} {decl};"))?;
-    }
-    Ok(())
+    Ok(has)
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,10 +1173,12 @@ pub struct NoteRow {
     pub title: String,
     pub raw_text: String,
     pub document_json: Option<String>,
+    pub note_kind: String,
     pub source: String,
     pub entries: Vec<NoteEntry>,
     pub event_date: String,
     pub created_at: String,
+    pub updated_at: String,
     pub trashed_at: Option<String>,
 }
 
@@ -1157,10 +1207,11 @@ fn list_notes_by_trash(conn: &Connection, trashed: bool) -> Result<Vec<NoteRow>>
     // falling back to the save day for any legacy rows without one. Meeting
     // notes keep their separate meeting-owned Trash lifecycle.
     let mut stmt = conn.prepare(
-        "SELECT n.id, COALESCE(n.title, ''), n.raw_text, n.document_json, n.source,
+        "SELECT n.id, COALESCE(n.title, ''), n.raw_text, n.document_json,
+                COALESCE(n.note_kind, 'capture'), n.source,
                 COALESCE(MAX(e.event_date), date(n.created_at)) AS event_date,
                 json_group_array(json_object('id', e.id, 'category', c.name, 'data', json(e.data_json))) AS entries,
-                n.created_at, n.trashed_at
+                n.created_at, COALESCE(n.updated_at, n.created_at), n.trashed_at
          FROM notes n
          LEFT JOIN entries e ON e.note_id = n.id
          LEFT JOIN categories c ON c.id = e.category_id
@@ -1180,17 +1231,19 @@ fn list_notes_by_trash(conn: &Connection, trashed: bool) -> Result<Vec<NoteRow>>
                   n.id DESC",
     )?;
     let rows = stmt.query_map([trashed], |r| {
-        let entries_str: String = r.get(6)?;
+        let entries_str: String = r.get(7)?;
         Ok(NoteRow {
             id: r.get(0)?,
             title: r.get(1)?,
             raw_text: r.get(2)?,
             document_json: r.get(3)?,
-            source: r.get(4)?,
-            event_date: r.get(5)?,
+            note_kind: r.get(4)?,
+            source: r.get(5)?,
+            event_date: r.get(6)?,
             entries: parse_note_entries(&entries_str),
-            created_at: r.get(7)?,
-            trashed_at: r.get(8)?,
+            created_at: r.get(8)?,
+            updated_at: r.get(9)?,
+            trashed_at: r.get(10)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2174,9 +2227,10 @@ pub fn update_note_with_document(
         "UPDATE notes
          SET title = ?2,
              raw_text = ?3,
-             document_json = COALESCE(?4, document_json)
+             document_json = COALESCE(?4, document_json),
+             updated_at = ?5
          WHERE id = ?1",
-        rusqlite::params![note_id, title.trim(), raw_text, document_json],
+        rusqlite::params![note_id, title.trim(), raw_text, document_json, now],
     )?;
     tx.execute("DELETE FROM embeddings WHERE note_id = ?1", [note_id])?;
     if previous != raw_text {
@@ -2213,8 +2267,8 @@ pub fn create_document_note(
 
     tx.execute(
         "INSERT INTO notes
-           (title, raw_text, document_json, source, category_id, created_at, filing_context)
-         VALUES (?1, ?2, ?3, 'text', NULL, ?4, ?5)",
+           (title, raw_text, document_json, note_kind, source, category_id, created_at, updated_at, filing_context)
+         VALUES (?1, ?2, ?3, 'document', 'text', NULL, ?4, ?4, ?5)",
         rusqlite::params![title.trim(), raw_text, document_json, now, filing_context],
     )?;
     let note_id = tx.last_insert_rowid();

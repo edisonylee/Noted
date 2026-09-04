@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { listen } from "./events";
-import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, ListTodo, Loader, MessageCircle, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Square, StickyNote, Sun, Video } from "lucide-react";
+import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, FileText, House, Library as LibraryIcon, ListTodo, Loader, MessageCircle, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Square, Sun, Video } from "lucide-react";
 import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg, type Img } from "./image";
@@ -21,7 +21,7 @@ import { parseBlocks, TodayView } from "./Today";
 import { MeetingPage } from "./MeetingPage";
 import { releaseProfile } from "./releaseProfile";
 import { ComingUp } from "./ComingUp";
-import { NotesView } from "./NotesView";
+import { DocumentsView, LibraryView } from "./NotesView";
 import { AskView } from "./AskView";
 import { AgentContextApproval } from "./AgentContextApproval";
 import { WeatherHome } from "./Weather";
@@ -38,7 +38,7 @@ import {
 import "./App.css";
 
 type Phase = "idle" | "thinking" | "review";
-type View = "today" | "ask" | "capture" | "notes" | "calendar" | "journal" | "knowledge" | "settings";
+type View = "today" | "ask" | "capture" | "documents" | "library" | "calendar" | "journal" | "knowledge" | "settings";
 
 // Journal is parked while the meeting recorder + knowledge graph stabilize;
 // the view, commands, and data all stay — this only hides the nav entry.
@@ -932,8 +932,11 @@ export default function App() {
           <button className={view === "calendar" ? "on" : ""} onClick={() => setView("calendar")}>
             <CalendarDays size={16} /> Calendar
           </button>
-          <button className={view === "notes" ? "on" : ""} onClick={() => setView("notes")}>
-            <StickyNote size={16} /> Notes
+          <button className={view === "documents" ? "on" : ""} onClick={() => setView("documents")}>
+            <FileText size={16} /> Documents
+          </button>
+          <button className={view === "library" ? "on" : ""} onClick={() => setView("library")}>
+            <LibraryIcon size={16} /> Library
           </button>
           {SHOW_JOURNAL && (
             <button className={view === "journal" ? "on" : ""} onClick={() => setView("journal")}>
@@ -1059,8 +1062,10 @@ export default function App() {
               }}
             />
           </WeatherHome>
-        ) : view === "notes" ? (
-          <NotesView notes={notes} cats={cats} onChanged={() => refresh().catch(handleErr)} />
+        ) : view === "documents" ? (
+          <DocumentsView key="documents" notes={notes} cats={cats} onChanged={() => refresh().catch(handleErr)} />
+        ) : view === "library" ? (
+          <LibraryView key="library" notes={notes} cats={cats} onChanged={() => refresh().catch(handleErr)} />
         ) : view === "calendar" ? (
           <CalendarView onOpenSettings={() => setView("settings")} />
         ) : view === "journal" ? (
@@ -1467,10 +1472,10 @@ export default function App() {
               if (savedMsg.spaceId != null) {
                 localStorage.setItem("noted-active-space", String(savedMsg.spaceId));
               }
-              setView("notes");
+              setView("library");
             }}
           >
-            View in Notes
+            View in Library
           </button>
           <button
             className="dismiss"

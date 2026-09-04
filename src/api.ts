@@ -180,10 +180,12 @@ export type NoteRow = {
   title: string;
   raw_text: string;
   document_json: string | null;
+  note_kind: "capture" | "document";
   source: string;
   entries: NoteEntry[];
   event_date: string;
   created_at: string;
+  updated_at: string;
   trashed_at?: string | null;
 };
 

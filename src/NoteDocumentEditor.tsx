@@ -18,6 +18,8 @@ type SaveState = "idle" | "dirty" | "saving" | "saved" | "error";
 
 export function NoteDocumentEditor({
   note,
+  workspaceLabel,
+  itemLabel,
   metadata,
   placement,
   controls,
@@ -26,6 +28,8 @@ export function NoteDocumentEditor({
   children,
 }: {
   note: NoteRow;
+  workspaceLabel: string;
+  itemLabel: string;
   metadata: ReactNode;
   placement?: ReactNode;
   controls?: ReactNode;
@@ -96,6 +100,7 @@ export function NoteDocumentEditor({
             title: snapshotTitle.trim(),
             raw_text: rawText,
             document_json: documentJson,
+            updated_at: new Date().toISOString(),
           };
           try {
             await onSavedRef.current(updated);
@@ -142,20 +147,20 @@ export function NoteDocumentEditor({
   }
 
   return (
-    <main className="note-document" aria-label="Document editor">
+    <main className="note-document" aria-label={`${itemLabel} editor`}>
       <header className="note-document-head">
         <button
           className="note-document-back"
           type="button"
           onClick={() => void closeEditor()}
-          aria-label="Back to notes"
-          title="Back to notes"
+          aria-label={`Back to ${workspaceLabel}`}
+          title={`Back to ${workspaceLabel}`}
         >
           <ArrowLeft size={17} aria-hidden="true" />
         </button>
         <div className="note-document-breadcrumb" aria-label="Current document">
           <FileText size={14} aria-hidden="true" />
-          <span>Documents</span>
+          <span>{workspaceLabel}</span>
           <ChevronRight size={13} aria-hidden="true" />
           <strong>{title.trim() || "Untitled"}</strong>
         </div>

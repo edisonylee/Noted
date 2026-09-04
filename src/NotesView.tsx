@@ -21,6 +21,7 @@ import {
   BookOpen,
   CalendarDays,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   FileText,
   Folder,
@@ -28,8 +29,6 @@ import {
   Inbox,
   ListFilter,
   MoreHorizontal,
-  PanelLeftClose,
-  PanelLeftOpen,
   PenLine,
   Plus,
   RotateCcw,
@@ -3227,7 +3226,7 @@ function LibraryWorkspace({
             aria-controls="document-files-rail"
             aria-expanded={false}
           >
-            <PanelLeftOpen size={17} />
+            <ChevronRight size={15} aria-hidden="true" />
           </button>
         )}
 
@@ -3235,33 +3234,18 @@ function LibraryWorkspace({
           <aside id="document-files-rail" className="spaces document-files" aria-label="Document files">
             <div className="spaces-scroll">
               <div className="space-switcher" ref={spaceSwitcherRef}>
-                <div className="space-switcher-row">
-                  <button
-                    className="space-switcher-trigger"
-                    onClick={() => setSpaceMenuOpen((open) => !open)}
-                    aria-haspopup="menu"
-                    aria-expanded={spaceMenuOpen}
-                  >
-                    <span className="space-switcher-copy">
-                      <strong>{activeSpaceLabel}</strong>
-                      <small>{activeSpaceDescription}</small>
-                    </span>
-                    <ChevronDown size={15} aria-hidden="true" />
-                  </button>
-                  <button
-                    className="notes-library-toggle icon-btn"
-                    onClick={() => {
-                      setSpaceMenuOpen(false);
-                      setLibraryOpen(false);
-                    }}
-                    title="Collapse files sidebar"
-                    aria-label="Collapse files sidebar"
-                    aria-controls="document-files-rail"
-                    aria-expanded={true}
-                  >
-                    <PanelLeftClose size={17} />
-                  </button>
-                </div>
+                <button
+                  className="space-switcher-trigger"
+                  onClick={() => setSpaceMenuOpen((open) => !open)}
+                  aria-haspopup="menu"
+                  aria-expanded={spaceMenuOpen}
+                >
+                  <span className="space-switcher-copy">
+                    <strong>{activeSpaceLabel}</strong>
+                    <small>{activeSpaceDescription}</small>
+                  </span>
+                  <ChevronDown size={15} aria-hidden="true" />
+                </button>
                 {spaceMenuOpen && (
                   <div className="space-switcher-menu" role="menu" aria-label="Switch document space">
                     {rootSpaces.map((space) => (
@@ -3380,6 +3364,19 @@ function LibraryWorkspace({
                 <span className="space-n">{trashedDocumentNotes.length}</span>
               </button>
             </div>
+            <button
+              className="notes-library-toggle notes-library-toggle-collapse icon-btn"
+              onClick={() => {
+                setSpaceMenuOpen(false);
+                setLibraryOpen(false);
+              }}
+              title="Hide files sidebar"
+              aria-label="Hide files sidebar"
+              aria-controls="document-files-rail"
+              aria-expanded={true}
+            >
+              <ChevronLeft size={15} aria-hidden="true" />
+            </button>
           </aside>
         )}
       </div>}
@@ -3393,7 +3390,7 @@ function LibraryWorkspace({
             aria-controls="library-navigation-rail"
             aria-expanded={false}
           >
-            <PanelLeftOpen size={17} />
+            <ChevronRight size={15} aria-hidden="true" />
           </button>
         )}
 
@@ -3401,33 +3398,18 @@ function LibraryWorkspace({
           <aside id="library-navigation-rail" className="spaces" aria-label="Library navigation">
           <div className="spaces-scroll">
           <div className="space-switcher" ref={spaceSwitcherRef}>
-            <div className="space-switcher-row">
-              <button
-                className="space-switcher-trigger"
-                onClick={() => setSpaceMenuOpen((open) => !open)}
-                aria-haspopup="menu"
-                aria-expanded={spaceMenuOpen}
-              >
-                <span className="space-switcher-copy">
-                  <strong>{activeSpaceLabel}</strong>
-                  <small>{activeSpaceDescription}</small>
-                </span>
-                <ChevronDown size={15} aria-hidden="true" />
-              </button>
-              <button
-                className="notes-library-toggle icon-btn"
-                onClick={() => {
-                  setSpaceMenuOpen(false);
-                  setLibraryOpen(false);
-                }}
-                title="Collapse library sidebar"
-                aria-label="Collapse library sidebar"
-                aria-controls="library-navigation-rail"
-                aria-expanded={true}
-              >
-                <PanelLeftClose size={17} />
-              </button>
-            </div>
+            <button
+              className="space-switcher-trigger"
+              onClick={() => setSpaceMenuOpen((open) => !open)}
+              aria-haspopup="menu"
+              aria-expanded={spaceMenuOpen}
+            >
+              <span className="space-switcher-copy">
+                <strong>{activeSpaceLabel}</strong>
+                <small>{activeSpaceDescription}</small>
+              </span>
+              <ChevronDown size={15} aria-hidden="true" />
+            </button>
             {spaceMenuOpen && (
               <div className="space-switcher-menu" role="menu" aria-label="Switch context">
                 {rootSpaces.map((space) => {
@@ -3639,6 +3621,19 @@ function LibraryWorkspace({
               <span className="space-n">{trashedMeetings.length + trashedNotes.length}</span>
             </button>
           </div>
+          <button
+            className="notes-library-toggle notes-library-toggle-collapse icon-btn"
+            onClick={() => {
+              setSpaceMenuOpen(false);
+              setLibraryOpen(false);
+            }}
+            title="Hide library sidebar"
+            aria-label="Hide library sidebar"
+            aria-controls="library-navigation-rail"
+            aria-expanded={true}
+          >
+            <ChevronLeft size={15} aria-hidden="true" />
+          </button>
           </aside>
         )}
       </div>}

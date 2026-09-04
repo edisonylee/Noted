@@ -789,7 +789,24 @@ pub fn reconcile(app: &tauri::AppHandle) {
     // turns a recoverable failure into another failure storm.
     let h = app.clone();
     tauri::async_runtime::spawn(async move {
+        let mut ready = Vec::new();
         for (id, segments, interrupted) in recover {
+            match summarize::ensure_note_projection(&h, id).await {
+                Ok(_) => ready.push((id, segments, interrupted)),
+                Err(error) => {
+                    eprintln!("[noted] recovery filing failed for {id}: {error}");
+                    let db = h.state::<Db>();
+                    let conn = db.0.lock().unwrap();
+                    let _ = store::mark_summary_failed(&conn, id, &error.to_string());
+                    drop(conn);
+                    let _ = h.emit(
+                        "meeting-summarized",
+                        json!({ "meetingId": id, "summaryFailed": true }),
+                    );
+                }
+            }
+        }
+        for (id, segments, interrupted) in ready {
             println!("[noted] recovering meeting {id} ({segments} segments)");
             // Labels first (blocking: onnx over the whole WAV), so the
             // summary and the reloaded transcript see speaker names.

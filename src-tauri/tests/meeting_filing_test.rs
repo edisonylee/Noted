@@ -94,6 +94,8 @@ fn stranded_transcripts_are_retried_with_a_bounded_failure_count() {
         .is_empty());
 
     store::insert_segment(&conn, id, "me", 0, 1_000, "Yesterday I shipped the fix.").unwrap();
+    let projection = note(&conn, "Daily Stand Up");
+    store::set_note_id(&conn, id, projection).unwrap();
     assert_eq!(
         store::list_summary_recovery_candidates(&conn, 3).unwrap(),
         vec![(id, 1)]

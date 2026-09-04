@@ -1813,6 +1813,8 @@ pub async fn ensure_note_projection(app: &tauri::AppHandle, meeting_id: i64) -> 
             )
         })?;
     }
+    drop(conn);
+    let _ = app.emit("note-filed", json!({ "id": note_id }));
     Ok(note_id)
 }
 

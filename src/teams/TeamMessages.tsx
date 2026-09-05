@@ -7,7 +7,6 @@ import {
   type FormEvent,
 } from "react";
 import {
-  ArrowLeft,
   ArrowDown,
   Hash,
   Lock,
@@ -18,6 +17,9 @@ import {
   RefreshCw,
   Send,
   Settings2,
+  Users,
+  Search,
+  SquarePen,
   Trash2,
 } from "lucide-react";
 import { orgPath, team } from "./client";
@@ -29,19 +31,25 @@ import type {
   TeamSnapshot,
 } from "./types";
 import { mergeMessages, roomLabel } from "./messaging";
+import { initials } from "./presentation";
 import "./messages.css";
 
 export function TeamMessages({
   data,
-  onBack,
+  active,
+  requestedRoom,
+  onUnread,
 }: {
   data: TeamSnapshot;
-  onBack: () => void;
+  active: boolean;
+  requestedRoom: TeamChatRoom | null;
+  onUnread: (count: number) => void;
 }) {
   const org = data.org.id,
     user = data.user.id;
   const [rooms, setRooms] = useState<TeamChatRoom[]>([]);
   const [selected, setSelected] = useState("");
+  const [search, setSearch] = useState("");
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
@@ -106,24 +114,88 @@ export function TeamMessages({
       ),
     [],
   );
+  useEffect(() => {
+    onUnread(
+      rooms
+        .filter((room) => !room.archived_at)
+        .reduce((total, room) => total + room.unread, 0),
+    );
+  }, [rooms, onUnread]);
+  useEffect(() => {
+    if (requestedRoom) {
+      updateRoom(requestedRoom);
+      setSelected(requestedRoom.id);
+      setSearch("");
+    }
+  }, [requestedRoom, updateRoom]);
+  useEffect(() => {
+    if (!active) setDialog(null);
+  }, [active]);
   const current = rooms.find((r) => r.id === selected);
+  const matches = (room: TeamChatRoom) =>
+    roomLabel(room, user).toLowerCase().includes(search.trim().toLowerCase());
+  const directRooms = rooms
+    .filter((room) => room.kind === "direct" && matches(room))
+    .sort((a, b) => b.last_activity.localeCompare(a.last_activity));
+  const channelRooms = rooms
+    .filter(
+      (room) =>
+        room.kind === "channel" &&
+        !room.is_default &&
+        matches(room) &&
+        (showArchived || !room.archived_at || room.id === selected),
+    )
+    .sort((a, b) => a.name.localeCompare(b.name));
   const roomButton = (room: TeamChatRoom) => (
     <button
       key={room.id}
-      className={selected === room.id ? "on" : ""}
+      className={`messages-conversation-row${selected === room.id ? " on" : ""}`}
       onClick={() => setSelected(room.id)}
       aria-current={selected === room.id ? "page" : undefined}
     >
-      {room.kind === "channel" ? (
-        <Hash size={15} />
-      ) : (
-        <span className="messages-person-mark">
-          {roomLabel(room, user).slice(0, 1)}
+      <span
+        className={`messages-person-mark${room.is_default ? " team" : ""}`}
+        aria-hidden="true"
+      >
+        {room.is_default ? (
+          <Users size={18} />
+        ) : room.kind === "channel" ? (
+          <Hash size={18} />
+        ) : (
+          initials(roomLabel(room, user))
+        )}
+      </span>
+      <span className="messages-conversation-copy">
+        <span className="messages-conversation-title">
+          <strong>{roomLabel(room, user)}</strong>
+          {room.last_message && (
+            <time dateTime={room.last_message.created_at}>
+              {new Date(room.last_message.created_at).toLocaleDateString() ===
+              new Date().toLocaleDateString()
+                ? new Date(room.last_message.created_at).toLocaleTimeString(
+                    [],
+                    { hour: "numeric", minute: "2-digit" },
+                  )
+                : new Date(room.last_message.created_at).toLocaleDateString(
+                    [],
+                    { month: "short", day: "numeric" },
+                  )}
+            </time>
+          )}
         </span>
-      )}
-      <span>
-        {roomLabel(room, user)}
-        {room.archived_at ? <small>Archived</small> : null}
+        <small>
+          {drafts[room.id]?.trim()
+            ? `Draft: ${drafts[room.id]}`
+            : room.archived_at
+              ? "Archived"
+              : room.last_message
+                ? `${room.last_message.author_id === user ? "You" : room.last_message.author_name}: ${room.last_message.body}`
+                : room.is_default
+                  ? `Everyone · ${data.members.length} members`
+                  : room.kind === "direct"
+                    ? "Private conversation"
+                    : "Team channel"}
+        </small>
       </span>
       {room.unread > 0 && (
         <b
@@ -141,30 +213,30 @@ export function TeamMessages({
         className="team-sidebar messages-nav"
         aria-label="Team conversations"
       >
-        <button onClick={onBack}>
-          <ArrowLeft size={15} /> Shared meetings
-        </button>
-        <h2>Team chat</h2>
-        <div className="team-sidebar-label">
-          <span>Channels</span>
-          <button
-            aria-label="Create channel"
-            onClick={() => setDialog("channel")}
-          >
-            <Plus size={15} />
-          </button>
+        <div className="messages-nav-head">
+          <div className="messages-list-heading">
+            <h2>Conversations</h2>
+            <button
+              aria-label="New message"
+              title="New message"
+              onClick={() => setDialog("direct")}
+            >
+              <SquarePen size={18} />
+            </button>
+          </div>
+          <label className="messages-search">
+            <Search size={14} />
+            <input
+              type="search"
+              aria-label="Find a conversation"
+              placeholder="Find a conversation"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+          </label>
         </div>
         {rooms
-          .filter(
-            (r) =>
-              r.kind === "channel" &&
-              (showArchived || !r.archived_at || r.id === selected),
-          )
-          .sort(
-            (a, b) =>
-              Number(b.is_default) - Number(a.is_default) ||
-              a.name.localeCompare(b.name),
-          )
+          .filter((room) => room.is_default && matches(room))
           .map(roomButton)}
         <div className="team-sidebar-label">
           <span>Direct messages</span>
@@ -175,26 +247,49 @@ export function TeamMessages({
             <Plus size={15} />
           </button>
         </div>
-        {rooms
-          .filter((r) => r.kind === "direct")
-          .sort((a, b) => b.last_activity.localeCompare(a.last_activity))
-          .map(roomButton)}
-        {!rooms.some((r) => r.kind === "direct") && (
+        {directRooms.map(roomButton)}
+        {!directRooms.length && (
           <button
             className="messages-start-dm"
             onClick={() => setDialog("direct")}
           >
-            <MessageSquare size={14} /> Message a teammate
+            <MessageSquare size={15} />
+            {search ? "Find a teammate" : "Start a conversation"}
           </button>
         )}
-        <label className="messages-archived">
-          <input
-            type="checkbox"
-            checked={showArchived}
-            onChange={(e) => setShowArchived(e.target.checked)}
-          />{" "}
-          Show archived channels
-        </label>
+        {(channelRooms.length > 0 || showArchived) && (
+          <>
+            <div className="team-sidebar-label">
+              <span>Team channels</span>
+              <button
+                aria-label="Create channel"
+                onClick={() => setDialog("channel")}
+              >
+                <Plus size={15} />
+              </button>
+            </div>
+            {channelRooms.map(roomButton)}
+          </>
+        )}
+        <div className="messages-nav-bottom">
+          <button
+            className="messages-create-topic"
+            onClick={() => setDialog("channel")}
+          >
+            <Plus size={14} /> Create a team channel
+          </button>
+          <p>A shared conversation for a project or topic. Optional.</p>
+          {rooms.some((room) => room.archived_at) && (
+            <label className="messages-archived">
+              <input
+                type="checkbox"
+                checked={showArchived}
+                onChange={(event) => setShowArchived(event.target.checked)}
+              />{" "}
+              Show archived channels
+            </label>
+          )}
+        </div>
       </aside>
       {current ? (
         <MessageRoom
@@ -202,6 +297,8 @@ export function TeamMessages({
           org={org}
           user={user}
           room={current}
+          active={active}
+          memberCount={data.members.length}
           draft={drafts[current.id] ?? ""}
           setDraft={(value) =>
             setDrafts((old) => ({ ...old, [current.id]: value }))
@@ -249,6 +346,8 @@ export function TeamMessages({
       )}
       {dialog && (
         <NewConversation
+          key={dialog}
+          onKindChange={setDialog}
           data={data}
           kind={dialog}
           onClose={() => setDialog(null)}
@@ -266,11 +365,13 @@ export function TeamMessages({
 function NewConversation({
   data,
   kind,
+  onKindChange,
   onClose,
   onCreated,
 }: {
   data: TeamSnapshot;
   kind: "channel" | "direct";
+  onKindChange: (kind: "channel" | "direct") => void;
   onClose: () => void;
   onCreated: (room: TeamChatRoom) => void;
 }) {
@@ -307,11 +408,27 @@ function NewConversation({
   };
   return (
     <TeamDialog
-      title={kind === "channel" ? "Create a channel" : "Message a teammate"}
+      title={kind === "channel" ? "Create a team channel" : "New message"}
       busy={busy}
       onClose={onClose}
     >
       <form className="team-form" onSubmit={(e) => void submit(e)}>
+        <div className="messages-kind-choice">
+          <button
+            type="button"
+            aria-pressed={kind === "direct"}
+            onClick={() => onKindChange("direct")}
+          >
+            Direct message
+          </button>
+          <button
+            type="button"
+            aria-pressed={kind === "channel"}
+            onClick={() => onKindChange("channel")}
+          >
+            Team channel
+          </button>
+        </div>
         {kind === "channel" ? (
           <>
             <p className="team-muted">
@@ -365,7 +482,7 @@ function NewConversation({
                   <span>
                     {person.name}
                     <small>
-                      {person.role === "member" ? "Member" : "Workspace admin"}
+                      {person.role === "member" ? "Member" : "Team admin"}
                     </small>
                   </span>
                 </label>
@@ -401,6 +518,8 @@ function MessageRoom({
   org,
   user,
   room,
+  active: isActive,
+  memberCount,
   draft,
   setDraft,
   sendKey,
@@ -411,6 +530,8 @@ function MessageRoom({
   org: string;
   user: string;
   room: TeamChatRoom;
+  active: boolean;
+  memberCount: number;
   draft: string;
   setDraft: (value: string) => void;
   sendKey: (body: string) => string;
@@ -437,6 +558,8 @@ function MessageRoom({
   const pinned = useRef(true),
     alive = useRef(true);
   const accessEpoch = useRef(0);
+  const visible = useRef(isActive);
+  visible.current = isActive;
   const id = room.id;
   const path = orgPath(org, `/chat-rooms/${id}`);
   useEffect(() => {
@@ -448,7 +571,11 @@ function MessageRoom({
   }, []);
   const acknowledge = useCallback(
     async (seq: number) => {
-      if (seq <= readCursor.current || document.visibilityState !== "visible")
+      if (
+        !visible.current ||
+        seq <= readCursor.current ||
+        document.visibilityState !== "visible"
+      )
         return;
       try {
         await team.request("POST", `${path}/read`, { cursor: seq });
@@ -466,7 +593,7 @@ function MessageRoom({
     pinned.current = true;
     setNewBelow(false);
     requestAnimationFrame(() => {
-      if (!alive.current) return;
+      if (!alive.current || !visible.current) return;
       viewport.current?.scrollTo({ top: viewport.current.scrollHeight });
       if (cursor.current != null) void acknowledge(cursor.current);
     });
@@ -475,7 +602,7 @@ function MessageRoom({
     let active = true;
     let timer: number;
     const poll = async () => {
-      if (document.visibilityState !== "visible") {
+      if (!isActive || document.visibilityState !== "visible") {
         timer = window.setTimeout(poll, 3_000);
         return;
       }
@@ -540,7 +667,7 @@ function MessageRoom({
       clearTimeout(timer);
       window.removeEventListener("focus", wake);
     };
-  }, [path, onRoom, toBottom, retry]);
+  }, [path, onRoom, toBottom, retry, isActive]);
   const older = async () => {
     if (olderBefore == null || loadingOlder) return;
     setLoadingOlder(true);
@@ -577,7 +704,7 @@ function MessageRoom({
   };
   const send = async () => {
     const body = draft.trim();
-    if (!body || sending || !room.can_send || error) return;
+    if (!isActive || !body || sending || !room.can_send || error) return;
     const clientId = sendKey(body),
       epoch = accessEpoch.current;
     setSending(true);
@@ -606,23 +733,33 @@ function MessageRoom({
       <header className="messages-room-head">
         <div>
           <h1>
-            {room.kind === "channel" ? <Hash size={21} /> : <Lock size={18} />}
+            {room.is_default ? (
+              <Users size={21} />
+            ) : room.kind === "channel" ? (
+              <Hash size={21} />
+            ) : (
+              <Lock size={18} />
+            )}
             {label}
           </h1>
           <p>
             {room.archived_at
               ? "Archived channel · History is available below"
-              : room.kind === "direct"
-                ? room.can_send
-                  ? "Direct message · Only the two of you"
-                  : "This teammate is no longer in the workspace"
-                : room.description || "Open to everyone in this workspace"}
+              : room.is_default
+                ? `Everyone in your team · ${memberCount} members`
+                : room.kind === "direct"
+                  ? room.can_send
+                    ? "Private conversation · Only the two of you"
+                    : "This teammate is no longer in the team"
+                  : room.description || "Open to everyone in this team"}
           </p>
         </div>
         {room.can_manage && (
           <button
             className="team-text-button"
-            aria-label="Channel settings"
+            aria-label={
+              room.is_default ? "Team chat settings" : "Channel settings"
+            }
             onClick={() => setSettings(true)}
           >
             <Settings2 size={17} />
@@ -678,12 +815,14 @@ function MessageRoom({
             <h2>
               {room.kind === "direct"
                 ? `Your conversation with ${label}`
-                : `Welcome to #${label}`}
+                : room.is_default
+                  ? "A conversation for the whole team"
+                  : `Welcome to #${label}`}
             </h2>
             <p>
               {room.kind === "direct"
                 ? "A place to follow up, ask a question, or share a thought."
-                : "Keep the team in the loop. Everyone in this workspace can join the conversation."}
+                : "Keep the team in the loop. Everyone in this team can join the conversation."}
             </p>
           </div>
         )}
@@ -781,19 +920,24 @@ function MessageRoom({
             {sendError}
           </p>
         )}
-        <label className="messages-compose-label" htmlFor={`compose-${id}`}>
-          {room.kind === "channel" ? `Message #${label}` : `Message ${label}`}
+        <label
+          className="messages-compose-label sr-only"
+          htmlFor={`compose-${id}`}
+        >
+          {room.kind === "channel" && !room.is_default
+            ? `Message #${label}`
+            : `Message ${label}`}
         </label>
         <textarea
           id={`compose-${id}`}
           ref={composer}
           value={draft}
           maxLength={10_000}
-          rows={3}
+          rows={2}
           disabled={sending || !room.can_send}
           placeholder={
             room.can_send
-              ? `Message ${room.kind === "channel" ? "#" : ""}${label}`
+              ? `Message ${room.kind === "channel" && !room.is_default ? "#" : ""}${label}`
               : "This conversation is read-only"
           }
           onChange={(e) => setDraft(e.target.value)}
@@ -1008,7 +1152,11 @@ function ChannelSettings({
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   return (
-    <TeamDialog title="Channel settings" busy={busy} onClose={onClose}>
+    <TeamDialog
+      title={room.is_default ? "Team chat settings" : "Channel settings"}
+      busy={busy}
+      onClose={onClose}
+    >
       <form
         className="team-form"
         onSubmit={async (e) => {
@@ -1031,16 +1179,17 @@ function ChannelSettings({
           }
         }}
       >
-        <label>
-          Channel name
-          <input
-            value={name}
-            maxLength={48}
-            required
-            disabled={room.is_default}
-            onChange={(e) => setName(e.target.value)}
-          />
-        </label>
+        {!room.is_default && (
+          <label>
+            Channel name
+            <input
+              value={name}
+              maxLength={48}
+              required
+              onChange={(e) => setName(e.target.value)}
+            />
+          </label>
+        )}
         <label>
           Description
           <textarea
@@ -1066,7 +1215,7 @@ function ChannelSettings({
           </p>
         )}
         <button className="team-primary" disabled={busy}>
-          Save channel
+          Save changes
         </button>
       </form>
     </TeamDialog>

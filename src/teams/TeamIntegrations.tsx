@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Copy, Plus } from "lucide-react";
 import { team, orgPath, copyTeamText } from "./client";
 import { TeamDialog } from "./TeamDialog";
+import { collectionName } from "./presentation";
 import type { TeamSnapshot } from "./types";
 
 type Key = {
@@ -49,7 +50,7 @@ export function TeamIntegrations({ data }: { data: TeamSnapshot }) {
   return (
     <section>
       <div className="team-section-head">
-        <h2>Workspace integrations</h2>
+        <h2>Team integrations</h2>
         <button
           className="team-text-button"
           onClick={() => {
@@ -66,13 +67,14 @@ export function TeamIntegrations({ data }: { data: TeamSnapshot }) {
         </button>
       </div>
       <p className="team-muted">
-        Give each tool its own key and selected spaces. These keys belong to the
-        workspace and keep working when their creator leaves. They cannot edit
+        Give each tool its own key and selected collections. These keys belong
+        to the team and keep working when their creator leaves. They cannot edit
         notes, manage members, or read private saved answers.
       </p>
       <p className="team-muted">
-        Enable integration access in a space’s settings first. It starts off for
-        every space. Transcript access is a separate choice for each key.
+        Enable integration access in a collection’s settings first. It starts
+        off for every collection. Transcript access is a separate choice for
+        each key.
       </p>
       {error && (
         <p className="team-error" role="alert">
@@ -87,8 +89,12 @@ export function TeamIntegrations({ data }: { data: TeamSnapshot }) {
               {key.space_ids
                 .map(
                   (id) =>
-                    data.spaces.find((s) => s.id === id)?.name ??
-                    "Unavailable space",
+                    (() => {
+                      const collection = data.spaces.find((s) => s.id === id);
+                      return collection
+                        ? collectionName(collection)
+                        : undefined;
+                    })() ?? "Unavailable collection",
                 )
                 .join(", ")}{" "}
               ·{" "}
@@ -109,7 +115,7 @@ export function TeamIntegrations({ data }: { data: TeamSnapshot }) {
               onClick={async () => {
                 if (
                   !confirm(
-                    `Revoke ${key.name}? This tool will immediately lose workspace access.`,
+                    `Revoke ${key.name}? This tool will immediately lose team access.`,
                   )
                 )
                   return;
@@ -136,8 +142,8 @@ export function TeamIntegrations({ data }: { data: TeamSnapshot }) {
         <summary>API endpoints</summary>
         <p className="team-muted">
           Send the key in the Authorization header as a Bearer token. List
-          endpoints accept q, space, folder and offset; only approved spaces are
-          visible.
+          endpoints accept q, space, folder and offset; only approved
+          collections are visible.
         </p>
         <pre>{`GET ${server}/v1/api/spaces\nGET ${server}/v1/api/folders\nGET ${server}/v1/api/notes?q=launch\nGET ${server}/v1/api/notes/{meeting-id}`}</pre>
       </details>
@@ -217,7 +223,7 @@ export function TeamIntegrations({ data }: { data: TeamSnapshot }) {
                 />
               </label>
               <fieldset>
-                <legend>Approved spaces</legend>
+                <legend>Approved collections</legend>
                 {data.spaces
                   .filter((s) => s.api_enabled)
                   .map((space) => (
@@ -233,13 +239,13 @@ export function TeamIntegrations({ data }: { data: TeamSnapshot }) {
                           )
                         }
                       />
-                      {space.name}
+                      {collectionName(space)}
                     </label>
                   ))}
                 {!data.spaces.some((s) => s.api_enabled) && (
                   <p className="team-muted">
-                    Open Spaces → Manage access and allow approved integrations
-                    for a space first.
+                    Open Collections → Manage access and allow approved
+                    integrations for a collection first.
                   </p>
                 )}
               </fieldset>
@@ -265,7 +271,7 @@ export function TeamIntegrations({ data }: { data: TeamSnapshot }) {
               </label>
               <p className="team-muted">
                 This grants access to current and future published meetings in
-                the selected spaces.
+                the selected collections.
               </p>
               {error && (
                 <p className="team-error" role="alert">

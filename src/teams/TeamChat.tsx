@@ -10,6 +10,7 @@ import {
 import { MdBlock } from "../MeetingMarkdownView";
 import { copyTeamText, orgPath, team } from "./client";
 import { TeamDialog } from "./TeamDialog";
+import { collectionName } from "./presentation";
 import type {
   TeamConversation,
   TeamConversationRow,
@@ -185,28 +186,28 @@ export function TeamChat({
     setHistoryBusy(false);
   };
   const activeScope = current?.scope;
+  const scopedCollection =
+    activeScope && data.spaces.find((s) => s.id === activeScope.space_id);
   const label = activeScope
     ? activeScope.note_ids.length
       ? `${activeScope.note_ids.length} selected ${activeScope.note_ids.length === 1 ? "meeting" : "meetings"}`
       : (data.folders.find((f) => f.id === activeScope.folder_id)?.name ??
-        data.spaces.find((s) => s.id === activeScope.space_id)?.name ??
-        "All shared meetings")
+        (scopedCollection ? collectionName(scopedCollection) : undefined) ??
+        "Team meetings")
     : selected.length
       ? `${selected.length} selected ${selected.length === 1 ? "meeting" : "meetings"}`
       : scopeName;
   return (
     <section className="team-ask" aria-label="Ask shared meetings">
       <div className="team-chat-tools">
-        <span className="team-muted">
-          {current ? "Your conversation" : "Ask your team’s meetings"}
-        </span>
+        <span className="team-muted">Ask meetings</span>
         <button
           className="team-text-button"
           onClick={() => {
             void loadHistory();
           }}
         >
-          <History size={14} /> Chat history
+          <History size={14} /> Previous questions
         </button>
         {id && (
           <button
@@ -216,7 +217,7 @@ export function TeamChat({
               input.current?.focus();
             }}
           >
-            <Plus size={14} /> New conversation
+            <Plus size={14} /> New question
           </button>
         )}
       </div>
@@ -235,7 +236,7 @@ export function TeamChat({
       )}
       {loading && (
         <p className="team-muted" role="status">
-          Opening conversation…
+          Opening previous questions…
         </p>
       )}
       {current?.turns.map((turn) => (
@@ -317,7 +318,7 @@ export function TeamChat({
           placeholder={
             current
               ? "Ask a follow-up…"
-              : `What would you like to know about ${scopeName.toLowerCase()}?`
+              : "What did we decide? What happens next?"
           }
           value={question}
           maxLength={6000}
@@ -353,8 +354,8 @@ export function TeamChat({
         </p>
       ) : (
         <p className="team-chat-privacy">
-          Chats are saved privately to your account. Follow-ups use up to six
-          recent turns and current meeting sources.
+          Answers use shared meeting notes as sources. Your questions and
+          answers are private to you.
         </p>
       )}
       {!current && (

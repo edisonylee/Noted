@@ -17,6 +17,8 @@ import {
   Lock,
   LogOut,
   MessageSquare,
+  Share2,
+  ChevronDown,
   Plus,
   RefreshCw,
   Search,
@@ -33,9 +35,12 @@ import type {
   TeamFolder,
   TeamNote,
   TeamNoteRow,
+  TeamChatRoom,
 } from "./types";
 import { TeamDialog } from "./TeamDialog";
 import { TeamMessages } from "./TeamMessages";
+import { TeamPeople } from "./TeamPeople";
+import { collectionName, collectionAudience } from "./presentation";
 import { SavedAnswers } from "./SavedAnswers";
 import { TeamChat } from "./TeamChat";
 import { TeamAdministration } from "./TeamAdministration";
@@ -76,10 +81,10 @@ export function TeamConnect({
   };
   return (
     <section className="team-connect">
-      <h1>A shared memory for your team.</h1>
+      <h1>Your team’s meetings and conversations.</h1>
       <p>
-        Bring selected meetings into one place. Find decisions, follow the
-        context, and give the right people access.
+        Share meeting notes, find answers in your company’s knowledge, and
+        message your teammates.
       </p>
       <form onSubmit={submit} className="team-form">
         <label>
@@ -110,7 +115,7 @@ export function TeamConnect({
         {mode === "create" && (
           <>
             <label>
-              Workspace name
+              Team name
               <input
                 value={organization}
                 onChange={(e) => setOrganization(e.target.value)}
@@ -152,7 +157,7 @@ export function TeamConnect({
         )}
         <button className="team-primary" disabled={busy}>
           {busy ? <Loader size={15} className="spin" /> : null}
-          {mode === "create" ? "Create workspace" : "Connect to team"}
+          {mode === "create" ? "Create team" : "Connect to team"}
         </button>
       </form>
       <p className="team-privacy">
@@ -162,7 +167,9 @@ export function TeamConnect({
     </section>
   );
 }
-export function TeamWorkspace() {
+export function TeamWorkspace({
+  onOpenLibrary,
+}: { onOpenLibrary?: () => void } = {}) {
   const [orgs, setOrgs] = useState<TeamOrg[] | null>(null);
   const [org, setOrg] = useState("");
   const [connected, setConnected] = useState<boolean | null>(null);
@@ -193,10 +200,18 @@ export function TeamWorkspace() {
       active = false;
     };
   }, []);
+  const updateTeam = useCallback(
+    (next: TeamOrg) =>
+      setOrgs(
+        (old) =>
+          old?.map((team) => (team.id === next.id ? next : team)) ?? null,
+      ),
+    [],
+  );
   if (connected == null)
     return (
       <div className="team-loading">
-        <Loader className="spin" size={18} /> Opening team workspace…
+        <Loader className="spin" size={18} /> Opening your team…
       </div>
     );
   if (!connected)
@@ -216,9 +231,13 @@ export function TeamWorkspace() {
   return (
     <div className="team-workspace">
       <div className="team-workspace-bar">
-        <label>
-          <span className="sr-only">Team workspace</span>
-          <select value={org} onChange={(e) => setOrg(e.target.value)}>
+        <label className="team-identity">
+          <span className="team-eyebrow">Team</span>
+          <select
+            aria-label="Choose team"
+            value={org}
+            onChange={(e) => setOrg(e.target.value)}
+          >
             {(orgs ?? []).map((o) => (
               <option key={o.id} value={o.id}>
                 {o.name}
@@ -226,28 +245,38 @@ export function TeamWorkspace() {
             ))}
           </select>
         </label>
-        <span>Shared workspace</span>
-        <button
-          className="team-text-button"
-          onClick={() => setAddWorkspace(true)}
-        >
-          <Plus size={14} /> Workspace
-        </button>
-        <button
-          className="team-text-button"
-          onClick={async () => {
-            try {
-              await team.disconnect();
-              setConnected(false);
-              setOrgs(null);
-              setOrg("");
-            } catch (e) {
-              setError(String(e));
-            }
-          }}
-        >
-          <LogOut size={14} /> Sign out
-        </button>
+        <span className="team-purpose">Shared meetings. Connected people.</span>
+        <details className="team-account-menu">
+          <summary aria-label="Team options">
+            <ChevronDown size={16} />
+          </summary>
+          <div>
+            <button
+              className="team-text-button"
+              onClick={(event) => {
+                event.currentTarget.closest("details")?.removeAttribute("open");
+                setAddWorkspace(true);
+              }}
+            >
+              <Plus size={14} /> Create or join a team
+            </button>
+            <button
+              className="team-text-button"
+              onClick={async () => {
+                try {
+                  await team.disconnect();
+                  setConnected(false);
+                  setOrgs(null);
+                  setOrg("");
+                } catch (e) {
+                  setError(String(e));
+                }
+              }}
+            >
+              <LogOut size={14} /> Sign out
+            </button>
+          </div>
+        </details>
       </div>
       {error && (
         <p className="team-error" role="alert">
@@ -255,11 +284,15 @@ export function TeamWorkspace() {
         </p>
       )}
       {org ? (
-        <TeamLibrary key={org} org={org} />
+        <TeamLibrary
+          key={org}
+          org={org}
+          onOpenLibrary={onOpenLibrary}
+          onTeamUpdate={updateTeam}
+        />
       ) : (
         <p className="team-empty">
-          You don’t have access to a workspace. Ask an admin for a new
-          invitation.
+          You don’t have access to a team. Ask an admin for a new invitation.
         </p>
       )}
       {addWorkspace && (
@@ -289,7 +322,7 @@ function AddWorkspace({
   const [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   return (
-    <TeamDialog title="Add a workspace" onClose={onClose}>
+    <TeamDialog title="Create or join a team" onClose={onClose}>
       <form
         className="team-form"
         onSubmit={async (e) => {
@@ -312,7 +345,7 @@ function AddWorkspace({
         }}
       >
         <label>
-          Workspace action
+          Team action
           <select
             value={mode}
             onChange={(e) => {
@@ -320,12 +353,12 @@ function AddWorkspace({
               setValue("");
             }}
           >
-            <option value="join">Join an existing workspace</option>
-            <option value="create">Create a workspace</option>
+            <option value="join">Join an existing team</option>
+            <option value="create">Create a team</option>
           </select>
         </label>
         <label>
-          {mode === "join" ? "Invitation code" : "Workspace name"}
+          {mode === "join" ? "Invitation code" : "Team name"}
           <input
             autoFocus
             required
@@ -336,8 +369,8 @@ function AddWorkspace({
           />
         </label>
         <p className="team-muted">
-          Workspaces on your current team server have separate members, spaces,
-          and shared content.
+          Each team has its own members, meeting collections, and shared
+          content.
         </p>
         {error && (
           <p className="team-error" role="alert">
@@ -345,20 +378,31 @@ function AddWorkspace({
           </p>
         )}
         <button className="team-primary" disabled={busy}>
-          {mode === "join" ? "Join workspace" : "Create workspace"}
+          {mode === "join" ? "Join team" : "Create team"}
         </button>
       </form>
     </TeamDialog>
   );
 }
 
-function TeamLibrary({ org }: { org: string }) {
+function TeamLibrary({
+  org,
+  onOpenLibrary,
+  onTeamUpdate,
+}: {
+  org: string;
+  onOpenLibrary?: () => void;
+  onTeamUpdate: (team: TeamOrg) => void;
+}) {
   const [data, setData] = useState<TeamSnapshot | null>(null);
   const [space, setSpace] = useState("");
   const [folder, setFolder] = useState("");
   const [view, setView] = useState<
-    "notes" | "admin" | "trash" | "answers" | "messages"
+    "notes" | "admin" | "trash" | "answers" | "messages" | "people"
   >("notes");
+  const [unread, setUnread] = useState(0);
+  const [requestedRoom, setRequestedRoom] = useState<TeamChatRoom | null>(null);
+  const [shareHelp, setShareHelp] = useState(false);
   const [query, setQuery] = useState("");
   const [rows, setRows] = useState<TeamNoteRow[]>([]);
   const [more, setMore] = useState(false);
@@ -381,7 +425,7 @@ function TeamLibrary({ org }: { org: string }) {
       next.access_version < accessVersion.current
     ) {
       throw new Error(
-        "Workspace access changed. Refresh again for the current version.",
+        "Team access changed. Refresh again for the current version.",
       );
     }
     if (
@@ -396,8 +440,9 @@ function TeamLibrary({ org }: { org: string }) {
     }
     accessVersion.current = next.access_version;
     setData(next);
+    onTeamUpdate(next.org);
     return next;
-  }, [org]);
+  }, [org, onTeamUpdate]);
   const loadRows = useCallback(
     async (offset = 0) => {
       const version = ++requestVersion.current;
@@ -497,7 +542,8 @@ function TeamLibrary({ org }: { org: string }) {
   const currentSpace = data?.spaces.find((s) => s.id === space);
   const currentFolder = data?.folders.find((f) => f.id === folder);
   const scopeName =
-    currentFolder?.name ?? currentSpace?.name ?? "All shared meetings";
+    currentFolder?.name ??
+    (currentSpace ? collectionName(currentSpace) : "Team meetings");
   const isAdmin = data?.org.role === "owner" || data?.org.role === "admin";
   const nestedFolders = (
     spaceId: string,
@@ -519,303 +565,440 @@ function TeamLibrary({ org }: { org: string }) {
           {depth < 20 && nestedFolders(spaceId, f.id, depth + 1)}
         </div>
       ));
-  if (data && view === "messages") {
-    return <TeamMessages data={data} onBack={() => navigate()} />;
-  }
+  const openMessage = async (member: string) => {
+    const room = await team.request<TeamChatRoom>(
+      "POST",
+      orgPath(org, "/chat-rooms"),
+      { kind: "direct", member_id: member },
+    );
+    setRequestedRoom(room);
+    setView("messages");
+    setNoteId(null);
+  };
+  const knowledgeView = ["notes", "answers", "trash"].includes(view);
   return (
-    <div className="team-layout">
-      <aside className="team-sidebar" aria-label="Team library">
+    <>
+      <nav className="team-primary-nav" aria-label="Team navigation">
         <button
-          className={view === "notes" && !space ? "on" : ""}
-          onClick={() => navigate()}
-        >
-          <BookOpen size={15} /> All shared meetings
-        </button>
-        <button
+          aria-current={knowledgeView ? "page" : undefined}
+          className={knowledgeView ? "on" : ""}
           onClick={() => {
-            setView("messages");
-            setSpace("");
-            setFolder("");
-            setNoteId(null);
+            if (!knowledgeView) setView("notes");
+            else navigate();
           }}
         >
-          <MessageSquare size={15} /> Team chat
+          <BookOpen size={17} /> Meetings
         </button>
-        <div className="team-sidebar-label">
-          <span>Spaces</span>
-          {isAdmin && (
-            <button
-              aria-label="Create team space"
-              onClick={() => setEditor("space")}
-            >
-              <Plus size={15} />
-            </button>
+        <button
+          aria-current={view === "messages" ? "page" : undefined}
+          className={view === "messages" ? "on" : ""}
+          onClick={() => setView("messages")}
+        >
+          <MessageSquare size={17} /> Messages
+          {unread > 0 && (
+            <b aria-label={`${unread} unread messages`}>
+              {unread > 99 ? "99+" : unread}
+            </b>
           )}
+        </button>
+        <button
+          aria-current={view === "people" ? "page" : undefined}
+          className={view === "people" ? "on" : ""}
+          onClick={() => setView("people")}
+        >
+          <Users size={17} /> People{data && <span>{data.members.length}</span>}
+        </button>
+        <button
+          className={`team-nav-settings${view === "admin" ? " on" : ""}`}
+          aria-current={view === "admin" ? "page" : undefined}
+          aria-label="Team settings"
+          onClick={() => setView("admin")}
+        >
+          <Settings size={17} />
+        </button>
+      </nav>
+      {data && (
+        <div hidden={view !== "messages"}>
+          <TeamMessages
+            data={data}
+            active={view === "messages"}
+            requestedRoom={requestedRoom}
+            onUnread={setUnread}
+          />
         </div>
-        {data?.spaces.map((s) => (
-          <div key={s.id} className="team-space-nav">
-            <button
-              className={space === s.id && !folder ? "on" : ""}
-              onClick={() => navigate(s.id)}
-            >
-              {s.visibility === "restricted" ? (
-                <Lock size={14} />
-              ) : (
-                <Users size={14} />
-              )}
-              <span>{s.name}</span>
-            </button>
-            {nestedFolders(s.id)}
+      )}
+      {data && view === "people" && (
+        <TeamPeople
+          data={data}
+          onMessage={openMessage}
+          onManage={() => setView("admin")}
+        />
+      )}
+      {data && view === "admin" && (
+        <main className="team-settings-page">
+          <TeamAdministration data={data} refresh={refresh} />
+        </main>
+      )}
+      <div className="team-layout" hidden={!knowledgeView}>
+        <aside className="team-sidebar" aria-label="Meeting collections">
+          <button
+            className={view === "notes" && !space ? "on" : ""}
+            onClick={() => navigate()}
+          >
+            <BookOpen size={15} /> All meetings
+          </button>
+          <div className="team-sidebar-label">
+            <span>Collections</span>
+            {isAdmin && (
+              <button
+                aria-label="Create collection"
+                onClick={() => setEditor("space")}
+              >
+                <Plus size={15} />
+              </button>
+            )}
           </div>
-        ))}
-        <div className="team-sidebar-bottom">
-          <button
-            className={view === "answers" ? "on" : ""}
-            onClick={() => {
-              setView("answers");
-              setNoteId(null);
-            }}
-          >
-            <BookOpen size={15} /> Saved answers
-          </button>
-          <button
-            className={view === "admin" ? "on" : ""}
-            onClick={() => {
-              setView("admin");
-              setNoteId(null);
-            }}
-          >
-            <Settings size={15} /> Members & prompts
-          </button>
-          <button
-            className={view === "trash" ? "on" : ""}
-            onClick={() => {
-              setView("trash");
-              setSpace("");
-              setFolder("");
-            }}
-          >
-            <Trash2 size={15} /> Trash
-          </button>
-        </div>
-      </aside>
-      <main className="team-main">
-        {error && (
-          <div className="team-error" role="alert">
-            {error}
+          <p className="team-sidebar-help">
+            Group meetings by project or topic.
+          </p>
+          {data?.spaces
+            .slice()
+            .sort((a, b) => collectionName(a).localeCompare(collectionName(b)))
+            .map((s) => (
+              <div key={s.id} className="team-space-nav">
+                <button
+                  className={space === s.id && !folder ? "on" : ""}
+                  onClick={() => navigate(s.id)}
+                >
+                  {s.visibility === "restricted" ? (
+                    <Lock size={14} />
+                  ) : (
+                    <Users size={14} />
+                  )}
+                  <span className="team-collection-name">
+                    {collectionName(s)}
+                    <small>
+                      {s.visibility === "team" ? "All members" : "Restricted"}
+                    </small>
+                  </span>
+                </button>
+                {nestedFolders(s.id)}
+              </div>
+            ))}
+          <div className="team-sidebar-bottom">
             <button
-              className="team-text-button"
+              className={view === "answers" ? "on" : ""}
               onClick={() => {
-                void refresh()
-                  .then(() => loadRows())
-                  .catch((e) => setError(String(e)));
+                setView("answers");
+                setNoteId(null);
               }}
             >
-              Retry
+              <BookOpen size={15} /> Saved answers
+            </button>
+            <button
+              className={view === "trash" ? "on" : ""}
+              onClick={() => {
+                setView("trash");
+                setSpace("");
+                setFolder("");
+              }}
+            >
+              <Trash2 size={15} /> Trash
             </button>
           </div>
-        )}
-        {!data && !error && (
-          <div className="team-loading">
-            <Loader size={16} className="spin" /> Loading workspace…
-          </div>
-        )}
-        {data && view === "answers" && !noteId ? (
-          <SavedAnswers
-            key={accessEpoch}
-            org={org}
-            onSource={(id) => setNoteId(id)}
-          />
-        ) : data && view === "admin" ? (
-          <TeamAdministration data={data} refresh={refresh} />
-        ) : data && noteId ? (
-          <SharedMeeting
-            key={noteId}
-            org={org}
-            id={noteId}
-            folders={data.folders}
-            accessEpoch={accessEpoch}
-            onBack={() => {
-              setNoteId(null);
-              void loadRows();
-            }}
-          />
-        ) : (
-          data && (
-            <>
-              <header className="team-library-head">
-                <div>
-                  <h1>{view === "trash" ? "Trash" : scopeName}</h1>
-                  <p>
-                    {view === "trash"
-                      ? "Removed shared copies. Local originals remain in their owners’ libraries."
-                      : currentFolder?.description ||
-                        currentSpace?.description ||
-                        "The conversations your team chose to bring together."}
-                  </p>
-                </div>
-                <button
-                  className="team-text-button"
-                  aria-label="Refresh shared meetings"
-                  onClick={() => {
-                    void refresh()
-                      .then(() => loadRows())
-                      .catch((e) => setError(String(e)));
-                  }}
-                >
-                  <RefreshCw size={15} />
-                </button>
-                {currentSpace?.role === "editor" && view === "notes" && (
-                  <button
-                    className="team-text-button"
-                    onClick={() => setEditor("folder")}
-                  >
-                    <Plus size={14} /> Folder
-                  </button>
-                )}
-                {currentFolder &&
-                  currentSpace?.role === "editor" &&
-                  view === "notes" && (
+        </aside>
+        <main className="team-main">
+          {error && (
+            <div className="team-error" role="alert">
+              {error}
+              <button
+                className="team-text-button"
+                onClick={() => {
+                  void refresh()
+                    .then(() => loadRows())
+                    .catch((e) => setError(String(e)));
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+          {!data && !error && (
+            <div className="team-loading">
+              <Loader size={16} className="spin" /> Loading your team…
+            </div>
+          )}
+          {data && view === "answers" && !noteId ? (
+            <SavedAnswers
+              key={accessEpoch}
+              org={org}
+              onSource={(id) => setNoteId(id)}
+            />
+          ) : data && noteId ? (
+            <SharedMeeting
+              key={noteId}
+              org={org}
+              id={noteId}
+              folders={data.folders}
+              accessEpoch={accessEpoch}
+              onBack={() => {
+                setNoteId(null);
+                void loadRows();
+              }}
+            />
+          ) : (
+            data && (
+              <>
+                <header className="team-library-head">
+                  <div>
+                    <span className="team-eyebrow">
+                      {currentSpace
+                        ? "Meeting collection"
+                        : "Company knowledge"}
+                    </span>
+                    <h1>{view === "trash" ? "Trash" : scopeName}</h1>
+                    <p>
+                      {view === "trash"
+                        ? "Removed shared copies. Local originals remain in their owners’ libraries."
+                        : currentFolder?.description ||
+                          currentSpace?.description ||
+                          "Your team’s meeting notes, decisions, and answers in one place."}
+                    </p>
+                    {currentSpace && (
+                      <span className="team-collection-audience">
+                        {currentSpace.visibility === "restricted" ? (
+                          <Lock size={12} />
+                        ) : (
+                          <Users size={12} />
+                        )}
+                        {collectionAudience(currentSpace)} ·{" "}
+                        {currentSpace.role === "editor"
+                          ? "You can contribute"
+                          : "View only"}
+                      </span>
+                    )}
+                  </div>
+                  {view === "notes" && (
                     <button
-                      className="team-text-button"
-                      onClick={() => setEditor("editFolder")}
+                      className="team-primary team-share-button"
+                      onClick={() => setShareHelp(true)}
                     >
-                      Edit folder
+                      <Share2 size={14} /> Share a meeting
                     </button>
                   )}
-              </header>
-              {view === "notes" && (
-                <TeamChat
-                  key={accessEpoch}
-                  org={org}
-                  data={data}
-                  space={space}
-                  folder={folder}
-                  selected={selected}
-                  scopeName={scopeName}
-                  id={conversationId}
-                  onConversation={setConversationId}
-                  onSource={setNoteId}
-                />
-              )}
-              <div className="team-list-tools">
-                <label>
-                  <Search size={15} />
-                  <input
-                    type="search"
-                    aria-label="Search shared notes and transcripts"
-                    placeholder="Search notes and transcripts"
-                    value={query}
-                    maxLength={500}
-                    onChange={(e) => setQuery(e.target.value)}
-                  />
-                </label>
-                <span>
-                  {selected.length
-                    ? `${selected.length} selected`
-                    : `${rows.length}${more ? "+" : ""} ${rows.length === 1 ? "meeting" : "meetings"}`}
-                </span>
-              </div>
-              {selected.length > 0 && (
-                <div className="team-selection">
-                  <button onClick={() => changeSelection([])}>
-                    Clear selection
-                  </button>
-                  <span>
-                    Ask a question above to work with these meetings (up to 40).
-                  </span>
-                </div>
-              )}
-              <div className="team-note-list" aria-busy={loading}>
-                {rows.map((row) => (
-                  <div className="team-note-row" key={row.id}>
-                    {view === "notes" && (
-                      <input
-                        type="checkbox"
-                        checked={selected.includes(row.id)}
-                        disabled={
-                          selected.length >= 40 && !selected.includes(row.id)
-                        }
-                        aria-label={`Select ${row.title}`}
-                        onChange={(e) =>
-                          changeSelection(
-                            e.target.checked
-                              ? [...selected, row.id]
-                              : selected.filter((id) => id !== row.id),
-                          )
-                        }
-                      />
-                    )}
-                    <button onClick={() => setNoteId(row.id)}>
-                      <strong>{row.title}</strong>
-                      <span className="team-excerpt">
-                        {row.excerpt
-                          .replace(/^#+\s*/gm, "")
-                          .replace(/\*\*/g, "")}
-                      </span>
-                      <span className="team-note-meta">
-                        {row.owner_name} ·{" "}
-                        {new Date(row.occurred_at).toLocaleDateString(
-                          undefined,
-                          { month: "short", day: "numeric" },
-                        )}
-                        {row.has_transcript ? " · Transcript included" : ""}
-                      </span>
-                    </button>
-                    <ChevronRight size={15} aria-hidden="true" />
-                  </div>
-                ))}
-                {loading && (
-                  <div className="team-loading">
-                    <Loader size={16} className="spin" /> Loading meetings…
-                  </div>
-                )}
-                {!loading && !rows.length && (
-                  <div className="team-empty">
-                    <h2>
-                      {query
-                        ? "No shared meetings match."
-                        : view === "trash"
-                          ? "Nothing in Trash."
-                          : "Start with a conversation worth sharing."}
-                    </h2>
-                    <p>
-                      {query
-                        ? "Try a name, decision, or phrase from the transcript."
-                        : view === "trash"
-                          ? "Removed shared meetings will appear here."
-                          : "Open a completed meeting in your Library and choose Share → Publish to team. Only the content you review is published."}
-                    </p>
-                  </div>
-                )}
-                {more && !loading && (
                   <button
                     className="team-text-button"
-                    onClick={() => void loadRows(rows.length)}
+                    aria-label="Refresh shared meetings"
+                    onClick={() => {
+                      void refresh()
+                        .then(() => loadRows())
+                        .catch((e) => setError(String(e)));
+                    }}
                   >
-                    Load more meetings
+                    <RefreshCw size={15} />
                   </button>
+                  {currentSpace?.role === "editor" && view === "notes" && (
+                    <button
+                      className="team-text-button"
+                      onClick={() => setEditor("folder")}
+                    >
+                      <Plus size={14} /> Folder
+                    </button>
+                  )}
+                  {currentFolder &&
+                    currentSpace?.role === "editor" &&
+                    view === "notes" && (
+                      <button
+                        className="team-text-button"
+                        onClick={() => setEditor("editFolder")}
+                      >
+                        Edit folder
+                      </button>
+                    )}
+                </header>
+                {view === "notes" && (
+                  <TeamChat
+                    key={accessEpoch}
+                    org={org}
+                    data={data}
+                    space={space}
+                    folder={folder}
+                    selected={selected}
+                    scopeName={scopeName}
+                    id={conversationId}
+                    onConversation={setConversationId}
+                    onSource={setNoteId}
+                  />
                 )}
-              </div>
-            </>
-          )
-        )}
-        {editor && data && (
-          <CreateTeamLocation
-            kind={editor}
-            org={org}
-            space={currentSpace}
-            parent={currentFolder}
-            folders={data.folders}
-            onClose={() => setEditor(null)}
-            onSaved={async () => {
-              setEditor(null);
-              await refresh();
-            }}
-          />
-        )}
-      </main>
-    </div>
+                <div className="team-list-tools">
+                  <label>
+                    <Search size={15} />
+                    <input
+                      type="search"
+                      aria-label="Search shared notes and transcripts"
+                      placeholder="Search notes and transcripts"
+                      value={query}
+                      maxLength={500}
+                      onChange={(e) => setQuery(e.target.value)}
+                    />
+                  </label>
+                  <span>
+                    {selected.length
+                      ? `${selected.length} selected`
+                      : `${rows.length}${more ? "+" : ""} ${rows.length === 1 ? "meeting" : "meetings"}`}
+                  </span>
+                </div>
+                {selected.length > 0 && (
+                  <div className="team-selection">
+                    <button onClick={() => changeSelection([])}>
+                      Clear selection
+                    </button>
+                    <span>
+                      Ask a question above to work with these meetings (up to
+                      40).
+                    </span>
+                  </div>
+                )}
+                <div className="team-note-list" aria-busy={loading}>
+                  {rows.map((row) => (
+                    <div className="team-note-row" key={row.id}>
+                      {view === "notes" && (
+                        <input
+                          type="checkbox"
+                          checked={selected.includes(row.id)}
+                          disabled={
+                            selected.length >= 40 && !selected.includes(row.id)
+                          }
+                          aria-label={`Select ${row.title}`}
+                          onChange={(e) =>
+                            changeSelection(
+                              e.target.checked
+                                ? [...selected, row.id]
+                                : selected.filter((id) => id !== row.id),
+                            )
+                          }
+                        />
+                      )}
+                      <button onClick={() => setNoteId(row.id)}>
+                        <strong>{row.title}</strong>
+                        <span className="team-excerpt">
+                          {row.excerpt
+                            .replace(/^#+\s*/gm, "")
+                            .replace(/\*\*/g, "")}
+                        </span>
+                        <span className="team-note-meta">
+                          {row.owner_name} ·{" "}
+                          {new Date(row.occurred_at).toLocaleDateString(
+                            undefined,
+                            { month: "short", day: "numeric" },
+                          )}
+                          {data.spaces.find((s) => s.id === row.space_id) && (
+                            <>
+                              {" "}
+                              ·{" "}
+                              {collectionName(
+                                data.spaces.find((s) => s.id === row.space_id)!,
+                              )}
+                            </>
+                          )}
+                          {row.has_transcript ? " · Transcript included" : ""}
+                        </span>
+                      </button>
+                      <ChevronRight size={15} aria-hidden="true" />
+                    </div>
+                  ))}
+                  {loading && (
+                    <div className="team-loading">
+                      <Loader size={16} className="spin" /> Loading meetings…
+                    </div>
+                  )}
+                  {!loading && !rows.length && (
+                    <div className="team-empty">
+                      <h2>
+                        {query
+                          ? "No shared meetings match."
+                          : view === "trash"
+                            ? "Nothing in Trash."
+                            : "Build your team’s shared memory."}
+                      </h2>
+                      <p>
+                        {query
+                          ? "Try a name, decision, or phrase from the transcript."
+                          : view === "trash"
+                            ? "Removed shared meetings will appear here."
+                            : "Open a completed meeting in your Library and choose Share → Publish to team. Only the content you review is published."}
+                      </p>
+                    </div>
+                  )}
+                  {more && !loading && (
+                    <button
+                      className="team-text-button"
+                      onClick={() => void loadRows(rows.length)}
+                    >
+                      Load more meetings
+                    </button>
+                  )}
+                </div>
+              </>
+            )
+          )}
+          {editor && data && (
+            <CreateTeamLocation
+              kind={editor}
+              org={org}
+              space={currentSpace}
+              parent={currentFolder}
+              folders={data.folders}
+              onClose={() => setEditor(null)}
+              onSaved={async () => {
+                setEditor(null);
+                await refresh();
+              }}
+            />
+          )}
+        </main>
+      </div>
+      {!data && !knowledgeView && (
+        <p className="team-empty" role="status">
+          {error || "Loading your team…"}
+        </p>
+      )}
+      {shareHelp && (
+        <TeamDialog
+          title="Share a meeting with your team"
+          onClose={() => setShareHelp(false)}
+        >
+          <div className="team-form">
+            <p>
+              Meetings start in your private Library. Choose which ones become
+              company knowledge.
+            </p>
+            <ol className="team-share-steps">
+              <li>
+                Open a completed meeting in <strong>Library</strong>.
+              </li>
+              <li>
+                Choose <strong>Share → Publish to team</strong>.
+              </li>
+              <li>Choose a collection, review who can read it, and publish.</li>
+            </ol>
+            <p className="team-muted">
+              A shared copy appears here for everyone with access. Personal
+              notes and recordings stay in your Library.
+            </p>
+            <button
+              className="team-primary"
+              onClick={() => {
+                setShareHelp(false);
+                onOpenLibrary?.();
+              }}
+            >
+              {onOpenLibrary ? "Open my Library" : "Got it"}
+            </button>
+          </div>
+        </TeamDialog>
+      )}
+    </>
   );
 }
 
@@ -852,7 +1035,7 @@ function CreateTeamLocation({
     <TeamDialog
       title={
         kind === "space"
-          ? "Create a team space"
+          ? "Create a collection"
           : kind === "editFolder"
             ? "Edit folder"
             : "Create a folder"
@@ -913,6 +1096,12 @@ function CreateTeamLocation({
           />
         </label>
         {kind === "space" && (
+          <p className="team-muted">
+            A collection groups meeting notes around a project, client, or
+            topic. Choose who can read and contribute.
+          </p>
+        )}
+        {kind === "space" && (
           <label>
             Who can access
             <select
@@ -922,7 +1111,7 @@ function CreateTeamLocation({
               <option value="restricted">
                 Admins and invited members or groups
               </option>
-              <option value="team">Everyone in this workspace</option>
+              <option value="team">All team members</option>
             </select>
           </label>
         )}
@@ -948,7 +1137,9 @@ function CreateTeamLocation({
                   ))}
               </select>
             </label>
-            <p className="team-muted">Folders inherit their space’s access.</p>
+            <p className="team-muted">
+              Folders use the same access as their collection.
+            </p>
           </>
         )}
         {error && (

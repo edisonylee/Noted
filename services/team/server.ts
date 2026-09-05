@@ -112,6 +112,8 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
         throw new TeamError(404, "Not found");
       if (path.length === 3 && method === "GET")
         return respond(store.snapshot(user, org));
+      if (path.length === 3 && method === "PATCH")
+        return respond(store.renameOrg(user, org, body.name));
       if (resource === "chat-rooms") {
         if (!id && method === "GET") return respond(store.chatRooms(user, org));
         if (!id && method === "POST")

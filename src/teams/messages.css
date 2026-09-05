@@ -382,3 +382,200 @@
   justify-content: flex-end;
   gap: 14px;
 }
+
+.team-messages {
+  border-top: 0;
+  grid-template-columns: 245px minmax(0, 1fr);
+  height: calc(100dvh - 242px);
+  min-height: 460px;
+}
+.messages-nav {
+  padding: 16px 10px 12px;
+  background: var(--surface-2);
+}
+.messages-list-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 6px 12px;
+}
+.messages-nav-head {
+  position: sticky;
+  top: -16px;
+  z-index: 2;
+  flex: none;
+  padding-top: 4px;
+  background: var(--surface-2);
+}
+.messages-list-heading h2 {
+  margin: 0;
+  font-size: 15px;
+}
+.messages-list-heading button {
+  width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 7px;
+}
+.messages-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 9px;
+  margin: 0 4px 16px;
+  border: 1px solid var(--line);
+  background: var(--canvas);
+  border-radius: 6px;
+  color: var(--muted);
+}
+.messages-search input {
+  min-width: 0;
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 0;
+}
+.messages-search:focus-within {
+  border-color: var(--accent);
+}
+.messages-nav .messages-conversation-row {
+  gap: 10px;
+  padding: 11px 8px;
+  min-height: 64px;
+}
+.messages-nav .messages-person-mark {
+  width: 33px;
+  height: 33px;
+  flex: none;
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+.messages-nav .messages-conversation-copy {
+  display: block;
+  flex: 1;
+  min-width: 0;
+}
+.messages-nav .messages-conversation-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 4px;
+}
+.messages-conversation-title strong {
+  font-size: 12px;
+  font-weight: 560;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.messages-conversation-title time {
+  font-size: 9px;
+  color: var(--muted);
+  margin-left: auto;
+  flex: none;
+}
+.messages-nav .messages-conversation-copy small {
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+}
+.messages-nav .team-sidebar-label {
+  margin-top: 22px;
+}
+.messages-nav .messages-start-dm {
+  font-size: 12px;
+}
+.messages-nav-bottom {
+  margin-top: auto;
+  padding: 24px 4px 4px;
+}
+.messages-nav-bottom p {
+  margin: 2px 8px 0;
+  font-size: 10px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+.messages-nav-bottom .messages-create-topic {
+  font-size: 11px;
+}
+.messages-nav-bottom .messages-archived {
+  padding-top: 14px;
+}
+.messages-kind-choice {
+  display: flex;
+  border-bottom: 1px solid var(--line);
+  gap: 20px;
+}
+.messages-kind-choice button {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  padding: 10px 0;
+  cursor: pointer;
+}
+.messages-kind-choice button[aria-pressed="true"] {
+  color: var(--ink);
+  border-bottom-color: var(--ink);
+}
+.messages-room-head {
+  padding: 18px 24px;
+}
+.messages-room-head h1 {
+  font-size: 19px;
+}
+.messages-compose {
+  margin: 0 20px 18px;
+  padding: 10px 13px;
+}
+.messages-compose textarea {
+  min-height: 42px;
+}
+.messages-compose-label.sr-only {
+  margin: 0;
+}
+.messages-compose-foot {
+  margin-top: 3px;
+}
+.messages-new {
+  bottom: 140px;
+}
+@media (max-width: 1050px) {
+  .team-messages {
+    grid-template-columns: 215px minmax(0, 1fr);
+  }
+  .messages-room-head {
+    padding: 18px;
+  }
+  .messages-compose {
+    margin: 0 16px 16px;
+  }
+}
+@media (max-width: 650px) {
+  .team-messages {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 650px;
+  }
+  .messages-nav {
+    max-height: 280px;
+  }
+  .messages-room {
+    height: 550px;
+  }
+  .messages-nav-bottom {
+    padding-top: 10px;
+  }
+  .messages-conversation-title time {
+    font-size: 10px;
+  }
+}

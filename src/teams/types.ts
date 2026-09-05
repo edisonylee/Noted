@@ -111,6 +111,12 @@ export type TeamChatRoom = {
   participants: (TeamUser & { active: boolean })[];
   unread: number;
   last_activity: string;
+  last_message?: {
+    author_id: string;
+    author_name: string;
+    body: string;
+    created_at: string;
+  } | null;
   can_manage: boolean;
   can_send: boolean;
 };

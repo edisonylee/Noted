@@ -860,3 +860,341 @@
   line-height: 1.5;
   margin: 10px 0 0;
 }
+
+/* Team navigation keeps company knowledge and conversations in one place. */
+.team-workspace [hidden] {
+  display: none !important;
+}
+.team-workspace-bar {
+  padding: 12px 20px;
+  min-height: 76px;
+  gap: 20px;
+}
+.team-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.team-eyebrow {
+  display: block;
+  font-size: 10px;
+  font-weight: 550;
+  color: var(--muted);
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+.team-workspace-bar .team-eyebrow {
+  margin: 0;
+}
+.team-workspace-bar .team-identity select {
+  max-width: 340px;
+  min-height: 30px;
+  padding: 1px 20px 1px 0;
+  font-size: 17px;
+}
+.team-purpose {
+  flex: 1;
+}
+.team-account-menu {
+  position: relative;
+  margin-left: auto;
+}
+.team-account-menu summary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  cursor: pointer;
+  list-style: none;
+  border-radius: 6px;
+}
+.team-account-menu summary::-webkit-details-marker {
+  display: none;
+}
+.team-account-menu summary:hover {
+  background: var(--hover-soft);
+}
+.team-account-menu summary:focus-visible {
+  outline: 2px solid var(--accent);
+}
+.team-account-menu > div {
+  position: absolute;
+  top: 40px;
+  right: 0;
+  z-index: 20;
+  width: 230px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px #0002;
+}
+.team-account-menu button {
+  width: 100%;
+  justify-content: flex-start;
+}
+.team-primary-nav {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  min-height: 48px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--line);
+}
+.team-primary-nav > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  align-self: stretch;
+  padding: 10px 1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.team-primary-nav > button.on {
+  border-bottom-color: var(--ink);
+  color: var(--ink);
+  font-weight: 600;
+}
+.team-primary-nav > button:hover {
+  color: var(--ink);
+}
+.team-primary-nav > button.team-nav-settings {
+  margin-left: auto;
+  width: 38px;
+}
+.team-primary-nav button > span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.team-primary-nav button > b {
+  font-size: 10px;
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--ink);
+  color: var(--on-ink);
+}
+.team-layout {
+  min-height: calc(100dvh - 242px);
+  grid-template-columns: 195px minmax(0, 1fr);
+}
+.team-sidebar {
+  padding: 20px 12px;
+}
+.team-sidebar-help {
+  margin: -4px 8px 12px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.team-sidebar .team-collection-name {
+  display: block;
+  min-width: 0;
+}
+.team-collection-name small {
+  display: block;
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 3px;
+  font-weight: 400;
+}
+.team-collection-audience {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 11px;
+  line-height: 1.5;
+}
+.team-main {
+  padding: 24px;
+}
+.team-library-head {
+  flex-wrap: wrap;
+  row-gap: 10px;
+  margin-bottom: 24px;
+}
+.team-library-head > div {
+  flex-basis: 240px;
+}
+.team-library-head .team-share-button {
+  font-size: 11px;
+  padding: 8px 11px;
+  min-height: 34px;
+}
+.team-library-head h1 {
+  font-size: 25px;
+}
+.team-share-steps {
+  padding-left: 22px;
+  margin: 0;
+  display: grid;
+  gap: 14px;
+  line-height: 1.6;
+  font-size: 14px;
+}
+.team-people-page,
+.team-settings-page {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 30px;
+  min-height: 520px;
+}
+.team-people-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+}
+.team-people-search input {
+  flex: 1;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  outline: 0;
+}
+.team-people-search:focus-within {
+  border-color: var(--accent);
+}
+.team-person-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px 0;
+  border-bottom: 1px solid var(--line);
+}
+.team-person-avatar {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  border-radius: 10px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.team-person-row > div {
+  flex: 1;
+}
+.team-person-row strong {
+  font-size: 14px;
+  font-weight: 550;
+}
+.team-person-row strong small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+.team-person-row p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.team-name-form {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+  max-width: 500px;
+  margin: 0 0 24px;
+}
+.team-name-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  font-size: 12px;
+}
+.team-name-form input {
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 9px;
+  font: inherit;
+}
+.team-name-form button {
+  min-height: 36px;
+}
+@media (max-width: 1050px) {
+  .team-purpose {
+    display: none;
+  }
+  .team-layout {
+    grid-template-columns: 175px minmax(0, 1fr);
+  }
+  .team-main {
+    padding: 24px 18px;
+  }
+}
+@media (max-width: 650px) {
+  .team-workspace-bar {
+    padding: 10px 14px;
+  }
+  .team-primary-nav {
+    padding: 0 14px;
+    gap: 18px;
+  }
+  .team-layout {
+    grid-template-columns: 1fr;
+  }
+  .team-sidebar {
+    border-bottom: 1px solid var(--line);
+  }
+  .team-sidebar-help {
+    max-width: 220px;
+  }
+  .team-people-page,
+  .team-settings-page {
+    padding: 24px 18px;
+  }
+  .team-primary-nav > button {
+    font-size: 12px;
+  }
+  .team-primary-nav > button svg {
+    width: 15px;
+  }
+}
+.team-ask {
+  margin-bottom: 24px;
+}
+.team-ask form {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 14px;
+}
+.team-ask textarea {
+  min-width: 0;
+  flex: 1;
+  min-height: 42px;
+  font-size: 13px;
+}
+.team-ask-footer {
+  flex: none;
+  flex-direction: column-reverse;
+  align-items: flex-end;
+  gap: 5px;
+  margin: 0;
+}
+.team-ask-footer > span {
+  max-width: 150px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 10px;
+}

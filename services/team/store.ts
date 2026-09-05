@@ -156,7 +156,7 @@ export class TeamStore {
       );
       this.run("INSERT INTO members VALUES(?,?,'owner')", id, user);
       this.createSpace(user, id, {
-        name: "Team knowledge",
+        name: "General meetings",
         description:
           "Meetings and decisions shared with everyone in this workspace.",
         visibility: "team",
@@ -172,6 +172,14 @@ export class TeamStore {
       );
     })();
     return id;
+  }
+  renameOrg(user: string, org: string, name: unknown) {
+    if (!admin(this.role(user, org)))
+      fail(403, "Only an admin can rename the team");
+    const value = text(name, "team name");
+    this.run("UPDATE organizations SET name=? WHERE id=?", value, org);
+    this.audit(org, user, "team.renamed", org);
+    return {};
   }
   role(user: string, org: string): TeamRole {
     const row = this.get(
@@ -1349,6 +1357,18 @@ export class TeamStore {
       "SELECT MAX(COALESCE(deleted_at,edited_at,created_at)) AS at FROM chat_messages WHERE room_id=?",
       id,
     )?.at;
+    const preview = this.get<{
+      author_id: string;
+      author_name: string;
+      body: string;
+      created_at: string;
+      deleted_at: string | null;
+    }>(
+      `SELECT m.author_id,u.name AS author_name,m.body,m.created_at,m.deleted_at
+       FROM chat_messages m JOIN users u ON u.id=m.author_id
+       WHERE m.room_id=? ORDER BY m.created_seq DESC LIMIT 1`,
+      id,
+    );
     return {
       id,
       org_id: org,
@@ -1363,6 +1383,16 @@ export class TeamStore {
       participants,
       unread,
       last_activity: String(last ?? row.created_at),
+      last_message: preview
+        ? {
+            author_id: preview.author_id,
+            author_name: preview.author_name,
+            body: preview.deleted_at
+              ? "Message deleted"
+              : preview.body.slice(0, 160),
+            created_at: preview.created_at,
+          }
+        : null,
       can_manage:
         row.kind === "channel" && (row.created_by === user || admin(role)),
       can_send:

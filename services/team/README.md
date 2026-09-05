@@ -72,7 +72,7 @@ NOTED_TEAM_DB=/absolute/private/path/team.sqlite bun run team:serve
 The default listener is `127.0.0.1:8790`. In Noted’s **Team** view, use
 `http://127.0.0.1:8790`, choose **Set up a new team server**, and enter the setup
 key, organization name and owner name. Bootstrap works only once. An initialized service can restart without the setup key; omitting it disables bootstrap. Then create
-one-use invitations in **Members & prompts → Members**. Share the invitation
+one-use invitations in **Team settings → Members**. Share the invitation
 code and server address through your organization’s approved channel.
 
 For other Macs, configure an HTTPS reverse proxy and use its root URL in Noted.
@@ -99,53 +99,75 @@ policy. The server operator is a trusted administrator with filesystem access.
 
 For the container deployment and free-trial setup, see [Railway deployment](RAILWAY.md).
 
-1. Connect from **Team**, then create spaces and optional folders. A new custom
-   space starts restricted. The initial **Team knowledge** space includes the
-   whole workspace. Admins can read every published space.
-2. In the private Library, open a completed meeting and choose **Share → Publish
-   to team**. Select the audience and summary. The transcript starts unchecked.
-   Review content and publish. Background local changes invalidate the preview.
-3. Team members can search, select meetings, ask across folders/spaces, open
-   sources, and continue private conversations from **Chat history**. Conversations save automatically; individual answers can also be bookmarked. Summaries can be edited by editors;
-   concurrent stale edits are rejected. Shared edits do not alter local originals.
-4. Use workspace settings to invite members, adjust roles, manage groups, share
-   prompts, transfer ownership or revoke access. Removing someone preserves
-   company meeting copies while blocking further access by that member.
-5. Use **+ Workspace** to create/join another organization on the same server.
-   One native server connection is active at a time.
+1. Connect from **Team**. **Meetings**, **Messages**, and **People** remain visible
+   as the three main destinations. A team represents one organization and its
+   members; admins can change its name in **Team settings**.
+2. **Meetings** brings together explicitly shared notes from everyone with access.
+   **Collections** group meetings by project, client, or topic. **General meetings**
+   includes all team members; custom collections start restricted. Folders inherit
+   their collection's permissions. Admins can read every published collection.
+3. Choose **Share a meeting** for the publishing steps. In your private Library,
+   open a completed meeting and choose **Share → Publish to team**. Select a
+   collection and summary, review the audience and content, and publish. The
+   transcript starts unchecked. Background local changes invalidate the preview.
+4. Search or select meeting notes and use **Ask meetings** for source-grounded
+   answers. **Previous questions** resumes your private question history. Answers
+   can also be bookmarked. Editors can update shared summaries; stale edits are
+   rejected, and shared edits do not alter private originals.
+5. **People** lists teammates and opens private conversations. **Invite & manage**
+   opens settings for invitations, roles, groups, collections, prompts, and
+   integrations. Removing a member preserves published company knowledge while
+   blocking that member's further access.
+6. The menu beside the team name includes **Create or join a team**. Teams on the
+   same server have separate membership and content. One native server connection
+   is active at a time.
+
+The former **Spaces** label is now **Collections**. Existing IDs, grants, folders,
+and API paths are unchanged. The original uncustomized **Team knowledge** starter
+collection displays as **General meetings** without rewriting its stored name.
 
 ## Team chat
 
-Open **Team → Team chat** for conversations with people. Every workspace has a
-`#general` channel, and members can create additional channels. All current
-workspace members can read channel history and send messages. The creator or a
-workspace admin can rename, describe, archive, or restore a channel; `#general`
-always remains available. Archiving preserves history and pauses sending.
+Open **Team → Messages** for conversations with people. **Team chat** includes
+all current team members and stays available. It is backed by the existing
+`general` channel, so earlier history is preserved. Additional **Team channels**
+are optional conversations for projects or topics; all team members can read and
+send in them. A creator or team admin can rename, describe, archive, or restore a
+custom channel. Archiving preserves history and pauses sending.
 
-Choose **New direct message**, then a teammate, for a private two-person
-conversation. Reopening the same pair returns the same history. Every request
-checks workspace membership and participation: even workspace owners and admins
-cannot open someone else's DM through the API. If a participant leaves, the
-remaining member retains read-only history. The server operator has database
-access; messages are not end-to-end encrypted.
+Choose **New message**, then a teammate, or **People → Message**, for a private
+two-person conversation. Reopening the same pair returns the same history. Every
+request checks membership and participation: even team owners and admins cannot
+open someone else's DM through the API. If a participant leaves, the remaining
+member retains read-only history. The server operator has database access;
+messages are not end-to-end encrypted.
 
-Chat includes unread counts, earlier history, drafts retained while switching
-rooms, editing your own messages, and deletion. Channel admins can also delete
-channel messages. Messages are plain text, limited to 10,000 characters. Failed
-sends can be retried with the same request identifier without creating a second
-copy. Edits reject stale revisions, and deletion removes the body while leaving
-a visible tombstone. Backups may retain earlier content.
+The conversation list includes latest-message previews, unread counts, and
+search by conversation name. Drafts survive switching rooms and moving between
+Meetings, Messages, and People within Team; they are not persisted across app
+restarts or leaving the Team area. Chat supports earlier history, editing your
+own messages, and deletion. Channel admins can delete channel messages. Messages
+are plain text, limited to 10,000 characters. Failed sends can be retried with the
+same request identifier without creating a second copy. Edits reject stale
+revisions, and deletion removes the body while leaving a visible tombstone.
+Backups may retain earlier content.
 
-While chat is visible, the open conversation refreshes every three seconds and
-the conversation list every ten seconds; focus triggers an immediate refresh.
-Read markers sync across devices when the conversation is viewed at the bottom.
-This release does not include typing indicators, attachments, threads, message
-search, or push notifications. Chat messages are not included in meeting search,
-model prompts, read-only integration keys, or MCP responses.
+While Messages is visible, the open conversation refreshes every three seconds.
+The conversation list refreshes every ten seconds while Team is visible, keeping
+the navigation unread badge up to date. Focus triggers an immediate refresh.
+Read markers sync across devices when the conversation is viewed at the bottom;
+hidden conversations are not marked read. This release does not include group
+DMs, typing indicators, attachments, threads, message-body search, or push
+notifications. Messages are not included in meeting search, model prompts,
+read-only integration keys, or MCP responses.
 
-The existing service database gains additive `chat_*` tables on startup and a
-general channel for each existing workspace. Use the normal service backup and
-deployment process; no separate chat server or model subscription is needed.
+The service database gains additive `chat_*` tables on startup and a general
+channel for each existing team. The navigation refresh requires no additional
+schema migration. Conversation previews are limited to 160 characters and are
+returned only after the room's membership/participant checks. Older service
+versions without previews still render the conversation list. Use the normal
+service backup and deployment process; no separate chat server or model
+subscription is needed.
 
 ## Data and authority boundaries
 
@@ -199,8 +221,8 @@ See [the parity audit](../../docs/GRANOLA_PARITY.md) for explicit remaining work
 
 ## Read-only API and MCP
 
-An administrator first enables **Allow approved workspace integrations** in a
-space’s access settings. Then **Integrations → Create read-only key** chooses
+An administrator first enables **Allow approved team integrations to read this collection** in a
+collection’s access settings. Then **Integrations → Create read-only key** chooses
 specific spaces, an expiry, and whether transcripts are included. Both approvals
 are required. Turning space access off blocks all keys for that space immediately;
 revoking one key affects only that integration. A workspace key survives its

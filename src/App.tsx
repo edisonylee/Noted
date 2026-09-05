@@ -1071,7 +1071,7 @@ export default function App() {
           </WeatherHome>
         ) : view === "team" ? (
           <Suspense fallback={<p role="status">Opening team workspace…</p>}>
-            <TeamWorkspace />
+            <TeamWorkspace onOpenLibrary={() => setView("library")} />
           </Suspense>
         ) : view === "documents" ? (
           <DocumentsView key="documents" notes={notes} cats={cats} onChanged={() => refresh().catch(handleErr)} />

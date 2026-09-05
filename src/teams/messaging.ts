@@ -1,6 +1,7 @@
 import type { TeamChatMessage, TeamChatRoom } from "./types";
 
 export function roomLabel(room: TeamChatRoom, user: string) {
+  if (room.is_default) return "Team chat";
   return room.kind === "channel"
     ? room.name
     : (room.participants.find((p) => p.id !== user)?.name ?? "Former teammate");

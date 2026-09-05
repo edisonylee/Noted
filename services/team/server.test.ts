@@ -39,6 +39,74 @@ function fixture() {
   return { s, owner, org, space, join, publish, token: setup.token };
 }
 
+describe("team navigation data", () => {
+  test("conversation previews stay inside the participant boundary and reflect edits and deletions", () => {
+    const { s, owner, org, join } = fixture();
+    const alice = join("Alice").id,
+      bob = join("Bob").id;
+    const dm = s.createChatRoom(alice, org, { kind: "direct", member_id: bob });
+    const message = s.sendChatMessage(alice, org, dm.id, {
+      body: "Private launch discussion ".repeat(30),
+      client_id: crypto.randomUUID(),
+    });
+    expect(
+      s.chatRooms(bob, org).find((room) => room.id === dm.id)?.last_message
+        ?.body,
+    ).toHaveLength(160);
+    expect(JSON.stringify(s.chatRooms(owner, org))).not.toContain(
+      "Private launch discussion",
+    );
+    const edited = s.changeChatMessage(alice, org, message.id, {
+      revision: message.revision,
+      body: "Revised plan",
+    });
+    expect(s.chatRoom(bob, org, dm.id).last_message?.body).toBe("Revised plan");
+    s.changeChatMessage(
+      alice,
+      org,
+      message.id,
+      { revision: edited.revision },
+      true,
+    );
+    expect(s.chatRoom(bob, org, dm.id).last_message?.body).toBe(
+      "Message deleted",
+    );
+    expect(JSON.stringify(s.chatRooms(bob, org))).not.toContain("Revised plan");
+    s.changeMember(owner, org, bob, "remove");
+    expect(() => s.chatRooms(bob, org)).toThrow();
+  });
+  test("team names can be changed by admins without changing identity, members, or collections", async () => {
+    const { s, owner, org, join, token, space } = fixture();
+    const member = join("Member"),
+      administrator = join("Admin", "admin");
+    const handler = createHandler(s);
+    const rename = (session: string, name: string, target = org) =>
+      handler(
+        new Request(`https://team.test/v1/orgs/${target}`, {
+          method: "PATCH",
+          headers: {
+            authorization: `Bearer ${session}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ name }),
+        }),
+      );
+    expect((await rename(member.token!, "Unauthorized")).status).toBe(403);
+    expect((await rename(administrator.token!, "Fieldwork")).status).toBe(200);
+    expect(s.get("SELECT name FROM organizations WHERE id=?", org)?.name).toBe(
+      "Fieldwork",
+    );
+    expect(s.snapshot(owner, org).members).toHaveLength(3);
+    expect(s.spaces(owner, org)[0].id).toBe(space);
+    expect((await rename(token, " ")).status).toBe(400);
+    const other = s.createOrg(owner, "Other team");
+    expect(
+      (await rename(administrator.token!, "Unauthorized", other)).status,
+    ).toBe(404);
+    expect((await rename("invalid", "Unauthorized")).status).toBe(401);
+  });
+});
+
 describe("team member messaging", () => {
   const query = (value = "") => new URLSearchParams(value);
   const message = (body: string) => ({ body, client_id: crypto.randomUUID() });

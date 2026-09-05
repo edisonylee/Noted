@@ -4,6 +4,7 @@ import { api, type MeetingDetail } from "../api";
 import { MdBlock } from "../MeetingMarkdownView";
 import { team, orgPath } from "./client";
 import { TeamDialog } from "./TeamDialog";
+import { collectionName } from "./presentation";
 import type { TeamOrg, TeamSnapshot } from "./types";
 import "./teams.css";
 
@@ -41,7 +42,7 @@ export function PublishMeeting({
       .catch(() => {
         if (active)
           setError(
-            "Connect to a workspace from Team in the sidebar before publishing a meeting.",
+            "Connect to a team from Team in the sidebar before publishing a meeting.",
           );
       });
     return () => {
@@ -122,8 +123,9 @@ export function PublishMeeting({
           <Check size={22} />
           <h3>{meeting.title}</h3>
           <p>
-            Published to {data?.org.name} / {destination?.name}. Your team can
-            now find it in the shared workspace.
+            Published to {data?.org.name} /{" "}
+            {destination ? collectionName(destination) : ""}. Your team can now
+            find it in the team’s Meetings tab.
           </p>
           <button className="team-primary" onClick={onClose}>
             Done
@@ -136,13 +138,13 @@ export function PublishMeeting({
             before publishing.
           </p>
           <label>
-            Workspace
+            Team
             <select
               value={org}
               onChange={(e) => setOrg(e.target.value)}
               disabled={busy}
             >
-              <option value="">Choose a workspace</option>
+              <option value="">Choose a team</option>
               {orgs.map((o) => (
                 <option key={o.id} value={o.id}>
                   {o.name}
@@ -151,7 +153,7 @@ export function PublishMeeting({
             </select>
           </label>
           <label>
-            Destination space
+            Collection
             <select
               value={space}
               onChange={(e) => {
@@ -165,8 +167,8 @@ export function PublishMeeting({
                 .filter((s) => s.role === "editor")
                 .map((s) => (
                   <option key={s.id} value={s.id}>
-                    {s.name} ·{" "}
-                    {s.visibility === "team" ? "Whole workspace" : "Restricted"}
+                    {collectionName(s)} ·{" "}
+                    {s.visibility === "team" ? "All members" : "Restricted"}
                   </option>
                 ))}
             </select>
@@ -180,13 +182,13 @@ export function PublishMeeting({
               )}
               {destination.visibility === "team"
                 ? `Everyone in ${data?.org.name} can read this copy.`
-                : "Workspace admins and members or groups with access to this space can read this copy."}
+                : "Team admins and members or groups with access to this collection can read this copy."}
             </p>
           )}
           {destination?.api_enabled && (
             <p className="team-muted">
-              Approved workspace integrations can also read published content in
-              this space.
+              Approved team integrations can also read published content in this
+              collection.
             </p>
           )}
           {!!data?.folders.filter((f) => f.space_id === space).length && (

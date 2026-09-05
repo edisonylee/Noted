@@ -4,6 +4,7 @@ import { api, isDesktop } from "../api";
 import { team, orgPath, copyTeamText } from "./client";
 import { TeamIntegrations } from "./TeamIntegrations";
 import { TeamDialog } from "./TeamDialog";
+import { collectionName } from "./presentation";
 import type {
   TeamSnapshot,
   TeamGroup,
@@ -46,6 +47,7 @@ export function TeamAdministration({
   const [promptEdit, setPromptEdit] = useState<TeamRecipe | null>(null);
   const [spaceEdit, setSpaceEdit] = useState<TeamSpace | null>(null);
   const [activity, setActivity] = useState<Activity[]>([]);
+  const [teamName, setTeamName] = useState(data.org.name);
   const org = data.org.id,
     admin = data.org.role !== "member";
   useEffect(() => {
@@ -132,13 +134,43 @@ export function TeamAdministration({
     <section className="team-admin">
       <header className="team-library-head">
         <div>
-          <h1>Workspace settings</h1>
+          <h1>Team settings</h1>
           <p>
             {data.org.name} · Signed in as {data.user.name}
           </p>
         </div>
       </header>
-      <nav className="team-tabs" aria-label="Workspace settings">
+      {admin && (
+        <form
+          className="team-name-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void act(
+              () => team.request("PATCH", orgPath(org), { name: teamName }),
+              "Team name updated.",
+            );
+          }}
+        >
+          <label>
+            Team name
+            <input
+              value={teamName}
+              maxLength={200}
+              required
+              onChange={(event) => setTeamName(event.target.value)}
+            />
+          </label>
+          <button
+            className="team-primary"
+            disabled={
+              busy || !teamName.trim() || teamName.trim() === data.org.name
+            }
+          >
+            Save name
+          </button>
+        </form>
+      )}
+      <nav className="team-tabs" aria-label="Team settings">
         {[
           "members",
           ...(admin ? ["spaces", "groups"] : []),
@@ -156,7 +188,9 @@ export function TeamAdministration({
           >
             {name === "prompts"
               ? "Recipes & templates"
-              : name.charAt(0).toUpperCase() + name.slice(1)}
+              : name === "spaces"
+                ? "Collections"
+                : name.charAt(0).toUpperCase() + name.slice(1)}
           </button>
         ))}
       </nav>
@@ -197,7 +231,7 @@ export function TeamAdministration({
                   </strong>
                   <small>
                     {member.role === "owner"
-                      ? "Workspace owner"
+                      ? "Team owner"
                       : member.role === "admin"
                         ? "Admin"
                         : "Member"}
@@ -217,7 +251,7 @@ export function TeamAdministration({
                         if (
                           role === "remove" &&
                           !confirm(
-                            `Remove ${member.name} from ${data.org.name}? They will lose access to all shared content in this workspace.`,
+                            `Remove ${member.name} from ${data.org.name}? They will lose access to all shared content in this team.`,
                           )
                         )
                           return;
@@ -242,7 +276,7 @@ export function TeamAdministration({
                     onClick={() => {
                       if (
                         confirm(
-                          `Make ${member.name} the workspace owner? You will remain an admin.`,
+                          `Make ${member.name} the team owner? You will remain an admin.`,
                         )
                       )
                         void act(() =>
@@ -289,9 +323,9 @@ export function TeamAdministration({
             </>
           )}
           <p className="team-muted">
-            Joining gives access to team-visible spaces. Restricted spaces need
-            a separate grant. Admins can access and manage all published
-            content.
+            Joining gives access to collections shared with all members.
+            Restricted collections need a separate grant. Admins can access and
+            manage all published content.
           </p>
           <div className="team-account-actions">
             <button
@@ -330,7 +364,7 @@ export function TeamAdministration({
                     );
                 }}
               >
-                Leave workspace
+                Leave team
               </button>
             )}
           </div>
@@ -339,16 +373,16 @@ export function TeamAdministration({
       {tab === "spaces" && admin && (
         <>
           <p className="team-muted">
-            Space permissions apply to every folder, meeting, search result, and
-            answer within it.
+            Collection permissions apply to every folder, meeting, search
+            result, and answer within it.
           </p>
           {data.spaces.map((space) => (
             <div className="team-member-row" key={space.id}>
               <div>
-                <strong>{space.name}</strong>
+                <strong>{collectionName(space)}</strong>
                 <small>
                   {space.visibility === "team"
-                    ? "Everyone in this workspace"
+                    ? "Everyone in this team"
                     : "Admins and invited members or groups"}
                 </small>
               </div>
@@ -508,7 +542,7 @@ export function TeamAdministration({
       {tab === "integrations" && admin && <TeamIntegrations data={data} />}
       {tab === "activity" && admin && (
         <>
-          <h2 className="team-section-title">Recent workspace activity</h2>
+          <h2 className="team-section-title">Recent team activity</h2>
           <div className="team-activity">
             {activity.map((a) => (
               <div key={a.id}>
@@ -813,7 +847,7 @@ function SpaceAccess({
   onClose: () => void;
   refresh: () => Promise<TeamSnapshot>;
 }) {
-  const [value, setValue] = useState(space),
+  const [value, setValue] = useState({ ...space, name: collectionName(space) }),
     [grants, setGrants] = useState<TeamGrant[]>([]),
     [recipient, setRecipient] = useState(""),
     [role, setRole] = useState("viewer");
@@ -843,7 +877,7 @@ function SpaceAccess({
     }
   };
   return (
-    <TeamDialog title={`Access to ${space.name}`} onClose={onClose}>
+    <TeamDialog title={`Access to ${collectionName(space)}`} onClose={onClose}>
       <form
         className="team-form"
         onSubmit={async (e) => {
@@ -862,7 +896,7 @@ function SpaceAccess({
         }}
       >
         <label>
-          Space name
+          Collection name
           <input
             required
             maxLength={200}
@@ -895,7 +929,7 @@ function SpaceAccess({
             <option value="restricted">
               Admins and invited members or groups
             </option>
-            <option value="team">Everyone in this workspace</option>
+            <option value="team">Everyone in this team</option>
           </select>
         </label>
         <label className="team-checkbox">
@@ -906,21 +940,22 @@ function SpaceAccess({
               setValue({ ...value, api_enabled: e.target.checked })
             }
           />
-          Allow approved workspace integrations to read this space
+          Allow approved team integrations to read this collection
         </label>
         <p className="team-muted">
-          Each integration still needs a key explicitly scoped to this space.
-          Turning this off immediately blocks all integration keys here.
+          Each integration still needs a key explicitly scoped to this
+          collection. Turning this off immediately blocks all integration keys
+          here.
         </p>
         <button className="team-primary" disabled={busy}>
-          Save space settings
+          Save collection settings
         </button>
       </form>
       <h3>Members and groups</h3>
       {space.visibility === "team" && (
         <p className="team-muted">
-          Everyone in this workspace is an editor unless given an explicit
-          viewer grant. Removing a grant restores that default access.
+          Everyone in this team is an editor unless given an explicit viewer
+          grant. Removing a grant restores that default access.
         </p>
       )}
       <p className="team-muted">

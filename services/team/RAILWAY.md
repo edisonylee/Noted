@@ -15,6 +15,12 @@ Trial volume data has a limited retention period after credit expiry. Export a
 database backup before the trial ends. A backup on the same hosting account
 does not replace an independent copy.
 
+At the September 2026 trial setup, Railway's dashboard restricted automatic
+backups and PITR to Pro. The trial deployment therefore uses a manual,
+consistent SQLite export downloaded to the operator's Mac. This does not
+schedule future backups. A fresh container restored from that export was
+verified to open the workspace using the existing owner's account session.
+
 References: [trial](https://docs.railway.com/pricing/free-trial),
 [volumes](https://docs.railway.com/volumes),
 [backups](https://docs.railway.com/volumes/backups),
@@ -32,7 +38,7 @@ separate database service or additional replicas.
 | Build source | This directory's Dockerfile and its three source files |
 | Database | `/data/team.sqlite` (image default) |
 | Listener | `0.0.0.0` (image default) |
-| Port | Railway's `PORT`, or explicitly set `NOTED_TEAM_PORT=8790` |
+| Port | Set `PORT=8790`; leave `NOTED_TEAM_PORT` unset or set it to the same value |
 | Health check | `/health` |
 | Public networking | Railway-generated HTTPS domain, target the configured port |
 | Restart policy | On failure, within the trial's supported limits |
@@ -56,6 +62,8 @@ or development state. Keep the project/service IDs in local deployment records.
 
 The service defaults to HTTP inside the container. Railway terminates HTTPS.
 Use the generated HTTPS root URL in Noted; no custom domain is required.
+Railway also uses `PORT` for its deployment health check. Setting only
+`NOTED_TEAM_PORT` leaves that check pointing at the wrong port.
 
 ## Connect and invite
 

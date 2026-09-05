@@ -287,7 +287,7 @@ if (import.meta.main) {
   );
   const server = Bun.serve({
     hostname: process.env.NOTED_TEAM_HOST ?? "127.0.0.1",
-    port: Number(process.env.NOTED_TEAM_PORT ?? 8790),
+    port: Number(process.env.NOTED_TEAM_PORT ?? process.env.PORT ?? 8790),
     maxRequestBodySize: 1_500_000,
     idleTimeout: 30,
     fetch: (request, server) =>

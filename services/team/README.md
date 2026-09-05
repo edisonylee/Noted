@@ -85,7 +85,7 @@ domains, certificates, a production host or an identity provider.
 | `NOTED_TEAM_DB` | `team.sqlite` in current directory | Separate SQLite database |
 | `NOTED_TEAM_SETUP_KEY` | Required for a new database | Initial one-time owner provisioning; omit after setup to disable bootstrap |
 | `NOTED_TEAM_HOST` | `127.0.0.1` | Listen interface |
-| `NOTED_TEAM_PORT` | `8790` | Listen port |
+| `NOTED_TEAM_PORT` | `PORT`, otherwise `8790` | Listen port; supports hosting providers' assigned port |
 | `NOTED_TEAM_ORIGINS` | Empty | Exact browser origins permitted, comma separated; native requests need none |
 
 Deploy the service as one process over a local SQLite filesystem, behind TLS,
@@ -96,6 +96,8 @@ backup scheduling, high availability, SSO, SCIM, recovery email or central model
 policy. The server operator is a trusted administrator with filesystem access.
 
 ## User workflow
+
+For the container deployment and free-trial setup, see [Railway deployment](RAILWAY.md).
 
 1. Connect from **Team**, then create spaces and optional folders. A new custom
    space starts restricted. The initial **Team knowledge** space includes the

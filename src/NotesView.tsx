@@ -1305,6 +1305,42 @@ function LibraryWorkspace({
     return categories.find((category) => category.id === selection)?.label ?? "Library";
   }, [categories, selectedFolder, selection]);
 
+  // One line of orientation under the title. Documents and Library share the
+  // masthead, so the copy is selected here instead of being duplicated in two
+  // near-identical header blocks.
+  const mastheadDescription = useMemo(() => {
+    if (trashView) {
+      return documentsMode
+        ? "Deleted documents stay here until you restore them."
+        : "Deleted items stay here until you restore them.";
+    }
+    if (documentsMode) {
+      if (selectedFolder) return "Documents and subfolders filed here.";
+      if (selection === "inbox") {
+        return `Documents saved directly to ${activeSpaceLabel}, before you choose a folder.`;
+      }
+      return "Write here, then shape your own folder structure as the work grows.";
+    }
+    if (selectedFolder?.auto_rule === "daily_standup") {
+      return "Stand-up notes are filed here automatically.";
+    }
+    if (selection === "inbox") {
+      return `Items saved to ${activeSpaceLabel} without a folder. Move them only when you want more organization.`;
+    }
+    if (selection === "all") return "Everything in this space — meetings, documents, and captures.";
+    if (selection === "meetings") return "Recorded meetings, with their transcripts and summaries.";
+    if (needsFilingView) return "Items without a folder yet. File them to find them later.";
+    if (selectedFolder) return "Items filed here.";
+    return null;
+  }, [
+    activeSpaceLabel,
+    documentsMode,
+    needsFilingView,
+    selectedFolder,
+    selection,
+    trashView,
+  ]);
+
   async function createDocumentNote() {
     if (creatingNote) return;
     setCreatingNote(true);
@@ -2958,13 +2994,20 @@ function LibraryWorkspace({
                 </select>
               </label>
             )}
+            {/* Deliberately inert: `db::delete_note_folder` refuses every call
+                until folder sync grows tombstones, so the reason is stated in
+                the menu rather than hidden in a title only a hover reveals. */}
             <button
               role="menuitem"
               disabled
-              title="Folder removal will return after synchronized lifecycle and purge protection is available."
+              aria-describedby={`folder-remove-note-${folder.id}`}
             >
-              Remove unavailable
+              Remove
             </button>
+            <p className="folder-menu-note" id={`folder-remove-note-${folder.id}`}>
+              Waiting on folder sync — without it, a removed folder could come
+              back on the next sync.
+            </p>
           </div>
         )}
         {creating?.parentId === folder.id && (
@@ -3667,51 +3710,9 @@ function LibraryWorkspace({
       )}
 
       <main className="notes-list">
-        {documentsMode ? (
-          <header className="documents-masthead">
-            <div className="documents-masthead-copy">
-              <div className="documents-breadcrumb">
-                {trashView ? (
-                  "All spaces"
-                ) : (
-                  <>
-                    {activeSpaceLabel}
-                    {selectedFolderParentWithinSpace
-                      ? ` / ${selectedFolderParentWithinSpace}`
-                      : ""}
-                  </>
-                )}
-              </div>
-              <h1>{currentLabel}</h1>
-              <p>
-                {trashView
-                  ? "Deleted documents stay here until you restore them."
-                  : selectedFolder
-                    ? "Documents and subfolders filed here."
-                    : selection === "inbox"
-                      ? `Documents saved directly to ${activeSpaceLabel}, before you choose a folder.`
-                      : "Write here, then shape your own folder structure as the work grows."}
-              </p>
-            </div>
-            <div className="documents-masthead-actions">
-              <span>{countLabel}</span>
-              {canCreateNote && (
-                <button
-                  className="notes-new-note"
-                  type="button"
-                  onClick={() => void createDocumentNote()}
-                  disabled={creatingNote}
-                >
-                  <Plus size={14} aria-hidden="true" />
-                  <span>{creatingNote ? "Creating…" : "New document"}</span>
-                </button>
-              )}
-            </div>
-          </header>
-        ) : (
-        <div className="notes-context">
-          <div>
-            <div className="notes-breadcrumb">
+        <header className="notes-masthead">
+          <div className="notes-masthead-copy">
+            <div className="notes-masthead-breadcrumb">
               {needsFilingView || trashView ? (
                 "All spaces"
               ) : (
@@ -3724,18 +3725,10 @@ function LibraryWorkspace({
               )}
             </div>
             <h1>{currentLabel}</h1>
-            {selectedFolder?.auto_rule === "daily_standup" && (
-              <p>Stand-up notes are filed here automatically.</p>
-            )}
-            {selection === "inbox" && (
-              <p>
-                Items saved to {activeSpaceLabel} without a folder. Move them only
-                when you want more organization.
-              </p>
-            )}
+            {mastheadDescription && <p>{mastheadDescription}</p>}
           </div>
-          <div className="notes-context-actions">
-            <span className="notes-context-count">{countLabel}</span>
+          <div className="notes-masthead-actions">
+            <span>{countLabel}</span>
             {canCreateNote && (
               <button
                 className="notes-new-note"
@@ -3748,7 +3741,7 @@ function LibraryWorkspace({
               </button>
             )}
           </div>
-        </div>)}
+        </header>
         {createNoteError && (
           <div className="notes-create-error" role="alert">{createNoteError}</div>
         )}

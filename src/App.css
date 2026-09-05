@@ -1542,6 +1542,18 @@ textarea.json.bad { border-color: var(--bad); }
   border-top: var(--border-width, 1px) solid var(--line);
   border-bottom: var(--border-width, 1px) solid var(--line);
 }
+/* Pinned to the top of the scrolling timeline: the all-day row and its Add
+   button are the day's fixed context, and scrolling to the evening used to take
+   them away. This must be the whole section rather than just its header — a
+   sticky element can only travel inside its parent's box, so pinning the header
+   alone let go the moment the short section scrolled past, which is the bug it
+   was meant to fix. Needs its own background so the hour grid passes under it. */
+.app.schedmode .today-allday {
+  position: sticky; top: 0; z-index: 6;
+  background: var(--canvas);
+}
+/* A long all-day list must not swallow the timeline it is pinned above. */
+.app.schedmode .today-allday-list { max-height: 22vh; overflow-y: auto; }
 .today-allday-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .today-allday-heading { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
 .today-allday-heading h2 {
@@ -1702,6 +1714,20 @@ a.today-allday-event:focus-visible { outline: 2px solid var(--accent); outline-o
 .today-save:active:not(:disabled) { transform: scale(0.97); }
 .today-save:disabled, .today-photo-btn:disabled, .today-cancel:disabled { opacity: 0.5; cursor: default; }
 
+/* Only the timeline scrolls. Previously the whole page did, so reading the
+   evening pushed the date header off the top and slid the task ledger out of
+   its own grid area — the two things you most want to keep in view. Same
+   full-height mode class Calendar, Journal and Knowledge already use. */
+.app.schedmode { height: 100%; }
+.app.schedmode .content { padding-bottom: 14px; min-height: 0; }
+.app.schedmode .schedule-page { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.app.schedmode .today-shell { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+/* The head and lead keep their natural height; the body takes what is left and
+   scrolls inside itself. */
+.app.schedmode .today-shell-head,
+.app.schedmode .today-shell-lead { flex: none; }
+.app.schedmode .today-shell-body { flex: 1; min-height: 0; overflow-y: auto; }
+
 /* Keep the accepted planner composition at the standard desktop window size.
    The dock narrows fluidly before the full 824px + 320px layout fits. */
 @media (min-width: 840px) {
@@ -1712,6 +1738,16 @@ a.today-allday-event:focus-visible { outline: 2px solid var(--accent); outline-o
       "lead lead"
       "body tasks";
     column-gap: clamp(18px, 2.2vw, 30px);
+  }
+  /* Grid, not flex, once the ledger is open: the body row takes the remaining
+     height so the timeline scrolls within it and the ledger keeps full height
+     beside it, rather than both riding the page scroll. */
+  .app.schedmode .today-shell.tasks-open {
+    display: grid; grid-template-rows: auto auto minmax(0, 1fr); align-items: stretch;
+  }
+  .app.schedmode .today-shell.tasks-open .today-shell-body { overflow-y: auto; min-height: 0; }
+  .app.schedmode .today-shell.tasks-open .today-task-drawer {
+    position: static; height: 100%; min-height: 0; overflow-y: auto;
   }
   .today-shell.tasks-open .today { min-width: 0; max-width: none; margin: 0; }
   .today-shell.tasks-open .today-shell-head { grid-area: head; }
@@ -3913,7 +3949,6 @@ a.cal-btn { text-decoration: none; }
 }
 .notes-view:has(.notes-library-toggle-reveal) { gap: 10px; }
 .documents-view { --workspace-rail-gap: 30px; max-width: 1180px; }
-.documents-view .notes-list { max-width: 920px; margin: 0 auto; }
 .document-files { width: 224px; }
 .document-files-label {
   margin: 0 9px 5px; color: var(--ink-soft); font-size: 12px; font-weight: 630;
@@ -3923,26 +3958,26 @@ a.cal-btn { text-decoration: none; }
 .document-folders-empty {
   margin: 5px 10px 0 29px; color: var(--faint); font-size: 10.5px; line-height: 1.45;
 }
-.documents-masthead {
+.notes-masthead {
   display: flex; align-items: flex-end; justify-content: space-between; gap: 28px;
   min-height: 122px; margin: 0 2px 24px; padding: 8px 4px 0;
 }
-.documents-masthead-copy { min-width: 0; }
-.documents-breadcrumb {
+.notes-masthead-copy { min-width: 0; }
+.notes-masthead-breadcrumb {
   color: var(--accent); font-size: 11.5px; font-weight: 560;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.documents-masthead h1 {
+.notes-masthead h1 {
   margin: 11px 0 6px; color: var(--ink); font-size: 38px; font-weight: 660;
   line-height: 1.05; letter-spacing: -0.045em;
 }
-.documents-masthead p {
+.notes-masthead p {
   max-width: 520px; margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.5;
 }
-.documents-masthead-actions {
+.notes-masthead-actions {
   flex: none; display: flex; align-items: center; gap: 13px; padding-bottom: 3px;
 }
-.documents-masthead-actions > span {
+.notes-masthead-actions > span {
   color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums;
 }
 .documents-view .note-row { min-height: 45px; padding-top: 10px; padding-bottom: 10px; }
@@ -4106,6 +4141,12 @@ a.cal-btn { text-decoration: none; }
   display: flex; flex-direction: column; gap: 4px; padding: 5px 7px;
   color: var(--faint); font-size: 10.5px;
 }
+/* Why a menu item is inert, stated in the menu. Matches the "Move to" label's
+   quiet register so it reads as explanation, not as another action. */
+.folder-menu-note {
+  margin: 0; padding: 0 7px 4px;
+  color: var(--faint); font-size: 10.5px; line-height: 1.4;
+}
 .folder-menu-move select {
   width: 100%; min-width: 0; padding: 5px 22px 5px 7px;
   color: var(--ink); background: var(--surface); border: var(--border-width, 1px) solid var(--line);
@@ -4194,16 +4235,16 @@ a.cal-btn { text-decoration: none; }
 .spaces .spaces-trash.drop-active small { color: var(--bad); }
 .spaces .spaces-trash.drop-blocked { opacity: .62; }
 
-.notes-list { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.notes-context {
-  min-height: 64px; display: flex; align-items: flex-start; justify-content: space-between;
-  gap: 18px; margin-bottom: 13px; padding: 0 6px;
+/* One capped, centered track for both Documents and Library. The shell goes
+   full-bleed (see the full-bleed sections below) while the list keeps a
+   readable measure inside it, matching Journal's 920px editor track. Library
+   used to opt out of the cap, which left a row's title and its date roughly
+   1100px apart on a wide display and shifted the whole column sideways when
+   switching modes. */
+.notes-list {
+  flex: 1; min-width: 0; display: flex; flex-direction: column;
+  max-width: 920px; margin: 0 auto;
 }
-.notes-context h1 { margin: 0; color: var(--ink); font-size: 21px; font-weight: 640; letter-spacing: -0.02em; }
-.notes-context p { max-width: 560px; margin: 5px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
-.notes-breadcrumb { margin-bottom: 4px; color: var(--accent); font-size: 11.5px; font-weight: 540; }
-.notes-context-count { flex: none; padding-top: 5px; color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-.notes-context-actions { display: flex; flex: none; align-items: center; gap: 12px; }
 .notes-new-note {
   display: inline-flex; align-items: center; gap: 6px; min-height: 32px;
   padding: 0 10px; border: 0; border-radius: 7px;
@@ -4585,16 +4626,15 @@ a.cal-btn { text-decoration: none; }
   .spaces { width: 170px; }
   .document-files { width: 172px; }
   .notes-list { width: auto; }
-  .notes-context { min-height: 0; }
-  .notes-context-count, .note-row-categories { display: none; }
+  .note-row-categories { display: none; }
   .note-row-date { width: 52px; }
   .folder-more { opacity: 1; }
   .notes-list-head { flex-wrap: wrap; }
   .notes-list-head .notes-search { flex-basis: 100%; min-width: 0; }
-  .notes-context-actions { gap: 8px; }
-  .documents-masthead { min-height: 104px; margin-bottom: 18px; }
-  .documents-masthead h1 { font-size: 33px; }
-  .documents-masthead p { max-width: 390px; }
+  .notes-masthead-actions { gap: 8px; }
+  .notes-masthead { min-height: 104px; margin-bottom: 18px; }
+  .notes-masthead h1 { font-size: 33px; }
+  .notes-masthead p { max-width: 390px; }
   .documents-view .note-row-categories { display: block; max-width: 175px; }
   .note-document-page-head { padding: 44px 38px 0; }
   .note-document-title { font-size: 35px; }
@@ -4608,12 +4648,10 @@ a.cal-btn { text-decoration: none; }
 }
 
 @media (max-width: 560px) {
-  .notes-context { padding: 0 2px; }
-  .notes-context-count, .note-row-categories { display: none; }
-  .notes-context { align-items: center; }
+  .note-row-categories { display: none; }
   .notes-new-note { min-height: 34px; }
-  .documents-masthead { align-items: flex-start; flex-direction: column; gap: 14px; }
-  .documents-masthead-actions { width: 100%; justify-content: space-between; }
+  .notes-masthead { align-items: flex-start; flex-direction: column; gap: 14px; }
+  .notes-masthead-actions { width: 100%; justify-content: space-between; }
   .documents-view .note-row-categories { display: none; }
   .notes-list-head { flex-wrap: wrap; }
   .notes-list-head .notes-search { flex-basis: 100%; }

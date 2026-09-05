@@ -591,6 +591,7 @@ export type MeetingDetail = MeetingListRow & {
   video_path: string | null; // window recording; null = off/expired/deleted
   asr_engine: string | null; // resolved engine used when this meeting started
   asr_model: string | null; // exact local artifact or provider model used
+  summary_error: string | null; // persisted generation failure or saved-quality warning
   segments: MeetingSegment[];
   summaries: MeetingSummary[];
   talk_ms: { me: number; them: number };

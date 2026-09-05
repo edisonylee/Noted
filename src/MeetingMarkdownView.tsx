@@ -111,6 +111,9 @@ export function MdBlock({
         </div>,
       );
       lineIndex = rowIndex - 1;
+    } else if (t.startsWith("#### ")) {
+      flush();
+      out.push(<h5 key={key++}>{t.slice(5)}</h5>);
     } else if (t.startsWith("### ")) {
       flush();
       out.push(<h4 key={key++}>{t.slice(4)}</h4>);

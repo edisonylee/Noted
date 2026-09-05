@@ -119,7 +119,7 @@ fn stranded_transcripts_are_retried_with_a_bounded_failure_count() {
     assert!(store::list_summary_recovery_candidates(&conn, 3)
         .unwrap()
         .is_empty());
-    store::mark_summary_succeeded(&conn, id).unwrap();
+    store::mark_summary_succeeded(&conn, id, None).unwrap();
     let (status, error): (String, Option<String>) = conn
         .query_row(
             "SELECT status, summary_error FROM meetings WHERE id = ?1",
@@ -129,6 +129,69 @@ fn stranded_transcripts_are_retried_with_a_bounded_failure_count() {
         .unwrap();
     assert_eq!(status, "done");
     assert_eq!(error, None);
+    drop(conn);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn saved_summary_warnings_survive_restart_without_triggering_recovery() {
+    let (path, conn) = test_db("summary_warning");
+    let id = store::create_meeting(&conn, "Planning", None, None, "2026-09-04T16:00:00Z").unwrap();
+    store::insert_segment(&conn, id, "me", 0, 1_000, "Confirm the release owner.").unwrap();
+    store::set_ended(&conn, id, "2026-09-04T16:20:00Z", "done").unwrap();
+    store::mark_summary_attempt(&conn, id).unwrap();
+    let pack = json!({"quality_warnings": ["missing later discussion topics"]});
+    store::insert_summary(
+        &conn,
+        id,
+        "Meeting",
+        "## Summary\nConfirm the release owner.",
+        Some(&pack),
+        "2026-09-04T16:21:00Z",
+    )
+    .unwrap();
+    let warning = "Notes were saved, but may be incomplete. Review them against the transcript.";
+    store::mark_summary_succeeded(&conn, id, Some(warning)).unwrap();
+    drop(conn);
+
+    let conn = db::init(&path).unwrap();
+    let detail = store::get_meeting(&conn, id).unwrap();
+    assert_eq!(detail["status"], "done");
+    assert_eq!(detail["summary_error"], warning);
+    assert_eq!(detail["summaries"].as_array().unwrap().len(), 1);
+    assert_eq!(detail["segments"].as_array().unwrap().len(), 1);
+    assert!(store::list_summary_recovery_candidates(&conn, 3)
+        .unwrap()
+        .is_empty());
+
+    // An optional template failure must leave the usable summary available.
+    store::mark_summary_attempt(&conn, id).unwrap();
+    assert!(store::get_meeting(&conn, id).unwrap()["summary_error"].is_null());
+    store::mark_summary_failed(&conn, id, "local model unavailable").unwrap();
+    let detail = store::get_meeting(&conn, id).unwrap();
+    assert_eq!(detail["status"], "done");
+    assert_eq!(detail["summary_error"], "local model unavailable");
+    assert_eq!(detail["summaries"].as_array().unwrap().len(), 1);
+    let retries: i64 = conn
+        .query_row(
+            "SELECT summary_retry_count FROM meetings WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retries, 0);
+
+    store::mark_summary_succeeded(&conn, id, Some(&"é".repeat(2_100))).unwrap();
+    assert_eq!(
+        store::get_meeting(&conn, id).unwrap()["summary_error"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        2_000
+    );
+    store::mark_summary_succeeded(&conn, id, None).unwrap();
+    assert!(store::get_meeting(&conn, id).unwrap()["summary_error"].is_null());
     drop(conn);
     let _ = std::fs::remove_file(path);
 }

@@ -1677,7 +1677,14 @@ export function MeetingPage({
         </div>
       )}
       {error && <div className="error">{error}</div>}
-      {detail?.status === "failed" && (
+      {detail?.summary_error && !error && !summarizing && (
+        <div className={summaries.length > 0 ? "meeting-hint" : "meeting-failure"} role="status">
+          {summaries.length > 0
+            ? detail.summary_error
+            : `Notes couldn’t be generated: ${detail.summary_error}`}
+        </div>
+      )}
+      {detail?.status === "failed" && !detail.summary_error && !error && (
         <div className="meeting-failure" role="status">
           {liveSegments.length === 0
             ? "Recording failed before any audio or transcript was saved. This attempt remains in your meeting history so it doesn’t disappear."

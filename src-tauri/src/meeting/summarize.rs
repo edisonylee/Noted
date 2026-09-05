@@ -58,7 +58,7 @@ impl CoveragePlan {
                 level: CoverageLevel::Comprehensive,
                 duration_min,
                 transcript_words,
-                // A hard 900-word floor still prevents a one-page collapse while
+                // A hard 800-word floor still prevents a one-page collapse while
                 // leaving room for compact tables and source ranges. The prompt
                 // continues to target 1,400-2,200 words when the evidence supports it.
                 minimum_summary_words: 800,
@@ -445,12 +445,23 @@ fn meeting_participants(title: &str, event_json: &Value) -> (Vec<String>, Option
     }
 }
 
+fn timestamp_schema() -> Value {
+    // Keep structured decoding on the same canonical shape as transcript_text.
+    // The deterministic normalizer below remains the final authority because
+    // not every local model honors every JSON Schema keyword consistently.
+    json!({
+        "type": "string",
+        "pattern": "^([0-9]{2,}:[0-5][0-9]|notes)$"
+    })
+}
+
 fn source_range_schema() -> Value {
+    let timestamp = timestamp_schema();
     json!({
         "type": "object",
         "properties": {
-            "start": { "type": "string" },
-            "end": { "type": "string" }
+            "start": timestamp.clone(),
+            "end": timestamp
         },
         "required": ["start", "end"]
     })
@@ -469,7 +480,7 @@ fn meeting_pack_schema(coverage: CoveragePlan) -> Value {
         maximum_timeline,
         maximum_register,
     ) = match coverage.level {
-        CoverageLevel::Comprehensive => (5, 3, 6, 6, 6, 12, 10),
+        CoverageLevel::Comprehensive => (5, 3, 6, 8, 8, 12, 10),
         CoverageLevel::Detailed => (3, 2, 3, 7, 6, 10, 10),
         CoverageLevel::Brief => (1, 1, 0, 4, 5, 5, 6),
     };
@@ -500,8 +511,8 @@ fn meeting_pack_schema(coverage: CoveragePlan) -> Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "start": { "type": "string" },
-                        "end": { "type": "string" },
+                        "start": timestamp_schema(),
+                        "end": timestamp_schema(),
                         "topic": { "type": "string" },
                         "details": { "type": "string" }
                     },
@@ -621,7 +632,7 @@ fn pack_discussion_points(pack: &Value) -> usize {
 
 fn semantic_word_count(value: &Value, key: Option<&str>) -> usize {
     match value {
-        Value::String(text) if !matches!(key, Some("start" | "end")) => {
+        Value::String(text) if !matches!(key, Some("start" | "end" | "quality_warnings")) => {
             text.split_whitespace().count()
         }
         Value::Array(items) => items
@@ -682,19 +693,74 @@ fn minimum_retained_count(extracted: usize) -> usize {
 }
 
 fn timestamp_seconds(value: &str) -> Option<i64> {
-    let (minutes, seconds) = value.trim_matches(['[', ']']).split_once(':')?;
-    Some(minutes.parse::<i64>().ok()? * 60 + seconds.parse::<i64>().ok()?)
+    let value = value.trim().trim_matches(['[', ']']);
+    let (minutes, seconds) = value.split_once(':')?;
+    if minutes.is_empty()
+        || seconds.len() != 2
+        || !minutes.chars().all(|character| character.is_ascii_digit())
+        || !seconds.chars().all(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    let minutes = minutes.parse::<i64>().ok()?;
+    let seconds = seconds.parse::<i64>().ok()?;
+    if seconds >= 60 {
+        return None;
+    }
+    minutes.checked_mul(60)?.checked_add(seconds)
+}
+
+/// Recover timestamp shapes emitted by small local models without guessing at
+/// arbitrary prose. Real examples include `:826` for `08:26`, `:13:38`, and
+/// `]==40:02`. Anything that cannot be read unambiguously is discarded later.
+fn loose_timestamp_seconds(value: &str) -> Option<i64> {
+    let trimmed = value.trim().trim_matches(['[', ']', '=', '<', '>']).trim();
+    if let Some(seconds) = timestamp_seconds(trimmed) {
+        return Some(seconds);
+    }
+
+    // Only repair known wrapper noise. Prose and ambiguous hours:minutes:seconds
+    // must not be reinterpreted as a different transcript location.
+    let compact = trimmed.strip_prefix(':')?;
+    if let Some(seconds) = timestamp_seconds(compact) {
+        return Some(seconds);
+    }
+
+    // Some constrained decodes keep the colon but collapse the leading zero
+    // and the separator: `:16` -> 00:16, `:826` -> 08:26, `:1248` -> 12:48.
+    if compact.is_empty() || !compact.chars().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    let (minutes, seconds) = if compact.len() <= 2 {
+        (0, compact.parse::<i64>().ok()?)
+    } else {
+        let split = compact.len() - 2;
+        (
+            compact[..split].parse::<i64>().ok()?,
+            compact[split..].parse::<i64>().ok()?,
+        )
+    };
+    if seconds >= 60 {
+        return None;
+    }
+    minutes.checked_mul(60)?.checked_add(seconds)
 }
 
 fn nearest_valid_timestamp(value: &str, valid: &HashSet<String>) -> Option<String> {
+    const MAX_SNAP_SECONDS: i64 = 90;
+    let value = value.trim();
     if valid.contains(value) {
         return Some(value.to_string());
     }
-    let target = timestamp_seconds(value)?;
+    if value.eq_ignore_ascii_case("notes") && valid.contains("notes") {
+        return Some("notes".to_string());
+    }
+    let target = loose_timestamp_seconds(value)?;
     valid
         .iter()
         .filter_map(|candidate| timestamp_seconds(candidate).map(|seconds| (candidate, seconds)))
-        .min_by_key(|(_, seconds)| (seconds - target).abs())
+        .min_by_key(|(_, seconds)| (seconds.abs_diff(target), *seconds))
+        .filter(|(_, seconds)| seconds.abs_diff(target) <= MAX_SNAP_SECONDS as u64)
         .map(|(candidate, _)| candidate.clone())
 }
 
@@ -716,7 +782,14 @@ fn normalize_pack_source_timestamps(value: &mut Value, valid: &HashSet<String>) 
                 let normalized_start = nearest_valid_timestamp(start, valid);
                 let normalized_end = nearest_valid_timestamp(end, valid);
                 match (normalized_start, normalized_end) {
-                    (Some(start), Some(end)) => {
+                    (Some(start), Some(end))
+                        if (start == "notes" && end == "notes")
+                            || timestamp_seconds(&start)
+                                .zip(timestamp_seconds(&end))
+                                .is_some_and(|(start_seconds, end_seconds)| {
+                                    start_seconds <= end_seconds
+                                }) =>
+                    {
                         map.insert("start".to_string(), json!(start));
                         map.insert("end".to_string(), json!(end));
                     }
@@ -724,7 +797,12 @@ fn normalize_pack_source_timestamps(value: &mut Value, valid: &HashSet<String>) 
                         map.insert("start".to_string(), json!(timestamp));
                         map.insert("end".to_string(), json!(timestamp));
                     }
-                    (None, None) => {}
+                    // Never let malformed model syntax leak into Markdown.
+                    // Empty source ranges are ignored by scoring and rendering.
+                    (Some(_), Some(_)) | (None, None) => {
+                        map.insert("start".to_string(), json!(""));
+                        map.insert("end".to_string(), json!(""));
+                    }
                 }
             }
             for (key, item) in map {
@@ -774,8 +852,19 @@ fn deduplicate_object_array(value: &mut Value, fields: &[&str]) {
 
 fn looks_like_source_range(value: &str) -> bool {
     value.split_once('-').is_some_and(|(start, end)| {
-        timestamp_seconds(start).is_some() && timestamp_seconds(end).is_some()
+        looks_like_timestamp_fragment(start) && looks_like_timestamp_fragment(end)
     })
+}
+
+fn looks_like_timestamp_fragment(value: &str) -> bool {
+    let value = value.trim();
+    value.contains(':')
+        && value.chars().any(|character| character.is_ascii_digit())
+        && value.chars().all(|character| {
+            character.is_ascii_digit()
+                || character.is_ascii_whitespace()
+                || matches!(character, ':' | '[' | ']' | '=' | '<' | '>')
+        })
 }
 
 /// Remove exact semantic repetition before quality scoring. A small local model
@@ -794,11 +883,16 @@ fn sanitize_meeting_pack(pack: &mut Value) {
     }
 
     if let Some(actions) = pack["actions"].as_array_mut() {
+        for item in actions.iter_mut() {
+            if item["timing"].as_str().is_some_and(looks_like_source_range) {
+                // A transcript citation is not a deadline. Keep the grounded
+                // action, but do not display source syntax in the timing column.
+                item["timing"] = json!("");
+            }
+        }
         actions.retain(|item| {
             let action = semantic_key(item["action"].as_str().unwrap_or(""));
-            let timing = item["timing"].as_str().unwrap_or("").trim();
             !action.is_empty()
-                && !looks_like_source_range(timing)
                 && ![
                     "start of meeting",
                     "check audio connection",
@@ -809,6 +903,7 @@ fn sanitize_meeting_pack(pack: &mut Value) {
                 ]
                 .iter()
                 .any(|mechanic| action.contains(mechanic))
+                && action != "share screen"
         });
     }
     deduplicate_object_array(&mut pack["actions"], &["owner", "action"]);
@@ -832,6 +927,211 @@ fn sanitize_meeting_pack(pack: &mut Value) {
         });
         !points.is_empty()
     });
+}
+
+fn ledger_source(item: &Value) -> Option<Value> {
+    let start = item["start"].as_str()?.trim();
+    let end = item["end"].as_str()?.trim();
+    if start.is_empty() || end.is_empty() {
+        return None;
+    }
+    Some(json!({ "start": start, "end": end }))
+}
+
+fn ledger_fact_to_point(fact: &Value) -> Option<Value> {
+    let text = fact["text"].as_str()?.trim();
+    let source = ledger_source(fact)?;
+    (!text.is_empty()).then(|| json!({ "text": text, "sources": [source] }))
+}
+
+fn append_unique_points(topic: &mut Value, candidates: &[Value]) {
+    let Some(points) = topic.get_mut("points").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut seen = points
+        .iter()
+        .filter_map(|point| point["text"].as_str())
+        .map(semantic_key)
+        .collect::<HashSet<_>>();
+    for candidate in candidates {
+        let Some(text) = candidate["text"].as_str() else {
+            continue;
+        };
+        if seen.insert(semantic_key(text)) {
+            points.push(candidate.clone());
+        }
+    }
+}
+
+fn merge_chapter_discussion(pack: &mut Value, ledgers: &[Value]) {
+    let mut topics = pack["discussion"].as_array().cloned().unwrap_or_default();
+    for ledger_topic in ledgers
+        .iter()
+        .flat_map(|ledger| ledger["topics"].as_array().into_iter().flatten())
+    {
+        let title = ledger_topic["title"]
+            .as_str()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .unwrap_or("Meeting chapter");
+        let facts = ledger_topic["facts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(ledger_fact_to_point)
+            .collect::<Vec<_>>();
+        if facts.is_empty() {
+            continue;
+        }
+
+        let title_key = semantic_key(title);
+        let title_match = topics.iter().position(|topic| {
+            semantic_key(topic["title"].as_str().unwrap_or("")) == title_key
+                && topic["points"].is_array()
+        });
+        let target = if let Some(index) = title_match {
+            index
+        } else {
+            topics.push(json!({
+                "title": title,
+                "summary": "",
+                "points": []
+            }));
+            topics.len() - 1
+        };
+        append_unique_points(&mut topics[target], &facts);
+    }
+    pack["discussion"] = Value::Array(topics);
+}
+
+fn merge_chapter_timeline(pack: &mut Value, ledgers: &[Value]) {
+    let mut timeline = Vec::new();
+    let mut seen = HashSet::new();
+
+    for item in pack["timeline"].as_array().into_iter().flatten() {
+        let title = item["topic"].as_str().unwrap_or("");
+        let start = item["start"].as_str().unwrap_or("");
+        let key = format!("{}|{}", semantic_key(title), start.trim());
+        if seen.insert(key) {
+            timeline.push(item.clone());
+        }
+    }
+
+    for topic in ledgers
+        .iter()
+        .flat_map(|ledger| ledger["topics"].as_array().into_iter().flatten())
+    {
+        let Some(start) = topic["start"].as_str() else {
+            continue;
+        };
+        let Some(end) = topic["end"].as_str() else {
+            continue;
+        };
+        let Some(title) = topic["title"].as_str() else {
+            continue;
+        };
+        let details = topic["facts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|fact| fact["text"].as_str())
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let key = format!("{}|{}", semantic_key(title), start.trim());
+        if !details.is_empty() && seen.insert(key) {
+            timeline.push(json!({
+                "start": start,
+                "end": end,
+                "topic": title,
+                "details": details
+            }));
+        }
+    }
+
+    timeline.sort_by_key(|item| {
+        item["start"]
+            .as_str()
+            .and_then(timestamp_seconds)
+            .unwrap_or(i64::MAX)
+    });
+    pack["timeline"] = Value::Array(timeline);
+}
+
+fn ledger_register_item(key: &str, item: &Value) -> Option<Value> {
+    let source = ledger_source(item)?;
+    match key {
+        "decisions" => Some(json!({
+            "decision": item["decision"].as_str()?,
+            "detail": item["detail"].as_str()?,
+            "sources": [source]
+        })),
+        "actions" => {
+            let owner = item["owner"].as_str()?.trim();
+            let owner_key = semantic_key(owner);
+            let owner =
+                if owner_key == "me" || owner_key == "them" || owner_key.starts_with("speaker ") {
+                    "Unassigned"
+                } else {
+                    owner
+                };
+            Some(json!({
+                "owner": owner,
+                "action": item["action"].as_str()?,
+                "timing": item["timing"].as_str()?,
+                "dependency": item["dependency"].as_str()?,
+                "sources": [source]
+            }))
+        }
+        "open_questions" => Some(json!({
+            "text": item["text"].as_str()?,
+            "sources": [source]
+        })),
+        "risks" => Some(json!({
+            "risk": item["risk"].as_str()?,
+            "impact": item["impact"].as_str()?,
+            "response": item["response"].as_str()?,
+            "sources": [source]
+        })),
+        _ => None,
+    }
+}
+
+fn merge_chapter_register(
+    pack: &mut Value,
+    ledgers: &[Value],
+    key: &str,
+    identity_fields: &[&str],
+) {
+    let mut merged = pack[key].as_array().cloned().unwrap_or_default();
+    merged.extend(
+        ledgers
+            .iter()
+            .flat_map(|ledger| ledger[key].as_array().into_iter().flatten())
+            .filter_map(|item| ledger_register_item(key, item)),
+    );
+    let mut seen = HashSet::new();
+    merged.retain(|item| {
+        let identity = object_key(item, identity_fields);
+        !identity.is_empty() && seen.insert(identity)
+    });
+    pack[key] = Value::Array(merged);
+}
+
+/// The final local-model composition is useful for organization and prose, but
+/// it must not be allowed to forget evidence already extracted from long-meeting
+/// chapters. Model response limits keep generation bounded; they must not
+/// truncate already-extracted evidence or attach later facts to unrelated topics.
+fn backfill_pack_from_chapter_ledgers(pack: &mut Value, ledgers: &[Value]) {
+    if ledgers.is_empty() {
+        return;
+    }
+    merge_chapter_timeline(pack, ledgers);
+    merge_chapter_discussion(pack, ledgers);
+    merge_chapter_register(pack, ledgers, "decisions", &["decision", "detail"]);
+    merge_chapter_register(pack, ledgers, "actions", &["owner", "action"]);
+    merge_chapter_register(pack, ledgers, "open_questions", &["text"]);
+    merge_chapter_register(pack, ledgers, "risks", &["risk", "impact"]);
 }
 
 fn collect_pack_source_starts(value: &Value, out: &mut Vec<i64>) {
@@ -1004,6 +1304,38 @@ fn richer_meeting_pack(
     }
 }
 
+fn protect_existing_summary(
+    summaries: &Value,
+    template: &str,
+    candidate: &Value,
+    coverage: CoveragePlan,
+    valid_timestamps: &HashSet<String>,
+) -> Result<()> {
+    let Some(previous) = summaries
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|summary| summary["template"].as_str() == Some(template))
+    else {
+        return Ok(());
+    };
+    // Only used for an incomplete regeneration. A manually edited summary has
+    // no structured pack and must not be replaced by a partial model result.
+    let old_pack = &previous["content_json"];
+    if old_pack.is_object()
+        && old_pack != candidate
+        && richer_meeting_pack(
+            old_pack.clone(),
+            candidate.clone(),
+            coverage,
+            Some(valid_timestamps),
+        ) == *candidate
+    {
+        return Ok(());
+    }
+    Err(anyhow!("The new notes were incomplete and did not improve on the existing notes. Your existing notes were kept."))
+}
+
 fn normalized_pack_sources(
     sources: &Value,
     valid_timestamps: Option<&HashSet<String>>,
@@ -1015,7 +1347,9 @@ fn normalized_pack_sources(
         .filter_map(|source| {
             let start = source["start"].as_str()?.trim_matches(['[', ']']);
             let end = source["end"].as_str()?.trim_matches(['[', ']']);
-            if start.is_empty() || valid_timestamps.is_some_and(|valid| !valid.contains(start)) {
+            if (start != "notes" && timestamp_seconds(start).is_none())
+                || valid_timestamps.is_some_and(|valid| !valid.contains(start))
+            {
                 return None;
             }
             let end =
@@ -1024,6 +1358,11 @@ fn normalized_pack_sources(
                 } else {
                     end
                 };
+            let end = timestamp_seconds(start)
+                .zip(timestamp_seconds(end))
+                .filter(|(start_seconds, end_seconds)| start_seconds <= end_seconds)
+                .map(|_| end)
+                .unwrap_or(start);
             Some(if end == start {
                 format!("[{start}]")
             } else {
@@ -1049,6 +1388,20 @@ fn sourced_pack_text(
 
 fn table_cell(text: &str) -> String {
     text.trim().replace('|', "/").replace('\n', " ")
+}
+
+fn renderable_timestamp<'a>(
+    value: &'a str,
+    valid_timestamps: Option<&HashSet<String>>,
+) -> Option<&'a str> {
+    let timestamp = value.trim().trim_matches(['[', ']']);
+    if timestamp_seconds(timestamp).is_none()
+        || valid_timestamps.is_some_and(|valid| !valid.contains(timestamp))
+    {
+        None
+    } else {
+        Some(timestamp)
+    }
 }
 
 fn push_markdown_table(out: &mut String, headers: &[&str], rows: &[Vec<String>]) {
@@ -1120,8 +1473,14 @@ fn render_meeting_pack(pack: &Value, valid_timestamps: Option<&HashSet<String>>)
         .into_iter()
         .flatten()
         .filter_map(|row| {
-            let start = row["start"].as_str()?;
-            let end = row["end"].as_str()?;
+            let start = renderable_timestamp(row["start"].as_str()?, valid_timestamps)?;
+            let end = renderable_timestamp(row["end"].as_str()?, valid_timestamps).unwrap_or(start);
+            if timestamp_seconds(start)
+                .zip(timestamp_seconds(end))
+                .is_none_or(|(start_seconds, end_seconds)| start_seconds > end_seconds)
+            {
+                return None;
+            }
             Some(vec![
                 if start == end {
                     start.to_string()
@@ -1185,11 +1544,29 @@ fn render_meeting_pack(pack: &Value, valid_timestamps: Option<&HashSet<String>>)
         .collect::<Vec<_>>();
     if !decisions.is_empty() {
         out.push_str("## Decisions and Working Agreements\n\n");
-        push_markdown_table(
-            &mut out,
-            &["Decision / agreement", "Detail", "Reference"],
-            &decisions,
-        );
+        let include_detail = decisions.iter().any(|row| !row[1].trim().is_empty());
+        let include_reference = decisions.iter().any(|row| !row[2].trim().is_empty());
+        let mut headers = vec!["Decision / agreement"];
+        if include_detail {
+            headers.push("Detail");
+        }
+        if include_reference {
+            headers.push("Reference");
+        }
+        let rows = decisions
+            .into_iter()
+            .map(|row| {
+                let mut rendered = vec![row[0].clone()];
+                if include_detail {
+                    rendered.push(row[1].clone());
+                }
+                if include_reference {
+                    rendered.push(row[2].clone());
+                }
+                rendered
+            })
+            .collect::<Vec<_>>();
+        push_markdown_table(&mut out, &headers, &rows);
     }
 
     let workplan = pack["workplan"]
@@ -1232,11 +1609,29 @@ fn render_meeting_pack(pack: &Value, valid_timestamps: Option<&HashSet<String>>)
         .collect::<Vec<_>>();
     if !actions.is_empty() {
         out.push_str("## Action Items\n\n");
-        push_markdown_table(
-            &mut out,
-            &["Owner", "Action", "Timing / priority", "Dependency or note"],
-            &actions,
-        );
+        let include_timing = actions.iter().any(|row| !row[2].trim().is_empty());
+        let include_dependency = actions.iter().any(|row| !row[3].trim().is_empty());
+        let mut headers = vec!["Owner", "Action"];
+        if include_timing {
+            headers.push("Timing / priority");
+        }
+        if include_dependency {
+            headers.push("Dependency or note");
+        }
+        let rows = actions
+            .into_iter()
+            .map(|row| {
+                let mut rendered = vec![row[0].clone(), row[1].clone()];
+                if include_timing {
+                    rendered.push(row[2].clone());
+                }
+                if include_dependency {
+                    rendered.push(row[3].clone());
+                }
+                rendered
+            })
+            .collect::<Vec<_>>();
+        push_markdown_table(&mut out, &headers, &rows);
     }
 
     if let Some(questions) = pack["open_questions"]
@@ -1275,13 +1670,53 @@ fn render_meeting_pack(pack: &Value, valid_timestamps: Option<&HashSet<String>>)
         .collect::<Vec<_>>();
     if !risks.is_empty() {
         out.push_str("## Risks and Operating Considerations\n\n");
-        push_markdown_table(
-            &mut out,
-            &["Risk / constraint", "Impact", "Practical response"],
-            &risks,
-        );
+        let include_impact = risks.iter().any(|row| !row[1].trim().is_empty());
+        let include_response = risks.iter().any(|row| !row[2].trim().is_empty());
+        let mut headers = vec!["Risk / constraint"];
+        if include_impact {
+            headers.push("Impact");
+        }
+        if include_response {
+            headers.push("Practical response");
+        }
+        let rows = risks
+            .into_iter()
+            .map(|row| {
+                let mut rendered = vec![row[0].clone()];
+                if include_impact {
+                    rendered.push(row[1].clone());
+                }
+                if include_response {
+                    rendered.push(row[2].clone());
+                }
+                rendered
+            })
+            .collect::<Vec<_>>();
+        push_markdown_table(&mut out, &headers, &rows);
     }
     out.trim_end().to_string()
+}
+
+fn finalize_meeting_pack(
+    pack: &mut Value,
+    coverage: CoveragePlan,
+    valid_timestamps: &HashSet<String>,
+    ledger_counts: Option<LedgerCounts>,
+) -> Result<(String, Option<String>)> {
+    if !pack.is_object() {
+        return Err(anyhow!("model did not return a Meeting Pack object"));
+    }
+    let md = render_meeting_pack(pack, Some(valid_timestamps));
+    if md.trim().is_empty() {
+        return Err(anyhow!("model produced an empty summary"));
+    }
+    let deficiencies =
+        meeting_pack_deficiencies(pack, coverage, Some(valid_timestamps), ledger_counts);
+    let warning = (!deficiencies.is_empty()).then(|| {
+        "Notes were saved, but may be incomplete. Review them against the transcript.".to_string()
+    });
+    pack["quality_warnings"] = json!(deficiencies);
+    Ok((md, warning))
 }
 
 fn normalized_source(
@@ -1605,10 +2040,20 @@ Return only JSON matching the supplied schema.";
 /// Turn one bounded portion of a long meeting into a typed chapter ledger. The
 /// final composer receives topic boundaries and distinct decision/action/risk
 /// registers rather than a lossy flat list of fact strings.
+fn model_object(value: Value) -> Result<Value> {
+    if !value.is_object() {
+        return Err(anyhow!(
+            "model returned JSON without the requested object structure"
+        ));
+    }
+    Ok(value)
+}
+
 async fn condense_chunk(chunk: &str) -> Result<Value> {
+    let timestamp = timestamp_schema();
     let source_fields = json!({
-        "start": { "type": "string" },
-        "end": { "type": "string" }
+        "start": timestamp.clone(),
+        "end": timestamp
     });
     let schema = json!({
         "type": "object",
@@ -1619,16 +2064,16 @@ async fn condense_chunk(chunk: &str) -> Result<Value> {
                     "type": "object",
                     "properties": {
                         "title": { "type": "string" },
-                        "start": { "type": "string" },
-                        "end": { "type": "string" },
+                        "start": timestamp_schema(),
+                        "end": timestamp_schema(),
                         "facts": {
                             "type": "array", "minItems": 3, "maxItems": 10,
                             "items": {
                                 "type": "object",
                                 "properties": {
                                     "text": { "type": "string" },
-                                    "start": { "type": "string" },
-                                    "end": { "type": "string" }
+                                    "start": timestamp_schema(),
+                                    "end": timestamp_schema()
                                 },
                                 "required": ["text", "start", "end"]
                             }
@@ -1699,11 +2144,13 @@ async fn condense_chunk(chunk: &str) -> Result<Value> {
         24_576,
     )
     .await
+    .and_then(model_object)
 }
 
 /// Ensure every captured transcript has a real, searchable library projection
 /// before model work begins. Generated notes replace this deterministic
-/// transcript fallback after they pass the quality checks.
+/// transcript fallback once usable notes are available. Incomplete notes retain
+/// a visible warning, and the original transcript remains on the meeting.
 pub async fn ensure_note_projection(app: &tauri::AppHandle, meeting_id: i64) -> Result<i64> {
     let (meeting, segments) = {
         let state = app.state::<Db>();
@@ -1840,7 +2287,8 @@ pub async fn run(
     if let Err(error) = &result {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
-        if let Err(persist_error) = store::mark_summary_failed(&conn, meeting_id, &error.to_string())
+        if let Err(persist_error) =
+            store::mark_summary_failed(&conn, meeting_id, &error.to_string())
         {
             eprintln!(
                 "[noted] failed to persist meeting summary error for {meeting_id}: {persist_error}"
@@ -1869,7 +2317,6 @@ async fn run_inner(
     if segments.is_empty() {
         return Err(anyhow!("no transcript to summarize"));
     }
-
     let title = meeting["title"].as_str().unwrap_or("Meeting").to_string();
     let raw_notes = meeting["raw_notes"].as_str().unwrap_or("").to_string();
     let (attendees, remote_alias) = meeting_participants(&title, &meeting["event_json"]);
@@ -1879,6 +2326,14 @@ async fn run_inner(
         .unwrap_or_default();
     let coverage = CoveragePlan::for_segments(&segments);
     let coverage_instructions = coverage.instructions();
+    let mut valid_timestamps = segments
+        .iter()
+        .filter_map(|segment| segment["t0_ms"].as_i64())
+        .map(mmss)
+        .collect::<HashSet<_>>();
+    if !raw_notes.trim().is_empty() {
+        valid_timestamps.insert("notes".to_string());
+    }
 
     let mut transcript = transcript_text_with_remote_alias(
         &segments,
@@ -1886,19 +2341,53 @@ async fn run_inner(
         remote_alias.as_deref(),
     );
     let mut expected_ledger_counts = None;
+    let mut chapter_ledgers = Vec::new();
     if transcript.len() > SINGLE_PASS_CHARS {
         // Chapter-preserving map/reduce: keep topic boundaries and typed facts
         // instead of handing the composer a lossy flat list.
         let mut condensed = String::new();
-        let mut ledgers = Vec::new();
         for (index, chunk) in transcript_chunks(&transcript).into_iter().enumerate() {
-            let ledger = condense_chunk(&chunk).await?;
-            condensed.push_str(&format!("\nSOURCE CHAPTER {}:\n", index + 1));
-            condensed.push_str(&serde_json::to_string_pretty(&ledger)?);
-            condensed.push('\n');
-            ledgers.push(ledger);
+            let ledger = match condense_chunk(&chunk).await {
+                Ok(ledger) => Ok(ledger),
+                Err(first_error) => {
+                    eprintln!(
+                        "[noted] meeting {meeting_id} chapter {} extraction failed; retrying once: {first_error}",
+                        index + 1
+                    );
+                    condense_chunk(&chunk).await.map_err(|second_error| {
+                        anyhow!(
+                            "chapter extraction failed twice: first attempt: {first_error}; retry: {second_error}"
+                        )
+                    })
+                }
+            };
+            match ledger {
+                Ok(mut ledger) => {
+                    // Repair or discard chapter citations before they become
+                    // source material for the final composer. Otherwise one
+                    // malformed ledger can propagate the same broken syntax
+                    // through every summary repair pass.
+                    normalize_pack_source_timestamps(&mut ledger, &valid_timestamps);
+                    condensed.push_str(&format!("\nSOURCE CHAPTER {}:\n", index + 1));
+                    condensed.push_str(&serde_json::to_string_pretty(&ledger)?);
+                    condensed.push('\n');
+                    chapter_ledgers.push(ledger);
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[noted] meeting {meeting_id} chapter {} extraction failed; preserving the raw chapter: {error}",
+                        index + 1
+                    );
+                    condensed.push_str(&format!(
+                        "\nSOURCE CHAPTER {} (VERBATIM FALLBACK):\n{chunk}\n",
+                        index + 1
+                    ));
+                }
+            }
         }
-        expected_ledger_counts = Some(chapter_ledger_counts(&ledgers));
+        if !chapter_ledgers.is_empty() {
+            expected_ledger_counts = Some(chapter_ledger_counts(&chapter_ledgers));
+        }
         transcript = format!(
             "TYPED CHAPTER LEDGERS (extracted in order across the complete transcript; \
              every object remains source evidence):\n{condensed}"
@@ -1934,16 +2423,7 @@ async fn run_inner(
             raw_notes.trim()
         },
     );
-    let mut valid_timestamps = segments
-        .iter()
-        .filter_map(|segment| segment["t0_ms"].as_i64())
-        .map(mmss)
-        .collect::<HashSet<_>>();
-    if !raw_notes.trim().is_empty() {
-        valid_timestamps.insert("notes".to_string());
-    }
-
-    let mut out = ollama::chat_json_local_ctx(
+    let first_attempt = ollama::chat_json_local_ctx(
         &ollama::text_model(),
         SYSTEM,
         &user,
@@ -1951,7 +2431,39 @@ async fn run_inner(
         Some(meeting_pack_schema(coverage)),
         24_576,
     )
-    .await?;
+    .await
+    .and_then(model_object);
+    let mut out = match first_attempt {
+        Ok(pack) => pack,
+        Err(first_error) => {
+            eprintln!(
+                "[noted] meeting {meeting_id} initial Meeting Pack composition failed; retrying once: {first_error}"
+            );
+            let retry_user = format!(
+                "{user}\n\nRECOVERY RETRY: The first structured response failed to parse or complete. \
+                 Return one complete, valid Meeting Pack JSON object now. Keep the content grounded \
+                 and concise enough to finish every required field."
+            );
+            ollama::chat_json_local_ctx(
+                &ollama::text_model(),
+                SYSTEM,
+                &retry_user,
+                None,
+                Some(meeting_pack_schema(coverage)),
+                24_576,
+            )
+            .await
+            .and_then(model_object)
+            .map_err(|second_error| {
+                anyhow!(
+                    "Meeting Pack generation failed twice: first attempt: {first_error}; retry: {second_error}"
+                )
+            })?
+        }
+    };
+    normalize_pack_source_timestamps(&mut out, &valid_timestamps);
+    sanitize_meeting_pack(&mut out);
+    backfill_pack_from_chapter_ledgers(&mut out, &chapter_ledgers);
     normalize_pack_source_timestamps(&mut out, &valid_timestamps);
     sanitize_meeting_pack(&mut out);
     for attempt in 1..=2 {
@@ -1985,8 +2497,12 @@ async fn run_inner(
             24_576,
         )
         .await
+        .and_then(model_object)
         {
             Ok(mut candidate) => {
+                normalize_pack_source_timestamps(&mut candidate, &valid_timestamps);
+                sanitize_meeting_pack(&mut candidate);
+                backfill_pack_from_chapter_ledgers(&mut candidate, &chapter_ledgers);
                 normalize_pack_source_timestamps(&mut candidate, &valid_timestamps);
                 sanitize_meeting_pack(&mut candidate);
                 out = richer_meeting_pack(out, candidate, coverage, Some(&valid_timestamps))
@@ -1994,21 +2510,27 @@ async fn run_inner(
             Err(error) => eprintln!("[noted] meeting summary expansion pass failed: {error}"),
         }
     }
-    let deficiencies = meeting_pack_deficiencies(
-        &out,
+    backfill_pack_from_chapter_ledgers(&mut out, &chapter_ledgers);
+    normalize_pack_source_timestamps(&mut out, &valid_timestamps);
+    sanitize_meeting_pack(&mut out);
+    let (md, quality_warning) = finalize_meeting_pack(
+        &mut out,
         coverage,
-        Some(&valid_timestamps),
+        &valid_timestamps,
         expected_ledger_counts,
-    );
-    if !deficiencies.is_empty() {
-        return Err(anyhow!(
-            "meeting notes did not meet the coverage standard: {}",
-            deficiencies.join(", ")
-        ));
-    }
-    let md = render_meeting_pack(&out, Some(&valid_timestamps));
-    if md.is_empty() {
-        return Err(anyhow!("model produced an empty summary"));
+    )?;
+    if quality_warning.is_some() {
+        eprintln!(
+            "[noted] meeting {meeting_id} summary quality warnings: {}",
+            out["quality_warnings"]
+        );
+        protect_existing_summary(
+            &meeting["summaries"],
+            &template,
+            &out,
+            coverage,
+            &valid_timestamps,
+        )?;
     }
 
     let now = chrono::Utc::now().to_rfc3339();
@@ -2050,7 +2572,7 @@ async fn run_inner(
     {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
-        store::mark_summary_succeeded(&conn, meeting_id)?;
+        store::mark_summary_succeeded(&conn, meeting_id, quality_warning.as_deref())?;
     }
     let _ = app.emit(
         "meeting-summarized",
@@ -2545,10 +3067,14 @@ mod tests {
         let properties = &schema["properties"];
 
         assert_eq!(properties["timeline"]["maxItems"], 12);
-        assert_eq!(properties["discussion"]["maxItems"], 6);
+        assert_eq!(
+            properties["timeline"]["items"]["properties"]["start"]["pattern"],
+            "^([0-9]{2,}:[0-5][0-9]|notes)$"
+        );
+        assert_eq!(properties["discussion"]["maxItems"], 8);
         assert_eq!(
             properties["discussion"]["items"]["properties"]["points"]["maxItems"],
-            6
+            8
         );
         assert_eq!(properties["actions"]["maxItems"], 10);
         assert_eq!(
@@ -2671,6 +3197,159 @@ mod tests {
     }
 
     #[test]
+    fn malformed_model_timestamps_are_repaired_or_hidden_before_rendering() {
+        assert_eq!(loose_timestamp_seconds(":16"), Some(16));
+        assert_eq!(loose_timestamp_seconds(":826"), Some(8 * 60 + 26));
+        assert_eq!(loose_timestamp_seconds(":13:38"), Some(13 * 60 + 38));
+        assert_eq!(loose_timestamp_seconds("]==40:02"), Some(40 * 60 + 2));
+        assert_eq!(loose_timestamp_seconds(":296"), None);
+        assert_eq!(timestamp_seconds("13:99"), None);
+        assert_eq!(loose_timestamp_seconds("recorded at 40:02"), None);
+        assert_eq!(loose_timestamp_seconds("01:02:03"), None);
+        assert_eq!(timestamp_seconds("9223372036854775807:59"), None);
+        assert_eq!(loose_timestamp_seconds(":922337203685477580759"), None);
+
+        let valid = HashSet::from([
+            "00:16".to_string(),
+            "00:41".to_string(),
+            "00:58".to_string(),
+            "03:26".to_string(),
+            "08:26".to_string(),
+            "09:58".to_string(),
+            "13:38".to_string(),
+            "26:51".to_string(),
+            "40:02".to_string(),
+            "41:58".to_string(),
+        ]);
+        let mut pack = json!({
+            "executive_summary":"Grounded summary",
+            "executive_sources":[{"start":":16","end":":58"}],
+            "success_definition":"", "success_sources":[], "at_glance":[],
+            "timeline":[
+                {"start":":16","end":":58","topic":"Opening","details":"Context"},
+                {"start":":826","end":":958","topic":"Dashboard","details":"Test data"},
+                {"start":":13:38","end":":26:51","topic":"Engineering","details":"Sentry"},
+                {"start":"]==40:02","end":"]==41:58","topic":"Delivery","details":"Options"},
+                {"start":":326","end":":41","topic":"Reversed citation","details":"Do not render"},
+                {"start":":296","end":":397","topic":"Broken citation","details":"Do not render"}
+            ],
+            "discussion":[],
+            "decisions":[{"decision":"Keep the plan","detail":"","sources":[]}],
+            "workplan":[],
+            "actions":[
+                {"owner":"Unassigned","action":"Check the account","timing":":296-:304","dependency":"","sources":[]},
+                {"owner":"Chris","action":"Review the plan","timing":"Tomorrow","dependency":"","sources":[{"start":"]==40:02","end":"]==41:58"}]}
+            ],
+            "open_questions":[],
+            "risks":[{"risk":"A delay","impact":"Launch moves","response":"","sources":[]}]
+        });
+
+        normalize_pack_source_timestamps(&mut pack, &valid);
+        sanitize_meeting_pack(&mut pack);
+
+        assert_eq!(pack["timeline"][0]["start"], "00:16");
+        assert_eq!(pack["timeline"][1]["start"], "08:26");
+        assert_eq!(pack["timeline"][2]["start"], "13:38");
+        assert_eq!(pack["timeline"][3]["start"], "40:02");
+        assert_eq!(pack["timeline"][4]["start"], "");
+        assert_eq!(pack["timeline"][5]["start"], "");
+        assert_eq!(pack["actions"][0]["timing"], "");
+
+        let markdown = render_meeting_pack(&pack, Some(&valid));
+        assert!(markdown.contains("00:16-00:58"));
+        assert!(markdown.contains("08:26-09:58"));
+        assert!(markdown.contains("40:02-41:58"));
+        assert!(!markdown.contains("Reversed citation"));
+        assert!(!markdown.contains("Broken citation"));
+        assert!(!markdown.contains(":826"));
+        assert!(!markdown.contains("==40:02"));
+        assert!(!markdown.contains("Dependency or note"));
+        assert!(!markdown.contains("| Reference |"));
+        assert!(!markdown.contains("Practical response"));
+    }
+
+    #[test]
+    fn citation_repairs_are_bounded_and_break_ties_consistently() {
+        let valid = HashSet::from([
+            "01:00".to_string(),
+            "02:00".to_string(),
+            "notes".to_string(),
+        ]);
+        assert_eq!(
+            nearest_valid_timestamp("01:30", &valid).as_deref(),
+            Some("01:00")
+        );
+        assert_eq!(nearest_valid_timestamp("30:00", &valid), None);
+        let mut sources = json!([
+            {"start": "notes", "end": "01:00"},
+            {"start": "30:00", "end": "31:00"},
+            {"start": "notes", "end": "notes"}
+        ]);
+        normalize_pack_source_timestamps(&mut sources, &valid);
+        assert_eq!(
+            normalized_pack_sources(&sources, Some(&valid)),
+            vec!["[notes]"]
+        );
+        assert!(
+            normalized_pack_sources(&json!([{"start": ":296", "end": ":397"}]), None).is_empty()
+        );
+    }
+
+    #[test]
+    fn incomplete_regeneration_keeps_existing_notes_unless_it_adds_substance() {
+        let coverage =
+            CoveragePlan::for_segments(&[json!({"t1_ms": 3_600_000, "text": "Launch planning"})]);
+        let valid = HashSet::from(["01:00".to_string()]);
+        let poor = json!({"executive_summary": "Launch planning."});
+        let rich = json!({"executive_summary": "The launch requires approval and a named owner before the release can proceed."});
+        let existing = json!([{"template": "Meeting", "content_json": rich}]);
+        assert!(protect_existing_summary(&existing, "Meeting", &poor, coverage, &valid).is_err());
+        assert!(protect_existing_summary(&existing, "Sales", &poor, coverage, &valid).is_ok());
+        let edited = json!([{"template": "Meeting", "content_json": null, "content_md": "My corrected notes"}]);
+        assert!(protect_existing_summary(&edited, "Meeting", &rich, coverage, &valid).is_err());
+        let existing = json!([{"template": "Meeting", "content_json": poor}]);
+        assert!(protect_existing_summary(&existing, "Meeting", &rich, coverage, &valid).is_ok());
+        let mut unchanged = poor.clone();
+        unchanged["quality_warnings"] =
+            json!(["Warnings must not inflate the substance score.".repeat(50)]);
+        assert!(
+            protect_existing_summary(&existing, "Meeting", &unchanged, coverage, &valid).is_err()
+        );
+    }
+
+    #[test]
+    fn usable_incomplete_notes_are_saved_with_a_warning_but_empty_output_is_rejected() {
+        let coverage =
+            CoveragePlan::for_segments(&[json!({"t1_ms": 3_600_000, "text": "Plan the launch"})]);
+        let valid = HashSet::from(["01:00".to_string()]);
+        let mut sparse = json!({
+            "executive_summary": "The launch depends on approval.",
+            "executive_sources": [{"start": "01:00", "end": "01:00"}]
+        });
+        let (markdown, warning) =
+            finalize_meeting_pack(&mut sparse, coverage, &valid, None).unwrap();
+        assert!(markdown.contains("The launch depends on approval. [01:00]"));
+        assert!(warning.unwrap().contains("may be incomplete"));
+        assert!(!sparse["quality_warnings"].as_array().unwrap().is_empty());
+        assert!(finalize_meeting_pack(&mut json!({}), coverage, &valid, None).is_err());
+        for malformed in [json!([]), json!("summary"), Value::Null] {
+            assert!(model_object(malformed).is_err());
+        }
+
+        let brief =
+            CoveragePlan::for_segments(&[json!({"t1_ms": 90_000, "text": "Plan the launch"})]);
+        sparse["discussion"] = json!([{
+            "title": "Launch", "summary": "", "points": [{
+                "text": "Request approval before shipping.",
+                "sources": [{"start": "01:00", "end": "01:00"}]
+            }]
+        }]);
+        let (_, warning) = finalize_meeting_pack(&mut sparse, brief, &valid, None).unwrap();
+        assert!(warning.is_none());
+        assert_eq!(sparse["quality_warnings"], json!([]));
+    }
+
+    #[test]
     fn meeting_pack_sanitizer_removes_repetition_and_in_meeting_mechanics() {
         let point = |text: &str| json!({"text": text, "sources": []});
         let mut pack = json!({
@@ -2702,6 +3381,152 @@ mod tests {
         assert_eq!(pack_discussion_points(&pack), 3);
         assert_eq!(pack_array_len(&pack, "actions"), 1);
         assert_eq!(pack["actions"][0]["action"], "Review the security findings");
+    }
+
+    #[test]
+    fn sanitizer_clears_source_ranges_from_timing_and_removes_screen_share_actions() {
+        assert!(looks_like_source_range("[00:29] - [00:56]"));
+        assert!(looks_like_source_range(":296-:304"));
+        let mut pack = json!({
+            "at_glance": [], "timeline": [], "discussion": [], "decisions": [],
+            "workplan": [],
+            "actions": [
+                {"owner":"Me","action":"Share screen","timing":"[00:29] - [00:56]"},
+                {"owner":"Chris","action":"Check the account","timing":":296-:304"},
+                {"owner":"Chris","action":"Audit the payment adapter","timing":"Tomorrow"},
+                {"owner":"Chris","action":"Share screen recording with the customer","timing":"Tomorrow"}
+            ],
+            "open_questions": [], "risks": []
+        });
+        sanitize_meeting_pack(&mut pack);
+        assert_eq!(pack_array_len(&pack, "actions"), 3);
+        assert_eq!(pack["actions"][0]["action"], "Check the account");
+        assert_eq!(pack["actions"][0]["timing"], "");
+        assert_eq!(pack["actions"][1]["action"], "Audit the payment adapter");
+        assert_eq!(
+            pack["actions"][2]["action"],
+            "Share screen recording with the customer"
+        );
+    }
+
+    #[test]
+    fn chapter_backfill_keeps_late_topics_and_actions_without_replacing_composed_detail() {
+        let ledgers = (1..=15)
+            .map(|number| {
+                let start = format!("{:02}:00", number * 3);
+                let title = format!("Workstream {number}");
+                json!({
+                    "topics": [{"title": title, "start": start, "end": start, "facts": [{
+                        "text": format!("Preserve the decision for workstream {number}."),
+                        "start": start, "end": start
+                    }]}],
+                    "actions": [{"owner": "Chris", "action": format!("Deliver workstream {number}"),
+                        "timing": "Tomorrow", "dependency": "", "start": start, "end": start}]
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut pack = json!({
+            "timeline": [{"topic": "Workstream 1", "start": "03:00", "end": "03:00",
+                "details": "Existing composed detail with the rationale."}],
+            "actions": [{"owner": "Chris", "action": "Deliver workstream 1", "timing": "Tomorrow",
+                "dependency": "Approved credentials", "sources": [{"start": "03:00", "end": "03:00"}]}]
+        });
+        sanitize_meeting_pack(&mut pack);
+        backfill_pack_from_chapter_ledgers(&mut pack, &ledgers);
+        sanitize_meeting_pack(&mut pack);
+        assert_eq!(pack_array_len(&pack, "timeline"), 15);
+        assert_eq!(pack_array_len(&pack, "discussion"), 15);
+        assert_eq!(pack_array_len(&pack, "actions"), 15);
+        assert_eq!(
+            pack["timeline"][0]["details"],
+            "Existing composed detail with the rationale."
+        );
+        assert_eq!(pack["actions"][0]["dependency"], "Approved credentials");
+        assert_eq!(pack["discussion"][14]["title"], "Workstream 15");
+        assert_eq!(pack["actions"][14]["action"], "Deliver workstream 15");
+        let once = pack.clone();
+        backfill_pack_from_chapter_ledgers(&mut pack, &ledgers);
+        sanitize_meeting_pack(&mut pack);
+        assert_eq!(pack, once);
+    }
+
+    #[test]
+    fn chapter_ledgers_are_deterministically_restored_into_a_sparse_pack() {
+        let chapter = |title: &str, start: &str, end: &str, number: usize| {
+            json!({
+                "title": title,
+                "start": start,
+                "end": end,
+                "facts": (0..3).map(|fact| json!({
+                    "text": format!(
+                        "Distinct grounded fact {number}-{fact} with rationale, constraint, implementation detail, concrete example, dependency, tradeoff, operating implication, and next-step context. {}",
+                        "The chapter preserves additional source-specific evidence without replacing another workstream. ".repeat(3)
+                    ),
+                    "start": start,
+                    "end": end
+                })).collect::<Vec<_>>()
+            })
+        };
+        let ledgers = vec![
+            json!({
+                "topics": [
+                    chapter("Onboarding", "01:00", "08:00", 1),
+                    chapter("Payments", "10:00", "16:00", 2),
+                    chapter("Email lifecycle", "18:00", "24:00", 3)
+                ],
+                "decisions": [{"decision":"Use adapters","detail":"Reuse integrations","start":"10:00","end":"16:00"}],
+                "actions": [{"owner":"Chris","action":"Audit payment wiring","timing":"Tomorrow","dependency":"Access","start":"10:00","end":"16:00"}],
+                "open_questions": [{"text":"Which provider is active?","start":"10:00","end":"16:00"}],
+                "risks": [{"risk":"Missing wiring","impact":"Launch delay","response":"Audit configuration","start":"01:00","end":"08:00"}]
+            }),
+            json!({
+                "topics": [
+                    chapter("Experiments", "26:00", "32:00", 4),
+                    chapter("Documentation", "34:00", "40:00", 5),
+                    chapter("Delivery plan", "42:00", "48:00", 6)
+                ],
+                "decisions": [], "actions": [], "open_questions": [], "risks": []
+            }),
+        ];
+        let mut pack = json!({
+            "executive_summary":"Summary", "executive_sources":[],
+            "success_definition":"Success", "success_sources":[],
+            "at_glance":[
+                {"item":"Purpose","details":"Plan implementation","sources":[]},
+                {"item":"Focus","details":"Onboarding and architecture","sources":[]},
+                {"item":"Timing","details":"Immediate delivery","sources":[]}
+            ],
+            "timeline":[], "discussion":[], "decisions":[], "workplan":[],
+            "actions":[{"owner":"Me","action":"Share screen","timing":"[00:29] - [00:56]","dependency":"","sources":[]}],
+            "open_questions":[], "risks":[]
+        });
+
+        backfill_pack_from_chapter_ledgers(&mut pack, &ledgers);
+        sanitize_meeting_pack(&mut pack);
+
+        assert_eq!(pack_array_len(&pack, "timeline"), 6);
+        assert_eq!(pack_array_len(&pack, "discussion"), 6);
+        assert_eq!(pack_discussion_points(&pack), 18);
+        assert_eq!(pack_array_len(&pack, "decisions"), 1);
+        assert_eq!(pack_array_len(&pack, "actions"), 1);
+        assert_eq!(pack["actions"][0]["action"], "Audit payment wiring");
+        assert_eq!(pack_array_len(&pack, "open_questions"), 1);
+        assert_eq!(pack_array_len(&pack, "risks"), 1);
+        assert_eq!(meeting_pack_stats(&pack, 50, None).covered_time_buckets, 5);
+        let coverage = CoveragePlan {
+            level: CoverageLevel::Comprehensive,
+            duration_min: 50,
+            transcript_words: 5_000,
+            minimum_summary_words: 800,
+            minimum_detail_points: 18,
+        };
+        assert!(meeting_pack_deficiencies(
+            &pack,
+            coverage,
+            None,
+            Some(chapter_ledger_counts(&ledgers))
+        )
+        .is_empty());
     }
 
     #[test]

@@ -3608,6 +3608,7 @@ a.cal-btn { text-decoration: none; }
   .meeting-print section { margin: 0 0 10mm; }
   .meeting-print section > h2 { margin: 0 0 4mm; padding-top: 3mm; border-top: .35mm solid #d9cfc1; color: #8c4f31; font-size: 15pt; letter-spacing: -.015em; break-after: avoid; }
   .meeting-print .md h3 { margin: 6mm 0 2mm; color: #766052; font-size: 9pt; letter-spacing: .12em; text-transform: uppercase; break-after: avoid; }
+  .meeting-print .md h4, .meeting-print .md h5 { margin: 4mm 0 2mm; color: #3f3831; font-size: 10pt; break-after: avoid; }
   .meeting-print .md p, .meeting-print .md li, .print-notes { font-size: 10.5pt; line-height: 1.58; }
   .meeting-print .md p { margin: 0 0 3mm; }
   .meeting-print .md ul { margin: 0 0 4mm; padding-left: 5mm; }
@@ -3619,6 +3620,7 @@ a.cal-btn { text-decoration: none; }
 .meeting-summary .md h3 { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; color: var(--ink); margin: 26px 0 9px; }
 .meeting-summary .md h3:first-child { margin-top: 8px; }
 .meeting-summary .md h4 { font-size: 14px; font-weight: 650; letter-spacing: -0.005em; color: var(--ink); margin: 20px 0 8px; }
+.meeting-summary .md h5 { font-size: 13px; font-weight: 650; letter-spacing: 0; color: var(--ink); margin: 16px 0 7px; }
 .meeting-summary .md p { margin: 0 0 10px; font-size: 14px; line-height: 1.65; }
 .meeting-summary .md ul { margin: 0 0 10px; padding-left: 20px; display: flex; flex-direction: column; gap: 7px; }
 .meeting-summary .md li { font-size: 14px; line-height: 1.55; }

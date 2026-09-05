@@ -734,10 +734,11 @@ pub fn mark_summary_failed(conn: &Connection, id: i64, error: &str) -> Result<()
     Ok(())
 }
 
-pub fn mark_summary_succeeded(conn: &Connection, id: i64) -> Result<()> {
+pub fn mark_summary_succeeded(conn: &Connection, id: i64, warning: Option<&str>) -> Result<()> {
+    let warning = warning.map(|value| value.chars().take(2_000).collect::<String>());
     conn.execute(
-        "UPDATE meetings SET status = 'done', summary_error = NULL WHERE id = ?1",
-        [id],
+        "UPDATE meetings SET status = 'done', summary_error = ?2 WHERE id = ?1",
+        rusqlite::params![id, warning],
     )?;
     Ok(())
 }
@@ -3295,7 +3296,8 @@ pub fn get_meeting(conn: &Connection, id: i64) -> Result<Value> {
                 audio_me_path, audio_them_path, note_id, video_path, trashed_at,
                 asr_engine, asr_model, route_folder_id, route_email,
                 COALESCE(route_via, 'no_event'), COALESCE(route_status, 'needs_filing'),
-                filing_context, COALESCE(capture_mode, 'online'), notes_document_json
+                filing_context, COALESCE(capture_mode, 'online'), notes_document_json,
+                summary_error
          FROM meetings WHERE id = ?1",
         [id],
         |r| {
@@ -3324,6 +3326,7 @@ pub fn get_meeting(conn: &Connection, id: i64) -> Result<Value> {
                 "filing_context": r.get::<_, Option<String>>(20)?,
                 "capture_mode": r.get::<_, String>(21)?,
                 "notes_document_json": r.get::<_, Option<String>>(22)?,
+                "summary_error": r.get::<_, Option<String>>(23)?,
                 "meeting_type": meeting_type,
             }))
         },

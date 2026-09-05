@@ -4,5 +4,11 @@
 <dict>
   <key>com.apple.security.device.audio-input</key>
   <true/>
+  <!-- The build enables the hardened runtime, which gates protected resources
+       behind entitlements. Without this, EventKit declines instantly with
+       granted=false and no error, and the user never sees a prompt. Read-only
+       calendar access still requires it. -->
+  <key>com.apple.security.personal-information.calendars</key>
+  <true/>
 </dict>
 </plist>

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Users, Network, Briefcase, Search } from "lucide-react";
+import { Users, Network, Briefcase, Search, ChevronDown } from "lucide-react";
 import { KnowledgeGraph } from "./KnowledgeGraph";
 import { PeopleView } from "./PeopleView";
 import { SelfView } from "./Self";
@@ -102,23 +102,33 @@ export function KnowledgeView({
           onChange={(e) => setQuery(e.target.value)}
           spellCheck={false}
         />
-        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
-          <option value="all">all types</option>
-          {TYPES.map((t) => (
-            <option key={t} value={t}>
-              {t}
-            </option>
-          ))}
-        </select>
-        {relationships.length > 0 && (
-          <select value={relFilter} onChange={(e) => setRelFilter(e.target.value)}>
-            <option value="all">any relationship</option>
-            {relationships.map((r) => (
-              <option key={r} value={r}>
-                {r}
+        {/* The border and rounding live on the label, not the select: a native
+            macOS select paints its own chrome and ignores border-radius, so it
+            never matched the input beside it. Same shape the editor toolbar
+            uses. */}
+        <label className="kn-select">
+          <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+            <option value="all">all types</option>
+            {TYPES.map((t) => (
+              <option key={t} value={t}>
+                {t}
               </option>
             ))}
           </select>
+          <ChevronDown size={13} aria-hidden="true" />
+        </label>
+        {relationships.length > 0 && (
+          <label className="kn-select">
+            <select value={relFilter} onChange={(e) => setRelFilter(e.target.value)}>
+              <option value="all">any relationship</option>
+              {relationships.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+            <ChevronDown size={13} aria-hidden="true" />
+          </label>
         )}
       </div>
 

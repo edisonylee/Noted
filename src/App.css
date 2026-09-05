@@ -692,10 +692,15 @@ textarea.json.bad { border-color: var(--bad); }
   background: var(--surface-2); border: var(--border-width, 1px) solid var(--line); border-radius: 99px;
   padding: 3px 4px 3px 10px;
 }
-.entity-name {
-  background: none; border: none; outline: none; color: var(--ink);
-  font-size: 13px; font-weight: 500; width: 9ch; min-width: 5ch;
+/* Scoped to the chip: `.entity-name` is also a heading on the entity page and
+   in Self, and an unscoped 9ch width shrank those headings to a nine-character
+   column. The input still sizes to the chip, but can no longer clip a name the
+   user is in the middle of typing. */
+.entity-chip .entity-name {
+  background: none; border: none; color: var(--ink);
+  font-size: 13px; font-weight: 500; max-width: 22ch;
 }
+.entity-chip .entity-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 3px; }
 .entity-type {
   background: none; border: none; outline: none; color: var(--accent);
   font-size: 11.5px; cursor: pointer;
@@ -1212,11 +1217,11 @@ textarea.json.bad { border-color: var(--bad); }
   color: var(--ink-soft); background: transparent; border: 0; border-radius: 6px;
   font: inherit; font-size: 12px; font-weight: 570;
 }
-.document-editor-select.text-style select { width: 104px; }
-.document-editor-select.font-family select { width: 96px; }
-.document-editor-select.font-size select { width: 63px; }
-.document-editor-select.alignment select { width: 80px; padding-left: 26px; }
-.document-editor-select.line-height select { width: 78px; }
+.document-editor-select.text-style select { min-width: 104px; }
+.document-editor-select.font-family select { min-width: 96px; }
+.document-editor-select.font-size select { min-width: 63px; }
+.document-editor-select.alignment select { min-width: 88px; }
+.document-editor-select.line-height select { min-width: 78px; }
 .document-editor-select > svg { position: absolute; z-index: 1; left: 8px; color: var(--muted); pointer-events: none; }
 .document-editor-select select:hover:not(:disabled) { background: var(--hover-soft); color: var(--ink); }
 .document-editor-select select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -1354,6 +1359,14 @@ textarea.json.bad { border-color: var(--bad); }
   background: var(--surface); border-top: var(--border-width, 1px) solid var(--line);
   border-bottom: var(--border-width, 1px) solid var(--line);
 }
+/* Overflow formatting, using the same expanding-row idiom as the link editor
+   rather than a floating popover — no positioning or click-outside to get
+   wrong, and it reads as part of the toolbar. */
+.document-editor-more-row {
+  display: flex; flex: 1 0 100%; align-items: center; gap: 4px; min-width: 0; min-height: 39px;
+  margin: 5px -2px -4px; padding: 6px 4px 0; border-top: var(--border-width, 1px) solid var(--line);
+}
+
 .document-editor-link-row {
   display: flex; flex: 1 0 100%; align-items: center; gap: 7px; min-width: 0; min-height: 39px;
   margin: 5px -2px -4px; padding: 6px 4px 0; border-top: var(--border-width, 1px) solid var(--line);
@@ -1403,15 +1416,27 @@ textarea.json.bad { border-color: var(--bad); }
 }
 .document-editor-outline button.level-2 { padding-left: 17px; }
 .document-editor-outline button.level-3 { padding-left: 27px; color: var(--faint); }
+/* Checklist items read as a peer of a heading, marked so the two are still
+   distinguishable at a glance. */
+.document-editor-outline button.task { padding-left: 17px; color: var(--faint); }
+.document-editor-outline button.task::before { content: "◦"; margin-right: 6px; color: var(--muted); }
 .document-editor-outline button:hover { color: var(--ink); background: var(--hover-soft); }
 .document-editor-outline button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .document-editor-outline p { margin: 0; padding-right: 5px; color: var(--faint); font-size: 11px; line-height: 1.45; }
 .document-editor-page {
   grid-column: 2; min-height: 980px; overflow: hidden;
+  display: flex; flex-direction: column;
   background: var(--surface); border: var(--border-width, 1px) solid var(--line); border-radius: 2px;
   box-shadow: 0 2px 5px rgba(27, 25, 22, 0.045);
 }
 .document-editor-balance { grid-column: 3; }
+/* Fills whatever page height the content leaves, so the whole card continues
+   the document on click rather than only the last line. */
+.document-editor-page-tail { flex: 1 1 auto; min-height: 120px; cursor: text; }
+.document-editor-stats {
+  flex: none; margin: 0 4px 0 0; color: var(--faint);
+  font-size: 11.5px; white-space: nowrap; user-select: none;
+}
 .document-editor.page .document-editor-canvas { flex: none; min-height: 650px; overflow: visible; }
 .document-editor.page .noted-document-content {
   width: 100%; min-height: 650px; padding: 28px 54px 110px;
@@ -1517,6 +1542,18 @@ textarea.json.bad { border-color: var(--bad); }
   border-top: var(--border-width, 1px) solid var(--line);
   border-bottom: var(--border-width, 1px) solid var(--line);
 }
+/* Pinned to the top of the scrolling timeline: the all-day row and its Add
+   button are the day's fixed context, and scrolling to the evening used to take
+   them away. This must be the whole section rather than just its header — a
+   sticky element can only travel inside its parent's box, so pinning the header
+   alone let go the moment the short section scrolled past, which is the bug it
+   was meant to fix. Needs its own background so the hour grid passes under it. */
+.app.schedmode .today-allday {
+  position: sticky; top: 0; z-index: 6;
+  background: var(--canvas);
+}
+/* A long all-day list must not swallow the timeline it is pinned above. */
+.app.schedmode .today-allday-list { max-height: 22vh; overflow-y: auto; }
 .today-allday-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .today-allday-heading { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
 .today-allday-heading h2 {
@@ -1677,6 +1714,20 @@ a.today-allday-event:focus-visible { outline: 2px solid var(--accent); outline-o
 .today-save:active:not(:disabled) { transform: scale(0.97); }
 .today-save:disabled, .today-photo-btn:disabled, .today-cancel:disabled { opacity: 0.5; cursor: default; }
 
+/* Only the timeline scrolls. Previously the whole page did, so reading the
+   evening pushed the date header off the top and slid the task ledger out of
+   its own grid area — the two things you most want to keep in view. Same
+   full-height mode class Calendar, Journal and Knowledge already use. */
+.app.schedmode { height: 100%; }
+.app.schedmode .content { padding-bottom: 14px; min-height: 0; }
+.app.schedmode .schedule-page { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.app.schedmode .today-shell { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+/* The head and lead keep their natural height; the body takes what is left and
+   scrolls inside itself. */
+.app.schedmode .today-shell-head,
+.app.schedmode .today-shell-lead { flex: none; }
+.app.schedmode .today-shell-body { flex: 1; min-height: 0; overflow-y: auto; }
+
 /* Keep the accepted planner composition at the standard desktop window size.
    The dock narrows fluidly before the full 824px + 320px layout fits. */
 @media (min-width: 840px) {
@@ -1687,6 +1738,16 @@ a.today-allday-event:focus-visible { outline: 2px solid var(--accent); outline-o
       "lead lead"
       "body tasks";
     column-gap: clamp(18px, 2.2vw, 30px);
+  }
+  /* Grid, not flex, once the ledger is open: the body row takes the remaining
+     height so the timeline scrolls within it and the ledger keeps full height
+     beside it, rather than both riding the page scroll. */
+  .app.schedmode .today-shell.tasks-open {
+    display: grid; grid-template-rows: auto auto minmax(0, 1fr); align-items: stretch;
+  }
+  .app.schedmode .today-shell.tasks-open .today-shell-body { overflow-y: auto; min-height: 0; }
+  .app.schedmode .today-shell.tasks-open .today-task-drawer {
+    position: static; height: 100%; min-height: 0; overflow-y: auto;
   }
   .today-shell.tasks-open .today { min-width: 0; max-width: none; margin: 0; }
   .today-shell.tasks-open .today-shell-head { grid-area: head; }
@@ -2007,6 +2068,10 @@ a.today-allday-event:focus-visible { outline: 2px solid var(--accent); outline-o
 .field input:focus { outline: none; border-color: var(--accent); }
 .system-settings-fields .field select { width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; color: var(--ink); background: var(--surface-2); border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm); padding: 9px 11px; }
 .system-settings-fields .field select:focus { outline: none; border-color: var(--accent); }
+.preferred-name-form { margin: 0; }
+.preferred-name-row { display: flex; align-items: center; gap: 8px; }
+.preferred-name-row input { min-width: 0; }
+.preferred-name-row .ghost-btn { flex: none; min-height: 37px; }
 .field-hint { font-size: 11.5px; color: var(--faint); line-height: 1.45; }
 .field-hint a { color: var(--accent); text-decoration: none; }
 .field-hint a:hover { text-decoration: underline; }
@@ -2271,17 +2336,31 @@ a.today-allday-event:focus-visible { outline: 2px solid var(--accent); outline-o
 .people-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; }
 
 /* ── Knowledge search + per-entity page ───────────────────────────────────── */
-.kn-search { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; }
+/* One height for every control in the row: the input's padding-derived height
+   and the select's did not agree, so they sat visibly out of line. */
+.kn-search { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; --kn-field-h: 38px; }
 .kn-search-icon { color: var(--faint); flex-shrink: 0; }
 .kn-search input {
-  flex: 1; min-width: 0; font: inherit; font-size: 14px; color: var(--ink);
-  background: var(--surface-2); border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm); padding: 9px 12px;
+  flex: 1; min-width: 0; height: var(--kn-field-h); font: inherit; font-size: 14px; color: var(--ink);
+  background: var(--surface-2); border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm); padding: 0 12px;
 }
 .kn-search input:focus { outline: none; border-color: var(--accent); }
-.kn-search select {
-  background: var(--surface-2); border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm);
-  color: var(--muted); font-size: 12.5px; padding: 8px 8px; outline: none; cursor: pointer;
+/* The chrome sits on the label so the corners actually round: a native select
+   paints its own background and ignores border-radius. The chevron is a real
+   icon rather than a background image, so it follows the active theme's colour
+   instead of being baked into a data URI. */
+.kn-select {
+  position: relative; display: inline-flex; align-items: center; flex: none;
+  height: var(--kn-field-h); background: var(--surface-2);
+  border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm);
 }
+.kn-select select {
+  appearance: none; -webkit-appearance: none;
+  height: 100%; border: 0; background: transparent; color: var(--muted);
+  font: inherit; font-size: 13px; padding: 0 26px 0 10px; outline: none; cursor: pointer;
+}
+.kn-select > svg { position: absolute; right: 8px; color: var(--faint); pointer-events: none; }
+.kn-select:focus-within { border-color: var(--accent); }
 .kn-results { display: flex; flex-direction: column; gap: 2px; }
 .kn-result {
   display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
@@ -3121,6 +3200,9 @@ a.cal-btn { text-decoration: none; }
 .meeting-folder-empty { margin: 0; padding: 18px 12px 20px; color: var(--muted); font-size: 12px; text-align: center; }
 .meeting-hint { margin: 0; color: var(--muted); font-size: 13px; }
 .meeting-export-status { align-self: flex-end; color: var(--good); border: 1px solid color-mix(in srgb, var(--good) 32%, transparent); background: color-mix(in srgb, var(--good) 8%, transparent); border-radius: 8px; padding: 7px 10px; }
+/* Speaker-labelling caveat while echo cancellation is off — advisory, not an
+   error: the recording is fine, only the "me" vs "them" split is softer. */
+.meeting-mic-aec { color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); border-radius: 8px; padding: 7px 10px; }
 .meeting-status { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
 .meeting-context { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .meeting-context select {
@@ -3654,6 +3736,11 @@ a.cal-btn { text-decoration: none; }
 .settings-body .settings-actions .field-hint { display: inline-flex; align-items: center; gap: 4px; color: var(--good); margin-right: auto; }
 .settings-body .settings-actions .settings-error { color: var(--bad); }
 .system-settings-fields { gap: 0; margin-top: 8px; }
+.settings-inline-form {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end;
+  gap: 12px; max-width: 560px;
+}
+.settings-inline-form .ghost-btn { min-height: 36px; justify-content: center; }
 .assistant-settings { gap: 0; margin-top: 8px; }
 .assistant-shortcut-row {
   display: flex; align-items: center; justify-content: space-between; gap: 20px;
@@ -3816,6 +3903,8 @@ a.cal-btn { text-decoration: none; }
   .settings-page .settings-nav-label { grid-column: 1 / -1; }
   .settings-group-head { flex-direction: column; gap: 4px; }
   .settings-group-head p { text-align: left; }
+  .settings-inline-form { grid-template-columns: 1fr; }
+  .settings-inline-form .ghost-btn { justify-self: start; }
 }
 .record-prompt.status::before { background: var(--good); }
 
@@ -3839,31 +3928,79 @@ a.cal-btn { text-decoration: none; }
 }
 .side-nav button:hover { color: var(--ink); background: var(--hover-soft); }
 .side-nav button.on { background: var(--hover-soft); color: var(--ink); font-weight: 570; }
-.side-foot { display: flex; gap: 4px; padding: 8px 8px 0; border-top: var(--border-width, 1px) solid var(--line); }
+/* Centred so the row sits under the record pill above it, which is itself
+   centred within the same 8px inset. Left-aligned, the group's centre landed
+   well left of the pill's and read as misaligned. Centring also keeps it
+   balanced when the iPhone button is absent from a release profile. */
+.side-foot {
+  display: flex; justify-content: center; gap: 4px; padding: 8px 8px 0;
+  border-top: var(--border-width, 1px) solid var(--line);
+}
 .sidebar .rec-pill { margin: 0 8px 10px; justify-content: center; }
 .main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 100vh; }
 .app.calmode .main-col, .app.journalmode .main-col { min-height: 0; height: 100%; }
 .main-col .content { padding-top: 26px; }
 
-/* ── Notes workspace: user-owned folders + automatic categories ──────────── */
+/* ── Library + Documents: shared records, purpose-built workspaces ───────── */
 .notes-view {
-  flex: 1; min-height: 0; display: flex; gap: 34px; align-items: stretch;
+  --workspace-rail-gap: 34px;
+  flex: 1; min-height: 0; display: flex; gap: var(--workspace-rail-gap); align-items: stretch;
   width: 100%; max-width: 1100px;
 }
+.notes-view:has(.notes-library-toggle-reveal) { gap: 10px; }
+.documents-view { --workspace-rail-gap: 30px; max-width: 1180px; }
+.document-files { width: 224px; }
+.document-files-label {
+  margin: 0 9px 5px; color: var(--ink-soft); font-size: 12px; font-weight: 630;
+}
+.document-file-views { margin-bottom: 2px; }
+.document-folder-head { margin-top: 19px; }
+.document-folders-empty {
+  margin: 5px 10px 0 29px; color: var(--faint); font-size: 10.5px; line-height: 1.45;
+}
+.notes-masthead {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 28px;
+  min-height: 122px; margin: 0 2px 24px; padding: 8px 4px 0;
+}
+.notes-masthead-copy { min-width: 0; }
+.notes-masthead-breadcrumb {
+  color: var(--accent); font-size: 11.5px; font-weight: 560;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.notes-masthead h1 {
+  margin: 11px 0 6px; color: var(--ink); font-size: 38px; font-weight: 660;
+  line-height: 1.05; letter-spacing: -0.045em;
+}
+.notes-masthead p {
+  max-width: 520px; margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.5;
+}
+.notes-masthead-actions {
+  flex: none; display: flex; align-items: center; gap: 13px; padding-bottom: 3px;
+}
+.notes-masthead-actions > span {
+  color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums;
+}
+.documents-view .note-row { min-height: 45px; padding-top: 10px; padding-bottom: 10px; }
+.documents-view .note-row-categories { max-width: 320px; }
 .notes-library-shell {
   /* The wrapper owns state, not geometry. Its children join the Notes layout
      directly so collapsing the library cannot leave an empty control rail. */
   display: contents;
 }
 .notes-library-toggle {
-  /* Pair the two sidebar controls on the native titlebar axis. The global
-     sidebar toggle occupies 76-104px; this one follows with a 4px gap. */
-  position: fixed; top: 4px; left: 108px; z-index: 60;
-  width: 28px; height: 28px; color: var(--muted);
+  flex: none; width: 28px; height: 28px; color: var(--muted);
 }
 .notes-library-toggle:hover { color: var(--ink); }
+.notes-library-toggle-reveal {
+  flex: none; align-self: flex-start; width: 32px; height: 50px;
+}
+.notes-library-toggle-collapse {
+  position: absolute; top: 0; right: calc(0px - var(--workspace-rail-gap)); z-index: 6;
+  width: var(--workspace-rail-gap); height: 50px; border-radius: 0; color: var(--faint);
+}
+.notes-library-toggle-collapse:hover { background: none; }
 .spaces {
-  flex: none; align-self: stretch; width: 244px; min-height: 0; overflow: hidden;
+  flex: none; align-self: stretch; width: 244px; min-height: 0; overflow: visible;
   display: flex; flex-direction: column; gap: 2px; position: sticky; top: 26px;
   padding: 0 0 2px; scrollbar-width: thin;
 }
@@ -4004,6 +4141,12 @@ a.cal-btn { text-decoration: none; }
   display: flex; flex-direction: column; gap: 4px; padding: 5px 7px;
   color: var(--faint); font-size: 10.5px;
 }
+/* Why a menu item is inert, stated in the menu. Matches the "Move to" label's
+   quiet register so it reads as explanation, not as another action. */
+.folder-menu-note {
+  margin: 0; padding: 0 7px 4px;
+  color: var(--faint); font-size: 10.5px; line-height: 1.4;
+}
 .folder-menu-move select {
   width: 100%; min-width: 0; padding: 5px 22px 5px 7px;
   color: var(--ink); background: var(--surface); border: var(--border-width, 1px) solid var(--line);
@@ -4092,16 +4235,16 @@ a.cal-btn { text-decoration: none; }
 .spaces .spaces-trash.drop-active small { color: var(--bad); }
 .spaces .spaces-trash.drop-blocked { opacity: .62; }
 
-.notes-list { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.notes-context {
-  min-height: 64px; display: flex; align-items: flex-start; justify-content: space-between;
-  gap: 18px; margin-bottom: 13px; padding: 0 6px;
+/* One capped, centered track for both Documents and Library. The shell goes
+   full-bleed (see the full-bleed sections below) while the list keeps a
+   readable measure inside it, matching Journal's 920px editor track. Library
+   used to opt out of the cap, which left a row's title and its date roughly
+   1100px apart on a wide display and shifted the whole column sideways when
+   switching modes. */
+.notes-list {
+  flex: 1; min-width: 0; display: flex; flex-direction: column;
+  max-width: 920px; margin: 0 auto;
 }
-.notes-context h1 { margin: 0; color: var(--ink); font-size: 21px; font-weight: 640; letter-spacing: -0.02em; }
-.notes-context p { max-width: 560px; margin: 5px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
-.notes-breadcrumb { margin-bottom: 4px; color: var(--accent); font-size: 11.5px; font-weight: 540; }
-.notes-context-count { flex: none; padding-top: 5px; color: var(--faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
-.notes-context-actions { display: flex; flex: none; align-items: center; gap: 12px; }
 .notes-new-note {
   display: inline-flex; align-items: center; gap: 6px; min-height: 32px;
   padding: 0 10px; border: 0; border-radius: 7px;
@@ -4393,7 +4536,9 @@ a.cal-btn { text-decoration: none; }
 .note-document-page-head .note-filed-placement { margin-top: 13px; }
 .note-document-error { flex: none; margin: 7px 4px 0 48px; color: var(--error-ink); font-size: 12px; }
 .note-document > .note-detail-entries { flex: none; margin: 0 4px 12px 48px; }
-.note-document > .note-filing-message { margin: -5px 4px 0 auto; }
+.note-document > .note-filing-message {
+  flex: none; margin: 0 14px 0 auto; padding-top: 8px; line-height: 1.35;
+}
 .note-detail-head { display: flex; align-items: flex-start; gap: 12px; }
 .note-detail-heading { flex: 1; min-width: 0; }
 .note-detail-head h2 { margin: 2px 0 0; font-size: 19px; font-weight: 630; letter-spacing: -0.015em; }
@@ -4415,10 +4560,17 @@ a.cal-btn { text-decoration: none; }
 .note-filed-placement button:hover:not(:disabled) { background: var(--hover-soft); }
 .note-filed-placement.smart strong,
 .note-filed-placement.unfiled strong { color: var(--muted); }
+/* Matches the document toolbar's selects, which sit directly below it: same
+   height, type and colour, so the header and the toolbar read as one system.
+   The border stays — unlike the toolbar's, this control sits alone in a header
+   and needs the affordance. */
 .note-file-select select {
-  max-width: 190px; border: var(--border-width, 1px) solid var(--line); border-radius: var(--r-sm);
-  padding: 6px 27px 6px 9px; background: var(--surface-2); color: var(--muted); font: inherit; font-size: 12px;
+  max-width: 190px; height: 30px; border: var(--border-width, 1px) solid var(--line);
+  border-radius: var(--r-sm); padding: 0 27px 0 9px; background: var(--surface-2);
+  color: var(--ink-soft); font: inherit; font-size: 12px; font-weight: 570;
 }
+.note-file-select select:hover:not(:disabled) { color: var(--ink); background: var(--hover-soft); }
+.note-file-select select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .note-filing-message { align-self: flex-end; margin-top: -12px; color: var(--muted); font-size: 11.5px; }
 .note-detail-controls { display: flex; align-items: center; gap: 6px; }
 .note-edit-trigger {
@@ -4460,8 +4612,9 @@ a.cal-btn { text-decoration: none; }
 }
 
 @media (max-width: 980px) {
-  .notes-view { gap: 22px; }
+  .notes-view { --workspace-rail-gap: 22px; }
   .spaces { width: 215px; }
+  .document-files { width: 205px; }
   .note-row-categories { max-width: 135px; }
   .document-editor-stage-inner { grid-template-columns: minmax(0, 1fr); padding: 20px 18px 68px; }
   .document-editor-page { grid-column: 1; }
@@ -4469,16 +4622,20 @@ a.cal-btn { text-decoration: none; }
 }
 
 @media (max-width: 780px) {
-  .notes-view { gap: 16px; }
+  .notes-view { --workspace-rail-gap: 16px; }
   .spaces { width: 170px; }
+  .document-files { width: 172px; }
   .notes-list { width: auto; }
-  .notes-context { min-height: 0; }
-  .notes-context-count, .note-row-categories { display: none; }
+  .note-row-categories { display: none; }
   .note-row-date { width: 52px; }
   .folder-more { opacity: 1; }
   .notes-list-head { flex-wrap: wrap; }
   .notes-list-head .notes-search { flex-basis: 100%; min-width: 0; }
-  .notes-context-actions { gap: 8px; }
+  .notes-masthead-actions { gap: 8px; }
+  .notes-masthead { min-height: 104px; margin-bottom: 18px; }
+  .notes-masthead h1 { font-size: 33px; }
+  .notes-masthead p { max-width: 390px; }
+  .documents-view .note-row-categories { display: block; max-width: 175px; }
   .note-document-page-head { padding: 44px 38px 0; }
   .note-document-title { font-size: 35px; }
   .document-editor.page .noted-document-content { padding: 26px 38px 82px; }
@@ -4491,10 +4648,11 @@ a.cal-btn { text-decoration: none; }
 }
 
 @media (max-width: 560px) {
-  .notes-context { padding: 0 2px; }
-  .notes-context-count, .note-row-categories { display: none; }
-  .notes-context { align-items: center; }
+  .note-row-categories { display: none; }
   .notes-new-note { min-height: 34px; }
+  .notes-masthead { align-items: flex-start; flex-direction: column; gap: 14px; }
+  .notes-masthead-actions { width: 100%; justify-content: space-between; }
+  .documents-view .note-row-categories { display: none; }
   .notes-list-head { flex-wrap: wrap; }
   .notes-list-head .notes-search { flex-basis: 100%; }
   .search-tool-buttons { width: 100%; padding-left: 0; }
@@ -4687,6 +4845,10 @@ a.cal-btn { text-decoration: none; }
   min-height: 0;
 }
 .app.side:not(.homemode) .main-col .content {
+  /* Give the flex item an explicit zero basis so tall, internally scrolling
+     workspaces cannot use their page height to push the footer off-screen. */
+  flex: 1 1 0;
+  height: 0;
   min-height: 0;
   overflow-y: auto;
   /* Keep the workspace gutter inside the scrollport so content retains its
@@ -4698,6 +4860,8 @@ a.cal-btn { text-decoration: none; }
 }
 .app.side:not(.homemode) .status {
   flex: none;
+  position: relative;
+  z-index: 6;
   margin-top: 0;
   background: var(--canvas);
 }
@@ -4800,8 +4964,18 @@ body.vibrant .app.homemode .main-col {
 }
 .kn-graph-search input { border: 0; outline: 0; background: transparent; color: var(--ink); font: inherit; font-size: 13px; width: 130px; }
 .kn-graph-msg { margin-top: -2px; }
+/* Full-height canvas, following the calmode/journalmode pattern rather than
+   guessing at the chrome above it: `100vh - 240px` made the container taller
+   than the space it actually had, pushing the legend below the fold. The floor
+   keeps the canvas usable if an ancestor ever loses its height. */
+.app.graphmode { height: 100%; }
+.app.graphmode .content { padding-bottom: 14px; min-height: 0; }
+.app.graphmode .knowledge { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+/* A flex column stretches its children, which blew the pill group out to the
+   full width. Only the canvas should stretch. */
+.app.graphmode .kn-tabs { align-self: flex-start; }
 .kn-graph {
-  flex: 1; position: relative; min-height: calc(100vh - 240px);
+  flex: 1; position: relative; min-height: 320px;
   border: var(--border-width, 1px) solid var(--line);
   border-radius: var(--r-lg); overflow: hidden; background: var(--canvas);
 }

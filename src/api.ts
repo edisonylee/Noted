@@ -180,10 +180,12 @@ export type NoteRow = {
   title: string;
   raw_text: string;
   document_json: string | null;
+  note_kind: "capture" | "document";
   source: string;
   entries: NoteEntry[];
   event_date: string;
   created_at: string;
+  updated_at: string;
   trashed_at?: string | null;
 };
 
@@ -307,6 +309,35 @@ export type GcalStatus = {
   sync_account: string | null; // account hosting the "noted" push calendar
   calendar_id: string | null;
   accounts: GcalAccountInfo[];
+};
+
+/**
+ * Apple Calendar (EventKit) — read-only, and local: no OAuth, no tokens.
+ *
+ * `access` is the macOS permission state. `write_only` is a real EventKit
+ * state that cannot read events, so it is no more useful here than `denied`;
+ * `unsupported` means this build is not on macOS.
+ */
+export type AppleCalAccess =
+  | "granted"
+  | "denied"
+  | "restricted"
+  | "write_only"
+  | "not_determined"
+  | "unsupported";
+
+export type AppleCalendarInfo = {
+  id: string;
+  name: string;
+  color: string;
+  source: string; // the EventKit account: iCloud, Google, On My Mac…
+  enabled: boolean;
+};
+
+export type AppleCalStatus = {
+  access: AppleCalAccess;
+  account: string; // the label Apple events carry in RangeEvent.account
+  calendars: AppleCalendarInfo[];
 };
 
 // Deterministic meeting filing. Rules match exact Google identities and run
@@ -603,12 +634,38 @@ export type MeetingsCfg = {
   default_template: string;
   vocabulary: string[];
   asr_engine: "whisper" | "parakeet" | "hosted";
-  /** macOS voice-processing (AEC) on the mic — strips speaker playback from the mic signal. */
+  /**
+   * macOS voice-processing (AEC) on the mic — strips speaker playback from the
+   * mic signal. Defaults off: voice processing seizes the input device, so a
+   * call app sharing the mic would record silence. Recording yields to a live
+   * call even when this is on (see `MicAecState`).
+   */
   mic_aec: boolean;
   /** Record the meeting app's window as video (ScreenCaptureKit, macOS 15+). */
   record_video: boolean;
   /** Days before the launch-time sweep deletes window videos; 0 = keep forever. */
   video_keep_days: number;
+};
+
+/**
+ * How the mic is being captured for the active recording ("meeting-mic-aec").
+ *
+ * - `active` — macOS voice processing is on; speaker bleed is cancelled.
+ * - `off_by_choice` — the user turned echo cancellation off.
+ * - `yielded` — a call app holds the mic, so voice processing was skipped to
+ *   avoid muting the user in that call; `app` is that app's name.
+ * - `unavailable` — it was wanted but could not run (odd device, denied
+ *   component), so the raw mic is recording.
+ *
+ * Every state but `active` means the far side may be picked up as you when
+ * recording on speakers.
+ */
+export type MicAecState = "active" | "off_by_choice" | "yielded" | "unavailable";
+
+export type MeetingMicAec = {
+  meetingId: number;
+  state: MicAecState;
+  app: string | null;
 };
 
 // ── Permissioned local agent access (vendor-neutral MCP) ───────────────────
@@ -753,6 +810,7 @@ export type SystemSettings = {
   timeZone: string;
   resolvedTimeZone: string;
   systemTimeZone: string;
+  preferredName: string | null;
 };
 
 export type ReminderSettings = {
@@ -818,8 +876,11 @@ export const api = {
     invoke<AgentContextReceipt[]>("agent_context_receipts"),
   health: () => invoke<Health>("health"),
   systemSettingsGet: () => invoke<SystemSettings>("system_settings_get"),
-  systemSettingsSet: (timeZone: string) =>
-    invoke<SystemSettings>("system_settings_set", { timeZone }),
+  systemSettingsSet: (timeZone: string, preferredName?: string) =>
+    invoke<SystemSettings>("system_settings_set", {
+      timeZone,
+      ...(preferredName === undefined ? {} : { preferredName }),
+    }),
   reminderSettingsGet: () => invoke<ReminderSettings>("reminder_settings_get"),
   reminderSettingsSet: (settings: ReminderSettings) =>
     invoke<ReminderSettings>("reminder_settings_set", { settings }),
@@ -944,7 +1005,7 @@ export const api = {
   generateRecap: (period: "day" | "week") => invoke<Recap>("generate_recap", { period }),
   backfillRecaps: () => invoke<void>("backfill_recaps"),
   listRecaps: () => invoke<RecapRow[]>("list_recaps"),
-  exportDb: () => invoke<string>("export_db"),
+  exportDb: (destination: string) => invoke<string>("export_db", { destination }),
   phoneInfo: () => invoke<PhoneInfo>("phone_info"),
   mobileAuthorityStart: (renew = false) =>
     invoke<MobileAuthorityInfo>("mobile_authority_start", { renew }),
@@ -1034,6 +1095,12 @@ export const api = {
   gcalSetCalendarEnabled: (account: string, calendarId: string, enabled: boolean) =>
     invoke<GcalStatus>("gcal_set_calendar_enabled", { account, calendarId, enabled }),
   gcalRefreshCalendars: () => invoke<GcalStatus>("gcal_refresh_calendars"),
+  // Apple Calendar is read-only, so there is no create/update/delete pair here.
+  // Its events arrive merged into gcalEventsRange.
+  applecalStatus: () => invoke<AppleCalStatus>("applecal_status"),
+  applecalRequestAccess: () => invoke<AppleCalStatus>("applecal_request_access"),
+  applecalSetCalendarEnabled: (calendarId: string, enabled: boolean) =>
+    invoke<AppleCalStatus>("applecal_set_calendar_enabled", { calendarId, enabled }),
   gcalSetSyncAccount: (email: string) => invoke<GcalStatus>("gcal_set_sync_account", { email }),
   gcalContacts: () => invoke<GcalContact[]>("gcal_contacts"),
   gcalEventsRange: (startDate: string, endDate: string) =>

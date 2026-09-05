@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import {
   api,
+  type AppleCalStatus,
   type EventInput,
   type GcalContact,
   type GcalStatus,
@@ -489,6 +490,10 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
   const today = easternDay();
   const [anchor, setAnchor] = useState(() => (days === 7 ? weekStart(today) : today));
   const [status, setStatus] = useState<GcalStatus | null>(null);
+  // Apple calendars filter in the same popover as Google's; they are a separate
+  // provider, not a separate concept, so the user should not have to go looking
+  // in Settings to hide one.
+  const [apple, setApple] = useState<AppleCalStatus | null>(null);
   const [events, setEvents] = useState<RangeEvent[] | null>(null);
   const [contacts, setContacts] = useState<GcalContact[]>([]);
   const [loading, setLoading] = useState(false);
@@ -533,6 +538,7 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
 
   useEffect(() => {
     api.gcalAuthStatus().then(setStatus).catch(() => setStatus(null));
+    api.applecalStatus().then(setApple).catch(() => setApple(null));
   }, []);
 
   // Fetch the visible range; a sequence guard drops stale responses when the
@@ -752,9 +758,26 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
     }
   }
 
+  async function toggleAppleCalendar(id: string, enabled: boolean) {
+    try {
+      setApple(await api.applecalSetCalendarEnabled(id, enabled));
+      await load(true);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function refreshCalendars() {
     try {
-      setStatus(await api.gcalRefreshCalendars());
+      // Refresh both providers: the button says "calendar lists", and leaving
+      // Apple stale here is exactly the kind of half-refresh that makes a newly
+      // added calendar look like a bug.
+      const [gcal, applecal] = await Promise.all([
+        api.gcalRefreshCalendars(),
+        api.applecalStatus().catch(() => null),
+      ]);
+      setStatus(gcal);
+      if (applecal) setApple(applecal);
       await load(true);
     } catch (e) {
       setError(String(e));
@@ -873,6 +896,22 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
                     ))}
                   </div>
                 ))}
+                {apple?.access === "granted" && apple.calendars.length > 0 && (
+                  <div className="cal-filter-acct">
+                    <div className="cal-filter-email">{apple.account}</div>
+                    {apple.calendars.map((c) => (
+                      <label key={c.id} className="cal-filter-row">
+                        <input
+                          type="checkbox"
+                          checked={c.enabled}
+                          onChange={(e) => toggleAppleCalendar(c.id, e.target.checked)}
+                        />
+                        <span className="cal-dot" style={{ background: c.color }} />
+                        <span className="cal-filter-name">{c.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                )}
                 <button className="cal-filter-add" onClick={() => onOpenSettings?.()}>
                   <Plus size={14} /> Add a Google account
                 </button>

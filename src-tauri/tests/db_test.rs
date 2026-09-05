@@ -462,6 +462,31 @@ fn transcript_filters_are_dynamic_and_one_on_ones_use_the_attendee_name() {
     ));
     let _ = std::fs::remove_file(&tmp);
     let mut conn = db::init(&tmp).unwrap();
+    let work: i64 = conn
+        .query_row(
+            "SELECT id FROM note_folders WHERE parent_id IS NULL AND name = 'Work'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let company = db::create_note_folder(
+        &conn,
+        Some(work),
+        "Baro",
+        "folder",
+        "",
+        "2026-08-03T14:59:00Z",
+    )
+    .unwrap();
+    db::create_note_folder(
+        &conn,
+        Some(company),
+        "Daily Standup Meeting Notes",
+        "folder",
+        "daily_standup",
+        "2026-08-03T14:59:01Z",
+    )
+    .unwrap();
     let one_on_one_event = json!({
         "attendees": [
             {"email":"edison@heybaro.com","self":true},

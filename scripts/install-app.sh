@@ -23,12 +23,15 @@ if [ ! -d "$APP" ]; then
   exit 1
 fi
 
-if pgrep -x tauri-app > /dev/null 2>&1 || pgrep -x noted > /dev/null 2>&1; then
+if pgrep -x tauri-app > /dev/null 2>&1 \
+  || pgrep -x noted > /dev/null 2>&1 \
+  || pgrep -x Noted > /dev/null 2>&1; then
   echo "Quitting the running noted…"
   osascript -e 'tell application id "com.noted.desktop.alpha" to quit' 2>/dev/null || true
   osascript -e 'tell application "noted" to quit' 2>/dev/null \
     || pkill -x tauri-app \
     || pkill -x noted \
+    || pkill -x Noted \
     || true
   sleep 1
 fi

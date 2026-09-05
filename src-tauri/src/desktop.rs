@@ -1,9 +1,11 @@
 // macOS desktop backend and command surface.
 
 pub mod analytics;
+pub mod applecal;
 pub mod approval_broker;
 pub mod backup;
 pub mod brain;
+pub mod calendar;
 pub mod context_pass;
 pub mod db;
 pub mod direct_authority_store;
@@ -90,9 +92,11 @@ async fn system_settings_get() -> Result<system_settings::SystemSettings, String
 async fn system_settings_set(
     app: tauri::AppHandle,
     time_zone: String,
+    preferred_name: Option<String>,
 ) -> Result<system_settings::SystemSettings, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    system_settings::set_time_zone(&dir, &time_zone).map_err(|e| e.to_string())
+    system_settings::update(&dir, &time_zone, preferred_name.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2146,18 +2150,22 @@ async fn backfill_entities(app: tauri::AppHandle) -> Result<i64, String> {
     Ok(added)
 }
 
-/// One-click plaintext, database-only backup on the Desktop. This intentionally
-/// includes sensitive rows and omits referenced media; it is not an encrypted or
-/// complete recovery archive. Returns the validated snapshot path.
+/// User-directed plaintext, database-only backup on the Desktop. This includes
+/// sensitive rows and omits referenced media; it is not an encrypted or complete
+/// recovery archive. Returns the validated snapshot path chosen in the save panel.
 #[tauri::command]
-async fn export_db(app: tauri::AppHandle) -> Result<String, String> {
-    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
-    let mut dest_dir = std::path::PathBuf::from(&home).join("Desktop");
-    if !dest_dir.exists() {
-        dest_dir = std::path::PathBuf::from(&home);
+async fn export_db(app: tauri::AppHandle, destination: String) -> Result<String, String> {
+    let trimmed = destination.trim();
+    if trimmed.is_empty() {
+        return Err("choose where to save the backup".into());
     }
-    let ts = now_local().format("%Y%m%d-%H%M%S-%6f");
-    let dest = dest_dir.join(format!("noted-backup-{ts}.db"));
+    let dest = std::path::PathBuf::from(trimmed);
+    if !dest.is_absolute() {
+        return Err("choose an absolute backup destination".into());
+    }
+    if dest.file_name().is_none() {
+        return Err("choose a backup file, not a folder".into());
+    }
 
     // Keep the one application writer locked through VACUUM INTO, independent
     // validation, fsync, and publication so no app write can race the snapshot.
@@ -3362,9 +3370,10 @@ async fn meeting_capture_probe(
     }
     {
         let (b, s) = (me.clone(), stop.clone());
-        let aec = meeting::cfg().mic_aec;
+        let mcfg = meeting::cfg();
+        let plan = meeting::capture::MicPlan::new(mcfg.mic_aec, mcfg.ignore_bundles.clone());
         threads.push(std::thread::spawn(move || {
-            meeting::capture::run_mic(b, s, aec, None)
+            meeting::capture::run_mic(b, s, plan, None, None)
         }));
     }
     tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
@@ -4569,7 +4578,7 @@ async fn gcal_list_events(
     let date = event_date
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(today_local);
-    let events = gcal::list_events(&dir, &date)
+    let events = calendar::list_events(&dir, &date)
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(events).map_err(|e| e.to_string())
@@ -4639,7 +4648,7 @@ async fn gcal_events_range(
     end_date: String,
 ) -> Result<Value, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let events = gcal::events_range(&dir, start_date.trim(), end_date.trim())
+    let events = calendar::events_range(&dir, start_date.trim(), end_date.trim())
         .await
         .map_err(|e| e.to_string())?;
     serde_json::to_value(events).map_err(|e| e.to_string())
@@ -4732,6 +4741,34 @@ async fn gcal_delete_event(
     gcal::remove_event(&dir, account.trim(), &calendar_id, &event_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Apple Calendar access state plus its calendar list.
+#[tauri::command]
+fn applecal_status() -> Result<Value, String> {
+    applecal::status().map_err(|e| e.to_string())
+}
+
+/// Ask macOS for calendar access. The OS prompts only the first time; after a
+/// denial this just reports `denied` and the user must change it in System
+/// Settings. Returns the resulting access state.
+#[tauri::command]
+async fn applecal_request_access(app: tauri::AppHandle) -> Result<Value, String> {
+    applecal::request_access(&app)
+        .await
+        .map_err(|e| e.to_string())?;
+    applecal::status().map_err(|e| e.to_string())
+}
+
+/// Show/hide one Apple calendar in the merged feed. Returns the new status.
+#[tauri::command]
+fn applecal_set_calendar_enabled(
+    app: tauri::AppHandle,
+    calendar_id: String,
+    enabled: bool,
+) -> Result<Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    applecal::set_calendar_enabled(&dir, calendar_id.trim(), enabled).map_err(|e| e.to_string())
 }
 
 // ── Quick-capture background worker ─────────────────────────────────────────
@@ -4851,6 +4888,7 @@ async fn process_pending_inner(app: &tauri::AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -4907,6 +4945,7 @@ pub fn run() {
             // historical one-on-ones; calendar secrets still remain in the
             // Keychain and only the normalized account emails are consulted.
             gcal::init(&dir);
+            applecal::cfg_init(&dir);
             reminders::init(&dir);
             let conn = db::init(&dir.join("noted.db"))?;
             app.manage(Db(Mutex::new(conn)));
@@ -5210,6 +5249,9 @@ pub fn run() {
             gcal_create_event,
             gcal_update_event,
             gcal_delete_event,
+            applecal_status,
+            applecal_request_access,
+            applecal_set_calendar_enabled,
             journal_reflect,
             brain_list_vaults,
             brain_add_vault,

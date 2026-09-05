@@ -113,6 +113,13 @@ export function KnowledgeGraph({
     return { nodes: nodes.map((n) => ({ ...n })) as FGNode[], links };
   }, [data, lens, range, query]);
 
+  // Re-fit whenever the visible set changes. Switching lens or range rebuilds
+  // the graph, and keeping the previous viewport leaves the new nodes framed
+  // badly — or entirely off-screen when the set shrinks.
+  useEffect(() => {
+    fitted.current = false;
+  }, [graph]);
+
   // Neighborhood map for hover dimming.
   const neighbors = useMemo(() => {
     const m = new Map<number, Set<number>>();
@@ -202,7 +209,7 @@ export function KnowledgeGraph({
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Find in graph…"
+              placeholder="Filter graph…"
             />
             {query && (
               <button className="icon-btn" onClick={() => setQuery("")}>

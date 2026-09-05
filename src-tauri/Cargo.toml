@@ -1,8 +1,8 @@
 [package]
-name = "tauri-app"
+name = "Noted"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "A local-first personal context system"
+authors = ["Noted contributors"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -72,6 +72,7 @@ noted-apple-security = { path = "crates/noted-apple-security" }
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 hyper = { version = "1", default-features = false, features = ["server"] }
 tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 printpdf = "0.7"
@@ -120,6 +121,22 @@ hound = "3"
 [target.'cfg(target_os = "macos")'.dependencies]
 cidre = "0.16"
 mdns-sd = "0.20.3"
+# Apple Calendar (EventKit) reads. In-process on purpose: TCC attributes the
+# calendar prompt to the binary that asks, so this keeps it as noted itself
+# rather than a spawned helper. Full access is macOS 14+, gated at runtime.
+objc2 = "0.6"
+# The EventKit access prompt is delivered through an Objective-C block.
+block2 = "0.6"
+objc2-core-graphics = "0.3"
+objc2-foundation = { version = "0.3", features = [
+  "NSArray", "NSDate", "NSString", "NSPredicate", "NSError", "NSURL", "NSValue",
+] }
+# objc2-core-graphics (not app-kit) buys the real calendar colours via CGColor
+# without dragging AppKit in for one accessor.
+objc2-event-kit = { version = "0.3", features = [
+  "EKObject", "EKEventStore", "EKCalendar", "EKCalendarItem", "EKEvent",
+  "EKSource", "EKParticipant", "EKTypes", "block2", "objc2-core-graphics",
+] }
 # Native window vibrancy: the sidebar's dark-glass look (desktop shows through).
 window-vibrancy = "0.6"
 

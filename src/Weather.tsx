@@ -36,15 +36,6 @@ type WeatherLocation = {
   timezone: string;
 };
 
-// First-run fallback. A city chosen from the weather bar replaces it locally.
-const ATLANTA_WEATHER_LOCATION: WeatherLocation = {
-  name: "Atlanta",
-  region: "Georgia",
-  latitude: 33.749,
-  longitude: -84.38798,
-  timezone: "America/New_York",
-};
-
 const LOCATION_KEY = "noted-weather-location-v1";
 const GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search";
 
@@ -83,14 +74,14 @@ function isWeatherLocation(value: unknown): value is WeatherLocation {
   );
 }
 
-function readSavedLocation(): WeatherLocation {
+function readSavedLocation(): WeatherLocation | null {
   try {
     const saved = JSON.parse(localStorage.getItem(LOCATION_KEY) ?? "null");
     if (isWeatherLocation(saved)) return saved;
   } catch {
     // A blocked or malformed local preference should never break the homepage.
   }
-  return ATLANTA_WEATHER_LOCATION;
+  return null;
 }
 
 function saveLocation(location: WeatherLocation) {
@@ -544,7 +535,7 @@ function WeatherLocationPicker({
   align,
   onChange,
 }: {
-  location: WeatherLocation;
+  location: WeatherLocation | null;
   align: "start" | "end";
   onChange: (location: WeatherLocation) => Promise<void>;
 }) {
@@ -664,7 +655,7 @@ function WeatherLocationPicker({
         title="Change weather city"
       >
         <MapPin size={13} />
-        <span>{location.name}</span>
+        <span>{location?.name ?? "Set weather city"}</span>
         <ChevronDown size={12} className={open ? "open" : ""} />
       </button>
       {open && (
@@ -754,15 +745,17 @@ export function WeatherHome({
   onTimeZoneChange,
   children,
 }: {
-  location?: WeatherLocation;
+  location?: WeatherLocation | null;
   onTimeZoneChange?: (timeZone: string) => void;
   children: ReactNode;
 }) {
-  const [location, setLocation] = useState<WeatherLocation>(() => initialLocation ?? readSavedLocation());
-  const [snapshot, setSnapshot] = useState<WeatherSnapshot | null>(() => readCache(location));
-  const [loading, setLoading] = useState(() => !readCache(location));
+  const [location, setLocation] = useState<WeatherLocation | null>(() =>
+    initialLocation === undefined ? readSavedLocation() : initialLocation,
+  );
+  const [snapshot, setSnapshot] = useState<WeatherSnapshot | null>(() => location ? readCache(location) : null);
+  const [loading, setLoading] = useState(() => location ? !readCache(location) : false);
   const [unavailable, setUnavailable] = useState(false);
-  const locationKey = keyFor(location);
+  const locationKey = location ? keyFor(location) : "";
 
   async function changeLocation(next: WeatherLocation) {
     const settings = await api.systemSettingsSet(next.timezone);
@@ -777,6 +770,7 @@ export function WeatherHome({
   }
 
   async function load(force = false) {
+    if (!location) return;
     setLoading(true);
     setUnavailable(false);
     try {
@@ -789,6 +783,12 @@ export function WeatherHome({
   }
 
   useEffect(() => {
+    if (!location) {
+      setSnapshot(null);
+      setLoading(false);
+      setUnavailable(false);
+      return;
+    }
     let active = true;
     const safelyLoad = async () => {
       try {
@@ -816,6 +816,27 @@ export function WeatherHome({
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [locationKey]);
+
+  if (!location) {
+    return (
+      <section className="weather-home weather-home-loading weather-home-unconfigured">
+        <WeatherAtmosphere
+          kind="loading"
+          cloudCover={25}
+          windSpeed={3}
+          windDirection={0}
+          precipitation={0}
+        />
+        <header className="weather-bar" aria-label="Weather city is not configured">
+          <WeatherLocationPicker location={null} align="start" onChange={changeLocation} />
+          <span className="weather-bar-status">
+            <Cloud size={18} /> Choose your city for local weather
+          </span>
+        </header>
+        <div className="weather-home-content">{children}</div>
+      </section>
+    );
+  }
 
   if (!snapshot) {
     return (

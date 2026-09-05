@@ -12,6 +12,19 @@ fn test_db(name: &str) -> (std::path::PathBuf, rusqlite::Connection) {
         nonce
     ));
     let conn = db::init(&path).unwrap();
+    let work = folder_id(&conn, "Work");
+    let personal = folder_id(&conn, "Personal");
+    let baro = create_folder(&conn, work, "Baro");
+    db::create_note_folder(
+        &conn,
+        Some(baro),
+        "Daily Standup Meeting Notes",
+        "folder",
+        "daily_standup",
+        "2026-08-06T12:00:00Z",
+    )
+    .unwrap();
+    create_folder(&conn, personal, "Health");
     (path, conn)
 }
 
@@ -66,6 +79,58 @@ fn work_event(attendees: serde_json::Value) -> serde_json::Value {
         "account": "edison@heybaro.com",
         "attendees": attendees
     })
+}
+
+#[test]
+fn stranded_transcripts_are_retried_with_a_bounded_failure_count() {
+    let (path, conn) = test_db("summary_recovery");
+    let id =
+        store::create_meeting(&conn, "Daily Stand Up", None, None, "2026-09-03T16:00:00Z").unwrap();
+    store::set_ended(&conn, id, "2026-09-03T16:20:00Z", "done").unwrap();
+
+    // Empty/abandoned rows are not valid recovery work.
+    assert!(store::list_summary_recovery_candidates(&conn, 3)
+        .unwrap()
+        .is_empty());
+
+    store::insert_segment(&conn, id, "me", 0, 1_000, "Yesterday I shipped the fix.").unwrap();
+    let projection = note(&conn, "Daily Stand Up");
+    store::set_note_id(&conn, id, projection).unwrap();
+    assert_eq!(
+        store::list_summary_recovery_candidates(&conn, 3).unwrap(),
+        vec![(id, 1)]
+    );
+
+    for attempt in 1..=3 {
+        store::mark_summary_attempt(&conn, id).unwrap();
+        store::mark_summary_failed(&conn, id, "local model unavailable").unwrap();
+        let (status, error, retries): (String, Option<String>, i64) = conn
+            .query_row(
+                "SELECT status, summary_error, summary_retry_count FROM meetings WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert_eq!(error.as_deref(), Some("local model unavailable"));
+        assert_eq!(retries, attempt);
+    }
+
+    assert!(store::list_summary_recovery_candidates(&conn, 3)
+        .unwrap()
+        .is_empty());
+    store::mark_summary_succeeded(&conn, id).unwrap();
+    let (status, error): (String, Option<String>) = conn
+        .query_row(
+            "SELECT status, summary_error FROM meetings WHERE id = ?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(status, "done");
+    assert_eq!(error, None);
+    drop(conn);
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -667,8 +732,8 @@ fn live_destination_is_manual_and_survives_the_first_note_link() {
     assert_eq!(meeting["filing_context"], "personal");
 
     let note_id = note(&conn, "Weekly reflection");
+    store::set_note_id(&conn, meeting_id, note_id).unwrap();
     db::file_note(&conn, note_id, Some(health), "2026-08-06T12:02:00Z").unwrap();
-    store::set_note_id_and_apply_route(&conn, meeting_id, note_id, "2026-08-06T12:03:00Z").unwrap();
 
     let filing: (i64, String) = conn
         .query_row(
@@ -694,8 +759,8 @@ fn completed_meeting_destination_moves_its_linked_note() {
     let meeting_id =
         store::create_meeting(&conn, "Planning", None, None, "2026-08-06T12:00:00Z").unwrap();
     let note_id = note(&conn, "Planning");
-    db::file_note(&conn, note_id, Some(baro), "2026-08-06T12:01:00Z").unwrap();
     store::set_note_id(&conn, meeting_id, note_id).unwrap();
+    db::file_note(&conn, note_id, Some(baro), "2026-08-06T12:01:00Z").unwrap();
 
     store::set_filing_destination(&conn, meeting_id, health, "2026-08-06T12:02:00Z").unwrap();
 

@@ -106,7 +106,13 @@ pub struct MeetingsCfg {
     /// macOS voice-processing (AEC) on the mic: the OS subtracts what the
     /// speakers play from the mic signal, so the other side of a call never
     /// lands on the "me" channel. Off = raw cpal mic.
-    #[serde(default = "d_true")]
+    ///
+    /// Defaults **off**. Voice processing seizes the input device, so turning it
+    /// on while a call app is using the mic makes that app record silence — the
+    /// user is muted to everyone else, with no symptom on their own screen.
+    /// `capture::decide_mic_aec` yields to a live call even when this is on;
+    /// the safe default means a fresh install never depends on that.
+    #[serde(default)]
     pub mic_aec: bool,
     /// Record the meeting app's WINDOW as video (ScreenCaptureKit, macOS 15+;
     /// follows the window even when covered or on another Space). Needs the
@@ -374,6 +380,29 @@ pub fn engine_spec(app: &tauri::AppHandle) -> Result<asr::EngineSpec> {
     })
 }
 
+/// Bridge the capture thread's echo-cancellation decision to the UI.
+///
+/// Capture reports *what happened*; deciding how to say it is the UI's job, so
+/// this emits the state and the app name and leaves the wording to the frontend.
+fn aec_notifier(app: tauri::AppHandle, meeting_id: i64) -> capture::AecNotify {
+    Arc::new(move |decision: capture::MicAec| {
+        let (state, bundle) = match &decision {
+            capture::MicAec::Active => ("active", None),
+            capture::MicAec::OffByChoice => ("off_by_choice", None),
+            capture::MicAec::Unavailable => ("unavailable", None),
+            capture::MicAec::YieldedTo { bundle } => ("yielded", Some(bundle.clone())),
+        };
+        let _ = app.emit(
+            "meeting-mic-aec",
+            json!({
+                "meetingId": meeting_id,
+                "state": state,
+                "app": bundle.as_deref().map(detect::app_label),
+            }),
+        );
+    })
+}
+
 /// Begin recording. `event_json` is the calendar-event snapshot when started
 /// from Coming Up / a calendar prompt; `source_bundle` is the mic-holding app
 /// when started from a mic-detection prompt (drives auto-stop).
@@ -519,9 +548,17 @@ pub fn start(
     }
     {
         let (b, s) = (me.clone(), stop.clone());
-        let aec = capture_mode == CaptureMode::Online && cfg().mic_aec;
+        let mcfg = cfg();
+        // Echo cancellation only means anything when the far side is playing
+        // through the speakers, so it is an online-call concern. An in-person
+        // recording has nothing to cancel and nothing to warn about.
+        let online = capture_mode == CaptureMode::Online;
+        let plan = capture::MicPlan::new(online && mcfg.mic_aec, mcfg.ignore_bundles.clone());
         let log = audio_dir.as_ref().map(|d| d.join("capture.log"));
-        threads.push(std::thread::spawn(move || capture::run_mic(b, s, aec, log)));
+        let notify = online.then(|| aec_notifier(app.clone(), id));
+        threads.push(std::thread::spawn(move || {
+            capture::run_mic(b, s, plan, log, notify)
+        }));
     }
     // Window video rides along when enabled (its own dir derivation — audio
     // retention off shouldn't disable video). Fire-and-forget: the worker
@@ -667,12 +704,6 @@ pub async fn stop(app: tauri::AppHandle) -> Result<Option<i64>> {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("[noted] meeting summarize failed: {e}");
-                let db = h.state::<Db>();
-                let conn = db.0.lock().unwrap();
-                // Capture already succeeded: preserve the meeting as a usable
-                // transcript even when optional note generation fails.
-                let _ = store::set_status(&conn, id, "done");
-                drop(conn);
                 let _ = h.emit(
                     "meeting-summarized",
                     json!({ "meetingId": id, "summaryFailed": true }),
@@ -721,12 +752,18 @@ fn rediarize_interrupted(app: &tauri::AppHandle, id: i64) {
 /// gets its speaker labels rebuilt from the retained audio, then summarized;
 /// empty ones are marked failed.
 pub fn reconcile(app: &tauri::AppHandle) {
-    let stuck = {
+    const MAX_SUMMARY_RECOVERY_ATTEMPTS: i64 = 3;
+    let (stuck, stranded) = {
         let db = app.state::<Db>();
         let conn = db.0.lock().unwrap();
-        store::list_stuck(&conn).unwrap_or_default()
+        (
+            store::list_stuck(&conn).unwrap_or_default(),
+            store::list_summary_recovery_candidates(&conn, MAX_SUMMARY_RECOVERY_ATTEMPTS)
+                .unwrap_or_default(),
+        )
     };
     let now = chrono::Utc::now().to_rfc3339();
+    let mut recover = Vec::new();
     for (id, segments) in stuck {
         let db = app.state::<Db>();
         let conn = db.0.lock().unwrap();
@@ -736,12 +773,44 @@ pub fn reconcile(app: &tauri::AppHandle) {
         }
         let _ = store::mark_interrupted(&conn, id, &now, "summarizing");
         drop(conn);
-        println!("[noted] recovering interrupted meeting {id} ({segments} segments)");
-        let h = app.clone();
-        tauri::async_runtime::spawn(async move {
+        recover.push((id, segments, true));
+    }
+    for (id, segments) in stranded {
+        if !recover.iter().any(|(candidate, _, _)| *candidate == id) {
+            recover.push((id, segments, false));
+        }
+    }
+    if recover.is_empty() {
+        return;
+    }
+
+    // Local inference is intentionally sequential. Launching every stranded
+    // meeting at once makes large transcripts contend for the same model and
+    // turns a recoverable failure into another failure storm.
+    let h = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut ready = Vec::new();
+        for (id, segments, interrupted) in recover {
+            match summarize::ensure_note_projection(&h, id).await {
+                Ok(_) => ready.push((id, segments, interrupted)),
+                Err(error) => {
+                    eprintln!("[noted] recovery filing failed for {id}: {error}");
+                    let db = h.state::<Db>();
+                    let conn = db.0.lock().unwrap();
+                    let _ = store::mark_summary_failed(&conn, id, &error.to_string());
+                    drop(conn);
+                    let _ = h.emit(
+                        "meeting-summarized",
+                        json!({ "meetingId": id, "summaryFailed": true }),
+                    );
+                }
+            }
+        }
+        for (id, segments, interrupted) in ready {
+            println!("[noted] recovering meeting {id} ({segments} segments)");
             // Labels first (blocking: onnx over the whole WAV), so the
             // summary and the reloaded transcript see speaker names.
-            if crate::release_profile::diarization() {
+            if interrupted && crate::release_profile::diarization() {
                 let h2 = h.clone();
                 let _ = tauri::async_runtime::spawn_blocking(move || {
                     rediarize_interrupted(&h2, id);
@@ -752,18 +821,14 @@ pub fn reconcile(app: &tauri::AppHandle) {
                 Ok(_) => {}
                 Err(e) => {
                     eprintln!("[noted] recovery summarize failed for {id}: {e}");
-                    let db = h.state::<Db>();
-                    let conn = db.0.lock().unwrap();
-                    let _ = store::set_status(&conn, id, "done");
-                    drop(conn);
                     let _ = h.emit(
                         "meeting-summarized",
                         json!({ "meetingId": id, "summaryFailed": true }),
                     );
                 }
             }
-        });
-    }
+        }
+    });
 }
 
 /// Live status for polling (phone bridge has no event channel).

@@ -64,10 +64,12 @@ CREATE TABLE IF NOT EXISTS notes (
   title        TEXT NOT NULL DEFAULT '',
   raw_text     TEXT NOT NULL,
   document_json TEXT,                    -- rich formatting for the same note; raw_text remains searchable
+  note_kind    TEXT NOT NULL DEFAULT 'capture', -- capture|document; formatting is not a content type
   source       TEXT NOT NULL DEFAULT 'text',
   image_path   TEXT,
   category_id  INTEGER REFERENCES categories(id),
   created_at   TEXT NOT NULL,
+  updated_at   TEXT,                     -- last user content edit; legacy rows fall back to created_at
   -- Provenance: 'capture' for notes the user logged; 'brain:<vault>' for notes
   -- mirrored from an Obsidian brain vault. Capture-listing views filter to
   -- capture-origin so imported brain notes never pollute the daily log/trends.
@@ -266,6 +268,8 @@ CREATE TABLE IF NOT EXISTS meetings (
   route_via      TEXT,                    -- source_account|organizer|creator|attendee|manual
   route_status   TEXT NOT NULL DEFAULT 'needs_filing', -- matched|needs_filing|manual
   route_updated_at TEXT,
+  summary_error  TEXT,                    -- last note-generation failure; cleared after success
+  summary_retry_count INTEGER NOT NULL DEFAULT 0, -- bounds automatic recovery attempts
   trashed_at     TEXT,                    -- reversible removal; NULL = visible
   created_at     TEXT NOT NULL
 );
@@ -492,6 +496,14 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     ensure_column(&conn, "entities", "relationship", "TEXT")?;
     ensure_column(&conn, "notes", "title", "TEXT")?;
     ensure_column(&conn, "notes", "document_json", "TEXT")?;
+    let had_note_kind = has_column(&conn, "notes", "note_kind")?;
+    ensure_column(
+        &conn,
+        "notes",
+        "note_kind",
+        "TEXT NOT NULL DEFAULT 'capture'",
+    )?;
+    ensure_column(&conn, "notes", "updated_at", "TEXT")?;
     // Brain-sync columns (additive; legacy rows read as capture-origin via COALESCE).
     ensure_column(&conn, "notes", "origin", "TEXT")?;
     ensure_column(&conn, "notes", "source_path", "TEXT")?;
@@ -572,6 +584,13 @@ pub fn init(db_path: &Path) -> Result<Connection> {
         "TEXT NOT NULL DEFAULT 'needs_filing'",
     )?;
     ensure_column(&conn, "meetings", "route_updated_at", "TEXT")?;
+    ensure_column(&conn, "meetings", "summary_error", "TEXT")?;
+    ensure_column(
+        &conn,
+        "meetings",
+        "summary_retry_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     // Future conversation pace uses speech-only VAD time. Historical rows stay
     // NULL so the UI can withhold pace instead of presenting padded spans as
     // precise articulation timing.
@@ -579,11 +598,47 @@ pub fn init(db_path: &Path) -> Result<Connection> {
     // Meeting Pack v2 keeps a structured source of truth next to the Markdown
     // projection used by search, older clients, and user edits.
     ensure_column(&conn, "meeting_summaries", "content_json", "TEXT")?;
+    // Before note_kind existed, editor-created documents were the rich records
+    // without extraction entries or a meeting owner. Perform that inference
+    // exactly once so rich formatting added to a capture never changes its
+    // content type.
+    if !had_note_kind {
+        conn.execute(
+            "UPDATE notes
+             SET note_kind = 'document'
+             WHERE document_json IS NOT NULL
+               AND NOT EXISTS (
+                 SELECT 1 FROM meetings WHERE meetings.note_id = notes.id
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM entries WHERE entries.note_id = notes.id
+               )",
+            [],
+        )?;
+    }
+    // Repair rows from the short-lived formatting-only classification. A
+    // document is authored directly and therefore never owns extraction rows
+    // or acts as a meeting projection.
+    conn.execute(
+        "UPDATE notes
+         SET note_kind = 'capture'
+         WHERE note_kind = 'document'
+           AND (
+             EXISTS (SELECT 1 FROM entries WHERE entries.note_id = notes.id)
+             OR EXISTS (SELECT 1 FROM meetings WHERE meetings.note_id = notes.id)
+           )",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE notes SET updated_at = created_at WHERE updated_at IS NULL",
+        [],
+    )?;
     backfill_meeting_public_ids(&conn)?;
     initialize_meeting_filing_provenance(&conn)?;
     initialize_meeting_transcript_index(&conn)?;
     seed_note_folders(&conn)?;
     seed_note_folder_structure_v2(&conn)?;
+    remove_empty_legacy_personal_folder_seed(&conn)?;
     initialize_semantic_folder_rules(&conn)?;
     crate::meeting::store::initialize_one_on_one_speakers(&conn)?;
     initialize_embedding_fingerprint(&conn, &crate::provider::active_embedding_fingerprint())?;
@@ -827,8 +882,8 @@ fn initialize_meeting_transcript_index(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Give the notes library a useful first filing tree once. The metadata
-/// marker means deleting or renaming any of these later is respected.
+/// Give every notes library neutral Work and Personal roots once. Child
+/// folders are user-owned and must never encode one developer's projects.
 fn seed_note_folders(conn: &Connection) -> Result<()> {
     let seeded: Option<String> = conn
         .query_row(
@@ -852,22 +907,10 @@ fn seed_note_folders(conn: &Connection) -> Result<()> {
          VALUES (NULL, 'Work', 'space', '', 0, ?1)",
         [&now],
     )?;
-    let work_id = tx.last_insert_rowid();
     tx.execute(
         "INSERT INTO note_folders (parent_id, name, kind, auto_rule, position, created_at)
          VALUES (NULL, 'Personal', 'space', '', 1, ?1)",
         [&now],
-    )?;
-    tx.execute(
-        "INSERT INTO note_folders (parent_id, name, kind, auto_rule, position, created_at)
-         VALUES (?1, 'Baro', 'folder', '', 0, ?2)",
-        rusqlite::params![work_id, now],
-    )?;
-    let baro_id = tx.last_insert_rowid();
-    tx.execute(
-        "INSERT INTO note_folders (parent_id, name, kind, auto_rule, position, created_at)
-         VALUES (?1, 'Daily Standup Meeting Notes', 'folder', 'daily_standup', 0, ?2)",
-        rusqlite::params![baro_id, now],
     )?;
     tx.execute(
         "INSERT INTO app_metadata (key, value) VALUES ('note_folders_v1_seeded', '1')",
@@ -877,9 +920,8 @@ fn seed_note_folders(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Add the agreed Work and Personal organization once. Folder placement stays
-/// user-owned: this creates empty destinations but does not guess where notes
-/// belong. The marker also means later renames or deletions are respected.
+/// Retain the historical marker without creating opinionated child folders.
+/// Existing libraries remain user-owned; new libraries receive only roots.
 fn seed_note_folder_structure_v2(conn: &Connection) -> Result<()> {
     let seeded: Option<String> = conn
         .query_row(
@@ -910,48 +952,102 @@ fn seed_note_folder_structure_v2(conn: &Connection) -> Result<()> {
         .optional()?;
     let has_all_roots = work_id.is_some() && personal_id.is_some();
 
-    let now = canonical_folder_seed_timestamp(conn)?;
     let tx = conn.unchecked_transaction()?;
-    for (parent_id, names) in [
-        (work_id, &["Symphony", "Side Projects", "Career"][..]),
-        (
-            personal_id,
-            &[
-                "Health",
-                "Finances",
-                "Home",
-                "Relationships",
-                "Travel",
-                "Personal Learning",
-            ][..],
-        ),
-    ] {
-        let Some(parent_id) = parent_id else {
-            continue;
-        };
-        for name in names {
-            tx.execute(
-                "INSERT OR IGNORE INTO note_folders
-                   (parent_id, name, kind, auto_rule, position, created_at)
-                 VALUES (
-                   ?1,
-                   ?2,
-                   'folder',
-                   '',
-                   (SELECT COALESCE(MAX(position), -1) + 1
-                    FROM note_folders WHERE parent_id IS ?1),
-                   ?3
-                 )",
-                rusqlite::params![parent_id, name, now],
-            )?;
-        }
-    }
     if has_all_roots {
         tx.execute(
             "INSERT INTO app_metadata (key, value) VALUES ('note_folders_v2_seeded', '1')",
             [],
         )?;
     }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Old development builds accidentally shipped a complete personal folder
+/// template. Remove that exact signature only from untouched libraries. Any
+/// real content, meeting, filing rule, added folder, missing folder, or rename
+/// makes the cleanup a no-op so user organization is never guessed at or lost.
+fn remove_empty_legacy_personal_folder_seed(conn: &Connection) -> Result<()> {
+    const MARKER: &str = "note_folders_personal_seed_cleanup_v1";
+    let finished: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_metadata WHERE key = ?1",
+            [MARKER],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if finished.is_some() {
+        return Ok(());
+    }
+
+    let (content_count, folder_count, filing_rule_count): (i64, i64, i64) = conn.query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM notes) + (SELECT COUNT(*) FROM meetings),
+           (SELECT COUNT(*) FROM note_folders),
+           (SELECT COUNT(*) FROM meeting_filing_rules)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+
+    let legacy_signature_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM note_folders child
+         JOIN note_folders root ON root.id = child.parent_id
+         WHERE root.parent_id IS NULL
+           AND (
+             (root.name = 'Work' COLLATE NOCASE AND child.name IN
+               ('Baro', 'Symphony', 'Side Projects', 'Career'))
+             OR
+             (root.name = 'Personal' COLLATE NOCASE AND child.name IN
+               ('Health', 'Finances', 'Home', 'Relationships', 'Travel', 'Personal Learning'))
+           )",
+        [],
+        |row| row.get(0),
+    )?;
+    let has_standup_child: bool = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM note_folders standup
+           JOIN note_folders baro ON baro.id = standup.parent_id
+           JOIN note_folders work ON work.id = baro.parent_id
+           WHERE work.parent_id IS NULL
+             AND work.name = 'Work' COLLATE NOCASE
+             AND baro.name = 'Baro' COLLATE NOCASE
+             AND standup.name = 'Daily Standup Meeting Notes' COLLATE NOCASE
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let tx = conn.unchecked_transaction()?;
+    if content_count == 0
+        && folder_count == 13
+        && filing_rule_count == 0
+        && legacy_signature_count == 10
+        && has_standup_child
+    {
+        tx.execute(
+            "DELETE FROM note_folders
+             WHERE parent_id IN (
+               SELECT id FROM note_folders
+               WHERE parent_id IS NULL AND name = 'Work' COLLATE NOCASE
+             )
+             AND name IN ('Baro', 'Symphony', 'Side Projects', 'Career')",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM note_folders
+             WHERE parent_id IN (
+               SELECT id FROM note_folders
+               WHERE parent_id IS NULL AND name = 'Personal' COLLATE NOCASE
+             )
+             AND name IN
+               ('Health', 'Finances', 'Home', 'Relationships', 'Travel', 'Personal Learning')",
+            [],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO app_metadata (key, value) VALUES (?1, '1')",
+        [MARKER],
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -1003,16 +1099,19 @@ fn inferred_folder_rule(name: &str) -> &'static str {
 /// the CREATE TABLE already includes it. ALTER adds it nullable; new writes always
 /// populate it and reads COALESCE legacy NULLs.
 fn ensure_column(conn: &Connection, table: &str, col: &str, decl: &str) -> Result<()> {
+    if !has_column(conn, table, col)? {
+        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {col} {decl};"))?;
+    }
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, col: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let has = stmt
         .query_map([], |r| r.get::<_, String>(1))?
         .filter_map(|x| x.ok())
         .any(|name| name == col);
-    drop(stmt);
-    if !has {
-        conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {col} {decl};"))?;
-    }
-    Ok(())
+    Ok(has)
 }
 
 // ---------------------------------------------------------------------------
@@ -1083,10 +1182,12 @@ pub struct NoteRow {
     pub title: String,
     pub raw_text: String,
     pub document_json: Option<String>,
+    pub note_kind: String,
     pub source: String,
     pub entries: Vec<NoteEntry>,
     pub event_date: String,
     pub created_at: String,
+    pub updated_at: String,
     pub trashed_at: Option<String>,
 }
 
@@ -1115,10 +1216,11 @@ fn list_notes_by_trash(conn: &Connection, trashed: bool) -> Result<Vec<NoteRow>>
     // falling back to the save day for any legacy rows without one. Meeting
     // notes keep their separate meeting-owned Trash lifecycle.
     let mut stmt = conn.prepare(
-        "SELECT n.id, COALESCE(n.title, ''), n.raw_text, n.document_json, n.source,
+        "SELECT n.id, COALESCE(n.title, ''), n.raw_text, n.document_json,
+                COALESCE(n.note_kind, 'capture'), n.source,
                 COALESCE(MAX(e.event_date), date(n.created_at)) AS event_date,
                 json_group_array(json_object('id', e.id, 'category', c.name, 'data', json(e.data_json))) AS entries,
-                n.created_at, n.trashed_at
+                n.created_at, COALESCE(n.updated_at, n.created_at), n.trashed_at
          FROM notes n
          LEFT JOIN entries e ON e.note_id = n.id
          LEFT JOIN categories c ON c.id = e.category_id
@@ -1138,17 +1240,19 @@ fn list_notes_by_trash(conn: &Connection, trashed: bool) -> Result<Vec<NoteRow>>
                   n.id DESC",
     )?;
     let rows = stmt.query_map([trashed], |r| {
-        let entries_str: String = r.get(6)?;
+        let entries_str: String = r.get(7)?;
         Ok(NoteRow {
             id: r.get(0)?,
             title: r.get(1)?,
             raw_text: r.get(2)?,
             document_json: r.get(3)?,
-            source: r.get(4)?,
-            event_date: r.get(5)?,
+            note_kind: r.get(4)?,
+            source: r.get(5)?,
+            event_date: r.get(6)?,
             entries: parse_note_entries(&entries_str),
-            created_at: r.get(7)?,
-            trashed_at: r.get(8)?,
+            created_at: r.get(8)?,
+            updated_at: r.get(9)?,
+            trashed_at: r.get(10)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2132,9 +2236,10 @@ pub fn update_note_with_document(
         "UPDATE notes
          SET title = ?2,
              raw_text = ?3,
-             document_json = COALESCE(?4, document_json)
+             document_json = COALESCE(?4, document_json),
+             updated_at = ?5
          WHERE id = ?1",
-        rusqlite::params![note_id, title.trim(), raw_text, document_json],
+        rusqlite::params![note_id, title.trim(), raw_text, document_json, now],
     )?;
     tx.execute("DELETE FROM embeddings WHERE note_id = ?1", [note_id])?;
     if previous != raw_text {
@@ -2171,8 +2276,8 @@ pub fn create_document_note(
 
     tx.execute(
         "INSERT INTO notes
-           (title, raw_text, document_json, source, category_id, created_at, filing_context)
-         VALUES (?1, ?2, ?3, 'text', NULL, ?4, ?5)",
+           (title, raw_text, document_json, note_kind, source, category_id, created_at, updated_at, filing_context)
+         VALUES (?1, ?2, ?3, 'document', 'text', NULL, ?4, ?4, ?5)",
         rusqlite::params![title.trim(), raw_text, document_json, now, filing_context],
     )?;
     let note_id = tx.last_insert_rowid();

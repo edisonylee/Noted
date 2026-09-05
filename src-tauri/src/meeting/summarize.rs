@@ -1701,9 +1701,156 @@ async fn condense_chunk(chunk: &str) -> Result<Value> {
     .await
 }
 
-/// Generate or refresh one template summary for a meeting. Files the meeting
-/// note on first summarize; later runs replace that template's existing tab.
+/// Ensure every captured transcript has a real, searchable library projection
+/// before model work begins. Generated notes replace this deterministic
+/// transcript fallback after they pass the quality checks.
+pub async fn ensure_note_projection(app: &tauri::AppHandle, meeting_id: i64) -> Result<i64> {
+    let (meeting, segments) = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        let meeting = store::get_meeting(&conn, meeting_id)?;
+        if let Some(note_id) = meeting["note_id"].as_i64() {
+            return Ok(note_id);
+        }
+        let segments = store::list_segments(&conn, meeting_id)?;
+        (meeting, segments)
+    };
+    if segments.is_empty() {
+        return Err(anyhow!("no transcript to file"));
+    }
+
+    let title = meeting["title"].as_str().unwrap_or("Meeting").to_string();
+    let raw_notes = meeting["raw_notes"].as_str().unwrap_or("").to_string();
+    let (attendees, remote_alias) = meeting_participants(&title, &meeting["event_json"]);
+    let date = meeting["started_at"]
+        .as_str()
+        .map(|value| value.chars().take(10).collect::<String>())
+        .unwrap_or_default();
+    let transcript = transcript_text_with_remote_alias(
+        &segments,
+        meeting["capture_mode"].as_str() == Some("in_person"),
+        remote_alias.as_deref(),
+    );
+    let mut note_text = format!(
+        "# {title}\n\n_Transcript saved. Generated meeting notes will replace this view when ready._"
+    );
+    if !raw_notes.trim().is_empty() {
+        note_text.push_str(&format!(
+            "\n\n## Your Notes (verbatim)\n\n{}",
+            raw_notes.trim()
+        ));
+    }
+    note_text.push_str(&format!("\n\n## Transcript\n\n{transcript}"));
+
+    let (me_ms, them_ms) = {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        store::talk_time(&conn, meeting_id)?
+    };
+    let duration_min = segments
+        .iter()
+        .filter_map(|segment| segment["t1_ms"].as_i64())
+        .max()
+        .unwrap_or(0)
+        / 60_000;
+    let entities: Vec<Value> = attendees
+        .iter()
+        .map(|name| json!({ "name": name, "type": "person" }))
+        .collect();
+    let route_status = meeting["route_status"].as_str();
+    let route_folder_id = matches!(route_status, Some("matched" | "manual"))
+        .then(|| meeting["route_folder_id"].as_i64())
+        .flatten();
+    // An exact approved meeting rule owns context as well as destination.
+    // Without one, use the Work/Personal choice captured when recording began;
+    // never consult whichever context happens to be active now.
+    let filing_context = if let Some(folder_id) = route_folder_id {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        Some(crate::db::note_folder_context(&conn, folder_id)?)
+    } else {
+        meeting["filing_context"].as_str().map(String::from)
+    };
+    let save_json = json!({
+        "raw_text": note_text,
+        "source": "meeting",
+        "event_date": if date.is_empty() { crate::today_local() } else { date },
+        "entries": [{
+            "category": "meetings",
+            "description": title,
+            "data": {
+                "meeting_id": meeting_id,
+                "title": title,
+                "attendees": attendees,
+                "duration_min": duration_min,
+                "talk_ms_me": me_ms,
+                "talk_ms_them": them_ms,
+            },
+        }],
+        "entities": entities,
+        "filing_context": filing_context,
+        "folder_id": route_folder_id,
+        "filing_source": route_folder_id.map(|_| {
+            if route_status == Some("manual") { "manual" } else { "rule" }
+        }),
+    });
+    let args = serde_json::from_value::<crate::SaveArgs>(save_json)
+        .map_err(|error| anyhow!("meeting note data was invalid: {error}"))?;
+    let note_id = crate::save_entry(app.clone(), args)
+        .await
+        .map_err(|error| anyhow!("meeting note could not be saved: {error}"))?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let state = app.state::<Db>();
+    let conn = state.0.lock().unwrap();
+    if let Err(error) = store::set_note_id_and_apply_route(&conn, meeting_id, note_id, &now) {
+        eprintln!("[noted] meeting route filing failed: {error}");
+        // The route application is transactional. Preserve the projection link
+        // so a retry cannot create a duplicate document; its broad save
+        // destination remains visible and can be re-filed separately.
+        store::set_note_id(&conn, meeting_id, note_id).map_err(|link_error| {
+            anyhow!(
+                "meeting note was saved but could not be linked: {link_error}; route error: {error}"
+            )
+        })?;
+    }
+    drop(conn);
+    let _ = app.emit("note-filed", json!({ "id": note_id }));
+    Ok(note_id)
+}
+
+/// Generate or refresh one template summary for a meeting. The transcript
+/// projection already exists; a successful primary summary refreshes it.
 pub async fn run(
+    app: &tauri::AppHandle,
+    meeting_id: i64,
+    template_name: Option<String>,
+) -> Result<String> {
+    if let Err(error) = ensure_note_projection(app, meeting_id).await {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        let _ = store::mark_summary_failed(&conn, meeting_id, &error.to_string());
+        return Err(error);
+    }
+    {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        store::mark_summary_attempt(&conn, meeting_id)?;
+    }
+    let result = run_inner(app, meeting_id, template_name).await;
+    if let Err(error) = &result {
+        let state = app.state::<Db>();
+        let conn = state.0.lock().unwrap();
+        if let Err(persist_error) = store::mark_summary_failed(&conn, meeting_id, &error.to_string())
+        {
+            eprintln!(
+                "[noted] failed to persist meeting summary error for {meeting_id}: {persist_error}"
+            );
+        }
+    }
+    result
+}
+
+async fn run_inner(
     app: &tauri::AppHandle,
     meeting_id: i64,
     template_name: Option<String>,
@@ -1865,12 +2012,14 @@ pub async fn run(
     }
 
     let now = chrono::Utc::now().to_rfc3339();
-    let first_note = {
+    let first_summary = meeting["summaries"]
+        .as_array()
+        .is_none_or(|summaries| summaries.is_empty());
+    {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
         store::insert_summary(&conn, meeting_id, &template, &md, Some(&out), &now)?;
-        meeting["note_id"].is_null()
-    };
+    }
 
     let mut note_text = format!("# {title}\n\n{md}");
     if !raw_notes.trim().is_empty() {
@@ -1880,79 +2029,7 @@ pub async fn run(
         ));
     }
 
-    // First summary → file a real note under 'meetings' (search/embeddings/KG).
-    if first_note {
-        let (me_ms, them_ms) = {
-            let state = app.state::<Db>();
-            let conn = state.0.lock().unwrap();
-            store::talk_time(&conn, meeting_id)?
-        };
-        let duration_min = segments
-            .iter()
-            .filter_map(|s| s["t1_ms"].as_i64())
-            .max()
-            .unwrap_or(0)
-            / 60_000;
-        let entities: Vec<Value> = attendees
-            .iter()
-            .map(|n| json!({ "name": n, "type": "person" }))
-            .collect();
-        let route_status = meeting["route_status"].as_str();
-        let route_folder_id = matches!(route_status, Some("matched" | "manual"))
-            .then(|| meeting["route_folder_id"].as_i64())
-            .flatten();
-        // An exact approved meeting rule owns context as well as destination.
-        // Without one, use the Work/Personal choice captured when recording
-        // began; never consult whichever context happens to be active now.
-        let filing_context = if let Some(folder_id) = route_folder_id {
-            let state = app.state::<Db>();
-            let conn = state.0.lock().unwrap();
-            Some(crate::db::note_folder_context(&conn, folder_id)?)
-        } else {
-            meeting["filing_context"].as_str().map(String::from)
-        };
-        let save_json = json!({
-            "raw_text": note_text,
-            "source": "meeting",
-            "event_date": if date.is_empty() { crate::today_local() } else { date.clone() },
-            "entries": [{
-                "category": "meetings",
-                "description": title,
-                "data": {
-                    "meeting_id": meeting_id,
-                    "title": title,
-                    "attendees": attendees,
-                    "duration_min": duration_min,
-                    "talk_ms_me": me_ms,
-                    "talk_ms_them": them_ms,
-                },
-            }],
-            "entities": entities,
-            "filing_context": filing_context,
-            "folder_id": route_folder_id,
-            "filing_source": route_folder_id.map(|_| {
-                if route_status == Some("manual") { "manual" } else { "rule" }
-            }),
-        });
-        match serde_json::from_value::<crate::SaveArgs>(save_json) {
-            Ok(args) => match crate::save_entry(app.clone(), args).await {
-                Ok(note_id) => {
-                    let state = app.state::<Db>();
-                    let conn = state.0.lock().unwrap();
-                    if let Err(error) =
-                        store::set_note_id_and_apply_route(&conn, meeting_id, note_id, &now)
-                    {
-                        eprintln!("[noted] meeting route filing failed: {error}");
-                        // Preserve the core meeting → note link even if a
-                        // destination disappeared during summarization.
-                        let _ = store::set_note_id(&conn, meeting_id, note_id);
-                    }
-                }
-                Err(e) => eprintln!("[noted] meeting note filing failed: {e}"),
-            },
-            Err(e) => eprintln!("[noted] meeting note args invalid: {e}"),
-        }
-    } else if template == super::cfg().default_template {
+    if first_summary || template == super::cfg().default_template {
         // A refreshed primary summary (including a speaker repair) must also
         // refresh the searchable note; otherwise a bad old name survives in
         // Notes, semantic search, and the knowledge graph.
@@ -1973,7 +2050,7 @@ pub async fn run(
     {
         let state = app.state::<Db>();
         let conn = state.0.lock().unwrap();
-        store::set_status(&conn, meeting_id, "done")?;
+        store::mark_summary_succeeded(&conn, meeting_id)?;
     }
     let _ = app.emit(
         "meeting-summarized",

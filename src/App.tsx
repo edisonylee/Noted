@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { save } from "@tauri-apps/plugin-dialog";
 import { listen } from "./events";
-import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, House, ListTodo, Loader, MessageCircle, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Square, StickyNote, Sun, Users, Video } from "lucide-react";
+import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, FileText, House, Library as LibraryIcon, ListTodo, Loader, MessageCircle, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Square, Sun, Users, Video } from "lucide-react";
 import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg, type Img } from "./image";
@@ -20,7 +21,7 @@ import { parseBlocks, TodayView } from "./Today";
 import { MeetingPage } from "./MeetingPage";
 import { releaseProfile } from "./releaseProfile";
 import { ComingUp } from "./ComingUp";
-import { NotesView } from "./NotesView";
+import { DocumentsView, LibraryView } from "./NotesView";
 import { AskView } from "./AskView";
 import { AgentContextApproval } from "./AgentContextApproval";
 import { WeatherHome } from "./Weather";
@@ -39,7 +40,7 @@ import "./App.css";
 const TeamWorkspace = lazy(() => import("./teams/TeamWorkspace").then(module => ({ default: module.TeamWorkspace })));
 
 type Phase = "idle" | "thinking" | "review";
-type View = "team" | "today" | "ask" | "capture" | "notes" | "calendar" | "journal" | "knowledge" | "settings";
+type View = "team" | "today" | "ask" | "capture" | "documents" | "library" | "calendar" | "journal" | "knowledge" | "settings";
 
 // Journal is parked while the meeting recorder + knowledge graph stabilize;
 // the view, commands, and data all stay — this only hides the nav entry.
@@ -653,9 +654,15 @@ export default function App() {
   }, []);
 
   async function onBackup() {
-    setBackupMsg("backing up…");
     try {
-      const path = await api.exportDb();
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const destination = await save({
+        defaultPath: `noted-backup-${timestamp}.db`,
+        filters: [{ name: "Noted database", extensions: ["db"] }],
+      });
+      if (!destination) return;
+      setBackupMsg("backing up…");
+      const path = await api.exportDb(destination);
       setBackupMsg(`backed up to ${path}`);
     } catch (e) {
       setBackupMsg(`backup failed: ${e}`);
@@ -882,7 +889,11 @@ export default function App() {
             ? " calmode"
             : view === "journal"
               ? " journalmode"
-              : "")
+              : view === "knowledge"
+                ? " graphmode"
+                : view === "today"
+                  ? " schedmode"
+                  : "")
       }
     >
       {reconnectingOverlay}
@@ -925,8 +936,11 @@ export default function App() {
           <button className={view === "calendar" ? "on" : ""} onClick={() => setView("calendar")}>
             <CalendarDays size={16} /> Calendar
           </button>
-          <button className={view === "notes" ? "on" : ""} onClick={() => setView("notes")}>
-            <StickyNote size={16} /> Notes
+          <button className={view === "documents" ? "on" : ""} onClick={() => setView("documents")}>
+            <FileText size={16} /> Documents
+          </button>
+          <button className={view === "library" ? "on" : ""} onClick={() => setView("library")}>
+            <LibraryIcon size={16} /> Library
           </button>
           {SHOW_JOURNAL && (
             <button className={view === "journal" ? "on" : ""} onClick={() => setView("journal")}>
@@ -1059,8 +1073,10 @@ export default function App() {
           <Suspense fallback={<p role="status">Opening team workspace…</p>}>
             <TeamWorkspace />
           </Suspense>
-        ) : view === "notes" ? (
-          <NotesView notes={notes} cats={cats} onChanged={() => refresh().catch(handleErr)} />
+        ) : view === "documents" ? (
+          <DocumentsView key="documents" notes={notes} cats={cats} onChanged={() => refresh().catch(handleErr)} />
+        ) : view === "library" ? (
+          <LibraryView key="library" notes={notes} cats={cats} onChanged={() => refresh().catch(handleErr)} />
         ) : view === "calendar" ? (
           <CalendarView onOpenSettings={() => setView("settings")} />
         ) : view === "journal" ? (
@@ -1392,6 +1408,11 @@ export default function App() {
                       <input
                         className="entity-name"
                         value={e.name}
+                        // Grow with the name being typed. `size` rather than CSS
+                        // field-sizing, which the WebKit view cannot be relied on
+                        // to support; max-width keeps a long name from pushing
+                        // the chip's type and remove controls off the row.
+                        size={Math.min(22, Math.max(5, e.name.length + 1))}
                         onChange={(ev) => updateEntity(i, { name: ev.target.value })}
                         spellCheck={false}
                       />
@@ -1462,10 +1483,10 @@ export default function App() {
               if (savedMsg.spaceId != null) {
                 localStorage.setItem("noted-active-space", String(savedMsg.spaceId));
               }
-              setView("notes");
+              setView("library");
             }}
           >
-            View in Notes
+            View in Library
           </button>
           <button
             className="dismiss"

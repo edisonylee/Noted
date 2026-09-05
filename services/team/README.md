@@ -5,6 +5,45 @@ initial self-hostable implementation, not a deployed hosted service or a claim o
 enterprise readiness. The private Noted vault never becomes this service’s data
 directory.
 
+## Persistent workspace on your Mac
+
+For a workspace that remains available after the terminal closes or the Mac
+restarts, run this from the repository root:
+
+```sh
+bun run team:local --owner "Your name" --workspace "Your workspace" --examples
+```
+
+This creates a persistent database in `~/Library/Application Support/Noted Team`,
+installs a user LaunchAgent named `com.noted.team`, and connects the standard
+Noted app to `http://127.0.0.1:8790`. The service listens only on this Mac. It is
+not a hosted service that coworkers can reach. Bun must remain installed at the
+path recorded in the LaunchAgent.
+
+Open Home, then Team in an already-running Noted app to refresh its connection.
+`--examples` adds a separate **Noted examples** workspace with clearly fictional
+meetings; it never imports or publishes private notes, recordings, or calendar
+data. Your named workspace starts empty. Re-running the command preserves both
+workspaces and existing content. It refuses to replace a connection to another
+server or take ownership of a transferred workspace.
+
+The runtime is copied outside the checkout, so changing branches or closing this
+task does not stop it. Credentials are saved in macOS Keychain; the LaunchAgent
+and connection file contain no account token or setup key. The initial setup key
+is discarded after provisioning, and bootstrap is disabled on subsequent starts.
+Account sessions expire after 30 days; rerunning `team:local` renews the local
+owner's connection. This is a development installation, not enterprise hosting.
+
+To stop it without deleting any workspace data:
+
+```sh
+launchctl bootout gui/$(id -u)/com.noted.team
+```
+
+To start it again, rerun the setup command. Back up `team.sqlite` with SQLite's
+backup API while running, or stop the service before copying its database/WAL.
+This installer does not schedule backups or provide remote access.
+
 ## Try it locally
 
 From the repository root, with Bun installed:
@@ -32,7 +71,7 @@ NOTED_TEAM_DB=/absolute/private/path/team.sqlite bun run team:serve
 
 The default listener is `127.0.0.1:8790`. In Noted’s **Team** view, use
 `http://127.0.0.1:8790`, choose **Set up a new team server**, and enter the setup
-key, organization name and owner name. Bootstrap works only once. Then create
+key, organization name and owner name. Bootstrap works only once. An initialized service can restart without the setup key; omitting it disables bootstrap. Then create
 one-use invitations in **Members & prompts → Members**. Share the invitation
 code and server address through your organization’s approved channel.
 
@@ -44,7 +83,7 @@ domains, certificates, a production host or an identity provider.
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `NOTED_TEAM_DB` | `team.sqlite` in current directory | Separate SQLite database |
-| `NOTED_TEAM_SETUP_KEY` | Required | Initial one-time owner provisioning |
+| `NOTED_TEAM_SETUP_KEY` | Required for a new database | Initial one-time owner provisioning; omit after setup to disable bootstrap |
 | `NOTED_TEAM_HOST` | `127.0.0.1` | Listen interface |
 | `NOTED_TEAM_PORT` | `8790` | Listen port |
 | `NOTED_TEAM_ORIGINS` | Empty | Exact browser origins permitted, comma separated; native requests need none |

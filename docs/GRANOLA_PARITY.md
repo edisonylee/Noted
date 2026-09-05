@@ -23,9 +23,10 @@ reviewed copy. Publishing never grants access to the publisher’s entire vault.
 
 ## Organizational functionality
 
-“Implemented” below means present on this branch, not deployed or installed in
-the user’s standard app. The service and UI require deployment before coworkers
-can connect from different Macs. See [the service runbook](../services/team/README.md).
+“Implemented” below means present on this branch. The standard native app is
+installed locally, with a persistent service on this Mac and an automatic
+connection. Coworkers on different Macs still require a hosted deployment.
+See [the service runbook](../services/team/README.md).
 
 | Capability | Current Granola evidence | Noted on this branch | Remaining difference |
 | --- | --- | --- | --- |
@@ -70,11 +71,13 @@ work required after the organizational foundation.
   older-meeting retrieval, shared prompts and private saved answers.
 - Native tests cover server-origin restrictions, opt-in transcript publication,
   private-field exclusion and exact publication-preview matching.
-- Production frontend compilation, service typechecking and all 335 active Rust unit tests pass (three manual/live tests remain ignored). The service suite has 27 tests with 174 assertions, including restart persistence, read-only integration scopes, MCP through a real HTTP listener and stdio process, private conversation continuity, source revocation, stale appends, fixed scope, bounded model history and history pagination.
+- Production frontend compilation, service typechecking and all 335 active Rust unit tests pass (three manual/live tests remain ignored). The service suite has 29 tests with 187 assertions, including restart persistence, read-only integration scopes, MCP through a real HTTP listener and stdio process, private conversation continuity, source revocation, stale appends, fixed scope, bounded model history and history pagination.
 - The dedicated browser preview uses the real local HTTP service and synthetic
   meetings. Browser checks cover organizational access changes, nested folders, scoped retrieval, follow-up history, saved answers, source jumps, summary edits, integration keys, responsive layouts and keyboard focus. It verifies retrieval and permissioned workflows, while generated
   answers use the configured model only in the native app.
 - The final native-browser deletion prompt stalled the preview automation. Chat deletion now uses an in-app confirmation dialog; its replacement compiles, but its final click-through was not verified in that stalled browser session. Backend conversation deletion and cascades are covered by tests.
+- The installed native app was checked end to end with a separate fictional workspace: automatic connection, workspace switching, a cited answer and follow-up using the configured model, saving the answer, opening its source, and jumping to a transcript timestamp. A forced service restart preserved both workspaces, three examples, two chat turns, the saved answer, and the authenticated connection. This is a small functional check, not a broad model-quality benchmark.
+- Local setup now installs a persistent service through a user LaunchAgent, stores the account session in Keychain, and creates a separate optional example workspace. The deployed runtime is independent of the source checkout; bootstrap is disabled after provisioning.
 - Real organizational deployment, identity-provider integration, production
   operations, native end-to-end publication and live-model answer quality remain
   unverified. Complete Granola functionality parity has **not** been achieved.

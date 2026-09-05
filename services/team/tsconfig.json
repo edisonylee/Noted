@@ -1,4 +1,12 @@
 {
-  "compilerOptions": { "target": "ESNext", "module": "ESNext", "moduleResolution": "bundler", "strict": true, "skipLibCheck": true, "noEmit": true, "types": ["bun"] },
-  "include": ["*.ts", "../../src/teams/types.ts"]
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["bun"]
+  },
+  "include": ["*.ts", "../../src/teams/types.ts", "../../scripts/team-local.ts"]
 }

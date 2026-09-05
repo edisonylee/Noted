@@ -261,15 +261,25 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
   };
 }
 
-if (import.meta.main) {
-  const setupKey = process.env.NOTED_TEAM_SETUP_KEY ?? "";
-  if (setupKey.length < 32)
+export function openServiceStore(path: string, setupKey = "") {
+  if (setupKey && setupKey.length < 32)
     throw new Error(
-      "Set NOTED_TEAM_SETUP_KEY to a random secret of at least 32 characters",
+      "The initial setup key must contain at least 32 characters",
     );
-  const store = new TeamStore(
+  const store = new TeamStore(path, setupKey);
+  if (!setupKey && !store.get("SELECT id FROM organizations LIMIT 1")) {
+    store.db.close();
+    throw new Error(
+      "A new server needs NOTED_TEAM_SETUP_KEY. An initialized server can run without it.",
+    );
+  }
+  return store;
+}
+
+if (import.meta.main) {
+  const store = openServiceStore(
     process.env.NOTED_TEAM_DB ?? "team.sqlite",
-    setupKey,
+    process.env.NOTED_TEAM_SETUP_KEY ?? "",
   );
   const handler = createHandler(
     store,

@@ -1,10 +1,11 @@
 import { describe, test, expect, afterEach } from "bun:test";
 import { TeamStore } from "./store";
-import { createHandler } from "./server";
+import { createHandler, openServiceStore } from "./server";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { createMcpHandler, apiClient } from "./mcp";
+import { ensureExampleWorkspace } from "./examples";
 const stores: TeamStore[] = [];
 afterEach(() => {
   stores.splice(0).forEach((s) => s.db.close());
@@ -923,5 +924,61 @@ describe("private team conversations", () => {
     ).toBe(401);
     expect((await call(`conversations/${c.id}`, "DELETE")).status).toBe(200);
     expect((await call(`conversations/${c.id}`)).status).toBe(404);
+  });
+});
+
+describe("persistent local service startup", () => {
+  test("examples are isolated from the real workspace and are not duplicated on reinstall", () => {
+    const { s, owner, org } = fixture();
+    const sample = ensureExampleWorkspace(s, owner);
+    expect(sample).not.toBe(org);
+    expect(s.listNotes(owner, org)).toEqual([]);
+    expect(s.listNotes(owner, sample)).toHaveLength(3);
+    expect(
+      s
+        .listNotes(owner, sample)
+        .every((note) => note.title.startsWith("Example —")),
+    ).toBe(true);
+    expect(ensureExampleWorkspace(s, owner)).toBe(sample);
+    expect(s.listNotes(owner, sample)).toHaveLength(3);
+    expect(s.orgs(owner)).toHaveLength(2);
+  });
+  test("an initialized server restarts with bootstrap disabled and preserves its owner", () => {
+    const directory = mkdtempSync(joinPath(tmpdir(), "noted-team-local-"));
+    const database = joinPath(directory, "team.sqlite");
+    try {
+      expect(() => openServiceStore(database)).toThrow("new server needs");
+      expect(() => openServiceStore(database, "short")).toThrow("at least 32");
+      const first = openServiceStore(
+        database,
+        "one-time-setup-key-for-local-startup-test",
+      );
+      const setup = first.bootstrap(
+        "one-time-setup-key-for-local-startup-test",
+        "Local",
+        "Owner",
+      );
+      const owner = first.authenticate(setup.token);
+      first.db.close();
+      const next = openServiceStore(database);
+      try {
+        expect(next.authenticate(setup.token)).toBe(owner);
+        expect(next.orgs(owner)[0].id).toBe(setup.org);
+        expect(() => next.bootstrap("", "Replacement", "Intruder")).toThrow(
+          "Invalid setup key",
+        );
+        expect(() =>
+          next.bootstrap(
+            "one-time-setup-key-for-local-startup-test",
+            "Replacement",
+            "Intruder",
+          ),
+        ).toThrow("Invalid setup key");
+      } finally {
+        next.db.close();
+      }
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

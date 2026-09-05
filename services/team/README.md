@@ -1,9 +1,9 @@
 # Noted team service
 
-A separate shared workspace for explicitly published meeting copies. This is an
-initial self-hostable implementation, not a deployed hosted service or a claim of
-enterprise readiness. The private Noted vault never becomes this service’s data
-directory.
+A separate shared workspace for explicitly published meeting copies, channels,
+and direct messages. It can run locally or on a hosted server such as Railway.
+The private Noted vault never becomes this service’s data directory. This is an
+initial self-hostable implementation, not a claim of enterprise readiness.
 
 ## Persistent workspace on your Mac
 
@@ -114,6 +114,39 @@ For the container deployment and free-trial setup, see [Railway deployment](RAIL
 5. Use **+ Workspace** to create/join another organization on the same server.
    One native server connection is active at a time.
 
+## Team chat
+
+Open **Team → Team chat** for conversations with people. Every workspace has a
+`#general` channel, and members can create additional channels. All current
+workspace members can read channel history and send messages. The creator or a
+workspace admin can rename, describe, archive, or restore a channel; `#general`
+always remains available. Archiving preserves history and pauses sending.
+
+Choose **New direct message**, then a teammate, for a private two-person
+conversation. Reopening the same pair returns the same history. Every request
+checks workspace membership and participation: even workspace owners and admins
+cannot open someone else's DM through the API. If a participant leaves, the
+remaining member retains read-only history. The server operator has database
+access; messages are not end-to-end encrypted.
+
+Chat includes unread counts, earlier history, drafts retained while switching
+rooms, editing your own messages, and deletion. Channel admins can also delete
+channel messages. Messages are plain text, limited to 10,000 characters. Failed
+sends can be retried with the same request identifier without creating a second
+copy. Edits reject stale revisions, and deletion removes the body while leaving
+a visible tombstone. Backups may retain earlier content.
+
+While chat is visible, the open conversation refreshes every three seconds and
+the conversation list every ten seconds; focus triggers an immediate refresh.
+Read markers sync across devices when the conversation is viewed at the bottom.
+This release does not include typing indicators, attachments, threads, message
+search, or push notifications. Chat messages are not included in meeting search,
+model prompts, read-only integration keys, or MCP responses.
+
+The existing service database gains additive `chat_*` tables on startup and a
+general channel for each existing workspace. Use the normal service backup and
+deployment process; no separate chat server or model subscription is needed.
+
 ## Data and authority boundaries
 
 - Published fields: title, selected summary, meeting date, optional formatted
@@ -150,6 +183,7 @@ For the container deployment and free-trial setup, see [Railway deployment](RAIL
 
 ```sh
 bun run team:test
+bun test tests/team-messaging.test.ts
 bun install --cwd services/team
 bun run --cwd services/team check
 bun run build

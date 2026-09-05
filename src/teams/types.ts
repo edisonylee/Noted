@@ -96,3 +96,42 @@ export type TeamConversationRow = {
   updated_at: string;
   available: boolean;
 };
+
+export type TeamChatRoom = {
+  id: string;
+  org_id: string;
+  kind: "channel" | "direct";
+  name: string;
+  description: string;
+  created_by: string;
+  created_at: string;
+  archived_at: string | null;
+  revision: number;
+  is_default: boolean;
+  participants: (TeamUser & { active: boolean })[];
+  unread: number;
+  last_activity: string;
+  can_manage: boolean;
+  can_send: boolean;
+};
+export type TeamChatMessage = {
+  id: string;
+  room_id: string;
+  author_id: string;
+  author_name: string;
+  body: string;
+  created_at: string;
+  edited_at: string | null;
+  deleted_at: string | null;
+  revision: number;
+  created_seq: number;
+  can_edit: boolean;
+  can_delete: boolean;
+};
+export type TeamChatPage = {
+  room: TeamChatRoom;
+  messages: TeamChatMessage[];
+  cursor: number;
+  has_more: boolean;
+  older_before: number | null;
+};

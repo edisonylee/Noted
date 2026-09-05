@@ -38,6 +38,387 @@ function fixture() {
     });
   return { s, owner, org, space, join, publish, token: setup.token };
 }
+
+describe("team member messaging", () => {
+  const query = (value = "") => new URLSearchParams(value);
+  const message = (body: string) => ({ body, client_id: crypto.randomUUID() });
+  test("channels include everyone and enforce creator/admin settings, archive state and revisions", () => {
+    const { s, owner, org, join } = fixture();
+    const member = join("Taylor").id,
+      peer = join("Morgan").id;
+    const general = s.chatRooms(member, org)[0];
+    expect(general.name).toBe("general");
+    expect(general.is_default).toBe(true);
+    const channel = s.createChatRoom(member, org, {
+      kind: "channel",
+      name: "Project Launch",
+      description: "Pilot coordination",
+    });
+    expect(channel.name).toBe("project-launch");
+    expect(s.chatRoom(peer, org, channel.id).can_send).toBe(true);
+    expect(() =>
+      s.createChatRoom(owner, org, { kind: "channel", name: "PROJECT-LAUNCH" }),
+    ).toThrow("already exists");
+    expect(() =>
+      s.updateChatRoom(peer, org, channel.id, { revision: 1, archived: true }),
+    ).toThrow();
+    const sent = s.sendChatMessage(
+      peer,
+      org,
+      channel.id,
+      message("Pilot is ready"),
+    );
+    const archived = s.updateChatRoom(member, org, channel.id, {
+      revision: 1,
+      archived: true,
+    });
+    expect(archived.can_send).toBe(false);
+    expect(
+      s.chatMessages(peer, org, channel.id, query()).messages[0].body,
+    ).toBe(sent.body);
+    expect(() =>
+      s.sendChatMessage(peer, org, channel.id, message("Late message")),
+    ).toThrow("archived");
+    expect(() =>
+      s.changeChatMessage(peer, org, sent.id, { revision: 1, body: "Edit" }),
+    ).toThrow();
+    expect(() =>
+      s.updateChatRoom(member, org, channel.id, {
+        revision: 1,
+        archived: false,
+      }),
+    ).toThrow("changed");
+    expect(
+      s.updateChatRoom(owner, org, channel.id, { revision: 2, archived: false })
+        .can_send,
+    ).toBe(true);
+    expect(() =>
+      s.updateChatRoom(owner, org, general.id, { revision: 1, archived: true }),
+    ).toThrow("general");
+  });
+  test("direct messages are private even from workspace owners and admins; cross-workspace IDs fail", async () => {
+    const { s, owner, org, join, token } = fixture();
+    const a = join("Taylor"),
+      b = join("Morgan"),
+      admin = join("Admin", "admin");
+    const dm = s.createChatRoom(a.id, org, { kind: "direct", member_id: b.id });
+    expect(
+      s.createChatRoom(b.id, org, { kind: "direct", member_id: a.id }).id,
+    ).toBe(dm.id);
+    const sent = s.sendChatMessage(
+      a.id,
+      org,
+      dm.id,
+      message("Private planning detail"),
+    );
+    expect(s.chatRooms(owner, org).some((r) => r.id === dm.id)).toBe(false);
+    for (const outsider of [owner, admin.id]) {
+      expect(() => s.chatRoom(outsider, org, dm.id)).toThrow();
+      expect(() => s.chatMessages(outsider, org, dm.id, query())).toThrow();
+      expect(() =>
+        s.sendChatMessage(outsider, org, dm.id, message("Intrusion")),
+      ).toThrow();
+      expect(() =>
+        s.changeChatMessage(outsider, org, sent.id, { revision: 1 }, true),
+      ).toThrow();
+      expect(() =>
+        s.readChat(outsider, org, dm.id, sent.created_seq),
+      ).toThrow();
+    }
+    const other = s.createOrg(owner, "Other workspace");
+    expect(() =>
+      s.createChatRoom(owner, other, { kind: "direct", member_id: a.id }),
+    ).toThrow();
+    expect(() =>
+      s.createChatRoom(a.id, org, { kind: "direct", member_id: a.id }),
+    ).toThrow();
+    const handler = createHandler(s);
+    for (const path of [
+      `chat-rooms/${dm.id}/messages`,
+      `chat-rooms/${dm.id}`,
+      `chat-rooms/${dm.id}/messages/extra`,
+    ]) {
+      const response = await handler(
+        new Request(`https://team.test/v1/orgs/${org}/${path}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      );
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toContain("Private planning detail");
+    }
+    expect(s.chatMessages(b.id, org, dm.id, query()).messages[0].body).toBe(
+      "Private planning detail",
+    );
+  });
+  test("send retries are idempotent, authors cannot be forged, and stale edits cannot restore deletions", () => {
+    const { s, owner, org, join } = fixture();
+    const member = join("Taylor").id,
+      room = s.chatRooms(owner, org)[0].id;
+    const payload = message("First version");
+    const sent = s.sendChatMessage(member, org, room, {
+      ...payload,
+      author_id: owner,
+    });
+    expect(sent.author_id).toBe(member);
+    expect(s.sendChatMessage(member, org, room, payload).id).toBe(sent.id);
+    expect(() =>
+      s.sendChatMessage(member, org, room, { ...payload, body: "Different" }),
+    ).toThrow();
+    expect(() =>
+      s.changeChatMessage(owner, org, sent.id, {
+        revision: 1,
+        body: "Impersonation",
+      }),
+    ).toThrow();
+    const edited = s.changeChatMessage(member, org, sent.id, {
+      revision: 1,
+      body: "Corrected",
+    });
+    expect(edited.revision).toBe(2);
+    expect(() =>
+      s.changeChatMessage(member, org, sent.id, { revision: 1, body: "Stale" }),
+    ).toThrow("changed");
+    const deleted = s.changeChatMessage(
+      owner,
+      org,
+      sent.id,
+      { revision: 2 },
+      true,
+    );
+    expect(deleted.body).toBe("");
+    expect(deleted.deleted_at).not.toBeNull();
+    expect(
+      s.sendChatMessage(member, org, room, payload).deleted_at,
+    ).not.toBeNull();
+    expect(s.chatMessages(owner, org, room, query()).messages).toHaveLength(1);
+    expect(() =>
+      s.changeChatMessage(member, org, sent.id, {
+        revision: 3,
+        body: "Resurrect",
+      }),
+    ).toThrow();
+    expect(
+      s.get("SELECT body FROM chat_messages WHERE id=?", sent.id)!.body,
+    ).toBe("");
+    for (const body of ["", " ", "x".repeat(10_001)])
+      expect(() =>
+        s.sendChatMessage(member, org, room, message(body)),
+      ).toThrow();
+  });
+  test("history pages and change cursors include old edits and deletions without skipping messages", () => {
+    const { s, owner, org } = fixture();
+    const room = s.chatRooms(owner, org)[0].id;
+    const sent = Array.from({ length: 125 }, (_, i) =>
+      s.sendChatMessage(owner, org, room, message(`Message ${i}`)),
+    );
+    const latest = s.chatMessages(owner, org, room, query());
+    expect(latest.messages).toHaveLength(50);
+    expect(latest.messages[0].id).toBe(sent[75].id);
+    const older = s.chatMessages(
+      owner,
+      org,
+      room,
+      query(`before=${latest.older_before}`),
+    );
+    expect(older.messages[0].id).toBe(sent[25].id);
+    expect(
+      s.chatMessages(owner, org, room, query(`before=${older.older_before}`))
+        .messages,
+    ).toHaveLength(25);
+    const firstDelta = s.chatMessages(owner, org, room, query("after=0"));
+    expect(firstDelta.has_more).toBe(true);
+    const secondDelta = s.chatMessages(
+      owner,
+      org,
+      room,
+      query(`after=${firstDelta.cursor}`),
+    );
+    expect(secondDelta.messages).toHaveLength(25);
+    s.changeChatMessage(owner, org, sent[0].id, {
+      revision: 1,
+      body: "An old correction",
+    });
+    s.changeChatMessage(owner, org, sent[1].id, { revision: 1 }, true);
+    const delta = s.chatMessages(
+      owner,
+      org,
+      room,
+      query(`after=${latest.cursor}`),
+    );
+    expect(delta.messages.map((m) => m.id)).toEqual([sent[0].id, sent[1].id]);
+    expect(delta.messages[0].body).toBe("An old correction");
+    expect(delta.messages[1].body).toBe("");
+    for (const q of [
+      "after=-1",
+      "after=NaN",
+      "before=1.1",
+      "after=999999",
+      "before=1&after=0",
+    ])
+      expect(() => s.chatMessages(owner, org, room, query(q))).toThrow();
+  });
+  test("unread markers are monotonic, edits do not become new messages, and removal immediately denies access", () => {
+    const { s, owner, org, join } = fixture();
+    const member = join("Taylor").id;
+    const room = s.createChatRoom(owner, org, {
+      kind: "direct",
+      member_id: member,
+    }).id;
+    const first = s.sendChatMessage(owner, org, room, message("One"));
+    const second = s.sendChatMessage(owner, org, room, message("Two"));
+    s.sendChatMessage(member, org, room, message("My own reply"));
+    expect(s.chatRoom(member, org, room).unread).toBe(2);
+    s.readChat(member, org, room, second.created_seq);
+    s.readChat(member, org, room, first.created_seq);
+    expect(s.chatRoom(member, org, room).unread).toBe(0);
+    s.changeChatMessage(owner, org, first.id, {
+      revision: 1,
+      body: "Edited one",
+    });
+    expect(s.chatRoom(member, org, room).unread).toBe(0);
+    const unread = s.sendChatMessage(owner, org, room, message("Three"));
+    expect(s.chatRoom(member, org, room).unread).toBe(1);
+    s.changeChatMessage(owner, org, unread.id, { revision: 1 }, true);
+    expect(s.chatRoom(member, org, room).unread).toBe(0);
+    expect(() =>
+      s.readChat(member, org, room, Number.MAX_SAFE_INTEGER),
+    ).toThrow();
+    s.changeMember(owner, org, member, "remove");
+    expect(() => s.chatRooms(member, org)).toThrow();
+    expect(() => s.chatMessages(member, org, room, query())).toThrow();
+    expect(() =>
+      s.sendChatMessage(member, org, room, message("Revoked")),
+    ).toThrow();
+    expect(s.chatRoom(owner, org, room).can_send).toBe(false);
+    expect(() =>
+      s.sendChatMessage(owner, org, room, message("No recipient")),
+    ).toThrow();
+    expect(s.chatMessages(owner, org, room, query()).messages).toHaveLength(4);
+  });
+  test("HTTP messaging requires a member session and supports send, edit, history and read routes", async () => {
+    const { s, owner, org, token, space } = fixture();
+    const handler = createHandler(s);
+    const request = (
+      path: string,
+      method = "GET",
+      body?: unknown,
+      key = token,
+    ) =>
+      handler(
+        new Request(`https://team.test/v1/orgs/${org}/${path}`, {
+          method,
+          headers: {
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+          },
+          body: body == null ? undefined : JSON.stringify(body),
+        }),
+      );
+    const room = s.chatRooms(owner, org)[0].id;
+    s.updateSpace(owner, org, space, {
+      ...s.space(owner, org, space),
+      api_enabled: true,
+    });
+    const integration = s.createIntegrationKey(owner, org, {
+      name: "Read shared meetings",
+      space_ids: [space],
+      transcripts: false,
+      days: 30,
+    });
+    expect(
+      (await request(`chat-rooms/${room}/messages`, "GET", undefined, ""))
+        .status,
+    ).toBe(401);
+    expect(
+      (
+        await request(
+          `chat-rooms/${room}/messages`,
+          "GET",
+          undefined,
+          String(integration.token),
+        )
+      ).status,
+    ).toBe(401);
+    const send = await request(
+      `chat-rooms/${room}/messages`,
+      "POST",
+      message("Hello team"),
+    );
+    expect(send.status).toBe(201);
+    const saved = await send.json();
+    expect(
+      (
+        await request(`chat-messages/${saved.id}`, "PATCH", {
+          body: "Hello everyone",
+          revision: 1,
+        })
+      ).status,
+    ).toBe(200);
+    const history = await (await request(`chat-rooms/${room}/messages`)).json();
+    expect(history.messages[0].body).toBe("Hello everyone");
+    expect(
+      (
+        await request(`chat-rooms/${room}/read`, "POST", {
+          cursor: history.cursor,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (await request(`chat-messages/${saved.id}`, "DELETE", { revision: 2 }))
+        .status,
+    ).toBe(200);
+  });
+  test("old workspaces gain one general channel and messages/read state survive a restart", () => {
+    const dir = mkdtempSync(joinPath(tmpdir(), "noted-chat-restart-"));
+    const path = joinPath(dir, "team.sqlite");
+    let s = new TeamStore(path, "setup-key-for-deterministic-tests-only");
+    try {
+      const setup = s.bootstrap(
+        "setup-key-for-deterministic-tests-only",
+        "Existing workspace",
+        "Owner",
+      );
+      const user = s.authenticate(setup.token);
+      // A pre-chat database has these existing account tables but no chat tables.
+      for (const table of [
+        "chat_reads",
+        "chat_events",
+        "chat_messages",
+        "chat_participants",
+        "chat_rooms",
+      ])
+        s.db.exec(`DROP TABLE ${table}`);
+      s.db.close();
+      s = new TeamStore(path);
+      const room = s.chatRooms(user, setup.org)[0];
+      expect(room.name).toBe("general");
+      const sent = s.sendChatMessage(
+        user,
+        setup.org,
+        room.id,
+        message("Persistent message"),
+      );
+      s.readChat(user, setup.org, room.id, sent.created_seq);
+      s.db.close();
+      s = new TeamStore(path);
+      expect(s.authenticate(setup.token)).toBe(user);
+      expect(s.chatRooms(user, setup.org)).toHaveLength(1);
+      expect(
+        s.chatMessages(user, setup.org, room.id, query()).messages[0].body,
+      ).toBe("Persistent message");
+      expect(
+        s.get(
+          "SELECT seq FROM chat_reads WHERE room_id=? AND user_id=?",
+          room.id,
+          user,
+        )!.seq,
+      ).toBe(sent.created_seq);
+    } finally {
+      s.db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 describe("organizational access", () => {
   test("team members read shared meetings; restricted spaces do not leak through lists, direct reads, search, or chat", () => {
     const { s, owner, org, space, join, publish } = fixture();

@@ -16,6 +16,7 @@ import {
   Loader,
   Lock,
   LogOut,
+  MessageSquare,
   Plus,
   RefreshCw,
   Search,
@@ -34,6 +35,7 @@ import type {
   TeamNoteRow,
 } from "./types";
 import { TeamDialog } from "./TeamDialog";
+import { TeamMessages } from "./TeamMessages";
 import { SavedAnswers } from "./SavedAnswers";
 import { TeamChat } from "./TeamChat";
 import { TeamAdministration } from "./TeamAdministration";
@@ -354,9 +356,9 @@ function TeamLibrary({ org }: { org: string }) {
   const [data, setData] = useState<TeamSnapshot | null>(null);
   const [space, setSpace] = useState("");
   const [folder, setFolder] = useState("");
-  const [view, setView] = useState<"notes" | "admin" | "trash" | "answers">(
-    "notes",
-  );
+  const [view, setView] = useState<
+    "notes" | "admin" | "trash" | "answers" | "messages"
+  >("notes");
   const [query, setQuery] = useState("");
   const [rows, setRows] = useState<TeamNoteRow[]>([]);
   const [more, setMore] = useState(false);
@@ -517,6 +519,9 @@ function TeamLibrary({ org }: { org: string }) {
           {depth < 20 && nestedFolders(spaceId, f.id, depth + 1)}
         </div>
       ));
+  if (data && view === "messages") {
+    return <TeamMessages data={data} onBack={() => navigate()} />;
+  }
   return (
     <div className="team-layout">
       <aside className="team-sidebar" aria-label="Team library">
@@ -525,6 +530,16 @@ function TeamLibrary({ org }: { org: string }) {
           onClick={() => navigate()}
         >
           <BookOpen size={15} /> All shared meetings
+        </button>
+        <button
+          onClick={() => {
+            setView("messages");
+            setSpace("");
+            setFolder("");
+            setNoteId(null);
+          }}
+        >
+          <MessageSquare size={15} /> Team chat
         </button>
         <div className="team-sidebar-label">
           <span>Spaces</span>

@@ -100,7 +100,8 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
         (action &&
           !(
             (resource === "notes" && action === "restore") ||
-            (resource === "spaces" && action === "grants")
+            (resource === "spaces" && action === "grants") ||
+            (resource === "chat-rooms" && ["messages", "read"].includes(action))
           ))
       )
         throw new TeamError(404, "Not found");
@@ -111,6 +112,27 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
         throw new TeamError(404, "Not found");
       if (path.length === 3 && method === "GET")
         return respond(store.snapshot(user, org));
+      if (resource === "chat-rooms") {
+        if (!id && method === "GET") return respond(store.chatRooms(user, org));
+        if (!id && method === "POST")
+          return respond(store.createChatRoom(user, org, body), 201);
+        if (id && !action && method === "GET")
+          return respond(store.chatRoom(user, org, id));
+        if (id && !action && method === "PATCH")
+          return respond(store.updateChatRoom(user, org, id, body));
+        if (id && action === "messages" && method === "GET")
+          return respond(store.chatMessages(user, org, id, url.searchParams));
+        if (id && action === "messages" && method === "POST")
+          return respond(store.sendChatMessage(user, org, id, body), 201);
+        if (id && action === "read" && method === "POST")
+          return respond(store.readChat(user, org, id, body.cursor));
+      }
+      if (resource === "chat-messages" && id && !action) {
+        if (method === "PATCH")
+          return respond(store.changeChatMessage(user, org, id, body));
+        if (method === "DELETE")
+          return respond(store.changeChatMessage(user, org, id, body, true));
+      }
       if (resource === "access-keys" && method === "POST" && !id) {
         store.audit(org, user, "session.created", user);
         return respond({ token: store.session(user) }, 201);

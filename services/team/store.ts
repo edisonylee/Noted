@@ -10,6 +10,9 @@ import type {
   TeamRecipe,
   TeamConversation,
   TeamTurn,
+  TeamChatRoom,
+  TeamChatMessage,
+  TeamChatPage,
 } from "../../src/teams/types";
 
 type Row = Record<string, string | number | null>;
@@ -81,6 +84,10 @@ export class TeamStore {
       this.db.exec(
         "ALTER TABLE spaces ADD COLUMN api_enabled INTEGER NOT NULL DEFAULT 0",
       );
+    this
+      .run(`INSERT OR IGNORE INTO chat_rooms(id,org_id,kind,name,description,created_by,created_at)
+      SELECT 'general-' || o.id,o.id,'channel','general','A place for everyone in the workspace.',m.user_id,o.created_at
+      FROM organizations o JOIN members m ON m.org_id=o.id AND m.role='owner'`);
   }
   all<T = Row>(sql: string, ...values: SQLQueryBindings[]): T[] {
     return this.db.query(sql).all(...values) as T[];
@@ -155,6 +162,14 @@ export class TeamStore {
         visibility: "team",
       });
       this.audit(id, user, "workspace.created", id);
+      this.run(
+        "INSERT INTO chat_rooms(id,org_id,kind,name,description,created_by,created_at) VALUES(?,?,'channel','general',?,?,?)",
+        `general-${id}`,
+        id,
+        "A place for everyone in the workspace.",
+        user,
+        now(),
+      );
     })();
     return id;
   }
@@ -1292,6 +1307,407 @@ export class TeamStore {
       fail(403, "Only the author or an admin can delete this prompt");
     this.run("DELETE FROM recipes WHERE id=?", id);
     this.audit(org, user, "prompt.deleted", id);
+  }
+  chatRoom(user: string, org: string, id: string): TeamChatRoom {
+    const role = this.role(user, org);
+    const row = this.get(
+      "SELECT * FROM chat_rooms WHERE id=? AND org_id=?",
+      id,
+      org,
+    );
+    if (
+      !row ||
+      (row.kind === "direct" &&
+        !this.get(
+          "SELECT 1 FROM chat_participants WHERE room_id=? AND user_id=?",
+          id,
+          user,
+        ))
+    )
+      fail(404, "Conversation not found or access removed");
+    const participants =
+      row.kind === "direct"
+        ? this.all<{ id: string; name: string; active: number }>(
+            `SELECT u.id,u.name,EXISTS(SELECT 1 FROM members m WHERE m.org_id=? AND m.user_id=u.id) AS active
+       FROM chat_participants p JOIN users u ON u.id=p.user_id WHERE p.room_id=? ORDER BY u.name,u.id`,
+            org,
+            id,
+          ).map((p) => ({ ...p, active: !!p.active }))
+        : [];
+    const unread = Number(
+      this.get(
+        `SELECT COUNT(*) AS n FROM chat_messages
+      WHERE room_id=? AND author_id<>? AND deleted_at IS NULL AND created_seq>
+      COALESCE((SELECT seq FROM chat_reads WHERE room_id=? AND user_id=?),0)`,
+        id,
+        user,
+        id,
+        user,
+      )!.n,
+    );
+    const last = this.get(
+      "SELECT MAX(COALESCE(deleted_at,edited_at,created_at)) AS at FROM chat_messages WHERE room_id=?",
+      id,
+    )?.at;
+    return {
+      id,
+      org_id: org,
+      kind: row.kind as "channel" | "direct",
+      name: String(row.name),
+      description: String(row.description),
+      created_by: String(row.created_by),
+      created_at: String(row.created_at),
+      archived_at: row.archived_at as string | null,
+      revision: Number(row.revision),
+      is_default: id === `general-${org}`,
+      participants,
+      unread,
+      last_activity: String(last ?? row.created_at),
+      can_manage:
+        row.kind === "channel" && (row.created_by === user || admin(role)),
+      can_send:
+        !row.archived_at &&
+        (row.kind === "channel" || participants.every((p) => p.active)),
+    };
+  }
+  chatRooms(user: string, org: string): TeamChatRoom[] {
+    this.role(user, org);
+    return this.all<{ id: string }>(
+      `SELECT r.id FROM chat_rooms r WHERE org_id=? AND
+      (kind='channel' OR EXISTS(SELECT 1 FROM chat_participants p WHERE p.room_id=r.id AND p.user_id=?))
+      ORDER BY r.kind,r.name COLLATE NOCASE,r.id`,
+      org,
+      user,
+    ).map((r) => this.chatRoom(user, org, r.id));
+  }
+  createChatRoom(
+    user: string,
+    org: string,
+    body: Record<string, unknown>,
+  ): TeamChatRoom {
+    this.role(user, org);
+    const kind = choice(body.kind, ["channel", "direct"], "conversation kind");
+    return this.db.transaction(() => {
+      if (kind === "direct") {
+        const peer = text(body.member_id, "teammate", 100);
+        if (peer === user) fail(400, "Choose another teammate");
+        this.role(peer, org);
+        const key = [user, peer].sort().join(":");
+        const old = this.get(
+          "SELECT id FROM chat_rooms WHERE org_id=? AND direct_key=?",
+          org,
+          key,
+        );
+        if (old) return this.chatRoom(user, org, String(old.id));
+        const id = uid();
+        this.run(
+          "INSERT INTO chat_rooms(id,org_id,kind,name,direct_key,created_by,created_at) VALUES(?,?,'direct','',?,?,?)",
+          id,
+          org,
+          key,
+          user,
+          now(),
+        );
+        for (const member of [user, peer])
+          this.run("INSERT INTO chat_participants VALUES(?,?)", id, member);
+        return this.chatRoom(user, org, id);
+      }
+      const name = this.chatChannelName(body.name);
+      if (
+        this.get(
+          "SELECT id FROM chat_rooms WHERE org_id=? AND kind='channel' AND name=? COLLATE NOCASE",
+          org,
+          name,
+        )
+      )
+        fail(409, "A channel with that name already exists");
+      if (
+        Number(
+          this.get(
+            "SELECT COUNT(*) AS n FROM chat_rooms WHERE org_id=? AND kind='channel'",
+            org,
+          )!.n,
+        ) >= 100
+      )
+        fail(400, "This workspace has reached its 100-channel limit");
+      const id = uid();
+      this.run(
+        "INSERT INTO chat_rooms(id,org_id,kind,name,description,created_by,created_at) VALUES(?,?,'channel',?,?,?,?)",
+        id,
+        org,
+        name,
+        text(body.description ?? "", "description", 500, true),
+        user,
+        now(),
+      );
+      this.audit(org, user, "channel.created", id);
+      return this.chatRoom(user, org, id);
+    })();
+  }
+  private chatChannelName(value: unknown) {
+    const name = text(value, "channel name", 48)
+      .toLowerCase()
+      .replace(/\s+/g, "-");
+    if (!/^[a-z0-9][a-z0-9_-]*$/.test(name))
+      fail(
+        400,
+        "Use letters, numbers, hyphens or underscores for the channel name",
+      );
+    return name;
+  }
+  updateChatRoom(
+    user: string,
+    org: string,
+    id: string,
+    body: Record<string, unknown>,
+  ) {
+    return this.db.transaction(() => {
+      const room = this.chatRoom(user, org, id);
+      if (!room.can_manage)
+        fail(403, "Only the channel creator or an admin can change it");
+      if (body.revision !== room.revision)
+        fail(409, "This channel changed. Reload before saving.");
+      if (body.archived != null && typeof body.archived !== "boolean")
+        fail(400, "Invalid archive setting");
+      if (room.is_default && body.archived === true)
+        fail(400, "The general channel stays available to everyone");
+      const name =
+        body.name == null ? room.name : this.chatChannelName(body.name);
+      if (room.is_default && name !== "general")
+        fail(400, "The general channel keeps its name");
+      if (
+        this.get(
+          "SELECT id FROM chat_rooms WHERE org_id=? AND kind='channel' AND name=? COLLATE NOCASE AND id<>?",
+          org,
+          name,
+          id,
+        )
+      )
+        fail(409, "A channel with that name already exists");
+      this.run(
+        "UPDATE chat_rooms SET name=?,description=?,archived_at=?,revision=revision+1 WHERE id=?",
+        name,
+        body.description == null
+          ? room.description
+          : text(body.description, "description", 500, true),
+        body.archived == null
+          ? room.archived_at
+          : body.archived
+            ? (room.archived_at ?? now())
+            : null,
+        id,
+      );
+      this.audit(org, user, "channel.updated", id);
+      return this.chatRoom(user, org, id);
+    })();
+  }
+  private chatCursor(value: unknown, name: string) {
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+      fail(400, `Invalid ${name}`);
+    return value;
+  }
+  private latestChatCursor(room: string) {
+    return Number(
+      this.get(
+        "SELECT COALESCE(MAX(seq),0) AS seq FROM chat_events WHERE room_id=?",
+        room,
+      )!.seq,
+    );
+  }
+  private chatMessage(
+    user: string,
+    org: string,
+    id: string,
+    room: TeamChatRoom,
+  ): TeamChatMessage {
+    const row = this.get(
+      `SELECT m.*,u.name AS author_name FROM chat_messages m JOIN users u ON u.id=m.author_id
+      WHERE m.id=? AND m.room_id=?`,
+      id,
+      room.id,
+    );
+    if (!row) fail(404, "Message not found");
+    return {
+      id,
+      room_id: room.id,
+      author_id: String(row.author_id),
+      author_name: String(row.author_name),
+      body: row.deleted_at ? "" : String(row.body),
+      created_at: String(row.created_at),
+      edited_at: row.edited_at as string | null,
+      deleted_at: row.deleted_at as string | null,
+      revision: Number(row.revision),
+      created_seq: Number(row.created_seq),
+      can_edit: !row.deleted_at && room.can_send && row.author_id === user,
+      can_delete:
+        !row.deleted_at &&
+        (row.author_id === user ||
+          (room.kind === "channel" && admin(this.role(user, org)))),
+    };
+  }
+  chatMessages(
+    user: string,
+    org: string,
+    id: string,
+    query: URLSearchParams,
+  ): TeamChatPage {
+    return this.db.transaction(() => {
+      const room = this.chatRoom(user, org, id);
+      if (query.has("before") && query.has("after"))
+        fail(400, "Choose history or updates, not both");
+      const latest = this.latestChatCursor(id);
+      if (query.has("after")) {
+        const after = this.chatCursor(
+          Number(query.get("after")),
+          "update cursor",
+        );
+        if (after > latest)
+          fail(409, "Conversation history changed. Reload it.");
+        const events = this.all<{ seq: number; message_id: string }>(
+          "SELECT seq,message_id FROM chat_events WHERE room_id=? AND seq>? ORDER BY seq LIMIT 101",
+          id,
+          after,
+        );
+        const page = events.slice(0, 100);
+        return {
+          room,
+          messages: [...new Set(page.map((e) => e.message_id))].map((m) =>
+            this.chatMessage(user, org, m, room),
+          ),
+          cursor: page.at(-1)?.seq ?? after,
+          has_more: events.length > 100,
+          older_before: null,
+        };
+      }
+      const before = query.has("before")
+        ? this.chatCursor(Number(query.get("before")), "history cursor")
+        : Number.MAX_SAFE_INTEGER;
+      const rows = this.all<{ id: string }>(
+        "SELECT id FROM chat_messages WHERE room_id=? AND created_seq<? ORDER BY created_seq DESC LIMIT 51",
+        id,
+        before,
+      );
+      const messages = rows
+        .slice(0, 50)
+        .reverse()
+        .map((r) => this.chatMessage(user, org, r.id, room));
+      return {
+        room,
+        messages,
+        cursor: latest,
+        has_more: rows.length > 50,
+        older_before: rows.length > 50 ? messages[0].created_seq : null,
+      };
+    })();
+  }
+  sendChatMessage(
+    user: string,
+    org: string,
+    roomId: string,
+    body: Record<string, unknown>,
+  ) {
+    return this.db.transaction(() => {
+      const room = this.chatRoom(user, org, roomId);
+      if (!room.can_send)
+        fail(
+          409,
+          room.archived_at
+            ? "This channel is archived"
+            : "This teammate is no longer in the workspace",
+        );
+      const content = text(body.body, "message", 10_000);
+      const client = text(body.client_id, "message identifier", 80);
+      if (!/^[a-zA-Z0-9_-]{16,80}$/.test(client))
+        fail(400, "Invalid message identifier");
+      const old = this.get(
+        "SELECT id,original_hash FROM chat_messages WHERE room_id=? AND author_id=? AND client_id=?",
+        roomId,
+        user,
+        client,
+      );
+      if (old) {
+        if (old.original_hash !== hash(content))
+          fail(409, "This send attempt already belongs to another message");
+        return this.chatMessage(user, org, String(old.id), room);
+      }
+      const id = uid();
+      this.run(
+        "INSERT INTO chat_messages(id,room_id,author_id,client_id,original_hash,body,created_at) VALUES(?,?,?,?,?,?,?)",
+        id,
+        roomId,
+        user,
+        client,
+        hash(content),
+        content,
+        now(),
+      );
+      const event = this.run(
+        "INSERT INTO chat_events(room_id,message_id) VALUES(?,?)",
+        roomId,
+        id,
+      );
+      this.run(
+        "UPDATE chat_messages SET created_seq=? WHERE id=?",
+        event.lastInsertRowid,
+        id,
+      );
+      return this.chatMessage(user, org, id, room);
+    })();
+  }
+  changeChatMessage(
+    user: string,
+    org: string,
+    id: string,
+    body: Record<string, unknown>,
+    remove = false,
+  ) {
+    return this.db.transaction(() => {
+      this.role(user, org);
+      const row = this.get(
+        "SELECT m.room_id FROM chat_messages m JOIN chat_rooms r ON r.id=m.room_id WHERE m.id=? AND r.org_id=?",
+        id,
+        org,
+      );
+      if (!row) fail(404, "Message not found");
+      const room = this.chatRoom(user, org, String(row.room_id));
+      const message = this.chatMessage(user, org, id, room);
+      if (!(remove ? message.can_delete : message.can_edit))
+        fail(403, "You cannot change this message");
+      if (body.revision !== message.revision)
+        fail(409, "This message changed. Reload before saving.");
+      if (remove)
+        this.run(
+          "UPDATE chat_messages SET body='',deleted_at=?,revision=revision+1 WHERE id=?",
+          now(),
+          id,
+        );
+      else
+        this.run(
+          "UPDATE chat_messages SET body=?,edited_at=?,revision=revision+1 WHERE id=?",
+          text(body.body, "message", 10_000),
+          now(),
+          id,
+        );
+      this.run(
+        "INSERT INTO chat_events(room_id,message_id) VALUES(?,?)",
+        room.id,
+        id,
+      );
+      return this.chatMessage(user, org, id, room);
+    })();
+  }
+  readChat(user: string, org: string, id: string, value: unknown) {
+    this.chatRoom(user, org, id);
+    const seq = this.chatCursor(value, "read cursor");
+    if (seq > this.latestChatCursor(id))
+      fail(400, "Read cursor is ahead of this conversation");
+    this.run(
+      "INSERT INTO chat_reads(room_id,user_id,seq) VALUES(?,?,?) ON CONFLICT(room_id,user_id) DO UPDATE SET seq=MAX(seq,excluded.seq)",
+      id,
+      user,
+      seq,
+    );
+    return {};
   }
   snapshot(user: string, org: string) {
     const role = this.role(user, org);

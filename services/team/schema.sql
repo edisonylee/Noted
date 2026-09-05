@@ -34,3 +34,24 @@ CREATE INDEX IF NOT EXISTS notes_space_date ON notes(space_id,occurred_at);
 CREATE INDEX IF NOT EXISTS members_user ON members(user_id);
 CREATE INDEX IF NOT EXISTS spaces_org ON spaces(org_id);
 CREATE INDEX IF NOT EXISTS audit_org ON audit(org_id,id);
+CREATE TABLE IF NOT EXISTS chat_rooms (
+ id TEXT PRIMARY KEY, org_id TEXT NOT NULL REFERENCES organizations(id),
+ kind TEXT NOT NULL CHECK(kind IN ('channel','direct')), name TEXT NOT NULL,
+ description TEXT NOT NULL DEFAULT '', direct_key TEXT, created_by TEXT NOT NULL REFERENCES users(id),
+ created_at TEXT NOT NULL, archived_at TEXT, revision INTEGER NOT NULL DEFAULT 1,
+ UNIQUE(org_id,direct_key)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS chat_channel_name ON chat_rooms(org_id,name COLLATE NOCASE) WHERE kind='channel';
+CREATE TABLE IF NOT EXISTS chat_participants (room_id TEXT NOT NULL REFERENCES chat_rooms(id), user_id TEXT NOT NULL REFERENCES users(id), PRIMARY KEY(room_id,user_id));
+CREATE TABLE IF NOT EXISTS chat_messages (
+ id TEXT PRIMARY KEY, room_id TEXT NOT NULL REFERENCES chat_rooms(id), author_id TEXT NOT NULL REFERENCES users(id),
+ client_id TEXT NOT NULL, original_hash TEXT NOT NULL, body TEXT NOT NULL,
+ created_at TEXT NOT NULL, edited_at TEXT, deleted_at TEXT, revision INTEGER NOT NULL DEFAULT 1,
+ created_seq INTEGER NOT NULL DEFAULT 0, UNIQUE(room_id,author_id,client_id)
+);
+CREATE TABLE IF NOT EXISTS chat_events (seq INTEGER PRIMARY KEY AUTOINCREMENT, room_id TEXT NOT NULL REFERENCES chat_rooms(id), message_id TEXT NOT NULL REFERENCES chat_messages(id));
+CREATE TABLE IF NOT EXISTS chat_reads (room_id TEXT NOT NULL REFERENCES chat_rooms(id), user_id TEXT NOT NULL REFERENCES users(id), seq INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(room_id,user_id));
+CREATE INDEX IF NOT EXISTS chat_rooms_org ON chat_rooms(org_id,kind);
+CREATE INDEX IF NOT EXISTS chat_participant_user ON chat_participants(user_id,room_id);
+CREATE INDEX IF NOT EXISTS chat_message_history ON chat_messages(room_id,created_seq);
+CREATE INDEX IF NOT EXISTS chat_room_events ON chat_events(room_id,seq);

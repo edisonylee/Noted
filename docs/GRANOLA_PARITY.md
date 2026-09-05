@@ -24,9 +24,11 @@ reviewed copy. Publishing never grants access to the publisher’s entire vault.
 ## Organizational functionality
 
 “Implemented” below means present on this branch. The standard native app is
-installed locally, with a persistent service on this Mac and an automatic
-connection. Coworkers on different Macs still require a hosted deployment.
-See [the service runbook](../services/team/README.md).
+installed locally and now connects to a Railway free-trial deployment over
+HTTPS. The earlier local service and its data remain available separately.
+Coworkers need a Mac build containing this branch and an individual invitation.
+See [the service runbook](../services/team/README.md) and
+[deployment notes](../services/team/RAILWAY.md).
 
 | Capability | Current Granola evidence | Noted on this branch | Remaining difference |
 | --- | --- | --- | --- |
@@ -78,9 +80,17 @@ work required after the organizational foundation.
 - The final native-browser deletion prompt stalled the preview automation. Chat deletion now uses an in-app confirmation dialog; its replacement compiles, but its final click-through was not verified in that stalled browser session. Backend conversation deletion and cascades are covered by tests.
 - The installed native app was checked end to end with a separate fictional workspace: automatic connection, workspace switching, a cited answer and follow-up using the configured model, saving the answer, opening its source, and jumping to a transcript timestamp. A forced service restart preserved both workspaces, three examples, two chat turns, the saved answer, and the authenticated connection. This is a small functional check, not a broad model-quality benchmark.
 - Local setup now installs a persistent service through a user LaunchAgent, stores the account session in Keychain, and creates a separate optional example workspace. The deployed runtime is independent of the source checkout; bootstrap is disabled after provisioning.
-- Real organizational deployment, identity-provider integration, production
-  operations, native end-to-end publication and live-model answer quality remain
-  unverified. Complete Granola functionality parity has **not** been achieved.
+- A Railway trial deployment is live with one instance and a persistent volume.
+  HTTPS checks cover one-use invitations, a separate member's shared-note read,
+  anonymous/admin denials, persistence after redeploy, disabled bootstrap and
+  member revocation. The native app opens the hosted owner's workspace and its
+  invitation controls. A consistent database export was downloaded and restored
+  successfully into a fresh container. Automatic Railway backups require Pro
+  and are not enabled on this trial.
+- Multiple physical Macs, identity-provider integration, ongoing production
+  operations, native end-to-end publication and broad live-model answer quality
+  remain unverified. Account renewal/recovery is still incomplete. Complete
+  Granola functionality parity has **not** been achieved.
 
 The isolated worktree starts from the current committed Noted state; the user’s
 uncommitted work in the original checkout is preserved and must be reconciled

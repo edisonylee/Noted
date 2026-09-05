@@ -1542,6 +1542,18 @@ textarea.json.bad { border-color: var(--bad); }
   border-top: var(--border-width, 1px) solid var(--line);
   border-bottom: var(--border-width, 1px) solid var(--line);
 }
+/* Pinned to the top of the scrolling timeline: the all-day row and its Add
+   button are the day's fixed context, and scrolling to the evening used to take
+   them away. This must be the whole section rather than just its header — a
+   sticky element can only travel inside its parent's box, so pinning the header
+   alone let go the moment the short section scrolled past, which is the bug it
+   was meant to fix. Needs its own background so the hour grid passes under it. */
+.app.schedmode .today-allday {
+  position: sticky; top: 0; z-index: 6;
+  background: var(--canvas);
+}
+/* A long all-day list must not swallow the timeline it is pinned above. */
+.app.schedmode .today-allday-list { max-height: 22vh; overflow-y: auto; }
 .today-allday-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .today-allday-heading { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
 .today-allday-heading h2 {
@@ -1702,6 +1714,20 @@ a.today-allday-event:focus-visible { outline: 2px solid var(--accent); outline-o
 .today-save:active:not(:disabled) { transform: scale(0.97); }
 .today-save:disabled, .today-photo-btn:disabled, .today-cancel:disabled { opacity: 0.5; cursor: default; }
 
+/* Only the timeline scrolls. Previously the whole page did, so reading the
+   evening pushed the date header off the top and slid the task ledger out of
+   its own grid area — the two things you most want to keep in view. Same
+   full-height mode class Calendar, Journal and Knowledge already use. */
+.app.schedmode { height: 100%; }
+.app.schedmode .content { padding-bottom: 14px; min-height: 0; }
+.app.schedmode .schedule-page { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.app.schedmode .today-shell { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+/* The head and lead keep their natural height; the body takes what is left and
+   scrolls inside itself. */
+.app.schedmode .today-shell-head,
+.app.schedmode .today-shell-lead { flex: none; }
+.app.schedmode .today-shell-body { flex: 1; min-height: 0; overflow-y: auto; }
+
 /* Keep the accepted planner composition at the standard desktop window size.
    The dock narrows fluidly before the full 824px + 320px layout fits. */
 @media (min-width: 840px) {
@@ -1712,6 +1738,16 @@ a.today-allday-event:focus-visible { outline: 2px solid var(--accent); outline-o
       "lead lead"
       "body tasks";
     column-gap: clamp(18px, 2.2vw, 30px);
+  }
+  /* Grid, not flex, once the ledger is open: the body row takes the remaining
+     height so the timeline scrolls within it and the ledger keeps full height
+     beside it, rather than both riding the page scroll. */
+  .app.schedmode .today-shell.tasks-open {
+    display: grid; grid-template-rows: auto auto minmax(0, 1fr); align-items: stretch;
+  }
+  .app.schedmode .today-shell.tasks-open .today-shell-body { overflow-y: auto; min-height: 0; }
+  .app.schedmode .today-shell.tasks-open .today-task-drawer {
+    position: static; height: 100%; min-height: 0; overflow-y: auto;
   }
   .today-shell.tasks-open .today { min-width: 0; max-width: none; margin: 0; }
   .today-shell.tasks-open .today-shell-head { grid-area: head; }

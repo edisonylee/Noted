@@ -2129,6 +2129,18 @@ export function TodayView({
 
   // ---- Agenda ----
   const nowMin = easternMinutes(now);
+  const nowLineRef = useRef<HTMLDivElement | null>(null);
+  // Open the day at the current hour rather than at 5 AM: what is happening now
+  // is what you came to see. Once per day shown — the now-line moves every
+  // minute, and re-scrolling then would drag the view out from under the user.
+  const scrolledToNowFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isToday || scrolledToNowFor.current === selectedDay) return;
+    const line = nowLineRef.current;
+    if (!line) return;
+    scrolledToNowFor.current = selectedDay;
+    line.scrollIntoView({ block: "center" });
+  }, [isToday, selectedDay, nowMin]);
   const scheduleGridPad = 16;
   const displayBlocks = reconcileScheduleBlocks(blocks, calEvents ?? []);
   const grid = buildScheduleGrid(displayBlocks);
@@ -2760,6 +2772,7 @@ export function TodayView({
             )}
             {isToday && nowMin >= grid.start && nowMin <= grid.end && (
               <div
+                ref={nowLineRef}
                 className="today-grid-now-line"
                 aria-hidden="true"
                 style={{ top: `${scheduleGridPad + scheduleScale.minuteToY(nowMin)}px` }}

@@ -889,7 +889,9 @@ export default function App() {
               ? " journalmode"
               : view === "knowledge"
                 ? " graphmode"
-                : "")
+                : view === "today"
+                  ? " schedmode"
+                  : "")
       }
     >
       {reconnectingOverlay}

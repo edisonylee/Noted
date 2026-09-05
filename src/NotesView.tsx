@@ -2958,13 +2958,20 @@ function LibraryWorkspace({
                 </select>
               </label>
             )}
+            {/* Deliberately inert: `db::delete_note_folder` refuses every call
+                until folder sync grows tombstones, so the reason is stated in
+                the menu rather than hidden in a title only a hover reveals. */}
             <button
               role="menuitem"
               disabled
-              title="Folder removal will return after synchronized lifecycle and purge protection is available."
+              aria-describedby={`folder-remove-note-${folder.id}`}
             >
-              Remove unavailable
+              Remove
             </button>
+            <p className="folder-menu-note" id={`folder-remove-note-${folder.id}`}>
+              Waiting on folder sync — without it, a removed folder could come
+              back on the next sync.
+            </p>
           </div>
         )}
         {creating?.parentId === folder.id && (

@@ -4142,6 +4142,12 @@ a.cal-btn { text-decoration: none; }
   display: flex; flex-direction: column; gap: 4px; padding: 5px 7px;
   color: var(--faint); font-size: 10.5px;
 }
+/* Why a menu item is inert, stated in the menu. Matches the "Move to" label's
+   quiet register so it reads as explanation, not as another action. */
+.folder-menu-note {
+  margin: 0; padding: 0 7px 4px;
+  color: var(--faint); font-size: 10.5px; line-height: 1.4;
+}
 .folder-menu-move select {
   width: 100%; min-width: 0; padding: 5px 22px 5px 7px;
   color: var(--ink); background: var(--surface); border: var(--border-width, 1px) solid var(--line);

@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { Search, Loader, MessageSquare, BookOpen } from "lucide-react";
+import {
+  Search,
+  Loader,
+  MessageSquare,
+  BookOpen,
+  ChevronDown,
+  SlidersHorizontal,
+  RotateCcw,
+} from "lucide-react";
 import { useNavigationState } from "../useNavigationState";
 import { team, orgPath } from "./client";
 import type {
@@ -195,6 +203,13 @@ export function TeamSearch({
       </span>
     </button>
   );
+  const activeFilterCount = [
+    effectiveKind !== "all",
+    !!room,
+    !!author,
+    !!since,
+    !!until,
+  ].filter(Boolean).length;
   return (
     <main className="team-search">
       <header>
@@ -218,69 +233,72 @@ export function TeamSearch({
       </p>
       <details className="team-search-filter-panel">
         <summary>
+          <SlidersHorizontal size={14} aria-hidden="true" />
           Filters
-          {[effectiveKind !== "all", !!room, !!author, !!since, !!until].filter(
-            Boolean,
-          ).length > 0 && (
-            <span>
-              {
-                [
-                  effectiveKind !== "all",
-                  !!room,
-                  !!author,
-                  !!since,
-                  !!until,
-                ].filter(Boolean).length
-              }{" "}
-              active
-            </span>
-          )}
+          {activeFilterCount > 0 && <span>{activeFilterCount} active</span>}
+          <ChevronDown
+            size={14}
+            className="team-filter-disclosure"
+            aria-hidden="true"
+          />
         </summary>
         <div className="team-search-filters">
           <label>
             Search in
-            <select
-              value={effectiveKind}
-              disabled={!!room}
-              onChange={(e) => setKind(e.target.value)}
-            >
-              <option value="all">Messages and meetings</option>
-              <option value="messages">Messages</option>
-              <option value="meetings">Meetings</option>
-            </select>
+            <span className="team-filter-select">
+              <select
+                value={effectiveKind}
+                disabled={!!room}
+                onChange={(e) => setKind(e.target.value)}
+              >
+                <option value="all">All content</option>
+                <option value="messages">Messages</option>
+                <option value="meetings">Meetings</option>
+              </select>
+              <ChevronDown size={14} aria-hidden="true" />
+            </span>
           </label>
           <label>
             Conversation
-            <select value={room} onChange={(e) => onRoom(e.target.value)}>
-              <option value="">All conversations</option>
-              {room && !rooms.some((r) => r.id === room) && (
-                <option value={room}>Selected conversation</option>
-              )}
-              {rooms.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.kind === "channel"
-                    ? r.is_default
-                      ? "Team chat"
-                      : `#${r.name}`
-                    : r.participants
-                        .filter((p) => p.id !== data.user.id)
-                        .map((p) => p.name)
-                        .join(", ")}
-                  {r.archived_at ? " (archived)" : ""}
-                </option>
-              ))}
-            </select>
+            <span className="team-filter-select">
+              <select value={room} onChange={(e) => onRoom(e.target.value)}>
+                <option value="">All conversations</option>
+                {room && !rooms.some((r) => r.id === room) && (
+                  <option value={room}>Selected conversation</option>
+                )}
+                {rooms.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.kind === "channel"
+                      ? r.is_default
+                        ? "Team chat"
+                        : `#${r.name}`
+                      : r.participants
+                          .filter((p) => p.id !== data.user.id)
+                          .map((p) => p.name)
+                          .join(", ")}
+                    {r.archived_at ? " (archived)" : ""}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown size={14} aria-hidden="true" />
+            </span>
           </label>
           <label>
             Sender / publisher
-            <select value={author} onChange={(e) => setAuthor(e.target.value)}>
-              <option value="">Anyone</option>
-              {data.members.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
+            <span className="team-filter-select">
+              <select
+                value={author}
+                onChange={(e) => setAuthor(e.target.value)}
+              >
+                <option value="">Anyone</option>
+                {data.members.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown size={14} aria-hidden="true" />
+            </span>
           </label>
           <label>
             From
@@ -299,7 +317,8 @@ export function TeamSearch({
             />
           </label>
           <button
-            className="team-text-button"
+            className="team-text-button team-filter-reset"
+            disabled={activeFilterCount === 0}
             onClick={() => {
               setKind("all");
               onRoom("");
@@ -308,6 +327,7 @@ export function TeamSearch({
               setUntil("");
             }}
           >
+            <RotateCcw size={13} aria-hidden="true" />
             Clear filters
           </button>
         </div>

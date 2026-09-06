@@ -126,12 +126,22 @@
   padding-bottom: 12px;
 }
 .team-search-filter-panel summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  list-style: none;
   width: fit-content;
   cursor: pointer;
   color: var(--ink-soft);
   font-size: 12px;
   padding: 6px 4px;
   border-radius: 5px;
+}
+.team-search-filter-panel summary::-webkit-details-marker {
+  display: none;
+}
+.team-search-filter-panel[open] .team-filter-disclosure {
+  transform: rotate(180deg);
 }
 .team-search-filter-panel summary span {
   display: inline-block;
@@ -153,6 +163,60 @@
   width: 100%;
   max-width: 100%;
   min-width: 0;
+  box-sizing: border-box;
+  height: 40px;
+  min-height: 40px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 20px;
+  appearance: none;
+  -webkit-appearance: none;
+}
+.team-filter-select {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+.team-workspace .team-filter-select select {
+  padding-right: 32px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.team-filter-select > svg {
+  position: absolute;
+  right: 11px;
+  top: 13px;
+  pointer-events: none;
+  color: var(--muted);
+}
+.team-workspace .team-search-filters :is(select, input):hover:not(:disabled) {
+  border-color: var(--line-strong);
+}
+.team-workspace .team-search-filters select:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.team-workspace .team-search-filters input[type="date"] {
+  color-scheme: light;
+}
+[data-theme="dark"] .team-workspace .team-search-filters input[type="date"] {
+  color-scheme: dark;
+}
+.team-workspace .team-search-filters .team-filter-reset {
+  height: 40px;
+  padding: 8px 10px;
+  font-size: 12px;
+  gap: 6px;
+  color: var(--muted);
+}
+.team-filter-reset:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .team-workspace .team-search-result {
   padding: 14px 8px;

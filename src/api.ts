@@ -835,6 +835,10 @@ export type Trends = {
 };
 
 export const api = {
+  companionDesktopStatus: () => invoke<{ supported: boolean; detached: boolean; dragging: boolean; overApp: boolean; direction: number }>("companion_desktop_status"),
+  companionBeginDrag: (grabX: number, grabY: number, size: number, followPointer = true) => invoke<void>("companion_begin_drag", { grabX, grabY, size, followPointer }),
+  companionReturn: () => invoke<void>("companion_return"),
+  companionOpenChat: () => invoke<void>("companion_open_chat"),
   teamNotificationSend: (title: string, body: string, target?: import("./teams/types").TeamNotificationTarget) => invoke<void>("team_notification_send", { title, body, target }),
   teamNotificationTakeTarget: () => invoke<import("./teams/types").TeamNotificationTarget | null>("team_notification_take_target"),
   teamStatus: () => invoke<import("./teams/types").TeamSession>("team_status"),

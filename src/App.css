@@ -1942,25 +1942,6 @@ a.today-allday-event:focus-visible { outline: 2px solid var(--accent); outline-o
 .recap-period { font-weight: 560; font-size: 14px; color: var(--ink); }
 .recap-text { margin: 0; font-size: 14px; line-height: 1.65; white-space: pre-wrap; color: var(--ink-soft); }
 
-/* ── footer ────────────────────────────────────────────── */
-.status { padding: 12px 2px 20px; color: var(--faint); font-size: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: var(--border-width, 1px) solid var(--line); margin-top: 8px; }
-.status .meta { display: inline-flex; align-items: center; gap: 7px; }
-.backup-msg { color: var(--good); }
-.assistant-dock {
-  width: min(430px, 58vw); min-height: 34px; display: flex; align-items: center; gap: 9px;
-  padding: 7px 9px; border: none; border-radius: var(--r-sm); background: transparent;
-  color: var(--muted); font: inherit; font-size: 12.5px; text-align: left;
-  transition: color var(--duration-fast) var(--ease), background var(--duration-fast) var(--ease);
-}
-.assistant-dock:hover, .assistant-dock.on { color: var(--ink); background: var(--hover-soft); }
-.assistant-dock svg { flex: none; color: var(--accent); }
-.assistant-dock > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.assistant-dock kbd {
-  margin-left: auto; flex: none; padding: 1px 5px; border: var(--border-width, 1px) solid var(--line);
-  border-radius: 5px; background: var(--surface-2); color: var(--faint);
-  font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
 /* ── modal + QR ────────────────────────────────────────── */
 .modal-overlay { position: fixed; inset: 0; background: color-mix(in srgb, var(--ink) 32%, transparent); backdrop-filter: blur(var(--surface-blur)); display: flex; align-items: center; justify-content: center; z-index: 80; animation: fade var(--duration-fast) var(--ease); }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
@@ -2072,6 +2053,16 @@ a.today-allday-event:focus-visible { outline: 2px solid var(--accent); outline-o
 .preferred-name-row { display: flex; align-items: center; gap: 8px; }
 .preferred-name-row input { min-width: 0; }
 .preferred-name-row .ghost-btn { flex: none; min-height: 37px; }
+.app-update-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.app-update-copy { min-width: 0; display: grid; gap: 3px; }
+.app-update-copy strong { color: var(--ink-soft); font-size: 12.5px; font-weight: 590; }
+.app-update-copy small { color: var(--faint); font-size: 11.5px; line-height: 1.4; }
+.app-update-copy small.error { color: var(--error-ink); }
+.app-update-row button { flex: none; display: inline-flex; align-items: center; gap: 7px; }
+.app-update-notes { margin: -4px 0 0; color: var(--muted); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; }
+@media (max-width: 560px) {
+  .app-update-row { align-items: flex-start; flex-direction: column; }
+}
 .field-hint { font-size: 11.5px; color: var(--faint); line-height: 1.45; }
 .field-hint a { color: var(--accent); text-decoration: none; }
 .field-hint a:hover { text-decoration: underline; }
@@ -2164,7 +2155,7 @@ a.today-allday-event:focus-visible { outline: 2px solid var(--accent); outline-o
   .theme-preview-bar > span { flex-basis: 100%; }
 }
 
-/* ── footer chat assistant ─────────────────────────────── */
+/* ── chat assistant ─────────────────────────────── */
 .chat-panel {
   position: fixed; bottom: 52px; right: 26px; z-index: 70;
   width: 400px; max-width: calc(100vw - 36px); height: 570px; max-height: calc(100vh - 76px);
@@ -2223,16 +2214,6 @@ a.today-allday-event:focus-visible { outline: 2px solid var(--accent); outline-o
 .mic-btn:hover { color: var(--ink); border-color: var(--line-strong); }
 .mic-btn.recording { background: var(--accent); border-color: var(--accent); color: var(--on-accent); animation: pulse 1.3s var(--ease) infinite; }
 @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.4); } 50% { box-shadow: 0 0 0 6px rgba(var(--accent-rgb), 0); } }
-
-@media (max-width: 760px) {
-  .assistant-dock { width: auto; flex: 1; }
-  .assistant-dock kbd { display: none; }
-  .status button.link { white-space: nowrap; }
-}
-
-@media (max-width: 640px) {
-  .chat-panel:not(.chat-sheet) { right: 12px; bottom: 48px; max-width: calc(100vw - 24px); }
-}
 
 /* ── Self: knowledge graph ─────────────────────────────── */
 .self { flex: 1; display: flex; min-height: 0; gap: 0; }
@@ -3938,6 +3919,18 @@ a.cal-btn { text-decoration: none; }
   display: flex; justify-content: center; gap: 4px; padding: 8px 8px 0;
   border-top: var(--border-width, 1px) solid var(--line);
 }
+.sidebar-update {
+  width: calc(100% - 16px); margin: 0 8px 4px; padding: 8px 7px;
+  display: flex; align-items: center; gap: 9px; text-align: left;
+  color: var(--ink-soft); background: transparent; border: 0; border-radius: var(--r-sm);
+}
+.sidebar-update:hover:not(:disabled) { color: var(--ink); background: var(--hover-soft); }
+.sidebar-update:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sidebar-update:disabled { cursor: wait; }
+.sidebar-update > svg { flex: none; color: var(--accent); }
+.sidebar-update > span { min-width: 0; display: grid; gap: 1px; }
+.sidebar-update strong { font-size: 12px; font-weight: 620; line-height: 1.25; }
+.sidebar-update small { overflow: hidden; color: var(--faint); font-size: 10.5px; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar .rec-pill { margin: 0 8px 10px; justify-content: center; }
 .main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 100vh; }
 .app.calmode .main-col, .app.journalmode .main-col { min-height: 0; height: 100%; }
@@ -3950,16 +3943,14 @@ a.cal-btn { text-decoration: none; }
   width: 100%; max-width: 1100px;
 }
 .notes-view:has(.notes-library-toggle-reveal) { gap: 10px; }
-.documents-view { --workspace-rail-gap: 30px; max-width: 1180px; }
-.document-files { width: 224px; }
-.document-files-label {
-  margin: 0 9px 5px; color: var(--ink-soft); font-size: 12px; font-weight: 630;
+.documents-view { --workspace-rail-gap: 0px; max-width: 1180px; }
+.documents-space-select {
+  max-width: 240px; min-height: 28px; padding: 3px 6px;
+  color: var(--ink-soft); background: transparent; border: 1px solid transparent;
+  border-radius: 5px; font: inherit; cursor: pointer;
 }
-.document-file-views { margin-bottom: 2px; }
-.document-folder-head { margin-top: 19px; }
-.document-folders-empty {
-  margin: 5px 10px 0 29px; color: var(--faint); font-size: 10.5px; line-height: 1.45;
-}
+.documents-space-select:hover { background: var(--hover-soft); }
+.documents-space-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .notes-masthead {
   display: flex; align-items: flex-end; justify-content: space-between; gap: 28px;
   min-height: 122px; margin: 0 2px 24px; padding: 8px 4px 0;
@@ -4820,23 +4811,11 @@ a.cal-btn { text-decoration: none; }
    and starts immediately beneath it so its links remain clickable. */
 .app.homemode .weather-bar { min-height: 84px; padding: 43px 10px 5px 14px; }
 .app.homemode .weather-home-content { padding-bottom: 66px; }
-.app.homemode .status {
-  position: fixed; z-index: 5; left: 206px; right: 0; bottom: 0; margin: 0;
-  padding: 10px 18px 12px; color: rgba(255,255,255,0.72);
-  border-color: rgba(255,255,255,0.16); background: rgba(17,38,53,0.12);
-  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
-}
-.app.homemode.side-hidden .status { left: 0; }
-.app.homemode .status button.link { color: rgba(255,255,255,0.76); }
-.app.homemode .status button.link:hover { color: #fff; }
 .app.homemode .capture-workspace { min-height: 0; overflow-y: auto; color: var(--ink); }
 .app.homemode .capture-workspace .log-hero { min-height: 100%; justify-content: flex-start; padding: 28px 0 56px; }
 .app.homemode .capture-workspace .greet-title { color: #fff; text-shadow: 0 1px 18px rgba(18,41,57,0.24); }
 
-/* Keep the assistant launcher in the desktop chrome. Long views scroll inside
-   the remaining space, while the status bar stays visible and never covers the
-   final note, calendar row, or settings control. Home has its own fixed,
-   atmospheric treatment above, so this shell intentionally excludes it. */
+/* Long desktop views scroll within the available window height. */
 .app.side:not(.homemode) {
   height: 100vh;
   min-height: 0;
@@ -4860,16 +4839,8 @@ a.cal-btn { text-decoration: none; }
   padding-bottom: 18px;
   overscroll-behavior: contain;
 }
-.app.side:not(.homemode) .status {
-  flex: none;
-  position: relative;
-  z-index: 6;
-  margin-top: 0;
-  background: var(--canvas);
-}
-
 /* Notes owns its two scrolling panes. This keeps the library and its
-   recoverable Trash target inside the exact space above the assistant footer. */
+   recoverable Trash target inside the available window height. */
 .app.side:not(.homemode) .main-col .content:has(> .notes-view) { overflow: hidden; }
 .app.side:not(.homemode) .main-col .content:has(> .note-document) { overflow: hidden; }
 .app.side:not(.homemode) .main-col .content:has(> .meeting-page.recording) { overflow: hidden; }

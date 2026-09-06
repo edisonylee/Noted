@@ -1,9 +1,10 @@
+import { AppUpdateIndicator } from "./AppUpdateIndicator";
+import brandWordmark from "./design-system/assets/wordmark.png";
 import type { TeamNotificationTarget } from "./teams/types";
 import { useMentionNotifications } from "./teams/useMentionNotifications";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { save } from "@tauri-apps/plugin-dialog";
 import { listen } from "./events";
-import { BookOpen, CalendarDays, Camera, Check, ChevronUp, Download, FileText, House, Library as LibraryIcon, ListTodo, Loader, MessageCircle, Mic, Moon, Network, PanelLeft, PenLine, Settings, Smartphone, Square, Sun, Users, Video } from "lucide-react";
+import { BookOpen, Camera, Check, ChevronUp, Loader, Mic, Moon, PenLine, Settings, Smartphone, Square, Sun, Video } from "lucide-react";
 import { SettingsModal } from "./Settings";
 import { startRecording, type Recorder } from "./audio";
 import { fileToImg, type Img } from "./image";
@@ -38,6 +39,9 @@ import {
   type FilingContext,
 } from "./filingContext";
 import "./App.css";
+import { FloatingDock } from "./FloatingDock";
+import { PRIMARY_DESTINATIONS } from "./navigation";
+import { isDocumentNote } from "./library";
 
 const TeamWorkspace = lazy(() => import("./teams/TeamWorkspace").then(module => ({ default: module.TeamWorkspace })));
 
@@ -196,7 +200,6 @@ export default function App() {
   // Phone capture + backup
   const [showPhone, setShowPhone] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [backupMsg, setBackupMsg] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<SavedFilingMessage | null>(null);
   const [undoingSave, setUndoingSave] = useState(false);
   const [savingCapture, setSavingCapture] = useState(false);
@@ -256,14 +259,8 @@ export default function App() {
     };
   }, []);
 
-  // Sidebar collapse (one click or ⌘B), remembered across launches.
-  const [sideOpen, setSideOpenState] = useState(
-    () => localStorage.getItem("noted-sidebar") !== "closed"
-  );
-  const setSideOpen = (o: boolean) => {
-    setSideOpenState(o);
-    localStorage.setItem("noted-sidebar", o ? "open" : "closed");
-  };
+  const [sideOpen, setSideOpen] = useState(false);
+  const [navigationNote, setNavigationNote] = useState<NoteRow | null>(null);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.code === "Space") {
@@ -271,13 +268,7 @@ export default function App() {
         setAssistantOpen(true);
         return;
       }
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b") {
-        e.preventDefault();
-        setSideOpenState((o) => {
-          localStorage.setItem("noted-sidebar", o ? "closed" : "open");
-          return !o;
-        });
-      }
+
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -673,22 +664,6 @@ export default function App() {
     };
   }, []);
 
-  async function onBackup() {
-    try {
-      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const destination = await save({
-        defaultPath: `noted-backup-${timestamp}.db`,
-        filters: [{ name: "Noted database", extensions: ["db"] }],
-      });
-      if (!destination) return;
-      setBackupMsg("backing up…");
-      const path = await api.exportDb(destination);
-      setBackupMsg(`backed up to ${path}`);
-    } catch (e) {
-      setBackupMsg(`backup failed: ${e}`);
-    }
-  }
-
   async function onSave() {
     if (!cards.length || !allValid || savingCaptureRef.current) return;
     savingCaptureRef.current = true;
@@ -839,7 +814,7 @@ export default function App() {
     return (
       <div className="app repair-screen">
         <div className="repair-card">
-          <div className="brand">noted<span className="dot">.</span></div>
+          <div className="brand"><img className="brand-wordmark" src={brandWordmark} alt="noted" draggable={false} /><span className="brand-classic">noted<span className="dot">.</span></span></div>
           <h2>Reconnect to your Mac</h2>
           <p>
             This phone’s connection expired. Open <strong>noted</strong> on your Mac, click the
@@ -861,7 +836,7 @@ export default function App() {
       <div className="app mobile">
         {reconnectingOverlay}
         <header className="mobile-topbar">
-          <div className="brand">noted<span className="dot">.</span></div>
+          <div className="brand"><img className="brand-wordmark" src={brandWordmark} alt="noted" draggable={false} /><span className="brand-classic">noted<span className="dot">.</span></span></div>
           <button className="icon-btn" onClick={() => setShowSettings(true)} aria-label="Settings">
             <Settings size={18} />
           </button>
@@ -898,11 +873,23 @@ export default function App() {
     );
   }
 
+  const dockDestinations = PRIMARY_DESTINATIONS.map(item => ({
+    ...item,
+    active: view === item.id || (item.id === "ask" && view === "capture"),
+    onSelect: () => {
+      if (item.id === "ask") goHome();
+      else if (item.id === "today") {
+        setMeetingOpen(null);
+        setView("today");
+        refresh().catch(handleErr);
+      } else setView(item.id);
+    },
+  }));
+
   return (
     <div
       className={
-        "app side" +
-        (sideOpen ? "" : " side-hidden") +
+        "app side dock-shell" +
         (view === "ask" || view === "capture"
           ? " homemode"
           : view === "calendar"
@@ -917,62 +904,21 @@ export default function App() {
       }
     >
       {reconnectingOverlay}
-      {/* Overlay titlebar (Codex-style): the top strip drags the window, and
-          the sidebar toggle sits just right of the traffic lights — same spot
-          whether the rail is open or closed. */}
       <div className="titlebar-drag" data-tauri-drag-region />
-      <button
-        className="side-toggle icon-btn"
-        onClick={() => setSideOpen(!sideOpen)}
-        title={(sideOpen ? "Collapse" : "Open") + " sidebar (⌘B)"}
-        aria-label={(sideOpen ? "Collapse" : "Open") + " sidebar"}
-      >
-        <PanelLeft size={17} />
-      </button>
-      {/* The whole sidebar background drags the window (like a native app's
-          source list) — buttons still click because the drag region only
-          engages when the grabbed element is the one carrying the attribute. */}
-      <aside className="sidebar" data-tauri-drag-region="deep">
+      <FloatingDock open={sideOpen} onOpenChange={setSideOpen} notes={notes}
+        onOpenNote={note => { setNavigationNote(note); setView(isDocumentNote(note) ? "documents" : "library"); }}
+        recording={!!recMeeting}
+        onRecording={() => { if (recMeeting) openRecordingMeeting(); else { setSideOpen(true); setRecordModeMenu(true); } }}
+        destinations={dockDestinations}>
+      <aside className="mission-utilities">
         <div className="side-head" data-tauri-drag-region>
-          <div className="brand" data-tauri-drag-region>noted<span className="dot">.</span></div>
+          <div className="brand" data-tauri-drag-region><img className="brand-wordmark" src={brandWordmark} alt="noted" draggable={false} /><span className="brand-classic">noted<span className="dot">.</span></span></div>
         </div>
         <nav className="side-nav">
-          <button
-            className={view === "ask" || view === "capture" ? "on" : ""}
-            onClick={goHome}
-          >
-            <House size={16} /> Home
-          </button>
-          <button
-            className={view === "today" ? "on" : ""}
-            onClick={() => {
-              setMeetingOpen(null);
-              setView("today");
-              refresh().catch(handleErr);
-            }}
-          >
-            <ListTodo size={16} /> Schedule
-          </button>
-          <button className={view === "calendar" ? "on" : ""} onClick={() => setView("calendar")}>
-            <CalendarDays size={16} /> Calendar
-          </button>
-          <button className={view === "documents" ? "on" : ""} onClick={() => setView("documents")}>
-            <FileText size={16} /> Documents
-          </button>
-          <button className={view === "library" ? "on" : ""} onClick={() => setView("library")}>
-            <LibraryIcon size={16} /> Library
-          </button>
-          {SHOW_JOURNAL && (
-            <button className={view === "journal" ? "on" : ""} onClick={() => setView("journal")}>
-              <BookOpen size={16} /> Journal
-            </button>
-          )}
-          <button className={view === "team" ? "on" : ""} onClick={() => setView("team")}>
-            <Users size={16} /> Team
-          </button>
-          <button className={view === "knowledge" ? "on" : ""} onClick={() => setView("knowledge")}>
-            <Network size={16} /> Knowledge
-          </button>
+          {dockDestinations.map(item => <button key={item.id} className={item.active ? "on" : ""} onClick={item.onSelect}>
+            <item.icon size={16} />{item.label}
+          </button>)}
+          {SHOW_JOURNAL && <button className={view === "journal" ? "on" : ""} onClick={() => setView("journal")}><BookOpen size={16} /> Journal</button>}
         </nav>
         <span className="spacer" data-tauri-drag-region />
         {recordModeMenu && !recMeeting && (
@@ -1045,6 +991,7 @@ export default function App() {
             {meetingControlError}
           </span>
         )}
+        <AppUpdateIndicator />
         <div className="side-foot">
           <button
             className="icon-btn"
@@ -1060,7 +1007,7 @@ export default function App() {
             </button>
           )}
           <button
-            className={"icon-btn" + (view === "settings" ? " on" : "")}
+            className={"icon-btn mission-settings" + (view === "settings" ? " on" : "")}
             onClick={() => setView("settings")}
             title="Settings"
           >
@@ -1068,6 +1015,7 @@ export default function App() {
           </button>
         </div>
       </aside>
+      </FloatingDock>
 
       {/* Empty background = window drag, like a native app. The attribute only
           fires when the grabbed element IS the background (children keep their
@@ -1094,9 +1042,9 @@ export default function App() {
             <TeamWorkspace onOpenLibrary={() => setView("library")} notificationTarget={notificationTarget} onNotificationHandled={() => setNotificationTarget(null)} />
           </Suspense>
         ) : view === "documents" ? (
-          <DocumentsView key="documents" notes={notes} cats={cats} onChanged={() => refresh().catch(handleErr)} />
+          <DocumentsView key="documents" notes={notes} cats={cats} requestedNote={navigationNote} onRequestedNoteOpened={() => setNavigationNote(null)} onChanged={() => refresh().catch(handleErr)} />
         ) : view === "library" ? (
-          <LibraryView key="library" notes={notes} cats={cats} onChanged={() => refresh().catch(handleErr)} />
+          <LibraryView key="library" notes={notes} cats={cats} requestedNote={navigationNote} onRequestedNoteOpened={() => setNavigationNote(null)} onChanged={() => refresh().catch(handleErr)} />
         ) : view === "calendar" ? (
           <CalendarView onOpenSettings={() => setView("settings")} />
         ) : view === "journal" ? (
@@ -1518,24 +1466,7 @@ export default function App() {
         </div>
       )}
 
-      <footer className="status">
-        <button
-          className={"assistant-dock" + (assistantOpen ? " on" : "")}
-          onClick={() => setAssistantOpen((open) => !open)}
-          aria-haspopup="dialog"
-          aria-expanded={assistantOpen}
-        >
-          <MessageCircle size={15} aria-hidden="true" />
-          <span>Ask anything or schedule a meeting</span>
-          <kbd>Command + Shift + Space</kbd>
-        </button>
-        <span className="meta">
-          {backupMsg && <span className="backup-msg">{backupMsg}</span>}
-          <button className="link" onClick={onBackup}>
-            <Download size={14} /> Back up
-          </button>
-        </span>
-      </footer>
+
       </div>
 
       <FloatingChat

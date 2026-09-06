@@ -147,3 +147,14 @@ The morning crops confirm that 8:00, 9:00, 9:45, and 10:00 events all occupy the
 
 - Pair and sync a real library to replace the expected pre-pairing Notes empty state during the physical-device proof.
 final result: passed
+
+
+## Neon rollout — corrected master baseline, 2026-09-05
+
+The first design build used an older feature branch and omitted current-master functionality. It was replaced by an installation built from freshly fetched master (`267a57b`) with only the design changes ported. Team and current Documents/Library screens were verified with existing content. The Team service and feature implementations remain identical to master. Installation guards prevent older branches from automatically replacing the app.
+
+See [corrected product verification](docs/design-system/product-qa.md) for evidence, checks, and limits.
+
+final result: passed for the corrected rollout
+
+Combined native integration verified: Aperture app icon, floating dock, companion chat/customization/desktop return, Documents without its folder rail, Library folders, and existing Teams workspace. See `docs/design-system/product-qa.md` for test counts and limits.

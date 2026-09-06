@@ -10,6 +10,7 @@ import { api, isDesktop, type AppleCalStatus, type AgentAccessStatus, type Agent
 import { ThemesSettings } from "./ThemesSettings";
 import { TranscriptVocabularySettings } from "./TranscriptVocabularySettings";
 import { releaseProfile } from "./releaseProfile";
+import { CompanionSettings } from "./Companion";
 import { SystemSettingsPanel } from "./SystemSettings";
 
 const ProfileSettings = lazy(() => import("./ProfileSettings").then((module) => ({ default: module.ProfileSettings })));
@@ -996,7 +997,7 @@ export function SettingsModal({ onClose, page = false, onOpenTeam }: { onClose: 
       label: "Intelligence",
       sections: [
         { id: "models", label: "Models", description: "Intelligence and providers", icon: Laptop },
-        { id: "assistant", label: "Assistant", description: "Chat and keyboard shortcut", icon: MessageCircle },
+        { id: "assistant", label: "Assistant", description: "Companion, chat, and shortcut", icon: MessageCircle },
         ...(isDesktop
           ? [{ id: "agents" as const, label: "Agent Access", description: "Permissioned MCP connections", icon: Bot }]
           : []),
@@ -1453,6 +1454,7 @@ export function SettingsModal({ onClose, page = false, onOpenTeam }: { onClose: 
         </p>
 
         <div className="settings-fields assistant-settings">
+          <CompanionSettings />
           <section className="settings-group">
             <header className="settings-group-head">
               <h4>Open from anywhere</h4>

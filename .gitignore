@@ -32,3 +32,6 @@ src-tauri/resources/noted-fluid-diarizer
 # Team service runtime data
 team.sqlite*
 services/team/*.sqlite*
+
+# Standalone design preview output
+dist-design-system

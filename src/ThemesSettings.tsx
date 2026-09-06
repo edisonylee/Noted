@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, FileText, Loader2, Palette, RotateCcw, Search, Sparkles, Trash2, Upload } from "lucide-react";
 import { api } from "./api";
+import { DEFAULT_THEME, NEON_THEMES } from "./themes/presets";
+import { NEON_ACCENTS, neonAccentForTheme } from "./design-system/tokens";
 import { useTheme, validateThemePack, type ThemeMode, type ThemeModePreference, type ThemePack } from "./useTheme";
 
 function resolvedMode(mode: ThemeModePreference): ThemeMode {
@@ -12,7 +14,7 @@ function ThemeSwatches({ pack, mode }: { pack: ThemePack; mode: ThemeMode }) {
   const colors = pack[mode].colors;
   return (
     <span className="theme-swatches" aria-hidden>
-      {[colors.canvas, colors.surface, colors.ink, colors.accent, pack[mode].charts[2]].map((color, index) => (
+      {[colors.canvas, colors.surface, colors.ink, neonAccentForTheme(pack.id) ? NEON_ACCENTS[neonAccentForTheme(pack.id)!].vivid : colors.accent].map((color, index) => (
         <i key={`${color}-${index}`} style={{ background: color }} />
       ))}
     </span>
@@ -43,10 +45,11 @@ export function ThemesSettings() {
   const fileRef = useRef<HTMLInputElement>(null);
   const mode = resolvedMode(modePreference);
   const displayThemes = pendingPack ? [...themes, pendingPack] : themes;
+  const catalogThemes = displayThemes.filter(pack => !neonAccentForTheme(pack.id));
   const normalizedSearch = search.trim().toLowerCase();
   const visibleThemes = normalizedSearch
-    ? displayThemes.filter((theme) => `${theme.name} ${theme.description ?? ""}`.toLowerCase().includes(normalizedSearch))
-    : displayThemes;
+    ? catalogThemes.filter((theme) => `${theme.name} ${theme.description ?? ""}`.toLowerCase().includes(normalizedSearch))
+    : catalogThemes;
 
   useEffect(() => {
     setSelectedId(activeThemeId);
@@ -181,6 +184,32 @@ export function ThemesSettings() {
         ))}
       </div>
 
+      {(isPreviewing || selectedId !== activeThemeId) && (
+        <div className="theme-preview-bar">
+          <span><Palette size={14} /> Previewing {displayThemes.find((theme) => theme.id === selectedId)?.name ?? "theme"}</span>
+          <button className="ghost-btn" onClick={cancelPreview}>Cancel</button>
+          <button className="primary" onClick={() => void applySelected()} disabled={applying}>
+            {applying ? <Loader2 size={14} className="spin" /> : <Check size={14} />}
+            Apply
+          </button>
+        </div>
+      )}
+      {message && <div className="field-hint theme-message" role="status" aria-live="polite">{message}</div>}
+
+      <section className="neon-appearance" aria-label="Noted neon accents">
+        <div><h4>Noted neon</h4><p>Black and white. Your color.</p></div>
+        <div className="neon-accent-options" role="group" aria-label="Accent color">
+          {NEON_THEMES.map(pack => {
+            const accent = NEON_ACCENTS[neonAccentForTheme(pack.id)!];
+            return <button key={pack.id} className={selectedId === pack.id ? "selected" : ""}
+              onClick={() => selectTheme(pack)} aria-pressed={selectedId === pack.id}>
+              <span style={{ background: accent.vivid }}>{selectedId === pack.id && <Check size={16} />}</span>
+              {accent.name}{pack.id === DEFAULT_THEME.id && <small>Default</small>}
+            </button>;
+          })}
+        </div>
+      </section>
+
       <div className="theme-catalog-toolbar">
         <label className="theme-search">
           <Search size={14} aria-hidden="true" />
@@ -193,9 +222,9 @@ export function ThemesSettings() {
           />
         </label>
         <span className="theme-catalog-count">
-          {visibleThemes.length === displayThemes.length
-            ? `${displayThemes.length} themes`
-            : `${visibleThemes.length} of ${displayThemes.length}`}
+          {visibleThemes.length === catalogThemes.length
+            ? `${catalogThemes.length} themes`
+            : `${visibleThemes.length} of ${catalogThemes.length}`}
         </span>
       </div>
 
@@ -226,16 +255,7 @@ export function ThemesSettings() {
         <p className="theme-empty">No themes match “{search.trim()}”.</p>
       )}
 
-      {(isPreviewing || selectedId !== activeThemeId) && (
-        <div className="theme-preview-bar">
-          <span><Palette size={14} /> Previewing {displayThemes.find((theme) => theme.id === selectedId)?.name ?? "theme"}</span>
-          <button className="ghost-btn" onClick={cancelPreview}>Cancel</button>
-          <button className="primary" onClick={() => void applySelected()} disabled={applying}>
-            {applying ? <Loader2 size={14} className="spin" /> : <Check size={14} />}
-            Apply
-          </button>
-        </div>
-      )}
+
 
       <div className="theme-import">
         <div className="theme-import-head">
@@ -294,13 +314,13 @@ export function ThemesSettings() {
       <button
         className="theme-reset link"
         onClick={() => {
-          setSelectedId("noted-warm");
-          previewTheme("noted-warm", mode);
+          setSelectedId(DEFAULT_THEME.id);
+          previewTheme(DEFAULT_THEME.id, mode);
         }}
       >
-        <RotateCcw size={13} /> Restore Noted Warm
+        <RotateCcw size={13} /> Restore default citron
       </button>
-      {message && <div className="field-hint theme-message" role="status" aria-live="polite">{message}</div>}
+
     </>
   );
 }

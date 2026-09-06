@@ -3,11 +3,13 @@ import ReactDOM from "react-dom/client";
 import "@fontsource-variable/geist";
 import App from "./App";
 import { RecordPrompt } from "./RecordPrompt";
+import { DesktopCompanion } from "./DesktopCompanion";
 import { api, isDesktop } from "./api";
 import { configureAppTimeZone } from "./day";
 import { ThemeProvider } from "./useTheme";
 import { configurePreferredName } from "./usePreferredName";
 import "./App.css";
+import "./design-system/product.css";
 
 // The record-prompt popup is a second webview onto the same bundle — it must
 // render just the prompt card, never the app (a 372px window otherwise falls
@@ -36,10 +38,12 @@ const isPromptWindow = (() => {
 // Desktop gets native window vibrancy behind a transparent webview; the
 // "vibrant" class swaps solid backgrounds for glass where we want see-through.
 // The phone browser keeps solid backgrounds.
-if (isDesktop) document.body.classList.add("vibrant");
+const isCompanionWindow = new URLSearchParams(window.location.search).get("window") === "companion";
+if (isCompanionWindow) document.documentElement.classList.add("companion-window");
+else if (isDesktop) document.body.classList.add("vibrant");
 
 async function start() {
-  if (!isPromptWindow) {
+  if (!isPromptWindow && !isCompanionWindow) {
     try {
       const settings = await api.systemSettingsGet();
       configureAppTimeZone(settings.resolvedTimeZone);
@@ -51,7 +55,7 @@ async function start() {
 
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
-      <ThemeProvider>{isPromptWindow ? <RecordPrompt /> : <App />}</ThemeProvider>
+      <ThemeProvider>{isCompanionWindow ? <DesktopCompanion /> : isPromptWindow ? <RecordPrompt /> : <App />}</ThemeProvider>
     </React.StrictMode>,
   );
 }

@@ -129,6 +129,8 @@ type SearchInstrument = "filters" | null;
 type LibraryWorkspaceMode = "library" | "documents";
 
 type LibraryWorkspaceProps = {
+  requestedNote?: NoteRow | null;
+  onRequestedNoteOpened?: () => void;
   notes: NoteRow[];
   cats: CategoryInfo[];
   onChanged?: () => void | Promise<void>;
@@ -494,6 +496,8 @@ function filingTargetPath(folder: NoteFolderInfo, folders: NoteFolderInfo[]): st
 }
 
 function LibraryWorkspace({
+  requestedNote,
+  onRequestedNoteOpened,
   notes,
   cats,
   onChanged,
@@ -501,10 +505,18 @@ function LibraryWorkspace({
 }: LibraryWorkspaceProps & { mode: LibraryWorkspaceMode }) {
   const documentsMode = mode === "documents";
   const navigationScope = documentsMode ? "documents" : "library";
-  const [selection, setSelection] = useNavigationState(`${navigationScope}:selection`, documentsMode ? "documents" : "all");
+  const [savedSelection, setSelection] = useNavigationState(`${navigationScope}:selection`, documentsMode ? "documents" : "all");
+  // Documents always shows the writing index, regardless of old folder navigation.
+  const selection = documentsMode ? "documents" : savedSelection;
   const [query, setQuery] = useNavigationState(`${navigationScope}:query`, "");
   const [openNote, setOpenNote] = useState<NoteRow | null>(null);
   const [openMeeting, setOpenMeeting] = useState<MeetingTarget | null>(null);
+  useEffect(() => {
+    if (!requestedNote) return;
+    setOpenMeeting(null);
+    setOpenNote(requestedNote);
+    onRequestedNoteOpened?.();
+  }, [requestedNote, onRequestedNoteOpened]);
   const [meetings, setMeetings] = useState<MeetingListRow[]>([]);
   const [trashedMeetings, setTrashedMeetings] = useState<MeetingListRow[]>([]);
   const [trashedNotes, setTrashedNotes] = useState<NoteRow[]>([]);
@@ -570,7 +582,7 @@ function LibraryWorkspace({
   const [editError, setEditError] = useState<string | null>(null);
   const [creatingNote, setCreatingNote] = useState(false);
   const [createNoteError, setCreateNoteError] = useState<string | null>(null);
-  const explorerStorageKey = documentsMode ? "noted-document-files" : "noted-library";
+  const explorerStorageKey = "noted-library";
   const [libraryOpen, setLibraryOpenState] = useState(
     () => localStorage.getItem(explorerStorageKey) !== "closed"
   );
@@ -1057,10 +1069,6 @@ function LibraryWorkspace({
     () => new Set(documentNotes.map((note) => note.id)),
     [documentNotes]
   );
-  const trashedDocumentNotes = useMemo(
-    () => trashedNotes.filter(isDocumentNote),
-    [trashedNotes]
-  );
   const inboxNoteIds = useMemo(
     () => new Set((activeSpace?.explicit_filings ?? []).map((filing) => filing.note_id)),
     [activeSpace]
@@ -1068,10 +1076,6 @@ function LibraryWorkspace({
   const inboxNotes = useMemo(
     () => libraryNotes.filter((note) => inboxNoteIds.has(note.id)),
     [inboxNoteIds, libraryNotes]
-  );
-  const inboxDocuments = useMemo(
-    () => documentNotes.filter((note) => inboxNoteIds.has(note.id)),
-    [documentNotes, inboxNoteIds]
   );
   const libraryNoteIds = useMemo(
     () => new Set(libraryNotes.map((note) => note.id)),
@@ -1169,12 +1173,7 @@ function LibraryWorkspace({
   const list = useMemo(() => {
     let rows: NoteRow[];
     if (documentsMode) {
-      if (selection === "document-trash") rows = trashedDocumentNotes;
-      else if (selection === "inbox") rows = inboxDocuments;
-      else if (selection.startsWith("folder:")) {
-        const ids = new Set(selectedFolder?.note_ids ?? []);
-        rows = documentNotes.filter((note) => ids.has(note.id));
-      } else rows = documentNotes;
+      rows = documentNotes;
     } else {
       if (selection === "all") rows = libraryNotes;
       else if (selection === "documents") rows = documentNotes;
@@ -1215,7 +1214,6 @@ function LibraryWorkspace({
     documentsMode,
     libraryNotes,
     documentNotes,
-    inboxDocuments,
     inboxNotes,
     needsFilingNotes,
     query,
@@ -1227,7 +1225,6 @@ function LibraryWorkspace({
     standupNoteIds,
     notes,
     trashedNotes,
-    trashedDocumentNotes,
   ]);
 
   const meetingRows = useMemo(() => {
@@ -1316,13 +1313,7 @@ function LibraryWorkspace({
         ? "Deleted documents stay here until you restore them."
         : "Deleted items stay here until you restore them.";
     }
-    if (documentsMode) {
-      if (selectedFolder) return "Documents and subfolders filed here.";
-      if (selection === "inbox") {
-        return `Documents saved directly to ${activeSpaceLabel}, before you choose a folder.`;
-      }
-      return "Write here, then shape your own folder structure as the work grows.";
-    }
+    if (documentsMode) return null;
     if (selectedFolder?.auto_rule === "daily_standup") {
       return "Stand-up notes are filed here automatically.";
     }
@@ -3261,170 +3252,6 @@ function LibraryWorkspace({
           )}
         </div>
       )}
-      {documentsMode && <div className="notes-library-shell document-files-shell">
-        {!libraryOpen && (
-          <button
-            className="notes-library-toggle notes-library-toggle-reveal icon-btn"
-            onClick={() => setLibraryOpen(true)}
-            title="Show files sidebar"
-            aria-label="Show files sidebar"
-            aria-controls="document-files-rail"
-            aria-expanded={false}
-          >
-            <ChevronRight size={15} aria-hidden="true" />
-          </button>
-        )}
-
-        {libraryOpen && (
-          <aside id="document-files-rail" className="spaces document-files" aria-label="Document files">
-            <div className="spaces-scroll">
-              <div className="space-switcher" ref={spaceSwitcherRef}>
-                <button
-                  className="space-switcher-trigger"
-                  onClick={() => setSpaceMenuOpen((open) => !open)}
-                  aria-haspopup="menu"
-                  aria-expanded={spaceMenuOpen}
-                >
-                  <span className="space-switcher-copy">
-                    <strong>{activeSpaceLabel}</strong>
-                    <small>{activeSpaceDescription}</small>
-                  </span>
-                  <ChevronDown size={15} aria-hidden="true" />
-                </button>
-                {spaceMenuOpen && (
-                  <div className="space-switcher-menu" role="menu" aria-label="Switch document space">
-                    {rootSpaces.map((space) => (
-                      <button
-                        key={space.id}
-                        role="menuitemradio"
-                        aria-checked={space.id === activeSpace?.id}
-                        className={space.id === activeSpace?.id ? "on" : ""}
-                        onClick={() => selectSpace(space)}
-                      >
-                        <span>
-                          <strong>{space.name}</strong>
-                          <small>{space.name} documents</small>
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="document-files-label">Files</div>
-              <nav className="library-main document-file-views" aria-label="Document views">
-                <button
-                  className={selection === "documents" ? "on" : ""}
-                  onClick={() => setSelection("documents")}
-                >
-                  <FileText size={14} />
-                  <span className="space-label">All documents</span>
-                  <span className="space-n">{documentNotes.length}</span>
-                </button>
-                <button
-                  className={selection === "inbox" ? "on" : ""}
-                  onClick={() => setSelection("inbox")}
-                  title={`Documents saved to ${activeSpaceLabel} without a folder`}
-                >
-                  <Inbox size={14} />
-                  <span className="space-label">Inbox</span>
-                  <span className="space-n">{inboxDocuments.length}</span>
-                </button>
-              </nav>
-
-              <div className="library-section-head document-folder-head">
-                <span>Folders</span>
-                {!creating && (
-                  <button
-                    className="library-add"
-                    disabled={!defaultFolderParent}
-                    onClick={() => {
-                      if (!defaultFolderParent) return;
-                      setCreating({
-                        parentId: defaultFolderParent.id,
-                        label: `Folder in ${activeSpaceLabel}`,
-                      });
-                      setNewFolderName("");
-                    }}
-                    aria-label={`New folder in ${activeSpaceLabel}`}
-                    title="New folder"
-                  >
-                    <Plus size={14} />
-                  </button>
-                )}
-              </div>
-              <div className="folder-tree">
-                {topLevelFolders.map((folder) => renderFolder(folder, 0))}
-              </div>
-              {topLevelFolders.length === 0 && !creating && (
-                <p className="document-folders-empty">Create a folder when this space needs structure.</p>
-              )}
-              {creating && creating.parentId === activeSpace?.id && (
-                <form
-                  className="folder-create nested"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    createFolder();
-                  }}
-                >
-                  <input
-                    autoFocus
-                    value={newFolderName}
-                    onChange={(event) => setNewFolderName(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Escape") cancelFolderCreation();
-                    }}
-                    placeholder={creating.label}
-                    aria-label={creating.label}
-                  />
-                  <button
-                    type="button"
-                    className="folder-create-cancel"
-                    onClick={cancelFolderCreation}
-                    aria-label="Cancel new folder"
-                    title="Cancel"
-                  >
-                    <X size={13} />
-                  </button>
-                </form>
-              )}
-              {folderError && <div className="folder-error">{folderError}</div>}
-            </div>
-
-            <div className="spaces-trash-wrap">
-              <button
-                className={`spaces-trash${selection === "document-trash" ? " on" : ""}${
-                  draggingItem?.kind === "note" ? " drop-ready" : ""
-                }${trashDropActive ? " drop-active" : ""}`}
-                onClick={() => setSelection("document-trash")}
-                title="Open Document Trash. Drag a document here to remove it."
-                aria-label={`Open Document Trash, ${quantified(trashedDocumentNotes.length, "document")}. Drag a document here to remove it.`}
-                data-trash-drop-target
-              >
-                <Trash2 size={14} />
-                <span className="spaces-trash-copy">
-                  <strong>Trash</strong>
-                  <small>{trashDropActive ? "Release to move here" : "Deleted documents"}</small>
-                </span>
-                <span className="space-n">{trashedDocumentNotes.length}</span>
-              </button>
-            </div>
-            <button
-              className="notes-library-toggle notes-library-toggle-collapse icon-btn"
-              onClick={() => {
-                setSpaceMenuOpen(false);
-                setLibraryOpen(false);
-              }}
-              title="Hide files sidebar"
-              aria-label="Hide files sidebar"
-              aria-controls="document-files-rail"
-              aria-expanded={true}
-            >
-              <ChevronLeft size={15} aria-hidden="true" />
-            </button>
-          </aside>
-        )}
-      </div>}
       {!documentsMode && <div className="notes-library-shell">
         {!libraryOpen && (
           <button
@@ -3715,7 +3542,22 @@ function LibraryWorkspace({
         <header className="notes-masthead">
           <div className="notes-masthead-copy">
             <div className="notes-masthead-breadcrumb">
-              {needsFilingView || trashView ? (
+              {documentsMode ? (
+                <select
+                  className="documents-space-select"
+                  aria-label="Document space"
+                  value={activeSpace?.id ?? ""}
+                  disabled={rootSpaces.length === 0}
+                  onChange={(event) => {
+                    const space = rootSpaces.find((item) => item.id === Number(event.target.value));
+                    if (space) selectSpace(space);
+                  }}
+                >
+                  {rootSpaces.map((space) => (
+                    <option key={space.id} value={space.id}>{space.name}</option>
+                  ))}
+                </select>
+              ) : needsFilingView || trashView ? (
                 "All spaces"
               ) : (
                 <>

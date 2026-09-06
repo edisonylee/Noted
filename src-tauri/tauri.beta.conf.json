@@ -4,8 +4,17 @@
   "identifier": "com.noted.app",
   "bundle": {
     "targets": ["app", "dmg"],
+    "createUpdaterArtifacts": true,
     "macOS": {
       "minimumSystemVersion": "14.4"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIyOTQyMzUyQUY0QTNFOTIKUldTU1BrcXZVaU9VSWl1ZjB1Mnl3NWw2bm9oY3FNaFhvL1VxK1N6YTM3L01RQ2o1UlJNMDgxaXYK",
+      "endpoints": [
+        "https://github.com/edisonylee/Noted/releases/latest/download/latest.json"
+      ]
     }
   }
 }

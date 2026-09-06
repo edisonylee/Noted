@@ -1,7 +1,9 @@
+import { save } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { api, type SystemSettings } from "./api";
 import { configureAppTimeZone } from "./day";
 import { configurePreferredName } from "./usePreferredName";
+import { AppUpdateSettings } from "./AppUpdateSettings";
 
 const COMMON_TIME_ZONES = [
   ["America/Los_Angeles", "Pacific Time (Los Angeles)"],
@@ -44,6 +46,20 @@ function timeZonePreview(value: string): string {
 }
 
 export function SystemSettingsPanel() {
+  const [backupMsg, setBackupMsg] = useState("");
+  const [backingUp, setBackingUp] = useState(false);
+  async function onBackup() {
+    setBackingUp(true);
+    setBackupMsg("");
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const destination = await save({ defaultPath: `noted-backup-${timestamp}.db`, filters: [{ name: "Noted database", extensions: ["db"] }] });
+      if (!destination) return;
+      setBackupMsg(`Backed up to ${await api.exportDb(destination)}`);
+    }
+    catch (reason) { setBackupMsg(`Backup failed: ${reason}`); }
+    finally { setBackingUp(false); }
+  }
   const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [timeZonePreference, setTimeZonePreference] = useState("system");
   const [preferredName, setPreferredName] = useState("");
@@ -197,6 +213,12 @@ export function SystemSettingsPanel() {
             )}
           </label>
         </section>
+        <section className="settings-group">
+          <header className="settings-group-head"><h4>Database backup</h4><p>Export a copy of your Noted database to this Mac.</p></header>
+          <button className="ghost" onClick={() => void onBackup()} disabled={backingUp}>{backingUp ? "Backing up…" : "Back up database"}</button>
+          {backupMsg && <p className="field-hint" role="status" style={{ overflowWrap: "anywhere" }}>{backupMsg}</p>}
+        </section>
+        <AppUpdateSettings />
       </div>
 
       {error && <div className="settings-actions"><span className="field-hint settings-error">{error}</span></div>}

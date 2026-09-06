@@ -23,7 +23,7 @@
           var cached = JSON.parse(localStorage.getItem("noted-theme-cache-v1") || "null");
           var allowed = new Set([
             "--canvas", "--surface", "--surface-2", "--ink", "--ink-soft", "--muted", "--faint",
-            "--line", "--line-strong", "--accent", "--accent-tint", "--accent-rgb", "--on-accent", "--on-bad", "--good", "--bad",
+            "--accent-fill", "--on-accent-fill", "--accent-focus", "--line", "--line-strong", "--accent", "--accent-tint", "--accent-rgb", "--on-accent", "--on-bad", "--good", "--bad",
             "--on-ink", "--ink-hover", "--hover-soft", "--scroll-thumb", "--scroll-thumb-hover",
             "--error-bg", "--error-border", "--error-ink", "--r-sm", "--r-md", "--r-lg", "--r-xl",
             "--border-width", "--shadow-1", "--shadow-2", "--shadow-3", "--surface-blur", "--font",
@@ -45,6 +45,7 @@
           document.documentElement.style.colorScheme = t;
           if (cached && /^[a-z][a-z0-9-]{0,47}$/.test(cached.themeId || "") && !cached.themeId.endsWith("-") && !cached.themeId.includes("--")) {
             document.documentElement.setAttribute("data-theme-id", cached.themeId);
+            document.documentElement.setAttribute("data-design", /^noted-neon-(citron|blue|pink|green)$/.test(cached.themeId) ? "neon" : "custom");
           }
           if (cached && cached.schemaVersion === 1 && cached.cssVariables) {
             Object.entries(cached.cssVariables).forEach(function (entry) {

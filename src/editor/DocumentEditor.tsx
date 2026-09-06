@@ -1,3 +1,4 @@
+import { useTheme } from "../useTheme";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   EditorContent,
@@ -222,6 +223,7 @@ export function DocumentEditor({
   const imageInputRef = useRef<HTMLInputElement>(null);
   const insertImagesRef = useRef<(files: File[], position?: number) => void>(() => {});
   const linkInputRef = useRef<HTMLInputElement>(null);
+  useTheme(); // Keep color defaults in sync with the active palette.
   const [toolbarRevision, setToolbarRevision] = useState(0);
   const [linkEditorOpen, setLinkEditorOpen] = useState(false);
   // Colour and block controls live behind this rather than on the main bar:
@@ -409,8 +411,11 @@ export function DocumentEditor({
   const currentFontFamily = typeof textStyleAttributes.fontFamily === "string" ? textStyleAttributes.fontFamily : "";
   const currentFontSize = typeof textStyleAttributes.fontSize === "string" ? textStyleAttributes.fontSize : "";
   const currentLineHeight = typeof textStyleAttributes.lineHeight === "string" ? textStyleAttributes.lineHeight : "";
-  const currentTextColor = colorInputValue(textStyleAttributes.color, "#1b1916");
-  const currentHighlightColor = colorInputValue(textStyleAttributes.backgroundColor, "#fff0a8");
+  const palette = typeof document !== "undefined" ? getComputedStyle(document.documentElement) : null;
+  const currentTextColor = colorInputValue(textStyleAttributes.color,
+    colorInputValue(palette?.getPropertyValue("--ink").trim(), "#0a0a0a"));
+  const currentHighlightColor = colorInputValue(textStyleAttributes.backgroundColor,
+    colorInputValue(palette?.getPropertyValue("--accent-fill").trim(), "#dfff00"));
   const currentTextAlign = typeof activeBlockAttributes.textAlign === "string" ? activeBlockAttributes.textAlign : "left";
 
   let textStyle = "paragraph";

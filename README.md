@@ -93,6 +93,10 @@ Frontend-only scripts (`vite`) are also available via `bun run dev` / `bun run b
 
 Use standard Noted as the canonical local app. Do not run it alongside `tauri dev` or Noted Alpha: the processes can compete for app-level behavior and duplicate meeting prompts. App variants do not prevent Git conflicts because every build still reads source from the checkout. Parallel coding sessions should use separate Git worktrees or explicitly divided file ownership, then integrate through deliberate commits.
 
+When more than one person is changing Noted, use pushed branches and pull
+requests so GitHub can notify reviewers and preserve both sides of the work.
+See [Working together on Noted](CONTRIBUTING.md).
+
 ## Optional setup
 
 - **Balanced mode (Gemini):** open Settings, switch to *Balanced*, and paste a Gemini API key. Only OCR/extract calls go to Gemini; chat and embeddings stay local. The connection badge confirms the key is live.

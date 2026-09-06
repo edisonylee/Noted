@@ -20,18 +20,21 @@ jobs:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       NOTED_RELEASE_PROFILE: alpha
       VITE_NOTED_PROFILE: alpha
+      VITE_NOTED_UPDATES: "1"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Check release credentials
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           missing=0
-          for name in APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD; do
+          for name in APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
             if [ -z "${!name:-}" ]; then
               echo "::error::Missing GitHub Actions secret: $name"
               missing=1
@@ -74,15 +77,17 @@ jobs:
           echo "APPLE_SIGNING_IDENTITY=$CERT_IDENTITY" >> "$GITHUB_ENV"
 
       - name: Build, notarize, and draft release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tauriScript: bun tauri
           tagName: noted-v__VERSION__
           releaseName: Noted beta v__VERSION__
-          releaseBody: Download the universal macOS DMG below. This is a prerelease for external testing.
+          releaseBody: Download the universal macOS DMG below. This is the current public beta for external testing.
           releaseDraft: true
-          prerelease: true
+          prerelease: false
           generateReleaseNotes: true
           args: --target universal-apple-darwin --bundles app,dmg --config src-tauri/tauri.beta.conf.json

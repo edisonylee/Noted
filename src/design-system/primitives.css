@@ -1,0 +1,27 @@
+.nd-system { font-family: var(--nd-font); color: var(--nd-ink); background: var(--nd-canvas); font-size: 15px; -webkit-font-smoothing: antialiased; }
+.nd-system *, .nd-system *::before, .nd-system *::after { box-sizing: border-box; }
+.nd-system button, .nd-system input, .nd-system textarea, .nd-system select { font: inherit; }
+.nd-system button { cursor: pointer; }
+.nd-system :focus-visible { outline: 2px solid var(--nd-focus); outline-offset: 4px; }
+.nd-system ::selection { background: var(--nd-accent); color: var(--nd-on-accent); }
+.nd-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; padding: 8px 14px; border: 1px solid transparent; border-radius: 6px; font-size: 13px !important; font-weight: 550 !important; transition: background var(--nd-fast) var(--nd-ease); }
+.nd-button--primary { background: var(--nd-ink); color: var(--nd-canvas); }
+.nd-button--primary:hover { opacity: .85; }
+.nd-button--accent { background: var(--nd-accent); color: var(--nd-on-accent); }
+.nd-button--accent:hover { background: color-mix(in srgb, var(--nd-accent), white 18%); }
+.nd-button--quiet { background: transparent; color: var(--nd-secondary); }
+.nd-button--quiet:hover { background: var(--nd-hover); color: var(--nd-ink); }
+.nd-button:disabled { opacity: .4; cursor: not-allowed; }
+.nd-field { display: flex; flex-direction: column; gap: 8px; font-size: 13px; font-weight: 500; }
+.nd-field input, .nd-system textarea { width: 100%; background: var(--nd-canvas); border: 1px solid var(--nd-control-line); color: var(--nd-ink); border-radius: 6px; padding: 10px 12px; }
+.nd-field small { color: var(--nd-muted); font-size: 12px; font-weight: 400; }
+.nd-field input[aria-invalid=true] { border-color: var(--nd-danger); }
+.nd-field .nd-error { color: var(--nd-danger); }
+.nd-check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; line-height: 1.6; cursor: pointer; }
+.nd-check input { width: 16px; height: 16px; margin: 3px 0 0; flex-shrink: 0; accent-color: var(--nd-accent-ink); }
+.nd-check input:checked + span { color: var(--nd-muted); text-decoration: line-through; }
+.nd-citation { display: inline-flex; align-items: center; gap: 4px; padding: 3px 5px; border: 0; border-radius: 3px; background: var(--nd-accent-soft); color: var(--nd-accent-ink); font-size: 12px !important; font-weight: 500 !important; }
+.nd-citation:hover { text-decoration: underline; }
+.nd-system mark { background: var(--nd-accent); color: var(--nd-on-accent); padding: 1px 3px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+@media (prefers-reduced-motion: reduce) { .nd-system *, .nd-system *::before, .nd-system *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+@media (pointer: coarse) { .nd-button, .nd-citation { min-height: 44px; } .nd-check { min-height: 44px; align-items: center; } }

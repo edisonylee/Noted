@@ -1,0 +1,168 @@
+/* Shared product treatment. Custom packs retain their own visual language. */
+.brand-wordmark { display: none; width: 112px; height: 36px; object-fit: cover; mix-blend-mode: multiply; }
+[data-theme="dark"] .brand-wordmark { filter: invert(1); mix-blend-mode: screen; }
+.neon-appearance { padding: 22px 0; margin: 14px 0 22px; border-block: 1px solid var(--line); }
+.neon-appearance h4 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
+.neon-appearance p { margin: 0 0 18px; color: var(--muted); font-size: 13px; }
+.neon-accent-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.neon-accent-options button { display: flex; flex-direction: column; align-items: flex-start; gap: 9px; padding: 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); color: var(--ink); text-align: left; font-size: 12px; }
+.neon-accent-options button > span { display: grid; place-items: center; width: 100%; height: 42px; color: #0a0a0a; border-radius: 3px; }
+.neon-accent-options button.selected { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
+.neon-accent-options small { color: var(--muted); font-size: 11px; }
+
+html[data-design="neon"] .brand-wordmark { display: block; }
+html[data-design="neon"] .brand-classic { display: none; }
+
+/* The new foundation uses solid surfaces even with native vibrancy enabled. */
+html[data-design="neon"] body,
+html[data-design="neon"] body.vibrant .main-col { background: var(--canvas); }
+html[data-design="neon"] :is(button, input, textarea, select, a, [tabindex]):focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 3px; }
+html[data-design="neon"] input[type="checkbox"] { accent-color: var(--accent); }
+html[data-design="neon"] ::selection { background: var(--accent-fill); color: var(--on-accent-fill); }
+html[data-design="neon"] :is(.primary, .ghost, .ghost-btn, .pill, .today-edit) { min-height: 36px; }
+html[data-design="neon"] :is(button.primary:disabled, button:disabled) { cursor: not-allowed; }
+html[data-design="neon"] button.primary:disabled { color: var(--muted); background: var(--surface-2); border: 1px solid var(--line); }
+
+/* A permanent black identity rail, independent of reading mode. */
+html[data-design="neon"] .sidebar {
+  --ink: #f5f5f5; --ink-soft: #dddddd; --muted: #b0b0b0; --faint: #a0a0a0;
+  --canvas: #0a0a0a; --surface: #161616; --surface-2: #202020;
+  --hover-soft: #242424; --line: #303030; --line-strong: #858585;
+  --accent: var(--accent-fill); --accent-tint: #242424; --on-accent: #0a0a0a;
+  background: #0a0a0a; border-right-color: #303030; padding-top: 54px;
+}
+html[data-design="neon"] .sidebar .brand-wordmark { width: 122px; height: 40px; filter: invert(1); mix-blend-mode: screen; }
+html[data-design="neon"] .side-head { padding: 0 8px 26px; }
+html[data-design="neon"] .side-nav { gap: 5px; }
+html[data-design="neon"] .side-nav button { min-height: 40px; font-size: 13px; padding: 10px 12px; border-radius: 6px; }
+html[data-design="neon"] .side-nav button.on { color: #f5f5f5; background: #242424; }
+html[data-design="neon"] .side-nav button.on svg { color: var(--accent-fill); }
+html[data-design="neon"] .side-foot { padding-top: 16px; border-top-color: #303030; }
+html[data-design="neon"] .sidebar .rec-pill { min-height: 38px; border-radius: 6px; color: #0a0a0a; background: var(--accent-fill); border-color: transparent; }
+html[data-design="neon"] .sidebar .rec-pill:hover { filter: brightness(.93); }
+html[data-design="neon"] .sidebar .record-mode-menu { color: #f5f5f5; }
+html[data-design="neon"] .side-toggle,
+html[data-design="neon"] .notes-library-toggle { color: #b0b0b0; }
+html[data-design="neon"] .side-hidden :is(.side-toggle, .notes-library-toggle) { color: var(--muted); background: var(--canvas); backdrop-filter: none; }
+html[data-design="neon"] .side-hidden :is(.side-toggle, .notes-library-toggle):hover { color: var(--ink); background: var(--hover-soft); }
+html[data-design="neon"] .sidebar :is(button, a):focus-visible { outline-color: var(--accent-fill); }
+
+/* Home: a useful weather strip above a quiet capture and question surface. */
+html[data-design="neon"] .weather-home { --weather-fg: var(--ink); background: var(--canvas); color: var(--ink); box-shadow: none; }
+html[data-design="neon"] .weather-home::after,
+html[data-design="neon"] .weather-atmosphere { display: none; }
+html[data-design="neon"] .weather-home .weather-bar { color: var(--muted); border-color: var(--line); background: var(--canvas); text-shadow: none; }
+html[data-design="neon"] .weather-home :is(.weather-bar-place, .weather-bar-refresh, .weather-bar-credit, .weather-bar-date, .weather-bar-range, .weather-bar-status) { color: var(--muted); text-shadow: none; }
+html[data-design="neon"] .weather-home .weather-bar-current { color: var(--ink); }
+html[data-design="neon"] .weather-home :is(.weather-bar-place, .weather-bar-refresh):hover { color: var(--ink); background: var(--hover-soft); }
+html[data-design="neon"] .weather-home :is(.ask-hero, .greet-title),
+html[data-design="neon"] .app.homemode .capture-workspace .greet-title { color: var(--ink); text-shadow: none; font-size: clamp(30px, 4vw, 44px); font-weight: 620; letter-spacing: -.04em; }
+html[data-design="neon"] .weather-home .ask-composer { color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: none; backdrop-filter: none; padding: 18px; }
+html[data-design="neon"] .weather-home .ask-composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-tint); }
+html[data-design="neon"] .ask-composer textarea { font-size: 16px; line-height: 1.6; min-height: 50px; }
+html[data-design="neon"] .weather-home .ask-recipes-label { color: var(--muted); text-transform: none; letter-spacing: 0; }
+html[data-design="neon"] .weather-home .ask-recipe { color: var(--ink-soft); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; backdrop-filter: none; min-height: 36px; }
+html[data-design="neon"] .weather-home .ask-recipe:hover { color: var(--ink); background: var(--hover-soft); border-color: var(--line-strong); }
+html[data-design="neon"] .weather-home .ask-bubble.user { color: var(--ink); background: var(--accent-tint); border: 0; }
+html[data-design="neon"] .weather-home .ask-bubble.assistant { color: var(--ink); background: var(--surface); border-color: var(--line); }
+html[data-design="neon"] .ask-file-error { color: var(--error-ink); }
+html[data-design="neon"] .ask-view { max-width: 720px; }
+html[data-design="neon"] .ask-thread { gap: 20px; }
+html[data-design="neon"] .ask-bubble { font-size: 15px; line-height: 1.7; }
+
+/* Vivid fills are explicit. Text and focus keep the readable companion. */
+html[data-design="neon"] :is(.ask-send, .notes-new-note, .today-edit-primary, .home-capturebtn) { background: var(--accent-fill); color: var(--on-accent-fill); border-color: transparent; border-radius: 6px; }
+html[data-design="neon"] :is(.ask-send, .notes-new-note, .today-edit-primary, .home-capturebtn):hover:not(:disabled) { background: var(--accent-fill); color: var(--on-accent-fill); filter: brightness(.94); }
+html[data-design="neon"] :is(.pill.on, .settings-nav button.on, .folder-row.on, .space-tab.on) { color: var(--accent); background: var(--accent-tint); }
+html[data-design="neon"] mark { color: var(--on-accent-fill); background: var(--accent-fill); }
+
+/* Notes and documents: a source rail and a generous reading column. */
+html[data-design="neon"] .app.side .notes-view { gap: 28px; }
+html[data-design="neon"] .spaces { width: 224px; padding: 12px; background: var(--surface-2); border-right: 1px solid var(--line); }
+html[data-design="neon"] .notes-context { padding-top: 12px; padding-bottom: 20px; }
+html[data-design="neon"] :is(.notes-context h1, .settings-title) { font-size: 30px; letter-spacing: -.035em; font-weight: 620; }
+html[data-design="neon"] .notes-search { min-height: 40px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; }
+html[data-design="neon"] .notes-search:focus-within { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
+html[data-design="neon"] .note-document { background: var(--canvas); }
+html[data-design="neon"] .document-editor-stage-inner { grid-template-columns: minmax(132px, 1fr) minmax(0, 780px) minmax(32px, 1fr); padding-top: 36px; }
+html[data-design="neon"] .noted-document-content { font-size: 16px; line-height: 1.75; }
+html[data-design="neon"] .noted-document-content :is(h1, h2, h3) { letter-spacing: -.025em; }
+html[data-design="neon"] .document-editor.page > .document-editor-toolbar { background: var(--canvas); }
+
+/* Meetings keep the transcript and evidence legible beside the document. */
+html[data-design="neon"] .meeting-page { gap: 20px; }
+html[data-design="neon"] .meeting-head { padding: 12px 0 18px; border-bottom: 1px solid var(--line); }
+html[data-design="neon"] .meeting-title h2 { font-size: 28px; letter-spacing: -.035em; }
+html[data-design="neon"] .meeting-meta { gap: 12px; margin-top: 8px; font-size: 12px; }
+html[data-design="neon"] :is(.summary, .transcript) { box-shadow: none; }
+html[data-design="neon"] .md { font-size: 15px; line-height: 1.75; }
+html[data-design="neon"] .source-chip { color: var(--accent); background: var(--accent-tint); border-color: transparent; border-radius: 4px; }
+
+/* Scheduling and calendar share the document hierarchy and fine separators. */
+html[data-design="neon"] .today-head { padding-top: 10px; }
+html[data-design="neon"] .today-date { font-size: clamp(28px, 3vw, 36px); font-weight: 620; }
+html[data-design="neon"] .today-grid-event { background: var(--surface-2); border: 1px solid var(--line); box-shadow: none; }
+html[data-design="neon"] .today-grid-event.now { background: var(--accent-tint); border-left: 3px solid var(--accent); }
+html[data-design="neon"] .today-photo-entry { background: var(--surface); border-style: solid; }
+html[data-design="neon"] .up-next { box-shadow: none; background: var(--surface-2); }
+html[data-design="neon"] :is(.cal-head, .today-shell-head) { border-color: var(--line); }
+html[data-design="neon"] :is(.cal-popover, .today-addpop, .today-calendar-popover) { background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow-2); }
+
+/* Settings, dialogs, assistant, knowledge, and journal use the same surfaces. */
+html[data-design="neon"] .settings-page-head { padding-top: 10px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+html[data-design="neon"] .settings-nav-label { font-size: 11px; text-transform: none; letter-spacing: 0; }
+html[data-design="neon"] .settings-body h3 { font-size: 22px; letter-spacing: -.025em; }
+html[data-design="neon"] .settings-sub { font-size: 13px; line-height: 1.6; }
+html[data-design="neon"] .theme-card { box-shadow: none; }
+html[data-design="neon"] :is(.modal, .chat-panel, .record-prompt) { background: var(--surface); border-color: var(--line); box-shadow: var(--shadow-3); backdrop-filter: none; }
+html[data-design="neon"] :is(.chat-input-row, .chat-head, .journal-compose) { background: var(--surface); border-color: var(--line); }
+html[data-design="neon"] .bubble { font-size: 14px; line-height: 1.7; }
+html[data-design="neon"] .person-card { background: var(--surface); box-shadow: none; }
+html[data-design="neon"] :is(.journal, .kg-canvas) { background: var(--canvas); }
+
+@media (max-width: 1000px) {
+  html[data-design="neon"] .spaces { width: 190px; }
+  html[data-design="neon"] .app.side .notes-view { gap: 18px; }
+  html[data-design="neon"] .document-editor-stage-inner { grid-template-columns: minmax(0, 1fr); }
+  html[data-design="neon"] .document-editor-stage-inner .document-editor-outline { display: none; }
+}
+@media (max-width: 620px) {
+  .neon-accent-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  html[data-design="neon"] .brand-wordmark { width: 88px; height: 28px; }
+  html[data-design="neon"] .notes-context h1 { font-size: 26px; }
+  html[data-design="neon"] .weather-home .ask-hero { font-size: 30px; }
+  html[data-design="neon"] .ask-composer textarea { font-size: 16px; }
+  html[data-design="neon"] .meeting-title h2 { font-size: 24px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-design="neon"] *, html[data-design="neon"] *::before, html[data-design="neon"] *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}
+@media print {
+  html[data-design="neon"] body { background: #fff !important; color: #0a0a0a !important; }
+  html[data-design="neon"] .meeting-print { color: #0a0a0a; }
+  html[data-design="neon"] .meeting-print :is(h2, h3, h4, h5, .print-meta, .print-kicker, footer) { color: #444; border-color: #ddd; }
+  html[data-design="neon"] .print-rule { background: #0a0a0a; }
+}
+@media (max-width: 1000px) {
+  html[data-design="neon"] .document-editor-stage-inner .document-editor-page { grid-column: 1; }
+  html[data-design="neon"] .document-editor-stage-inner .document-editor-balance { display: none; }
+  html[data-design="neon"] .document-editor.page .noted-document-content { padding-inline: 28px; }
+}
+.theme-preview-bar { top: 0; bottom: auto; margin-block: 12px; background: var(--surface); }
+
+html[data-design="neon"] .weather-home .weather-bar a { color: var(--muted); }
+html[data-design="neon"] .weather-home .weather-bar a:hover { color: var(--ink); }
+html[data-design="neon"] .note-row { min-height: 46px; padding-block: 12px; border-bottom: 1px solid var(--line); border-radius: 0; font-size: 14px; }
+html[data-design="neon"] .note-row:last-child { border-bottom: 0; }
+html[data-design="neon"] .note-row:hover { border-radius: 6px; }
+html[data-design="neon"] .note-row-title { font-weight: 540; }
+html[data-design="neon"] :is(.chip.on, .cal-dayhead.today .cal-dom, .today-nowtag, .today-calpop-sync) { color: var(--on-accent-fill); background: var(--accent-fill); border-color: transparent; }
+html[data-design="neon"] :is(.cal-ev, .cal-chip, .today-allday-event) { background: var(--surface-2); box-shadow: none; }
+html[data-design="neon"] .phone-confirmation > div button.primary { color: var(--on-accent-fill); background: var(--accent-fill); }
+
+/* Current Team workspace uses the same palette while retaining its pane layout. */
+html[data-design="neon"] .team-primary:not(:disabled) { color: var(--on-accent-fill); background: var(--accent-fill); border-color: transparent; }
+html[data-design="neon"] .team-primary:hover:not(:disabled) { filter: brightness(.94); }
+html[data-design="neon"] .team-primary-nav > button.on { color: var(--accent); border-bottom-color: var(--accent); }
+html[data-design="neon"] :is(.team-dialog, .team-workspace-bar, .messages-room) { background: var(--surface); }
+html[data-design="neon"] .messages-unread { color: var(--on-accent-fill); background: var(--accent-fill); }

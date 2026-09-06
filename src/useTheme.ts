@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { api } from "./api";
-import { BUILT_IN_THEMES, getBuiltInTheme, NOTED_WARM } from "./themes/presets";
+import { BUILT_IN_THEMES, getBuiltInTheme, DEFAULT_THEME } from "./themes/presets";
 import { applyThemeToDocument, themeModeToCssVariables, validateThemePack } from "./themes/runtime";
 import type {
   ThemeMode,
@@ -46,7 +46,7 @@ function resolveMode(preference: ThemeModePreference): ThemeMode {
 }
 
 function readSelection(): ThemeSelection {
-  if (typeof localStorage === "undefined") return { themeId: NOTED_WARM.id, mode: "system" };
+  if (typeof localStorage === "undefined") return { themeId: DEFAULT_THEME.id, mode: "system" };
   try {
     const cached = JSON.parse(localStorage.getItem(SELECTION_KEY) ?? "null") as Partial<ThemeSelection> | null;
     if (
@@ -58,11 +58,11 @@ function readSelection(): ThemeSelection {
     }
     const legacy = localStorage.getItem(LEGACY_MODE_KEY);
     return {
-      themeId: NOTED_WARM.id,
+      themeId: DEFAULT_THEME.id,
       mode: legacy === "light" || legacy === "dark" ? legacy : "system",
     };
   } catch {
-    return { themeId: NOTED_WARM.id, mode: "system" };
+    return { themeId: DEFAULT_THEME.id, mode: "system" };
   }
 }
 
@@ -93,8 +93,8 @@ class ThemeStore {
     const requested = readSelection();
     const selection = this.registry.has(requested.themeId)
       ? requested
-      : { ...requested, themeId: NOTED_WARM.id };
-    const activeTheme = this.registry.get(selection.themeId) ?? NOTED_WARM;
+      : { ...requested, themeId: DEFAULT_THEME.id };
+    const activeTheme = this.registry.get(selection.themeId) ?? DEFAULT_THEME;
     const resolvedMode = resolveMode(selection.mode);
     this.state = {
       selection,
@@ -147,7 +147,7 @@ class ThemeStore {
         themeId: activeTheme.id,
         modePreference: selection.mode,
         resolvedMode,
-        cssVariables: themeModeToCssVariables(activeTheme[resolvedMode]),
+        cssVariables: themeModeToCssVariables(activeTheme[resolvedMode], activeTheme.id, resolvedMode),
       }));
     } catch {
       // Local persistence is a startup optimization; the live theme still works.
@@ -192,8 +192,8 @@ class ThemeStore {
   removeTheme = (themeId: string): boolean => {
     if (getBuiltInTheme(themeId) || !this.registry.delete(themeId)) return false;
     if (this.state.activeTheme.id === themeId) {
-      const selection = { ...this.state.selection, themeId: NOTED_WARM.id };
-      const activeTheme = NOTED_WARM;
+      const selection = { ...this.state.selection, themeId: DEFAULT_THEME.id };
+      const activeTheme = DEFAULT_THEME;
       const resolvedMode = resolveMode(selection.mode);
       applyThemeToDocument(activeTheme, resolvedMode);
       this.emit({

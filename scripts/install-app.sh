@@ -14,6 +14,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# A local build must include current master before replacing the installed app.
+if git rev-parse --verify origin/master >/dev/null 2>&1 && ! git merge-base --is-ancestor origin/master HEAD; then
+  echo "Refusing to replace Noted: this checkout does not contain origin/master. Integrate current master before installing." >&2
+  exit 1
+fi
+
 echo "Building standard local noted with the native iPhone companion preview…"
 VITE_NOTED_IPHONE_COMPANION=1 bun run tauri build --features sanitized-development-fixtures
 

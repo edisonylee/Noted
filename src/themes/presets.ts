@@ -8,6 +8,7 @@ import type {
   ThemeTypography,
 } from "./types";
 import { ADDITIONAL_THEMES } from "./catalog";
+import { createNeonThemePack, NEON_ACCENTS, type NeonAccent } from "../design-system/tokens";
 
 const geist = '"Geist Variable", ui-sans-serif, system-ui, sans-serif';
 const system = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif';
@@ -360,7 +361,14 @@ const HIGH_CONTRAST = preset(
   },
 );
 
+export const NEON_THEMES: readonly ThemePack[] = (Object.keys(NEON_ACCENTS) as NeonAccent[]).map(accent => ({
+  ...createNeonThemePack(accent),
+  source: { kind: "builtin" as const },
+}));
+export const DEFAULT_THEME = NEON_THEMES[0];
+
 export const BUILT_IN_THEMES: readonly ThemePack[] = [
+  ...NEON_THEMES,
   NOTED_WARM,
   CUPERTINO,
   LINEAR_MIDNIGHT,

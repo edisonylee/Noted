@@ -5,6 +5,7 @@ pub mod applecal;
 pub mod approval_broker;
 pub mod backup;
 pub mod brain;
+pub mod companion;
 pub mod calendar;
 pub mod context_pass;
 pub mod db;
@@ -76,6 +77,30 @@ fn normalize(mut v: Vec<f32>) -> Vec<f32> {
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn companion_desktop_status(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<companion::Status, String> {
+    companion::check_window(&window)?;
+    Ok(companion::status(&app))
+}
+
+#[tauri::command]
+async fn companion_begin_drag(app: tauri::AppHandle, window: tauri::WebviewWindow, grab_x: f64, grab_y: f64, size: f64, follow_pointer: Option<bool>) -> Result<(), String> {
+    companion::check_window(&window)?;
+    companion::begin_drag(&app, grab_x, grab_y, size, follow_pointer.unwrap_or(true))
+}
+
+#[tauri::command]
+async fn companion_return(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    companion::check_window(&window)?;
+    companion::return_home(&app, true)
+}
+
+#[tauri::command]
+async fn companion_open_chat(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    companion::check_window(&window)?;
+    companion::open_chat(&app)
+}
 
 /// Persisted theme selection shared by desktop and phone.
 #[tauri::command]
@@ -4904,11 +4929,17 @@ async fn process_pending_inner(app: &tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(
+        .plugin(tauri_plugin_process::init());
+    // Local builds do not configure the distribution updater.
+    let builder = if context.config().plugins.0.contains_key("updater") {
+        builder.plugin(tauri_plugin_updater::Builder::new().build())
+    } else { builder };
+    builder.plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
                     if shortcut == &assistant_shortcut() && event.state() == ShortcutState::Pressed
@@ -4924,6 +4955,8 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            app.manage(companion::Companion::default());
+            companion::spawn(app.handle().clone());
             // Preview/Alpha builds may run alongside the installed app. Only
             // the canonical app claims this system-wide shortcut so the two
             // builds cannot silently steal it from one another.
@@ -5117,7 +5150,18 @@ pub fn run() {
 
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                if let Some(pet) = window.app_handle().get_webview_window(companion::LABEL) {
+                    let _ = pet.destroy();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            companion_desktop_status,
+            companion_begin_drag,
+            companion_return,
+            companion_open_chat,
             agent_access_status,
             agent_access_set_enabled,
             agent_client_create,
@@ -5294,6 +5338,6 @@ pub fn run() {
             #[cfg(all(target_os = "macos", feature = "sanitized-development-fixtures"))]
             fixture_authority_app::mobile_authority_confirm,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }

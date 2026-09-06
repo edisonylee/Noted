@@ -28,6 +28,8 @@ The release workflow needs these GitHub Actions repository secrets:
 | `APPLE_CERTIFICATE` | Base64-encoded Developer ID Application `.p12` |
 | `APPLE_CERTIFICATE_PASSWORD` | Password used when exporting the `.p12` |
 | `KEYCHAIN_PASSWORD` | A random password used only for the temporary CI keychain |
+| `TAURI_SIGNING_PRIVATE_KEY` | Private updater key stored in Keychain as `com.noted.app.updater-private-key` |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Updater key password stored in Keychain as `com.noted.app.updater-key-password` |
 
 Encode the certificate without adding line breaks:
 
@@ -46,12 +48,12 @@ password, or an updater private key.
 3. Push the release commit.
 4. In GitHub Actions, run **macOS beta** against that commit.
 5. Download the DMG from the draft release and test it on a clean Mac user.
-6. Publish the draft release when capture, permissions, and local data have
-   passed the release smoke test.
+6. Publish the draft release when capture, permissions, local data, and the
+   generated `latest.json` updater manifest have passed the release smoke test.
 
 The workflow builds one universal Apple Silicon + Intel app, signs it with the
 Developer ID identity, submits it to Apple's automated notarization service,
-and creates a draft prerelease. It cannot run successfully until all six
+and creates a draft beta release. It cannot run successfully until all eight
 secrets exist.
 
 ## Open-source builds
@@ -61,6 +63,21 @@ can run `bun install` and `bun run tauri dev` without access to release secrets.
 Forks can create ad-hoc local builds; only artifacts produced by the official
 release workflow are presented as verified Noted downloads.
 
-The Tauri in-app updater is intentionally deferred until the first notarized
-beta is working. It uses a separate update-signing key and can be added without
-changing the Apple signing or bundle identity established here.
+## In-app updates
+
+Public beta builds check the latest published GitHub Release on launch and every
+six hours while Noted is running. When a newer semantic version is available,
+the sidebar and Settings show **Update Noted**. The update is downloaded,
+signature-verified, installed, and then Noted restarts. Local development and
+the isolated `Noted Alpha.app` build never contact the release feed.
+
+GitHub's `releases/latest` endpoint ignores releases marked as prereleases.
+Accordingly, the workflow creates a draft normal release whose name and copy
+identify it as beta. Publishing the tested draft advances the beta update
+channel; leaving it as a draft keeps it invisible to installed apps.
+
+The updater private key and its password must remain recoverable. They are
+stored locally in the macOS Keychain and copied into the two GitHub Actions
+secrets above. The public key is intentionally committed in
+`tauri.beta.conf.json`. Losing the private key prevents existing installations
+from trusting future updates.

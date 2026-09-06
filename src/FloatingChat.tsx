@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, Check, Loader2, MessageCircle, Mic, Palette, Square, Volume2, VolumeX, X } from "lucide-react";
+import { ArrowUp, Check, Loader2, MessageCircle, Mic, Palette, Settings2, Square, Volume2, VolumeX, X } from "lucide-react";
 import { api, isDesktop, type AskEntity, type AskSource, type BrainVaultStatus, type ChatProposal } from "./api";
 import { colorForType } from "./entityColors";
 import { applyProposal, proposalText } from "./chatActions";
@@ -7,8 +7,14 @@ import { startRecording, type Recorder } from "./audio";
 import { DataView } from "./DataView";
 import { isThemeRequest, proposeTheme } from "./themeRequests";
 import { useTheme } from "./useTheme";
+import { CompanionLauncher, CompanionSettings } from "./Companion";
+import { useCompanion } from "./companionStore";
+import { usePetViewport } from "./CompanionLauncher";
+import { panelNearPet, PET_SIZES, restorePet, type PetState } from "./companionMotion";
+import { publishPetActivity } from "./companionDesktop";
 
 type Msg = {
+  failed?: boolean;
   role: "user" | "assistant";
   content: string;
   sources?: AskSource[];
@@ -28,9 +34,26 @@ export function FloatingChat({
   onOpenChange?: (open: boolean) => void;
   variant?: "floating" | "sheet";
 }) {
+  const { preferences, pet } = useCompanion();
+  const viewport = usePetViewport();
+  const [petPosition, setPetPosition] = useState(() => restorePet(preferences.position, preferences.side, viewport, PET_SIZES[preferences.size]));
+  const [customizing, setCustomizing] = useState(false);
+  const launcherRef = useRef<HTMLButtonElement>(null);
   const { themes, previewTheme, clearPreview, activateTheme } = useTheme();
   const open = openProp ?? false;
-  const setOpen = (o: boolean) => onOpenChange?.(o);
+  const openRef = useRef(open);
+  openRef.current = open;
+  const setOpen = (o: boolean) => {
+    openRef.current = o;
+    onOpenChange?.(o);
+    if (!o) {
+      recorderRef.current?.cancel();
+      recorderRef.current = null;
+      setRecording(false);
+      setCustomizing(false);
+      requestAnimationFrame(() => launcherRef.current?.focus());
+    }
+  };
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [asking, setAsking] = useState(false);
@@ -44,19 +67,24 @@ export function FloatingChat({
   const recorderRef = useRef<Recorder | null>(null);
   const threadRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const lastMessage = messages[messages.length - 1];
+  const petActivity: PetState = asking || confirming !== null ? "working" : recording ? "waiting"
+    : lastMessage?.failed ? "failed" : messages.some(message => message.proposal && !message.resolved) ? "waiting"
+    : open && lastMessage?.role === "assistant" ? "review" : "idle";
+  useEffect(() => { if (variant === "floating") publishPetActivity(petActivity); }, [petActivity, variant]);
 
   useEffect(() => {
     api.voiceStatus().then((s) => setVoiceReady(s.ready)).catch(() => {});
     api.brainListVaults().then(setVaults).catch(() => {});
   }, []);
   useEffect(() => {
-    threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, asking]);
+    threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+  }, [messages, asking, customizing, open]);
   useEffect(() => {
-    if (!open) return;
+    if (!open || customizing) return;
     const frame = requestAnimationFrame(() => inputRef.current?.focus());
     return () => cancelAnimationFrame(frame);
-  }, [open]);
+  }, [open, customizing]);
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -66,6 +94,14 @@ export function FloatingChat({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open, onOpenChange]);
   useEffect(() => () => clearPreview(), [clearPreview]);
+  useEffect(() => () => recorderRef.current?.cancel(), []);
+  useEffect(() => {
+    if (open) return;
+    recorderRef.current?.cancel();
+    recorderRef.current = null;
+    setRecording(false);
+    setCustomizing(false);
+  }, [open]);
   const wasOpenRef = useRef(open);
   useEffect(() => {
     if (wasOpenRef.current && !open && messages.some((message) => message.proposal?.action === "apply_theme" && !message.resolved)) {
@@ -125,7 +161,7 @@ export function FloatingChat({
         if (!muted && isDesktop) api.speak(res.answer).catch(() => {});
       }
     } catch (e) {
-      setMessages((p) => [...p, { role: "assistant", content: `Sorry — ${e}` }]);
+      setMessages((p) => [...p, { role: "assistant", content: `Sorry — ${e}`, failed: true }]);
     } finally {
       setAsking(false);
     }
@@ -149,7 +185,7 @@ export function FloatingChat({
       ]);
       onMutated?.();
     } catch (e) {
-      setMessages((ms) => [...ms, { role: "assistant", content: `Couldn’t apply that — ${e}` }]);
+      setMessages((ms) => [...ms, { role: "assistant", content: `Couldn’t apply that — ${e}`, failed: true }]);
     } finally {
       setConfirming(null);
     }
@@ -162,7 +198,7 @@ export function FloatingChat({
   }
 
   async function onMic() {
-    if (!(await ensureVoice())) return;
+    if (!(await ensureVoice()) || !openRef.current) return;
     if (recording) {
       setRecording(false);
       setAsking(true);
@@ -178,7 +214,9 @@ export function FloatingChat({
       }
     } else {
       try {
-        recorderRef.current = await startRecording();
+        const recorder = await startRecording();
+        if (!openRef.current) { recorder.cancel(); return; }
+        recorderRef.current = recorder;
         setRecording(true);
       } catch {
         /* mic denied — silently ignore */
@@ -193,20 +231,23 @@ export function FloatingChat({
     });
   }
 
-  if (!open) return null;
-
   return (
+    <>
+    {variant === "floating" && <CompanionLauncher open={open} activity={petActivity} onClick={() => setOpen(!open)} onMove={setPetPosition} buttonRef={launcherRef} />}
+    {open && (
     <div
-      className={"chat-panel" + (variant === "sheet" ? " chat-sheet" : "")}
+      id={variant === "floating" ? "companion-chat" : undefined}
+      style={variant === "floating" ? { ...panelNearPet(petPosition, viewport, PET_SIZES[preferences.size], Math.min(customizing ? 480 : 420, viewport.width - 24), customizing ? 680 : 570), right: "auto", bottom: "auto" } : undefined}
+      className={"chat-panel" + (variant === "sheet" ? " chat-sheet" : ` companion-panel companion-panel-${preferences.side}${customizing ? " companion-customizing" : ""}`)}
       role="dialog"
       aria-label="Ask Noted"
     >
       <div className="chat-panel-head">
-        <MessageCircle className="chat-panel-icon" size={17} aria-hidden="true" />
+        {variant === "floating" ? <img className="companion-head-image" src={pet.image} alt="" /> : <MessageCircle className="chat-panel-icon" size={17} aria-hidden="true" />}
         <span className="title">
-          Ask Noted<span className="sub">your notes and meetings</span>
+          {customizing ? "Your companion" : variant === "floating" ? preferences.name : "Ask Noted"}<span className="sub">{customizing ? "Make yourself at home" : "Your Noted assistant"}</span>
         </span>
-        {vaults.length > 0 && (
+        {!customizing && vaults.length > 0 && (
           <select
             className="chat-scope"
             value={scope}
@@ -222,6 +263,9 @@ export function FloatingChat({
           </select>
         )}
         <div className="tools">
+          {variant === "floating" && <button className="icon-btn" disabled={recording} onClick={() => setCustomizing(!customizing)} title={customizing ? "Back to chat" : "Customize companion"} aria-label={customizing ? "Back to chat" : "Customize companion"} aria-pressed={customizing}>
+            {customizing ? <MessageCircle size={17} /> : <Settings2 size={17} />}
+          </button>}
           {isDesktop && (
             <button className="icon-btn" onClick={toggleMute} title={muted ? "Unmute" : "Mute voice"}>
               {muted ? <VolumeX size={17} /> : <Volume2 size={17} />}
@@ -233,10 +277,11 @@ export function FloatingChat({
         </div>
       </div>
 
-      <div className="chat-thread" ref={threadRef}>
+      {customizing ? <div className="companion-editor"><CompanionSettings /></div> : <>
+      <div className="chat-thread" ref={threadRef} role="log" aria-live="polite">
         {messages.length === 0 && !asking && (
           <div className="chat-empty">
-            <strong>What can I do for you?</strong>
+            <strong>{variant === "floating" ? `Hi, I’m ${preferences.name}.` : "What can I do for you?"}</strong>
             <span>Ask about your notes, or schedule a meeting in one sentence.</span>
           </div>
         )}
@@ -309,6 +354,7 @@ export function FloatingChat({
         <input
           ref={inputRef}
           value={input}
+          aria-label="Message your assistant"
           placeholder="Ask or schedule something…"
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
@@ -316,10 +362,13 @@ export function FloatingChat({
           }}
           disabled={asking}
         />
-        <button className="send-btn" onClick={() => send(input)} disabled={asking || !input.trim()}>
+        <button className="send-btn" aria-label="Send message" onClick={() => send(input)} disabled={asking || !input.trim()}>
           <ArrowUp size={18} strokeWidth={2.5} />
         </button>
       </div>
+      </>}
     </div>
+    )}
+    </>
   );
 }

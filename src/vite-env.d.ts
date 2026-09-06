@@ -2,6 +2,8 @@
 
 interface ImportMetaEnv {
   readonly VITE_NOTED_PROFILE?: "development" | "alpha" | "mobile";
+  readonly VITE_NOTED_UPDATES?: "0" | "1";
+  readonly VITE_NOTED_UPDATE_PREVIEW?: "available";
   readonly VITE_NOTED_IPHONE_COMPANION?: "1";
 }
 

@@ -7,6 +7,7 @@ import {
   type ThemeValidationResult,
 } from "./types";
 import { BUILT_IN_THEME_MAP } from "./presets";
+import { getNeonTokens, neonAccentForTheme } from "../design-system/tokens";
 
 const COLOR_TO_CSS: Record<(typeof THEME_COLOR_KEYS)[number], string> = {
   canvas: "--canvas",
@@ -36,6 +37,7 @@ export const THEME_CSS_VARIABLES = [
   ...Object.values(COLOR_TO_CSS),
   "--accent-rgb",
   "--on-accent",
+  "--accent-fill", "--on-accent-fill", "--accent-focus",
   "--on-bad",
   "--r-sm",
   "--r-md",
@@ -346,7 +348,7 @@ function contrastText(color: string): string {
   return blackContrast >= whiteContrast ? "#000000" : "#ffffff";
 }
 
-export function themeModeToCssVariables(tokens: ThemeModeTokens): Record<string, string> {
+export function themeModeToCssVariables(tokens: ThemeModeTokens, themeId?: string, mode: ThemeMode = "light"): Record<string, string> {
   const variables: Record<string, string> = {};
   for (const key of THEME_COLOR_KEYS) variables[COLOR_TO_CSS[key]] = tokens.colors[key];
   Object.assign(variables, {
@@ -372,16 +374,22 @@ export function themeModeToCssVariables(tokens: ThemeModeTokens): Record<string,
     "--ease": tokens.motion.easing,
   });
   tokens.charts.forEach((color, index) => { variables[`--chart-${index + 1}`] = color; });
+  const neon = themeId ? neonAccentForTheme(themeId) : null;
+  const accent = neon ? getNeonTokens(neon, mode) : null;
+  variables["--accent-fill"] = accent?.accent ?? tokens.colors.accent;
+  variables["--on-accent-fill"] = accent?.onAccent ?? contrastText(tokens.colors.accent);
+  variables["--accent-focus"] = accent?.focus ?? tokens.colors.accent;
   return variables;
 }
 
 export function applyThemeToDocument(pack: ThemePack, mode: ThemeMode, target?: HTMLElement): Record<string, string> {
   const root = target ?? (typeof document !== "undefined" ? document.documentElement : undefined);
-  const variables = themeModeToCssVariables(pack[mode]);
+  const variables = themeModeToCssVariables(pack[mode], pack.id, mode);
   if (!root) return variables;
 
   root.dataset.theme = mode;
   root.dataset.themeId = pack.id;
+  root.dataset.design = neonAccentForTheme(pack.id) ? "neon" : "custom";
   root.style.colorScheme = mode;
   for (const [name, value] of Object.entries(variables)) root.style.setProperty(name, value);
 

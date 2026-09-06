@@ -13,9 +13,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: u32 = 1;
-pub const DEFAULT_THEME_ID: &str = "noted-warm";
+pub const DEFAULT_THEME_ID: &str = "noted-neon-citron";
 const BUILTIN_IDS: &[&str] = &[
     DEFAULT_THEME_ID,
+    "noted-neon-blue",
+    "noted-neon-pink",
+    "noted-neon-green",
+    "noted-warm",
     "cupertino",
     "linear-midnight",
     "paper",
@@ -757,10 +761,10 @@ mod tests {
     #[test]
     fn builtin_ids_activate_without_pack_and_cannot_delete() {
         let root = temp();
-        assert_eq!(BUILTIN_IDS.len(), 50);
+        assert_eq!(BUILTIN_IDS.len(), 54);
         assert_eq!(
             BUILTIN_IDS.iter().copied().collect::<HashSet<_>>().len(),
-            50
+            BUILTIN_IDS.len()
         );
         for id in BUILTIN_IDS {
             assert_eq!(activate(&root, id, None).unwrap().active_theme_id, *id);

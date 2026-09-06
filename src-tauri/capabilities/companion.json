@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "companion",
+  "description": "Local companion window event synchronization",
+  "platforms": ["macOS"],
+  "windows": ["companion"],
+  "permissions": ["core:event:default"]
+}

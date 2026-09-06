@@ -5,6 +5,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Older feature checkouts must not roll back the installed product automatically.
+if git rev-parse --verify origin/master >/dev/null 2>&1 && ! git merge-base --is-ancestor origin/master HEAD; then
+  echo "Automatic app update skipped: this checkout does not contain origin/master."
+  exit 0
+fi
+
 APP_BINARY="/Applications/noted.app/Contents/MacOS/noted"
 WATCHED_PATHS=(
   src

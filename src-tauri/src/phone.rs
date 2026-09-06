@@ -296,6 +296,8 @@ fn legacy_phone_command_is_allowed(command: &str) -> bool {
 async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, String> {
     let a = app.clone();
     match cmd {
+        "companion_desktop_status" | "companion_begin_drag" | "companion_return" | "companion_open_chat" =>
+            Err("Companion windows are available only inside the desktop app.".into()),
         "team_notification_send" | "team_notification_take_target" => Err("Desktop-only command".into()),
         "theme_state" => crate::theme_state(a).await,
         "system_settings_get" => crate::system_settings_get()

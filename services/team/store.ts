@@ -1,5 +1,5 @@
 import { REACTION_NAMES } from "./reactions";
-import { findMentions } from "../../src/teams/mentions";
+import { findMentions } from "./mentions";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";

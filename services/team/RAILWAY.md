@@ -1,8 +1,8 @@
 # Deploy the team service to Railway
 
 The Docker image runs the same team API as the local service. It contains only
-the server, store and schema; it does not contain the private Noted vault, app
-credentials, recordings, local databases or example meetings.
+the server, store, schema, and shared message helpers; it does not contain the
+private Noted vault, app credentials, recordings, local databases or example meetings.
 
 ## Account and trial
 
@@ -35,7 +35,7 @@ separate database service or additional replicas.
 
 | Setting | Value |
 | --- | --- |
-| Build source | This directory's Dockerfile and its three source files |
+| Build source | This directory's Dockerfile and its runtime files |
 | Database | `/data/team.sqlite` (image default) |
 | Listener | `0.0.0.0` (image default) |
 | Port | Set `PORT=8790`; leave `NOTED_TEAM_PORT` unset or set it to the same value |
@@ -54,9 +54,10 @@ The current Railway CLI supports `variable set NOTED_TEAM_SETUP_KEY --stdin`
 so the secret need not appear in command history. Use the CLI's own authenticated
 session, never browser cookies. CLI authentication may need user interaction.
 
-For a local upload, stage only these five files in a clean directory outside
-the repository: `Dockerfile`, `.dockerignore`, `server.ts`, `store.ts`, and
-`schema.sql`. Link that directory to the intended project/service, then run
+For a local upload, stage only these seven files in a clean directory outside
+the repository: `Dockerfile`, `.dockerignore`, `server.ts`, `store.ts`,
+`schema.sql`, `reactions.ts`, and `mentions.ts`. Link that directory to the
+intended project/service, then run
 `railway up . --path-as-root --detach`. This avoids uploading unrelated source
 or development state. Keep the project/service IDs in local deployment records.
 

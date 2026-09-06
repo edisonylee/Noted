@@ -1,6 +1,11 @@
+import { MessageComposer, type MessageComposerHandle } from "./MessageComposer";
+import { messageFormatting } from "./messageFormatting";
 import { SavedMessages } from "./SavedMessages";
 import { PinnedMessages } from "./PinnedMessages";
-import { AttachmentPicker, type PendingAttachment } from "./MessageAttachments";
+import {
+  AttachmentPicker,
+  type PendingAttachment,
+} from "./MessageAttachments";
 import { MessageSidebar } from "./MessageSidebar";
 import { ConversationNotifications } from "./ConversationNotifications";
 import { MentionsInbox } from "./MentionsInbox";
@@ -710,7 +715,7 @@ function MessageRoom({
   const cursor = useRef<number | null>(null),
     readCursor = useRef(0);
   const viewport = useRef<HTMLDivElement>(null),
-    composer = useRef<HTMLTextAreaElement>(null);
+    composer = useRef<MessageComposerHandle>(null);
   const pinned = useRef(true),
     alive = useRef(true);
   const accessEpoch = useRef(0);
@@ -1097,7 +1102,7 @@ function MessageRoom({
     });
   };
   // Passed to MessageRow so the row itself stays unaware of mentions.
-  const renderBody = (body: string) => {
+  const renderPlainBody = (body: string) => {
     let end = 0;
     const parts = findMentions(body, eligible).map((mention) => {
       const before = body.slice(end, mention.start);
@@ -1121,6 +1126,28 @@ function MessageRoom({
       <>
         {parts}
         {body.slice(end)}
+      </>
+    );
+  };
+  const renderBody = (body: string) => {
+    let end = 0;
+    const parts = messageFormatting(body).map((span) => {
+      const before = body.slice(end, span.start);
+      end = span.end;
+      const content = body.slice(span.contentStart, span.contentEnd);
+      return (
+        <Fragment key={span.start}>
+          {renderPlainBody(before)}
+          <span className={`message-format-${span.kind}`}>
+            {span.kind === "code" ? content : renderPlainBody(content)}
+          </span>
+        </Fragment>
+      );
+    });
+    return (
+      <>
+        {parts}
+        {renderPlainBody(body.slice(end))}
       </>
     );
   };
@@ -1484,8 +1511,7 @@ function MessageRoom({
               ))}
             </div>
           )}
-          <textarea
-            aria-autocomplete="list"
+          <MessageComposer
             aria-controls={
               suggestions.length ? `mentions-${draftKey}` : undefined
             }
@@ -1497,8 +1523,6 @@ function MessageRoom({
             id={`compose-${draftKey}`}
             ref={composer}
             value={draft}
-            maxLength={10_000}
-            rows={2}
             disabled={sending || !canSend}
             placeholder={
               canSend
@@ -1507,18 +1531,19 @@ function MessageRoom({
                   : `Message ${room.kind === "channel" && !room.is_default ? "#" : ""}${label}`
                 : "This conversation is read-only"
             }
-            onChange={(e) => {
-              setDraft(e.target.value);
-              setCaret(e.target.selectionStart);
+            onChange={(value, caret) => {
+              setDraft(value);
+              setCaret(caret);
               setMentionIndex(0);
               setDismissed(false);
             }}
-            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+            onSelect={setCaret}
             onKeyDown={(e) => {
-              if (e.nativeEvent.isComposing) return;
+              if (e.isComposing) return;
               if (suggestions.length) {
                 if (e.key === "Escape") {
                   e.preventDefault();
+                  e.stopPropagation();
                   setDismissed(true);
                   return;
                 }
@@ -1538,11 +1563,7 @@ function MessageRoom({
                   return;
                 }
               }
-              if (
-                e.key === "Enter" &&
-                !e.shiftKey &&
-                !e.nativeEvent.isComposing
-              ) {
+              if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
                 e.preventDefault();
                 void send();
               }
@@ -1558,7 +1579,8 @@ function MessageRoom({
           )}
           <div className="messages-compose-foot">
             <span>
-              @ to mention · Enter to send · Shift + Enter for a new line
+              Markdown supported · @ to mention · Enter to send · Shift + Enter
+              for a new line
             </span>
             <button
               className="team-primary"

@@ -691,6 +691,7 @@ export class TeamStore {
         "SELECT folder_id FROM note_folders WHERE note_id=?",
         id,
       ).map((f) => String(f.folder_id)),
+      sharing_enabled: true,
       can_edit: space.role === "editor",
       can_manage:
         space.role === "editor" &&
@@ -1806,7 +1807,7 @@ export class TeamStore {
             author_name: preview.author_name,
             body: preview.deleted_at
               ? "Message deleted"
-              : preview.body.slice(0, 160),
+              : preview.body.slice(0, 160) || "Shared an attachment or meeting",
             created_at: preview.created_at,
           }
         : null,
@@ -2208,6 +2209,9 @@ export class TeamStore {
     return {
       id,
       room_id: room.id,
+      has_meeting:
+        !row.deleted_at &&
+        !!this.get("SELECT 1 FROM chat_meeting_refs WHERE message_id=?", id),
       pinned: !!this.get("SELECT 1 FROM chat_pins WHERE message_id=?", id),
       author_id: String(row.author_id),
       author_name: String(row.author_name),
@@ -2413,24 +2417,30 @@ export class TeamStore {
       if (parent?.deleted_at)
         fail(409, "This thread's original message was deleted");
       const attachments = validateAttachments(body.attachments);
+      const meeting =
+        body.meeting == null
+          ? null
+          : this.validateMeetingShare(user, org, room, body.meeting);
       const content = text(
         body.body ?? "",
         "message",
         10_000,
-        attachments.length > 0,
+        attachments.length > 0 || !!meeting,
       );
-      const fingerprint = attachments.length
-        ? hash(
-            JSON.stringify([
-              content,
-              attachments.map((a) => [
-                a.name,
-                a.mime,
-                hash(a.bytes.toString("base64")),
+      const fingerprint =
+        attachments.length || meeting
+          ? hash(
+              JSON.stringify([
+                content,
+                attachments.map((a) => [
+                  a.name,
+                  a.mime,
+                  hash(a.bytes.toString("base64")),
+                ]),
+                ...(meeting ? [meeting] : []),
               ]),
-            ]),
-          )
-        : hash(content);
+            )
+          : hash(content);
       const client = text(body.client_id, "message identifier", 80);
       if (!/^[a-zA-Z0-9_-]{16,80}$/.test(client))
         fail(400, "Invalid message identifier");
@@ -2481,6 +2491,15 @@ export class TeamStore {
           a.size,
           a.bytes,
         );
+      if (meeting)
+        this.run(
+          "INSERT INTO chat_meeting_refs(message_id,note_id,revision,quote_start,quote_length) VALUES(?,?,?,?,?)",
+          id,
+          meeting.id,
+          meeting.revision,
+          meeting.start,
+          meeting.length,
+        );
       const event = this.messageChanged(roomId, id, thread);
       this.run("UPDATE chat_messages SET created_seq=? WHERE id=?", event, id);
       return this.chatMessage(user, org, id, room);
@@ -2524,10 +2543,122 @@ export class TeamStore {
         this.run("DELETE FROM chat_reactions WHERE message_id=?", id);
         this.run("DELETE FROM chat_attachments WHERE message_id=?", id);
         this.run("DELETE FROM chat_pins WHERE message_id=?", id);
+        this.run("DELETE FROM chat_meeting_refs WHERE message_id=?", id);
       }
       this.messageChanged(room.id, id, message.thread_id);
       return this.chatMessage(user, org, id, room);
     })();
+  }
+  private validateMeetingShare(
+    user: string,
+    org: string,
+    room: TeamChatRoom,
+    value: unknown,
+  ) {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      fail(400, "Invalid meeting reference");
+    const body = value as Record<string, unknown>;
+    const note = this.note(user, org, text(body.id, "meeting", 100));
+    if (note.trashed_at) fail(404, "Meeting unavailable");
+    if (body.revision !== note.revision)
+      fail(
+        409,
+        "The meeting changed. Review the updated source before sharing.",
+      );
+    const start = body.start ?? 0,
+      length = body.length ?? 0;
+    if (
+      !Number.isSafeInteger(start) ||
+      !Number.isSafeInteger(length) ||
+      Number(start) < 0 ||
+      Number(length) < 0 ||
+      Number(length) > 1000 ||
+      Number(start) + Number(length) > note.summary.length
+    )
+      fail(400, "Choose an excerpt from the current meeting notes");
+    if (!this.meetingAudience(user, org, room, note.space_id))
+      fail(
+        403,
+        "This conversation includes people who cannot access the meeting",
+      );
+    return {
+      id: note.id,
+      revision: note.revision,
+      start: Number(start),
+      length: Number(length),
+    };
+  }
+  private meetingAudience(
+    user: string,
+    org: string,
+    room: TeamChatRoom,
+    spaceId: string,
+  ) {
+    const space = this.space(user, org, spaceId);
+    return (
+      room.can_send &&
+      (room.kind === "channel"
+        ? space.visibility === "team"
+        : room.participants.every(
+            (p) => p.active && !!this.spaceRole(p.id, org, spaceId),
+          ))
+    );
+  }
+  meetingShareTargets(user: string, org: string, id: string) {
+    const note = this.note(user, org, id);
+    if (note.trashed_at) fail(404, "Meeting unavailable");
+    return this.chatRooms(user, org)
+      .filter((r) => this.meetingAudience(user, org, r, note.space_id))
+      .map((r) => ({
+        id: r.id,
+        label:
+          r.kind === "direct"
+            ? r.participants
+                .filter((p) => p.id !== user)
+                .map((p) => p.name)
+                .join(", ")
+            : r.is_default
+              ? "Team chat"
+              : `#${r.name}`,
+        audience:
+          r.kind === "channel"
+            ? "Everyone in this team, including future members"
+            : r.participants.map((p) => p.name).join(" and "),
+      }));
+  }
+  meetingReference(user: string, org: string, messageId: string) {
+    const room = this.messageRoom(user, org, messageId);
+    const message = this.get(
+      "SELECT deleted_at FROM chat_messages WHERE id=?",
+      messageId,
+    )!;
+    if (message.deleted_at) fail(404, "Message unavailable");
+    const ref = this.get(
+      "SELECT * FROM chat_meeting_refs WHERE message_id=?",
+      messageId,
+    );
+    if (!ref) return { available: false };
+    try {
+      const note = this.note(user, org, String(ref.note_id));
+      if (note.trashed_at) return { available: false };
+      return {
+        available: true,
+        id: note.id,
+        title: note.title,
+        excerpt:
+          note.revision === ref.revision
+            ? note.summary.slice(
+                Number(ref.quote_start),
+                Number(ref.quote_start) + Number(ref.quote_length),
+              )
+            : "",
+        updated: note.revision !== ref.revision,
+      };
+    } catch (e) {
+      if (e instanceof TeamError && [403, 404].includes(e.status))
+        return { available: false };
+      throw e;
+    }
   }
   pinMessage(user: string, org: string, id: string, active: unknown) {
     if (typeof active !== "boolean") fail(400, "Invalid pin state");

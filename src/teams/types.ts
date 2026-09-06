@@ -48,6 +48,7 @@ export type TeamRecipe = {
   revision: number;
 };
 export type TeamNote = {
+  sharing_enabled?: boolean;
   id: string;
   space_id: string;
   owner_id: string;
@@ -162,6 +163,7 @@ export type TeamAttachment = {
 export type TeamChatMessage = {
   attachments?: TeamAttachment[];
   pinned?: boolean;
+  has_meeting?: boolean;
   id: string;
   room_id: string;
   author_id: string;

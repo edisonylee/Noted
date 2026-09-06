@@ -60,6 +60,7 @@ export function TeamMessages({
   active,
   requestedRoom,
   onUnread,
+  onMeeting,
   notificationTarget,
   onNotificationHandled,
   requestedMessage,
@@ -75,6 +76,7 @@ export function TeamMessages({
   active: boolean;
   requestedRoom: TeamChatRoom | null;
   onUnread: (count: number) => void;
+  onMeeting?: (id: string) => void;
 }) {
   const org = data.org.id,
     user = data.user.id;
@@ -368,6 +370,7 @@ export function TeamMessages({
               onRoom={updateRoom}
               onRead={markRead}
               onOpenMessage={openMessage}
+              onMeeting={onMeeting}
             />
           ) : (
             <div className="messages-unavailable">
@@ -585,6 +588,7 @@ function MessageRoom({
   thread,
   onCloseThread,
   onOpenMessage,
+  onMeeting,
   jump,
   onSearch,
 }: {
@@ -605,6 +609,7 @@ function MessageRoom({
   thread?: TeamChatMessage;
   onCloseThread?: () => void;
   onOpenMessage?: (id: string) => void;
+  onMeeting?: (id: string) => void;
 }) {
   const [unreadBoundary, setUnreadBoundary] = useState(
     room.first_unread_seq ?? 0,
@@ -1140,6 +1145,7 @@ function MessageRoom({
         showReplies={showReplies}
         extras={!!room.message_extras}
         pinsEnabled={!!room.pins_enabled}
+        onMeeting={onMeeting}
         onChanged={changed}
         onReply={() =>
           threadId ? composer.current?.focus() : setThreadRoot(message)
@@ -1574,6 +1580,7 @@ function MessageRoom({
             onRoom={onRoom}
             onRead={onRead}
             onOpenMessage={onOpenMessage}
+            onMeeting={onMeeting}
             onCloseThread={() => {
               setThreadRoot(null);
               requestAnimationFrame(() =>

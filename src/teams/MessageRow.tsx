@@ -1,3 +1,4 @@
+import { MessageMeetingCard } from "./MessageMeetingCard";
 import { MessageAttachments } from "./MessageAttachments";
 import { useState, type ReactNode } from "react";
 import {
@@ -26,6 +27,7 @@ export function MessageRow({
   onDelete,
   onProfile,
   onMarkUnread,
+  onMeeting,
   pinsEnabled = false,
   renderBody,
   showReplies = true,
@@ -43,6 +45,7 @@ export function MessageRow({
   onDelete: () => void;
   onProfile: () => void;
   onMarkUnread?: () => void;
+  onMeeting?: (id: string) => void;
   pinsEnabled?: boolean;
   /** Lets the caller decorate the body (mention marks) without this row
    *  knowing what a mention is. Plain text when omitted. */
@@ -112,6 +115,13 @@ export function MessageRow({
           <p className="messages-deleted">Message deleted</p>
         ) : (
           <p>{renderBody ? renderBody(message.body) : message.body}</p>
+        )}
+        {!message.deleted_at && message.has_meeting && (
+          <MessageMeetingCard
+            org={org}
+            message={message.id}
+            onOpen={onMeeting}
+          />
         )}
         {!message.deleted_at && !!message.attachments?.length && (
           <MessageAttachments org={org} files={message.attachments} />

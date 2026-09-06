@@ -50,3 +50,52 @@
   align-items: center;
   gap: 4px;
 }
+.message-source-card {
+  display: flex;
+  align-items: start;
+  gap: 10px;
+  max-width: 520px;
+  width: 100%;
+  min-width: 0;
+  margin: 10px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--ink);
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+}
+button.message-source-card {
+  cursor: pointer;
+}
+.message-source-card > svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.message-source-card > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.message-source-card small {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.message-source-excerpt {
+  display: block;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.message-share-audience {
+  padding: 12px;
+  background: var(--surface-2);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+}

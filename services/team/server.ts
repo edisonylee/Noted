@@ -126,14 +126,15 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
         path.length > 6 ||
         (action &&
           !(
-            (resource === "notes" && action === "restore") ||
+            (resource === "notes" &&
+              ["restore", "share-targets"].includes(action)) ||
             (resource === "spaces" && action === "grants") ||
             (resource === "chat-rooms" &&
               ["messages", "read", "unread", "notifications", "pins"].includes(
                 action,
               )) ||
             (resource === "chat-messages" &&
-              ["reactions", "pin"].includes(action)) ||
+              ["reactions", "pin", "source"].includes(action)) ||
             (resource === "mentions" && action === "read") ||
             (resource === "profiles" && action === "avatar")
           ))
@@ -150,6 +151,20 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
         return respond(store.renameOrg(user, org, body.name));
       if (resource === "attachments" && id && !action && method === "GET")
         return respond(store.attachment(user, org, id));
+      if (
+        resource === "notes" &&
+        id &&
+        action === "share-targets" &&
+        method === "GET"
+      )
+        return respond(store.meetingShareTargets(user, org, id));
+      if (
+        resource === "chat-messages" &&
+        id &&
+        action === "source" &&
+        method === "GET"
+      )
+        return respond(store.meetingReference(user, org, id));
       if (resource === "search" && !id && method === "GET")
         return respond(store.search(user, org, url.searchParams));
       if (

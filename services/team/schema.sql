@@ -99,3 +99,11 @@ CREATE TABLE IF NOT EXISTS chat_pins (
   user_id TEXT NOT NULL REFERENCES users(id),
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS chat_meeting_refs (
+  message_id TEXT PRIMARY KEY REFERENCES chat_messages(id) ON DELETE CASCADE,
+  note_id TEXT NOT NULL REFERENCES notes(id),
+  revision INTEGER NOT NULL,
+  quote_start INTEGER NOT NULL DEFAULT 0,
+  quote_length INTEGER NOT NULL DEFAULT 0
+);

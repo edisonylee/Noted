@@ -295,3 +295,9 @@
     padding: 6px;
   }
 }
+
+.team-workspace > .team-shared-note {
+  max-width: 1060px;
+  margin: 0 auto;
+  padding: 24px 28px 48px;
+}

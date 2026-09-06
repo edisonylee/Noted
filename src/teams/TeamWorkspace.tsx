@@ -1,3 +1,4 @@
+import { ShareMeetingDialog } from "./ShareMeetingDialog";
 import { TeamSearch } from "./TeamSearch";
 import type { TeamNotificationTarget } from "./types";
 import {
@@ -482,6 +483,12 @@ function TeamLibrary({
   }, [notificationTarget]);
   const [requestedRoom, setRequestedRoom] = useState<TeamChatRoom | null>(null);
   const [shareHelp, setShareHelp] = useState(false);
+  const [messageMeeting, setMessageMeeting] = useState<string | null>(null);
+  const openSharedMessage = (id: string) => {
+    setMessageMeeting(null);
+    setRequestedMessage({ id, nonce: Date.now() });
+    setView("messages");
+  };
   const [query, setQuery] = useNavigationState(`team:${org}:query`, "");
   const [rows, setRows] = useState<TeamNoteRow[]>([]);
   const [more, setMore] = useState(false);
@@ -731,11 +738,12 @@ function TeamLibrary({
         </button>
       </nav>
       {data && (
-        <div hidden={view !== "messages"}>
+        <div hidden={view !== "messages" || !!messageMeeting}>
           <TeamMessages
             key={`${data.org.id}:${data.user.id}`}
             data={data}
-            active={view === "messages"}
+            active={view === "messages" && !messageMeeting}
+            onMeeting={setMessageMeeting}
             requestedRoom={requestedRoom}
             requestedMessage={requestedMessage}
             onRequestedMessageHandled={() => setRequestedMessage(null)}
@@ -750,6 +758,17 @@ function TeamLibrary({
           />
         </div>
       )}
+      {data && view === "messages" && messageMeeting && (
+        <SharedMeeting
+          org={org}
+          id={messageMeeting}
+          folders={data.folders}
+          accessEpoch={accessEpoch}
+          backLabel="Conversation"
+          onBack={() => setMessageMeeting(null)}
+          onShared={openSharedMessage}
+        />
+      )}
       {data &&
         view === "search" &&
         (searchMeeting ? (
@@ -759,6 +778,7 @@ function TeamLibrary({
             id={searchMeeting}
             folders={data.folders}
             accessEpoch={accessEpoch}
+            onShared={openSharedMessage}
             backLabel="Search results"
             onBack={() => setSearchMeeting(null)}
           />
@@ -921,6 +941,7 @@ function TeamLibrary({
               key={noteId}
               org={org}
               id={noteId}
+              onShared={openSharedMessage}
               folders={data.folders}
               accessEpoch={accessEpoch}
               onBack={() => {
@@ -1334,6 +1355,7 @@ function CreateTeamLocation({
 
 function SharedMeeting({
   backLabel = "Shared meetings",
+  onShared,
   org,
   id,
   folders,
@@ -1345,8 +1367,11 @@ function SharedMeeting({
   folders: TeamFolder[];
   accessEpoch: number;
   backLabel?: string;
+  onShared?: (id: string) => void;
   onBack: () => void;
 }) {
+  const [sharing, setSharing] = useState(false);
+  const [shareQuote, setShareQuote] = useState("");
   const [note, setNote] = useState<TeamNote | null>(null),
     [error, setError] = useState("");
   const [editing, setEditing] = useState(false),
@@ -1467,6 +1492,22 @@ function SharedMeeting({
             </p>
           </header>
           <div className="team-note-actions">
+            {note.sharing_enabled && !note.trashed_at && onShared && (
+              <button
+                onClick={() => {
+                  const selected =
+                    window.getSelection()?.toString().trim() ?? "";
+                  setShareQuote(
+                    selected.length <= 1000 && note.summary.includes(selected)
+                      ? selected
+                      : "",
+                  );
+                  setSharing(true);
+                }}
+              >
+                <Share2 size={14} /> Share in conversation
+              </button>
+            )}
             <button
               onClick={async () => {
                 try {
@@ -1528,6 +1569,18 @@ function SharedMeeting({
               </button>
             )}
           </div>
+          {sharing && onShared && (
+            <ShareMeetingDialog
+              org={org}
+              note={note}
+              initialQuote={shareQuote}
+              onClose={() => setSharing(false)}
+              onShared={(id) => {
+                setSharing(false);
+                onShared(id);
+              }}
+            />
+          )}
           {editing ? (
             <TeamDialog
               title="Edit shared meeting"

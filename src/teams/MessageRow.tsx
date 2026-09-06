@@ -157,7 +157,9 @@ export function MessageRow({
         {message.deleted_at ? (
           <p className="messages-deleted">Message deleted</p>
         ) : (
-          <p>{renderBody ? renderBody(message.body) : message.body}</p>
+          <div>
+            {renderBody ? renderBody(message.body) : <p>{message.body}</p>}
+          </div>
         )}
         {!message.deleted_at && message.has_meeting && (
           <MessageMeetingCard

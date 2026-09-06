@@ -51,7 +51,10 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-force-graph-2d": "^1.29.1",
-    "recharts": "^3.8.1"
+    "react-markdown": "10.1.0",
+    "recharts": "^3.8.1",
+    "remark-breaks": "4.0.0",
+    "remark-gfm": "4.0.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

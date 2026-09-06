@@ -1,5 +1,5 @@
 import { MessageComposer, type MessageComposerHandle } from "./MessageComposer";
-import { messageFormatting } from "./messageFormatting";
+import { MessageMarkdown } from "./MessageMarkdown";
 import { SavedMessages } from "./SavedMessages";
 import { PinnedMessages } from "./PinnedMessages";
 import {
@@ -1313,28 +1313,9 @@ function MessageRoom({
       </>
     );
   };
-  const renderBody = (body: string) => {
-    let end = 0;
-    const parts = messageFormatting(body).map((span) => {
-      const before = body.slice(end, span.start);
-      end = span.end;
-      const content = body.slice(span.contentStart, span.contentEnd);
-      return (
-        <Fragment key={span.start}>
-          {renderPlainBody(before)}
-          <span className={`message-format-${span.kind}`}>
-            {span.kind === "code" ? content : renderPlainBody(content)}
-          </span>
-        </Fragment>
-      );
-    });
-    return (
-      <>
-        {parts}
-        {renderPlainBody(body.slice(end))}
-      </>
-    );
-  };
+  const renderBody = (body: string) => (
+    <MessageMarkdown body={body} renderText={renderPlainBody} />
+  );
   const label = roomLabel(room, user);
   const unreadThreads = room.unread_threads ?? 0;
   const renderEpoch = accessEpoch.current;

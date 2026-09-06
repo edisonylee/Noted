@@ -18,3 +18,6 @@ Validation: parser regression tests cover literal HTML, incomplete and escaped
 syntax, code, and Unicode offsets. Synthetic browser checks cover formatting,
 newlines, mentions, navigation draft restoration, sending, undo, and plain-text
 paste. Frontend typecheck and production build pass. No server migration is needed.
+
+The follow-up [CommonMark/GFM plan](12-chat-markdown.md) replaces the limited
+sent-message renderer. The source editor keeps its inline decorations.

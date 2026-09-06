@@ -2,8 +2,10 @@ import { MessageMeetingCard } from "./MessageMeetingCard";
 import { MessageAttachments } from "./MessageAttachments";
 import { useState, type ReactNode } from "react";
 import {
+  CornerUpLeft,
   MessageSquare,
   Pencil,
+  Reply,
   SmilePlus,
   Trash2,
   Mail,
@@ -15,6 +17,7 @@ import { REACTIONS, REACTION_NAMES } from "../../services/team/reactions";
 import { TeamAvatar } from "./TeamAvatar";
 import { TeamDialog } from "./TeamDialog";
 import { orgPath, team } from "./client";
+import { quotePreview } from "./messaging";
 import type { TeamChatMessage, TeamUser } from "./types";
 
 export function MessageRow({
@@ -25,6 +28,8 @@ export function MessageRow({
   canSend,
   onChanged,
   onReply,
+  onQuote,
+  onOpenQuoted,
   onEdit,
   onDelete,
   onProfile,
@@ -44,6 +49,11 @@ export function MessageRow({
   canSend: boolean;
   onChanged: (message: TeamChatMessage) => void;
   onReply: () => void;
+  /** Starts an inline reply quoting this message; its presence shows the
+   *  Reply action, so the caller decides eligibility. */
+  onQuote?: () => void;
+  /** Opens the message this row quotes (in-window jump or a remount). */
+  onOpenQuoted?: (id: string) => void;
   onEdit: () => void;
   onDelete: () => void;
   onProfile: () => void;
@@ -98,6 +108,29 @@ export function MessageRow({
         <TeamAvatar org={org} person={person} className="messages-avatar" />
       </button>
       <div className="messages-message-content">
+        {!message.deleted_at &&
+          message.reply_to &&
+          (message.reply_to.deleted_at ? (
+            <p className="message-reply-ref is-deleted">
+              <CornerUpLeft size={12} aria-hidden="true" />
+              <span>{quotePreview(message.reply_to)}</span>
+            </p>
+          ) : (
+            // Plain text only: a 160-character prefix can cut a formatting
+            // span or a mention in half, so the quote never goes through
+            // renderBody.
+            <button
+              type="button"
+              className="message-reply-ref"
+              title="Jump to the original message"
+              aria-label={`Replying to ${message.reply_to.author_name}: ${quotePreview(message.reply_to)}. Jump to the original message`}
+              onClick={() => onOpenQuoted?.(message.reply_to!.id)}
+            >
+              <CornerUpLeft size={12} aria-hidden="true" />
+              <b>{message.reply_to.author_name}</b>
+              <span>{quotePreview(message.reply_to)}</span>
+            </button>
+          ))}
         <header>
           <button className="message-author" onClick={onProfile}>
             {person.name}
@@ -206,9 +239,19 @@ export function MessageRow({
             >
               <SmilePlus size={14} />
             </button>
+            {onQuote && (
+              <button
+                className="team-text-button"
+                aria-label={`Reply to message from ${person.name}`}
+                title="Reply"
+                onClick={onQuote}
+              >
+                <Reply size={14} />
+              </button>
+            )}
             <button
               className="team-text-button"
-              aria-label={`Reply to message from ${person.name}`}
+              aria-label={`Reply in thread to message from ${person.name}`}
               title="Reply in thread"
               onClick={onReply}
             >

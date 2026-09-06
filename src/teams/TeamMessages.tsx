@@ -31,6 +31,7 @@ import {
 import {
   ArrowDown,
   ChevronLeft,
+  CornerUpLeft,
   Hash,
   Lock,
   Loader,
@@ -50,10 +51,18 @@ import type {
   TeamChatMessage,
   TeamChatPage,
   TeamChatRoom,
+  TeamReplyReference,
   TeamSnapshot,
   TeamUser,
 } from "./types";
-import { mergeMessages, roomLabel } from "./messaging";
+import {
+  canReplyInline,
+  mergeMessages,
+  quotePreview,
+  replyReference,
+  roomLabel,
+  sendAttemptKey,
+} from "./messaging";
 import {
   draftKey as draftStorageKey,
   readDrafts,
@@ -694,6 +703,15 @@ function MessageRoom({
     `team:${org}:${user}:${draftKey}:attachments`,
     [],
   );
+  // Same lifecycle as staged attachments: survives room and thread switches
+  // and the jump remount, dropped on reload. Never the full message.
+  const [replyTo, setReplyTo] = useNavigationState<TeamReplyReference | null>(
+    `team:${org}:${user}:${draftKey}:reply-to`,
+    null,
+  );
+  const [flash, setFlash] = useState<string | null>(null);
+  const flashTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(flashTimer.current), []);
   const [readingFiles, setReadingFiles] = useState(false);
   const draft = drafts[draftKey] ?? "";
   const setDraft = (value: string) => setDraftFor(draftKey, value);
@@ -752,6 +770,14 @@ function MessageRoom({
   useEffect(() => {
     if (threadId && isActive) composer.current?.focus();
   }, [threadId, isActive]);
+  // Only rows in the loaded window are visible here; a target deleted outside
+  // it is caught by the server's 409 at send time instead.
+  useEffect(() => {
+    if (replyTo && messages.find((m) => m.id === replyTo.id)?.deleted_at) {
+      setReplyTo(null);
+      setSendError("The message you were replying to was deleted.");
+    }
+  }, [messages, replyTo, setReplyTo]);
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -932,8 +958,9 @@ function MessageRoom({
         );
         if (initial) setOlderBefore(page.older_before);
         // Reply sends, edits and deletes re-emit their root, so an open
-        // thread list refreshes within long-poll latency. Fan-out events on
-        // roots that merely have replies also match; the list absorbs that.
+        // thread list refreshes within long-poll latency. quotedChanged()
+        // fan-out re-emits quoting rows too, so a root with replies that is
+        // also quoted can trigger one extra, harmless refetch.
         if (
           !initial &&
           !threadId &&
@@ -1065,11 +1092,14 @@ function MessageRoom({
       error
     )
       return;
+    const replyToId = replyTo?.id ?? null;
     const clientId = sendKeyFor(
         draftKey,
-        attachments.length
-          ? JSON.stringify([body, attachments.map((f) => f.id)])
-          : body,
+        sendAttemptKey(
+          body,
+          attachments.map((f) => f.id),
+          replyToId,
+        ),
       ),
       epoch = accessEpoch.current;
     setSending(true);
@@ -1082,11 +1112,13 @@ function MessageRoom({
           body,
           client_id: clientId,
           thread_id: threadId,
+          reply_to_id: replyToId,
           attachments: attachments.map(({ name, data }) => ({ name, data })),
         },
       );
       onSentFor(draftKey, body);
       setAttachments([]);
+      setReplyTo(null);
       if (!alive.current || epoch !== accessEpoch.current) return;
       setMessages((old) => mergeMessages(old, [message]));
       toBottom();
@@ -1094,10 +1126,39 @@ function MessageRoom({
         composer.current?.focus({ preventScroll: true }),
       );
     } catch (e) {
-      if (alive.current) setSendError(String(e));
+      if (!alive.current) return;
+      setSendError(String(e));
+      // A failed send keeps the bar so the draft can be retried as written,
+      // except when the target itself is gone: that retry can never succeed.
+      if (String(e).includes("replying to was deleted")) setReplyTo(null);
     } finally {
       if (alive.current) setSending(false);
     }
+  };
+  const quote = (message: TeamChatMessage) => {
+    setReplyTo(replyReference(message));
+    requestAnimationFrame(() =>
+      composer.current?.focus({ preventScroll: true }),
+    );
+  };
+  // In-window first so a jump keeps the loaded page, drafts and scroll state;
+  // a target outside the window goes through the normal open flow (an
+  // around= remount, thread panel reopened when the target is a reply).
+  const jumpToMessage = (target: string) => {
+    const el = viewport.current;
+    if (el && restoreMessagePosition(el, { id: target, seq: 0, offset: 40 })) {
+      // onScroll recomputes pinned from holdPosition, so both must change
+      // before the scroll event lands or the next poll snaps to the bottom.
+      holdPosition.current = true;
+      pinned.current = false;
+      setNewBelow(el.scrollHeight - el.scrollTop - el.clientHeight >= 8);
+      setFlash(target);
+      window.clearTimeout(flashTimer.current);
+      flashTimer.current = window.setTimeout(
+        () => setFlash((f) => (f === target ? null : f)),
+        1600,
+      );
+    } else onOpenMessage?.(target);
   };
   const [caret, setCaret] = useState(0);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -1203,7 +1264,7 @@ function MessageRoom({
         org={org}
         user={user}
         message={message}
-        highlighted={destination?.id === message.id}
+        highlighted={destination?.id === message.id || flash === message.id}
         person={person}
         onMarkUnread={
           room.unread_navigation
@@ -1238,6 +1299,14 @@ function MessageRoom({
         onReply={() =>
           threadId ? composer.current?.focus() : setThreadRoot(message)
         }
+        // The thread panel's parent row sits at the other level, so it never
+        // gets the action; an older server without the flag shows nothing.
+        onQuote={
+          room.inline_replies && canSend && canReplyInline(message, threadId)
+            ? () => quote(message)
+            : undefined
+        }
+        onOpenQuoted={jumpToMessage}
         onEdit={() => setEditing(message)}
         onDelete={() => setDeleting(message)}
         onProfile={() => setProfile(person)}
@@ -1248,9 +1317,10 @@ function MessageRoom({
     <section
       className="messages-room"
       aria-label={threadId ? "Thread" : `Conversation: ${label}`}
-      // Escape precedence, outermost last: autocomplete picker (composer
-      // onKeyDown) → cancel pending reply (future, composer onKeyDown) → back
-      // to threads → close thread. An open <dialog> suppresses all of them.
+      // Escape precedence, outermost last: autocomplete picker → cancel
+      // pending reply (both in the composer onKeyDown, which stops
+      // propagation) → back to threads → close thread. An open <dialog>
+      // suppresses all of them.
       onKeyDown={(event) => {
         if (
           threadId &&
@@ -1593,12 +1663,42 @@ function MessageRoom({
             className="messages-compose-label sr-only"
             htmlFor={`compose-${draftKey}`}
           >
-            {threadId
-              ? "Reply in thread"
-              : room.kind === "channel" && !room.is_default
-                ? `Message #${label}`
-                : `Message ${label}`}
+            {replyTo
+              ? `Reply to ${replyTo.author_name}`
+              : threadId
+                ? "Reply in thread"
+                : room.kind === "channel" && !room.is_default
+                  ? `Message #${label}`
+                  : `Message ${label}`}
           </label>
+          {/* Always rendered so assistive tech announces the bar appearing and
+              leaving; the composer's name and description point at it too. */}
+          <div className="messages-compose-reply-live" aria-live="polite">
+            {replyTo && (
+              <div
+                className="messages-compose-reply"
+                id={`reply-to-${draftKey}`}
+              >
+                <CornerUpLeft size={13} aria-hidden="true" />
+                <span>
+                  Replying to <b>{replyTo.author_name}</b>
+                  {quotePreview(replyTo) ? ` · ${quotePreview(replyTo)}` : ""}
+                </span>
+                <button
+                  type="button"
+                  className="team-text-button"
+                  aria-label="Cancel reply"
+                  title="Cancel reply · Escape"
+                  onClick={() => {
+                    setReplyTo(null);
+                    composer.current?.focus({ preventScroll: true });
+                  }}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+          </div>
           {suggestions.length > 0 && (
             <div
               className="messages-mention-picker"
@@ -1640,15 +1740,18 @@ function MessageRoom({
                 ? `mention-${draftKey}-${mentionIndex % suggestions.length}`
                 : undefined
             }
+            aria-describedby={replyTo ? `reply-to-${draftKey}` : undefined}
             id={`compose-${draftKey}`}
             ref={composer}
             value={draft}
             disabled={sending || !canSend}
             placeholder={
               canSend
-                ? threadId
-                  ? "Reply in thread"
-                  : `Message ${room.kind === "channel" && !room.is_default ? "#" : ""}${label}`
+                ? replyTo
+                  ? `Reply to ${replyTo.author_name}`
+                  : threadId
+                    ? "Reply in thread"
+                    : `Message ${room.kind === "channel" && !room.is_default ? "#" : ""}${label}`
                 : "This conversation is read-only"
             }
             onChange={(value, caret) => {
@@ -1682,6 +1785,14 @@ function MessageRoom({
                   chooseMention(suggestions[mentionIndex % suggestions.length]);
                   return;
                 }
+              }
+              if (e.key === "Escape" && replyTo) {
+                e.preventDefault();
+                // Without this the section handler would also back out of or
+                // close the thread on the same keypress.
+                e.stopPropagation();
+                setReplyTo(null);
+                return;
               }
               if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
                 e.preventDefault();

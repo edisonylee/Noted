@@ -1,4 +1,8 @@
-import type { TeamChatMessage, TeamChatRoom } from "./types";
+import type {
+  TeamChatMessage,
+  TeamChatRoom,
+  TeamReplyReference,
+} from "./types";
 
 export function roomLabel(room: TeamChatRoom, user: string) {
   if (room.is_default) return "Team chat";
@@ -35,4 +39,52 @@ export function shortTime(iso: string, now = new Date()) {
   return date.toDateString() === now.toDateString()
     ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
     : date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+// Attachments and a reply target change what a send means, so they join the
+// idempotency key; a plain body keeps a plain key so existing retries match.
+export function sendAttemptKey(
+  body: string,
+  attachmentIds: string[],
+  replyToId: string | null,
+) {
+  return attachmentIds.length || replyToId
+    ? JSON.stringify([body, attachmentIds, replyToId])
+    : body;
+}
+
+// The pending target shown in the compose bar, shaped like the server's
+// reply_to so the bar and the sent row read the same before and after send.
+export function replyReference(message: TeamChatMessage): TeamReplyReference {
+  return {
+    id: message.id,
+    author_id: message.author_id,
+    author_name: message.author_name,
+    body: message.deleted_at ? "" : messagePreview(message).slice(0, 160),
+    deleted_at: message.deleted_at,
+    created_seq: message.created_seq,
+  };
+}
+
+// One line of quoted text: newlines collapse so a reference never grows the
+// row, and a deleted original reads as a tombstone rather than stale text.
+export function quotePreview(
+  ref: TeamReplyReference | null | undefined,
+  limit = 120,
+) {
+  if (!ref) return "";
+  if (ref.deleted_at) return "Original message deleted";
+  const text = ref.body.replace(/\s+/g, " ").trim();
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
+// Mirrors the server rule: a quote stays at the composer's conversation level
+// so the jump target is always inside the timeline the reply is shown in.
+export function canReplyInline(
+  message: TeamChatMessage,
+  threadId: string | undefined,
+) {
+  return (
+    !message.deleted_at && (message.thread_id ?? null) === (threadId ?? null)
+  );
 }

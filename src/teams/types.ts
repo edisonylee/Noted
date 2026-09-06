@@ -120,10 +120,13 @@ export type TeamChatRoom = {
   unread_navigation?: boolean;
   pins_enabled?: boolean;
   saved_messages_enabled?: boolean;
-  // Capability flags: each gates one header control so an older server
-  // never shows a control it cannot serve. threads_enabled gates "Threads".
+  // Capability flags: each gates one control so an older server never shows
+  // a control it cannot serve. threads_enabled gates the header "Threads"
+  // control (unread_threads is its count); inline_replies gates the per-row
+  // "Reply" action and the quote reference line.
   threads_enabled?: boolean;
   unread_threads?: number;
+  inline_replies?: boolean;
   read_version?: number;
   read_held?: boolean;
   read_cursor?: number;
@@ -165,6 +168,17 @@ export type TeamAttachment = {
   mime: string;
   size: number;
 };
+// The quoted excerpt a reply carries: a 160-character prefix of the original
+// (a fallback line when it had no text), or an empty body once the original
+// is deleted so the row shows a tombstone instead of stale text.
+export type TeamReplyReference = {
+  id: string;
+  author_id: string;
+  author_name: string;
+  body: string;
+  deleted_at: string | null;
+  created_seq: number;
+};
 export type TeamChatMessage = {
   attachments?: TeamAttachment[];
   pinned?: boolean;
@@ -178,6 +192,8 @@ export type TeamChatMessage = {
   thread_id?: string | null;
   reply_count?: number;
   last_reply_at?: string | null;
+  reply_to_id?: string | null;
+  reply_to?: TeamReplyReference | null;
   reactions?: TeamReaction[];
   created_at: string;
   edited_at: string | null;

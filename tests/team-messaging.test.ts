@@ -36,6 +36,44 @@ test("out-of-order history and send acknowledgments cannot replace newer edits o
   expect(rows[0].deleted_at).not.toBeNull();
   expect(rows[0].body).toBe("");
   expect(rows[1].body).toBe("Edited");
+  // Fan-out re-emits a quoting row at an unchanged revision with a fresh
+  // reply_to; equal revisions must replace, lower ones must not.
+  const quoted = { id: "a", author_id: "u", author_name: "Taylor", body: "Old", deleted_at: null, created_seq: 1 };
+  const refreshed = { ...quoted, body: "", deleted_at: "2026-09-05T00:02:00Z" };
+  const live = mergeMessages(
+    [message("reply", 4, 2, "Sure", { reply_to_id: "a", reply_to: quoted })],
+    [message("reply", 4, 2, "Sure", { reply_to_id: "a", reply_to: refreshed })],
+  );
+  expect(live[0].reply_to?.deleted_at).not.toBeNull();
+  const stale = mergeMessages(
+    [message("reply", 4, 2, "Sure", { reply_to_id: "a", reply_to: refreshed })],
+    [message("reply", 4, 1, "Sure", { reply_to_id: "a", reply_to: quoted })],
+  );
+  expect(stale[0].reply_to?.deleted_at).not.toBeNull();
+});
+
+import { canReplyInline, quotePreview, replyReference, sendAttemptKey } from "../src/teams/messaging";
+
+test("inline reply helpers key sends by target, preview quotes on one line and mirror the level rule", () => {
+  expect(sendAttemptKey("Hi", [], null)).toBe("Hi");
+  const keys = [sendAttemptKey("Hi", [], "a"), sendAttemptKey("Hi", [], "b"), sendAttemptKey("Hi", ["f"], null), sendAttemptKey("Hi", ["f"], "a")];
+  expect(new Set([...keys, "Hi"]).size).toBe(5);
+  const original = message("a", 1, 1, "First line\n\n  second   line ".padEnd(200, "x"));
+  const ref = replyReference(original);
+  expect(ref).toMatchObject({ id: "a", author_id: "user", author_name: "Taylor", deleted_at: null, created_seq: 1 });
+  expect(ref.body).toHaveLength(160);
+  expect(quotePreview(ref)).toMatch(/^First line second line x+…$/);
+  expect(quotePreview(ref)).toHaveLength(121);
+  expect(quotePreview(replyReference(message("b", 2, 1, "Short")))).toBe("Short");
+  expect(replyReference(message("f", 3, 1, "", { attachments: [{ id: "x", name: "a.png", mime: "image/png", size: 1 }] })).body).toBe("Shared an attachment or meeting");
+  expect(quotePreview({ ...ref, body: "", deleted_at: "2026-09-05T00:01:00Z" })).toBe("Original message deleted");
+  expect(quotePreview(null)).toBe("");
+  expect(quotePreview(undefined)).toBe("");
+  expect(canReplyInline(message("m", 4), undefined)).toBe(true);
+  expect(canReplyInline(message("t", 5, 1, "Hi", { thread_id: "root" }), "root")).toBe(true);
+  expect(canReplyInline(message("d", 6, 1, "", { deleted_at: "2026-09-05T00:01:00Z" }), undefined)).toBe(false);
+  expect(canReplyInline(message("t", 7, 1, "Hi", { thread_id: "root" }), undefined)).toBe(false);
+  expect(canReplyInline(message("root", 8, 1, "Hi", { thread_id: null }), "root")).toBe(false);
 });
 
 import { findMentions, mentionQuery } from "../src/teams/mentions";

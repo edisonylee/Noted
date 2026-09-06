@@ -150,6 +150,16 @@ export class TeamStore {
     this.db.exec(
       "CREATE INDEX IF NOT EXISTS chat_thread_replies ON chat_messages(thread_id,created_seq) WHERE thread_id IS NOT NULL",
     );
+    this.ensureColumn(
+      "chat_messages",
+      "reply_to_id",
+      "TEXT REFERENCES chat_messages(id)",
+    );
+    // Backs the quotedChanged() fan-out; `reply_to_id=?` implies NOT NULL, so
+    // the partial index is used and stays small.
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS chat_reply_refs ON chat_messages(reply_to_id) WHERE reply_to_id IS NOT NULL",
+    );
     initializeSearch(this.db);
     this
       .run(`INSERT OR IGNORE INTO chat_rooms(id,org_id,kind,name,description,created_by,created_at)
@@ -1746,6 +1756,7 @@ export class TeamStore {
       unread_threads: new Set(
         unreadMessages.map((m) => m.thread_id).filter(Boolean),
       ).size,
+      inline_replies: true,
       first_unread_root_id: this.get(
         "SELECT COALESCE(thread_id,id) AS id FROM chat_messages WHERE room_id=? AND author_id<>? AND deleted_at IS NULL AND created_seq>COALESCE((SELECT seq FROM chat_reads WHERE room_id=? AND user_id=?),0) ORDER BY created_seq LIMIT 1",
         id,
@@ -2219,8 +2230,16 @@ export class TeamStore {
     id: string,
     room: TeamChatRoom,
   ): TeamChatMessage {
+    // The quoted message rides the same SELECT so a reference costs no extra
+    // query. p.room_id=m.room_id is the tamper guard: a cross-room pointer
+    // serializes as null instead of leaking another conversation's text.
     const row = this.get(
-      `SELECT m.*,u.name AS author_name FROM chat_messages m JOIN users u ON u.id=m.author_id
+      `SELECT m.*,u.name AS author_name,
+        p.id AS quoted_id,p.author_id AS quoted_author_id,pu.name AS quoted_author_name,
+        substr(p.body,1,160) AS quoted_body,p.deleted_at AS quoted_deleted_at,p.created_seq AS quoted_seq
+      FROM chat_messages m JOIN users u ON u.id=m.author_id
+      LEFT JOIN chat_messages p ON p.id=m.reply_to_id AND p.room_id=m.room_id
+      LEFT JOIN users pu ON pu.id=p.author_id
       WHERE m.id=? AND m.room_id=?`,
       id,
       room.id,
@@ -2258,6 +2277,20 @@ export class TeamStore {
         "SELECT MAX(created_at) AS at FROM chat_messages WHERE thread_id=? AND deleted_at IS NULL",
         id,
       )?.at as string | null,
+      reply_to_id: (row.reply_to_id as string | null) ?? null,
+      reply_to:
+        row.deleted_at || !row.quoted_id
+          ? null
+          : {
+              id: String(row.quoted_id),
+              author_id: String(row.quoted_author_id),
+              author_name: String(row.quoted_author_name),
+              body: row.quoted_deleted_at
+                ? ""
+                : previewBody(String(row.quoted_body)),
+              deleted_at: row.quoted_deleted_at as string | null,
+              created_seq: Number(row.quoted_seq),
+            },
       reactions: row.deleted_at
         ? []
         : this.all<{ emoji: string; count: number; reacted: number }>(
@@ -2441,6 +2474,20 @@ export class TeamStore {
       if (parent?.thread_id) fail(400, "Reply in the original thread");
       if (parent?.deleted_at)
         fail(409, "This thread's original message was deleted");
+      // chatMessage() already 404s any id outside this room, so a quote can
+      // never point at another conversation; the level check keeps the jump
+      // target inside the same timeline the reply is shown in.
+      const replyTo =
+        body.reply_to_id == null
+          ? null
+          : text(body.reply_to_id, "reply target", 100);
+      const quoted = replyTo
+        ? this.chatMessage(user, org, replyTo, room)
+        : null;
+      if (quoted && (quoted.thread_id ?? null) !== thread)
+        fail(400, "Reply to a message in this conversation");
+      if (quoted?.deleted_at)
+        fail(409, "The message you are replying to was deleted");
       const attachments = validateAttachments(body.attachments);
       const meeting =
         body.meeting == null
@@ -2470,7 +2517,7 @@ export class TeamStore {
       if (!/^[a-zA-Z0-9_-]{16,80}$/.test(client))
         fail(400, "Invalid message identifier");
       const old = this.get(
-        "SELECT id,original_hash,thread_id FROM chat_messages WHERE room_id=? AND author_id=? AND client_id=?",
+        "SELECT id,original_hash,thread_id,reply_to_id FROM chat_messages WHERE room_id=? AND author_id=? AND client_id=?",
         roomId,
         user,
         client,
@@ -2478,7 +2525,8 @@ export class TeamStore {
       if (old) {
         if (
           old.original_hash !== fingerprint ||
-          (old.thread_id ?? null) !== thread
+          (old.thread_id ?? null) !== thread ||
+          (old.reply_to_id ?? null) !== replyTo
         )
           fail(409, "This send attempt already belongs to another message");
         return this.chatMessage(user, org, String(old.id), room);
@@ -2496,7 +2544,7 @@ export class TeamStore {
         fail(413, "This team has reached its attachment storage limit");
       const id = uid();
       this.run(
-        "INSERT INTO chat_messages(id,room_id,author_id,client_id,original_hash,body,created_at,thread_id) VALUES(?,?,?,?,?,?,?,?)",
+        "INSERT INTO chat_messages(id,room_id,author_id,client_id,original_hash,body,created_at,thread_id,reply_to_id) VALUES(?,?,?,?,?,?,?,?,?)",
         id,
         roomId,
         user,
@@ -2505,6 +2553,7 @@ export class TeamStore {
         content,
         now(),
         thread,
+        replyTo,
       );
       for (const a of attachments)
         this.run(
@@ -2572,8 +2621,22 @@ export class TeamStore {
         this.run("DELETE FROM chat_saved_messages WHERE message_id=?", id);
       }
       this.messageChanged(room.id, id, message.thread_id);
+      this.quotedChanged(room.id, id);
       return this.chatMessage(user, org, id, room);
     })();
+  }
+  // Re-emits the rows quoting an edited or deleted message so open windows
+  // pick up the new excerpt or tombstone from the live cursor. Their revision
+  // is deliberately untouched: the client merges on revision >= current, and a
+  // bump would 409 anyone mid-edit of a quoting reply. Capped so one delete
+  // of a much-quoted message cannot flood chat_events; older quoting rows
+  // refresh on their next full page load.
+  private quotedChanged(room: string, id: string) {
+    this.run(
+      "INSERT INTO chat_events(room_id,message_id) SELECT room_id,id FROM chat_messages WHERE reply_to_id=? AND room_id=? AND deleted_at IS NULL ORDER BY created_seq DESC LIMIT 100",
+      id,
+      room,
+    );
   }
   private validateMeetingShare(
     user: string,

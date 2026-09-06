@@ -95,6 +95,16 @@ same panel. Profile upload validation rejects
 remote URLs and active image formats. Identity and history survive display-name
 changes.
 
+Inline replies sit beside threads: a Reply action on a message row (before
+Reply in thread) starts a quote-reply at the same conversation level, shown as
+a quiet bar above the composer with the author, the first line of the original
+and a cancel control. The sent reply carries a one-line reference above its
+author line; activating it jumps to and briefly highlights the original in
+place, or reloads around it when it is outside the loaded window, and a deleted
+original becomes a non-interactive tombstone. Escape is layered: it dismisses
+the mention picker first, then cancels a pending reply, then acts on the thread
+panel as usual (Back when the thread came from the list, Close otherwise).
+
 The service suite now has 44 passing tests (338 assertions), plus the message-merge
 regression test. New checks cover thread pagination and isolation, idempotent
 reactions, live wake-up/revocation, profile authority and upload validation, and

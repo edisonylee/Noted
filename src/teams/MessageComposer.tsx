@@ -32,6 +32,7 @@ type Props = {
   onKeyDown: (event: KeyboardEvent) => void;
   "aria-controls"?: string;
   "aria-activedescendant"?: string;
+  "aria-describedby"?: string;
 };
 /** Plain-text document + visual decorations: Markdown stays lossless in drafts and on the wire. */
 export const MessageComposer = forwardRef<MessageComposerHandle, Props>(
@@ -168,6 +169,7 @@ export const MessageComposer = forwardRef<MessageComposerHandle, Props>(
           "aria-autocomplete": "list",
           "aria-controls": props["aria-controls"] ?? "",
           "aria-activedescendant": props["aria-activedescendant"] ?? "",
+          "aria-describedby": props["aria-describedby"] ?? "",
           "data-placeholder": props.placeholder,
           "data-empty": String(!props.value),
         },
@@ -179,6 +181,7 @@ export const MessageComposer = forwardRef<MessageComposerHandle, Props>(
       props.id,
       props["aria-controls"],
       props["aria-activedescendant"],
+      props["aria-describedby"],
     ]);
     return <div className="message-composer-editor" ref={host} />;
   },

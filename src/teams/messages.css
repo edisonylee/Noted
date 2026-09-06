@@ -929,3 +929,84 @@
   font-style: italic;
   color: var(--muted);
 }
+/* Scoped under the content column so the rules outrank the body-paragraph
+   rule above: the deleted-original tombstone is a <p>, and both states of the
+   reference line must share one size and rhythm. */
+.messages-message-content .message-reply-ref {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin: 0 0 3px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+}
+.messages-message-content .message-reply-ref svg {
+  flex: none;
+  color: var(--faint);
+}
+.messages-message-content .message-reply-ref b {
+  flex: none;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+.messages-message-content .message-reply-ref span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.messages-message-content .message-reply-ref:not(.is-deleted):hover {
+  color: var(--ink);
+}
+.messages-message-content .message-reply-ref:not(.is-deleted):hover span {
+  text-decoration: underline;
+}
+.messages-message-content .message-reply-ref.is-deleted {
+  font-style: italic;
+  cursor: default;
+}
+.messages-compose-reply {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 5px 6px 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+.messages-compose-reply > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.messages-compose-reply b {
+  color: var(--ink);
+  font-weight: 600;
+}
+/* Outranks team-layout.css's workspace-wide 34px button minimum on
+   specificity rather than load order. */
+.team-workspace .messages-compose-reply .team-text-button {
+  margin-left: auto;
+  padding: 4px;
+  min-height: 26px;
+}
+/* Below 650px the actions pill is always visible and floats over the row's
+   first line, which is now the reference; keep the quote clear of it. */
+@media (max-width: 650px) {
+  .messages-message-content .message-reply-ref {
+    padding-right: 180px;
+  }
+}

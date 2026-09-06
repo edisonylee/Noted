@@ -11,6 +11,7 @@ validation gate:
 6. [Message formatting](06-message-formatting.md)
 7. [Drop attachments](07-drop-attachments.md)
 8. [Threads](08-threads.md)
+9. [Inline replies](09-inline-replies.md)
 
 ## Implementation and verification
 

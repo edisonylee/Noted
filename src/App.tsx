@@ -1055,7 +1055,7 @@ export default function App() {
       <div className="main-col" data-tauri-drag-region>
       <main className="content" data-tauri-drag-region>
         {view === "settings" ? (
-          <SettingsModal page onClose={goHome} />
+          <SettingsModal page onClose={goHome} onOpenTeam={() => setView("team")} />
         ) : view === "ask" ? (
           <WeatherHome onTimeZoneChange={setAppTimeZone}>
             <AskView

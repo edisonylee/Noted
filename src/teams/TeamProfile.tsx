@@ -46,7 +46,7 @@ async function preparePhoto(file: File) {
 export function TeamProfileSettings({
   onSaved,
 }: {
-  onSaved: () => Promise<unknown>;
+  onSaved?: () => Promise<unknown>;
 }) {
   const [profile, setProfile] = useState<TeamProfile | null>(null);
   const [error, setError] = useState("");
@@ -110,7 +110,7 @@ export function TeamProfileSettings({
                 profile,
               );
               setProfile(value);
-              await onSaved();
+              await onSaved?.();
               setSaved(true);
             } catch (error) {
               setError(String(error));

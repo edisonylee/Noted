@@ -82,7 +82,8 @@ conversation navigation documented in [Slack's sidebar guidance](https://slack.c
 
 Threads now keep replies beside their original message, with counts, history,
 editing, deletion, and emoji reactions. The searchable reaction picker supports
-64 emoji and shows who reacted. Profiles in team settings add display names,
+64 emoji and shows who reacted. Profiles in main Settings (also accessible from
+team settings) add display names,
 photos, job titles, and bios, with member-authenticated photo access.
 
 The three-second message polling gap was replaced with authenticated long polling.

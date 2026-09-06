@@ -1,13 +1,15 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { X, Check, ChevronDown, ChevronUp, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, CalendarDays, Download, Mic, AudioLines, Plus, RefreshCw, Trash2, FolderPlus, FolderOpen, Laptop, Gauge, Cloud, KeyRound, Palette, Boxes, BookType, MessageCircle, Bot, Copy, ShieldCheck, BellRing, Settings2 } from "lucide-react";
+import { X, Check, ChevronDown, ChevronUp, Loader2, Wifi, WifiOff, CalendarCheck, CalendarX, CalendarDays, Download, Mic, AudioLines, Plus, RefreshCw, Trash2, FolderPlus, FolderOpen, Laptop, Gauge, Cloud, KeyRound, Palette, Boxes, BookType, MessageCircle, Bot, Copy, ShieldCheck, BellRing, Settings2, UserRound } from "lucide-react";
 import { api, isDesktop, type AppleCalStatus, type AgentAccessStatus, type AgentClientSetup, type AgentContextReceipt, type BrainVaultStatus, type ByokConfig, type CloudProvider, type GcalStatus, type MeetingFilingBackfillPreview, type MeetingFilingRule, type MeetingsCfg, type MeetingModelStatus, type MeetingTemplate, type NoteFolderInfo, type ProviderId, type ProviderMode, type ProviderSettings, type ReminderSettings } from "./api";
 import { ThemesSettings } from "./ThemesSettings";
 import { TranscriptVocabularySettings } from "./TranscriptVocabularySettings";
 import { releaseProfile } from "./releaseProfile";
 import { SystemSettingsPanel } from "./SystemSettings";
+
+const ProfileSettings = lazy(() => import("./ProfileSettings").then((module) => ({ default: module.ProfileSettings })));
 
 // Live connection status, shown as a persistent badge so "is Gemini actually
 // reachable?" is never a mystery — checked on open and after every save/test.
@@ -31,7 +33,7 @@ function meetingTemplateLabel(name: string) {
   return name === "Meeting" ? "General" : name;
 }
 
-type SettingsSection = "system" | "models" | "assistant" | "agents" | "themes" | "notifications" | "calendar" | "vaults" | "meetings" | "vocabulary";
+type SettingsSection = "profile" | "system" | "models" | "assistant" | "agents" | "themes" | "notifications" | "calendar" | "vaults" | "meetings" | "vocabulary";
 
 type SettingsSectionEntry = {
   id: SettingsSection;
@@ -135,7 +137,7 @@ function AppleCalendarSettings() {
   );
 }
 
-export function SettingsModal({ onClose, page = false }: { onClose: () => void; page?: boolean }) {
+export function SettingsModal({ onClose, page = false, onOpenTeam }: { onClose: () => void; page?: boolean; onOpenTeam?: () => void }) {
   const [section, setSection] = useState<SettingsSection>("system");
   const [savedHint, setSavedHint] = useState(false);
   const [s, setS] = useState<ProviderSettings | null>(null);
@@ -974,6 +976,7 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
       id: "app",
       label: "App",
       sections: [
+        { id: "profile", label: "Profile", description: "Your photo, name, and details", icon: UserRound },
         { id: "system", label: "General", description: "Time zone and regional behavior", icon: Settings2 },
         { id: "themes", label: "Appearance", description: "Theme and color mode", icon: Palette },
         ...(isDesktop
@@ -1033,6 +1036,11 @@ export function SettingsModal({ onClose, page = false }: { onClose: () => void; 
         ))}
       </nav>
       <div className="settings-body" data-section={section}>
+        {section === "profile" && (
+          <Suspense fallback={<p role="status">Loading your profile…</p>}>
+            <ProfileSettings onOpenTeam={onOpenTeam} />
+          </Suspense>
+        )}
         {section === "system" && <SystemSettingsPanel />}
 
         {section === "models" && (

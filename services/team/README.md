@@ -185,8 +185,9 @@ add yours, or click one you already added to remove it. Counts and names are
 visible to conversation participants; reactions on private messages do not grant
 any new access. Repeated requests set the desired state without double-counting.
 
-Open **Team settings → Profile** to edit your display name, job title, bio, and
-photo. Your profile is shared across your teams on the connected server. Click a
+Open **Settings → Profile** to edit your display name, job title, bio, and
+photo. **Team settings → Profile** opens the same editor and account. Your profile
+is shared across your teams on the connected server. Click a
 person's avatar or message author to view it. Photos are cropped and resized on
 the device before upload; the server accepts only bounded JPEG/PNG image data.
 It stores photos in the team database and serves them through member-authenticated

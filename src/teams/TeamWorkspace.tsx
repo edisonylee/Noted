@@ -738,7 +738,10 @@ function TeamLibrary({
         </button>
       </nav>
       {data && (
-        <div hidden={view !== "messages" || !!messageMeeting}>
+        <div
+          className="team-messages-page"
+          hidden={view !== "messages" || !!messageMeeting}
+        >
           <TeamMessages
             key={`${data.org.id}:${data.user.id}`}
             data={data}

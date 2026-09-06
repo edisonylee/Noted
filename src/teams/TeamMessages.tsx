@@ -4,6 +4,7 @@ import { SavedMessages } from "./SavedMessages";
 import { PinnedMessages } from "./PinnedMessages";
 import {
   AttachmentPicker,
+  type AttachmentPickerHandle,
   type PendingAttachment,
 } from "./MessageAttachments";
 import { MessageSidebar } from "./MessageSidebar";
@@ -716,6 +717,9 @@ function MessageRoom({
     readCursor = useRef(0);
   const viewport = useRef<HTMLDivElement>(null),
     composer = useRef<MessageComposerHandle>(null);
+  const attachmentPicker = useRef<AttachmentPickerHandle>(null);
+  const dragDepth = useRef(0);
+  const [draggingFiles, setDraggingFiles] = useState(false);
   const pinned = useRef(true),
     alive = useRef(true);
   const accessEpoch = useRef(0);
@@ -1225,7 +1229,47 @@ function MessageRoom({
         }
       }}
     >
-      <div className="messages-room-main" inert={!!threadRoot || undefined}>
+      <div
+        className="messages-room-main"
+        inert={!!threadRoot || undefined}
+        onDragEnter={(event) => {
+          if (!event.dataTransfer.types.includes("Files")) return;
+          event.preventDefault();
+          dragDepth.current++;
+          if (room.attachments_enabled && canSend && !sending && !readingFiles)
+            setDraggingFiles(true);
+        }}
+        onDragOver={(event) => {
+          if (!event.dataTransfer.types.includes("Files")) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect =
+            room.attachments_enabled && canSend && !sending && !readingFiles
+              ? "copy"
+              : "none";
+        }}
+        onDragLeave={(event) => {
+          if (!event.dataTransfer.types.includes("Files")) return;
+          dragDepth.current = Math.max(0, dragDepth.current - 1);
+          if (!dragDepth.current) setDraggingFiles(false);
+        }}
+        onDrop={(event) => {
+          if (!event.dataTransfer.types.includes("Files")) return;
+          event.preventDefault();
+          event.stopPropagation();
+          dragDepth.current = 0;
+          setDraggingFiles(false);
+          if (room.attachments_enabled && canSend && !sending && !readingFiles)
+            attachmentPicker.current?.addFiles(
+              Array.from(event.dataTransfer.files),
+            );
+        }}
+      >
+        {draggingFiles && (
+          <div className="message-drop-target" role="status">
+            <strong>Drop files to attach</strong>
+            <small>Up to 3 files · 5 MiB total · Send when you’re ready</small>
+          </div>
+        )}
         {room.read_held && (
           <div className="message-unread-notice" role="status">
             <span>Marked unread · Kept unread until you mark it read</span>
@@ -1571,6 +1615,7 @@ function MessageRoom({
           />
           {room.attachments_enabled && (
             <AttachmentPicker
+              ref={attachmentPicker}
               files={attachments}
               onChange={setAttachments}
               disabled={sending || !canSend}

@@ -44,3 +44,30 @@
   font-size: 11px;
   margin: 4px 0;
 }
+
+.messages-room-main {
+  position: relative;
+}
+.message-drop-target {
+  position: absolute;
+  inset: 8px;
+  z-index: 20;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  gap: 8px;
+  pointer-events: none;
+  background: var(--surface);
+  color: var(--ink);
+  border: 2px dashed var(--muted);
+  border-radius: 12px;
+}
+.message-drop-target small {
+  color: var(--muted);
+}
+.message-attachment-preview {
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  border-radius: 5px;
+}

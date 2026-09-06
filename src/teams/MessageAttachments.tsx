@@ -1,4 +1,10 @@
-import { useRef, useState } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import { Download, FileText, Loader, Paperclip, X } from "lucide-react";
 import { api, isDesktop } from "../api";
 import { team, orgPath } from "./client";
@@ -16,20 +22,80 @@ const sizeLabel = (size: number) =>
   size < 1024 * 1024
     ? `${Math.ceil(size / 1024)} KB`
     : `${(size / 1024 / 1024).toFixed(1)} MB`;
-export function AttachmentPicker({
-  files,
-  onChange,
-  disabled,
-  onBusy,
-}: {
-  files: PendingAttachment[];
-  onChange: (files: PendingAttachment[]) => void;
-  disabled: boolean;
-  onBusy: (busy: boolean) => void;
-}) {
+export type AttachmentPickerHandle = { addFiles: (files: File[]) => void };
+export const AttachmentPicker = forwardRef<
+  AttachmentPickerHandle,
+  {
+    files: PendingAttachment[];
+    onChange: (files: PendingAttachment[]) => void;
+    disabled: boolean;
+    onBusy: (busy: boolean) => void;
+  }
+>(function AttachmentPicker({ files, onChange, disabled, onBusy }, ref) {
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const busyRef = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const addFiles = async (chosen: File[]) => {
+    if (busyRef.current || disabled || !chosen.length) return;
+    setError("");
+    if (
+      files.length + chosen.length > 3 ||
+      files.reduce((n, f) => n + f.size, 0) +
+        chosen.reduce((n, f) => n + f.size, 0) >
+        limit
+    ) {
+      setError("Choose up to three files, totaling 5 MiB or less.");
+      return;
+    }
+    busyRef.current = true;
+    setBusy(true);
+    onBusy(true);
+    try {
+      const next = await Promise.all(
+        chosen.map(async (file) => {
+          if (!file.size || !/\.(png|jpe?g|pdf|txt|md|csv)$/i.test(file.name))
+            throw new Error("Choose a nonempty PNG, JPEG, PDF, or text file.");
+          const data = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () =>
+              reject(
+                new Error("Could not read the file. Try choosing it again."),
+              );
+            reader.onload = () => resolve(String(reader.result).split(",")[1]);
+            reader.readAsDataURL(file);
+          });
+          return {
+            id: crypto.randomUUID(),
+            name: file.name,
+            size: file.size,
+            data,
+          };
+        }),
+      );
+      if (mounted.current) onChange([...files, ...next]);
+    } catch (e) {
+      if (mounted.current) setError(String(e));
+    } finally {
+      busyRef.current = false;
+      if (mounted.current) {
+        setBusy(false);
+        onBusy(false);
+      }
+    }
+  };
+  useImperativeHandle(ref, () => ({
+    addFiles: (chosen) => {
+      void addFiles(chosen);
+    },
+  }));
   return (
     <div className="message-attachment-picker">
       <input
@@ -41,56 +107,7 @@ export function AttachmentPicker({
         onChange={async (e) => {
           const chosen = [...(e.target.files ?? [])];
           e.target.value = "";
-          if (busy || disabled || !chosen.length) return;
-          setError("");
-          if (
-            files.length + chosen.length > 3 ||
-            files.reduce((n, f) => n + f.size, 0) +
-              chosen.reduce((n, f) => n + f.size, 0) >
-              limit
-          ) {
-            setError("Choose up to three files, totaling 5 MiB or less.");
-            return;
-          }
-          setBusy(true);
-          onBusy(true);
-          try {
-            const next = await Promise.all(
-              chosen.map(async (file) => {
-                if (
-                  !file.size ||
-                  !/\.(png|jpe?g|pdf|txt|md|csv)$/i.test(file.name)
-                )
-                  throw new Error(
-                    "Choose a nonempty PNG, JPEG, PDF, or text file.",
-                  );
-                const data = await new Promise<string>((resolve, reject) => {
-                  const reader = new FileReader();
-                  reader.onerror = () =>
-                    reject(
-                      new Error(
-                        "Could not read the file. Try choosing it again.",
-                      ),
-                    );
-                  reader.onload = () =>
-                    resolve(String(reader.result).split(",")[1]);
-                  reader.readAsDataURL(file);
-                });
-                return {
-                  id: crypto.randomUUID(),
-                  name: file.name,
-                  size: file.size,
-                  data,
-                };
-              }),
-            );
-            onChange([...files, ...next]);
-          } catch (e) {
-            setError(String(e));
-          } finally {
-            setBusy(false);
-            onBusy(false);
-          }
+          void addFiles(chosen);
         }}
       />
       <button
@@ -107,7 +124,15 @@ export function AttachmentPicker({
         <ul aria-label="Files to send">
           {files.map((file) => (
             <li key={file.id}>
-              <FileText size={15} />
+              {/\.(png|jpe?g)$/i.test(file.name) ? (
+                <img
+                  className="message-attachment-preview"
+                  src={`data:image/${/\.png$/i.test(file.name) ? "png" : "jpeg"};base64,${file.data}`}
+                  alt=""
+                />
+              ) : (
+                <FileText size={15} />
+              )}
               <span title={file.name}>
                 {file.name}
                 <small>{sizeLabel(file.size)}</small>
@@ -138,7 +163,7 @@ export function AttachmentPicker({
       )}
     </div>
   );
-}
+});
 export function MessageAttachments({
   org,
   files,

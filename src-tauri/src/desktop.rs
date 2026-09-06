@@ -33,6 +33,7 @@ pub mod sync_journal;
 pub mod system_settings;
 pub mod themes;
 pub mod teams;
+mod team_document_identity;
 pub mod voice;
 
 use db::{Db, SaveInput};
@@ -2910,6 +2911,65 @@ async fn team_publish_meeting(app: tauri::AppHandle, org: String, id: i64, space
     payload["expected_access_version"] = json!(version);
     teams::request(&dir, "POST", &format!("/v1/orgs/{org}/notes"), Some(payload)).await.map_err(|e| e.to_string())
 }
+#[tauri::command]
+fn team_document_identity(app: tauri::AppHandle, id: i64) -> Result<String, String> {
+    let db = app.state::<Db>();
+    let conn = db.0.lock().unwrap();
+    team_document_identity::identity(&conn, id).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn team_document_local_id(app: tauri::AppHandle, source_key: String) -> Result<Option<i64>, String> {
+    let db = app.state::<Db>();
+    let conn = db.0.lock().unwrap();
+    team_document_identity::local_id(&conn, &source_key).map_err(|e| e.to_string())
+}
+#[tauri::command]
+async fn team_publish_document(app: tauri::AppHandle, org: String, id: i64, space_id: String, folder_ids: Vec<String>, source_key: String, reviewed_content: Value, existing_id: Option<String>, revision: Option<i64>, room_id: Option<String>) -> Result<Value, String> {
+    use rusqlite::OptionalExtension;
+    if org.is_empty() || !org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') { return Err("Invalid workspace".into()); }
+
+    // The desktop cannot re-derive the client's Markdown export, so the local
+    // row only gates that this is a live Library document and dates the copy.
+    let occurred_at = {
+        let db = app.state::<Db>();
+        let conn = db.0.lock().unwrap();
+        if team_document_identity::identity(&conn, id).map_err(|e| e.to_string())? != source_key {
+            return Err("This shared source does not belong to the local document".into());
+        }
+        let row: Option<(String, Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT COALESCE(note_kind, 'capture'), COALESCE(updated_at, created_at), trashed_at
+                 FROM notes WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let (kind, updated_at, trashed_at) = row.ok_or("This document no longer exists")?;
+        if kind != "document" { return Err("Only Library documents can be shared".into()); }
+        if trashed_at.is_some() { return Err("Restore the document before sharing it".into()); }
+        updated_at.unwrap_or_else(|| chrono::Utc::now().to_rfc3339())
+    };
+    let title = reviewed_content["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).ok_or("Give the document a title before sharing it")?;
+    let markdown = reviewed_content["markdown"].as_str().filter(|m| !m.trim().is_empty()).ok_or("The document is empty")?;
+    let version = reviewed_content["accessVersion"].as_u64().ok_or("Review the workspace audience before publishing")?;
+    let payload = json!({
+        "kind": "document",
+        "id": existing_id,
+        "revision": revision,
+        "room_id": room_id,
+        "source_key": source_key,
+        "space_id": space_id,
+        "folder_ids": folder_ids,
+        "title": title,
+        "summary": markdown,
+        "transcript": "",
+        "occurred_at": occurred_at,
+        "expected_access_version": version,
+    });
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    teams::request(&dir, "POST", &format!("/v1/orgs/{org}/document-publications"), Some(payload)).await.map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 async fn meeting_get(app: tauri::AppHandle, id: i64) -> Result<Value, String> {
@@ -5266,6 +5326,9 @@ pub fn run() {
             team_save_attachment,
             team_ask,
             team_publish_meeting,
+            team_publish_document,
+            team_document_identity,
+            team_document_local_id,
             meeting_set_notes,
             meeting_set_title,
             meeting_set_filing_destination,

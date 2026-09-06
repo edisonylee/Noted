@@ -471,7 +471,7 @@ async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, Stri
         "team_request" => crate::team_request(a, sarg(b, "method"), sarg(b, "path"), b.get("body").cloned()).await,
         "team_ask" => crate::team_ask(a, sarg(b, "org"), varg(b, "body")).await,
         "team_save_attachment" => Err("Save team attachments from the desktop app".into()),
-        "team_connect" | "team_disconnect" | "team_publish_meeting" => Err("Manage team connections and publish local meetings from the desktop app".into()),
+        "team_connect" | "team_disconnect" | "team_publish_meeting" | "team_publish_document" | "team_document_identity" | "team_document_local_id" => Err("Manage team connections and publish local meetings and documents from the desktop app".into()),
         "meeting_model_status" => Ok(crate::meeting_model_status(a)),
         "meeting_state" => Ok(crate::meeting_state(a)),
         "meeting_list" => crate::meeting_list(a).await,

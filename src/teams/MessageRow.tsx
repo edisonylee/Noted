@@ -1,4 +1,4 @@
-import { MessageMeetingCard } from "./MessageMeetingCard";
+import { MessageSourceCard } from "./MessageSourceCard";
 import { MessageAttachments } from "./MessageAttachments";
 import { useState, type ReactNode } from "react";
 import {
@@ -162,7 +162,7 @@ export function MessageRow({
           </div>
         )}
         {!message.deleted_at && message.has_meeting && (
-          <MessageMeetingCard
+          <MessageSourceCard
             org={org}
             message={message.id}
             onOpen={onMeeting}

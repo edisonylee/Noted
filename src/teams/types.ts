@@ -47,12 +47,19 @@ export type TeamRecipe = {
   owner_id: string;
   revision: number;
 };
+export type TeamNoteKind = "meeting" | "document";
 export type TeamNote = {
   sharing_enabled?: boolean;
   id: string;
   space_id: string;
   owner_id: string;
   owner_name: string;
+  // A document is a published Library page: Markdown in summary, no
+  // transcript. Older servers omit the field; treat missing as "meeting".
+  kind: TeamNoteKind;
+  // Publisher-chosen idempotency key: a random per-vault prefix for meetings,
+  // Opaque document:v2 identities are resolved only by the originating local database.
+  source_key: string;
   title: string;
   summary: string;
   transcript: string;
@@ -70,6 +77,7 @@ export type TeamNoteRow = Omit<TeamNote, "summary" | "transcript"> & {
   has_transcript: boolean;
 };
 export type TeamSnapshot = {
+  document_publication_review?: boolean;
   access_version: number;
   org: TeamOrg;
   user: TeamUser;
@@ -119,12 +127,16 @@ export type TeamChatRoom = {
   attachments_enabled?: boolean;
   unread_navigation?: boolean;
   pins_enabled?: boolean;
-  meeting_references_enabled?: boolean;
   saved_messages_enabled?: boolean;
   // Capability flags: each gates one control so an older server never shows
   // a control it cannot serve. threads_enabled gates the header "Threads"
   // control (unread_threads is its count); inline_replies gates the per-row
-  // "Reply" action and the quote reference line.
+  // "Reply" action and the quote reference line; the reference flags gate the
+  // composer's "Reference a meeting" / "Share a document" actions and
+  // media_enabled the header "Media" panel (GET /chat-rooms/:id/media).
+  meeting_references_enabled?: boolean;
+  document_references_enabled?: boolean;
+  media_enabled?: boolean;
   threads_enabled?: boolean;
   unread_threads?: number;
   inline_replies?: boolean;
@@ -247,6 +259,40 @@ export type TeamThreadPage = {
   items: TeamThreadSummary[];
   next_before: number | null;
 };
+// GET /chat-messages/:id/source — the per-viewer card for a message's shared
+// meeting or document. Unavailable covers trash, lost access and foreign ids
+// alike so the body never has to carry a title or excerpt.
+export type TeamSourceReference =
+  | { available: false }
+  | {
+      available: true;
+      id: string;
+      kind: TeamNoteKind;
+      title: string;
+      // Empty once the note moved past the pinned revision.
+      excerpt: string;
+      updated: boolean;
+    };
+// GET /chat-rooms/:id/media?kind=images|files|documents&before=<seq>: one row
+// per shared item, newest first, paged by the message's created_seq. Exactly
+// one of attachment / document is present, matching the requested kind.
+export type TeamMediaItem = {
+  message_id: string;
+  created_seq: number;
+  created_at: string;
+  author: TeamUser;
+  attachment?: TeamAttachment;
+  document?: {
+    note_id: string;
+    title: string;
+    // The note's revision moved past the one the message pinned.
+    updated: boolean;
+  };
+};
+export type TeamMediaPage = {
+  items: TeamMediaItem[];
+  next_before: number | null;
+};
 
 export type SearchSnippet = { text: string; match: boolean }[];
 export type TeamMessageSearchHit = {
@@ -259,8 +305,9 @@ export type TeamMessageSearchHit = {
   created_at: string;
   snippet: SearchSnippet;
 };
+// kind is the note's kind; a message hit is told apart by kind === "message".
 export type TeamMeetingSearchHit = {
-  kind: "meeting";
+  kind: TeamNoteKind;
   id: string;
   space_id: string;
   title: string;

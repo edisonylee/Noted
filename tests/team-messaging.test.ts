@@ -261,3 +261,51 @@ test("thread summaries merge by root, label participants and preview roots", () 
   expect(shortTime(new Date(2026, 8, 5, 14, 30).toISOString(), now)).toMatch(/2:30/);
   expect(shortTime(new Date(2026, 8, 4, 14, 30).toISOString(), now)).toMatch(/^Sep 4$/);
 });
+
+import { slashCommands } from "../src/teams/composerCommands";
+import { mediaCountLabel, mediaKey, mergeMedia } from "../src/teams/media";
+import type { TeamMediaItem } from "../src/teams/types";
+
+test("the document action is listed only when available and /doc filters to it", () => {
+  const all = ["attach", "meeting", "document"] as const;
+  expect(slashCommands("/", 1, [...all]).map((a) => a.id)).toEqual([...all]);
+  expect(slashCommands("/doc", 4, [...all]).map((a) => a.id)).toEqual(["document"]);
+  expect(slashCommands("/share", 6, [...all]).map((a) => a.id)).toEqual(["document"]);
+  expect(slashCommands("/doc", 4, ["attach", "meeting"])).toEqual([]);
+  expect(slashCommands("/", 1, ["attach", "meeting"]).map((a) => a.id)).toEqual(["attach", "meeting"]);
+});
+
+test("a staged document reference joins the retry key by id and revision alone, like a meeting", () => {
+  const shared = { id: "n", revision: 3, title: "Roadmap", occurred_at: "2026-09-05T00:00:00Z", collection: "Product" };
+  const document = sendAttemptKey("See", ["f"], null, { ...shared, kind: "document" as const });
+  expect(document).toBe(sendAttemptKey("See", ["f"], null, { ...shared, kind: "meeting" as const }));
+  expect(document).toBe(sendAttemptKey("See", ["f"], null, { id: "n", revision: 3 }));
+  expect(document).not.toBe(sendAttemptKey("See", ["f"], null, { id: "n", revision: 4 }));
+  expect(document).not.toBe(sendAttemptKey("See", ["f"], null, null));
+});
+
+test("media pages merge by attachment or document key, page one owning its range", () => {
+  const author = { id: "t", name: "Taylor" };
+  const file = (id: string, seq: number): TeamMediaItem => ({
+    message_id: `m${seq}`, created_seq: seq, created_at: "2026-09-05T00:00:00Z", author,
+    attachment: { id, name: `${id}.png`, mime: "image/png", size: 1 },
+  });
+  const doc = (note: string, seq: number): TeamMediaItem => ({
+    message_id: `m${seq}`, created_seq: seq, created_at: "2026-09-05T00:00:00Z", author,
+    document: { note_id: note, title: "Roadmap", updated: false },
+  });
+  // Two attachments on one message and one document shared twice stay distinct.
+  expect(new Set([file("a", 9), file("b", 9), doc("n", 8), doc("n", 7)].map(mediaKey)).size).toBe(4);
+  const old = [file("c", 30), file("b", 20), file("a", 10)];
+  // Refresh: c's message was deleted, d is new; a is older than page one and is kept.
+  const refreshed = mergeMedia(old, { items: [file("d", 40), file("b", 20)], next_before: 20 }, true);
+  expect(refreshed.map((i) => i.attachment!.id)).toEqual(["d", "b", "a"]);
+  // A complete page one (no continuation) replaces everything.
+  expect(mergeMedia(old, { items: [file("b", 20)], next_before: null }, true).map((i) => i.attachment!.id)).toEqual(["b"]);
+  // Load older appends only unseen rows and keeps order.
+  const older = mergeMedia(refreshed, { items: [file("a", 10), file("z", 5)], next_before: null }, false);
+  expect(older.map((i) => i.attachment!.id)).toEqual(["d", "b", "a", "z"]);
+  expect(mediaCountLabel("images", 1)).toBe("1 image");
+  expect(mediaCountLabel("documents", 2)).toBe("2 documents");
+  expect(mediaCountLabel("files", 0)).toBe("0 files");
+});

@@ -12,6 +12,9 @@ CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, org_id TEXT NOT NULL REF
 CREATE TABLE IF NOT EXISTS group_members (group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id), PRIMARY KEY(group_id,user_id));
 CREATE TABLE IF NOT EXISTS space_groups (space_id TEXT NOT NULL REFERENCES spaces(id), group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE, role TEXT NOT NULL CHECK(role IN ('viewer','editor')), PRIMARY KEY(space_id,group_id));
 CREATE TABLE IF NOT EXISTS folders (id TEXT PRIMARY KEY, space_id TEXT NOT NULL REFERENCES spaces(id), parent_id TEXT REFERENCES folders(id), name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '');
+-- notes.kind ('meeting' | 'document', default 'meeting') is added by TeamStore's
+-- constructor (ensureColumn) after this file runs and is validated in code, so
+-- an existing database migrates without a CHECK that could reject old rows.
 CREATE TABLE IF NOT EXISTS notes (
  id TEXT PRIMARY KEY, space_id TEXT NOT NULL REFERENCES spaces(id), owner_id TEXT NOT NULL REFERENCES users(id),
  source_key TEXT NOT NULL, title TEXT NOT NULL, summary TEXT NOT NULL, transcript TEXT NOT NULL DEFAULT '',

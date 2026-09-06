@@ -19,6 +19,8 @@ import type {
   TeamChatPage,
   TeamThreadPage,
   TeamThreadSummary,
+  TeamMediaItem,
+  TeamMediaPage,
   TeamUser,
   TeamProfile,
 } from "../../src/teams/types";
@@ -160,6 +162,9 @@ export class TeamStore {
     this.db.exec(
       "CREATE INDEX IF NOT EXISTS chat_reply_refs ON chat_messages(reply_to_id) WHERE reply_to_id IS NOT NULL",
     );
+    // Validated with choice() in publish() rather than a CHECK constraint so
+    // the additive migration cannot fail on an existing database.
+    this.ensureColumn("notes", "kind", "TEXT NOT NULL DEFAULT 'meeting'");
     initializeSearch(this.db);
     this
       .run(`INSERT OR IGNORE INTO chat_rooms(id,org_id,kind,name,description,created_by,created_at)
@@ -735,6 +740,71 @@ export class TeamStore {
         fail(400, "Folder must belong to the destination space");
     return folders;
   }
+  // The local-content release boundary is deliberately separate from collaborative
+  // note editing. Old servers cannot silently ignore its consent requirements.
+  publishDocumentCopy(
+    user: string,
+    org: string,
+    body: Record<string, unknown>,
+  ) {
+    return this.db.transaction(() => {
+      this.role(user, org);
+      if (
+        !Number.isSafeInteger(body.expected_access_version) ||
+        body.expected_access_version !== this.accessVersion(org)
+      )
+        fail(
+          409,
+          "Workspace access changed. Refresh and review the audience before publishing.",
+        );
+      const key = text(body.source_key, "source key", 200);
+      if (!/^document:v2:[a-f0-9]{64}$/.test(key))
+        fail(400, "Choose a document with a verified local identity");
+      const space = text(body.space_id, "space", 100);
+      this.space(user, org, space, true);
+      if (body.room_id != null) {
+        const room = this.chatRoom(
+          user,
+          org,
+          text(body.room_id, "conversation", 100),
+        );
+        if (!this.meetingAudience(user, org, room, space))
+          fail(
+            403,
+            "Everyone in this conversation must have access before publishing",
+          );
+      }
+      if (body.id != null) {
+        const note = this.note(user, org, text(body.id, "document", 100));
+        if (
+          note.kind !== "document" ||
+          note.owner_id !== user ||
+          note.source_key !== key ||
+          note.space_id !== space
+        )
+          fail(
+            403,
+            "This shared copy does not belong to the selected local document",
+          );
+        return this.updateNote(user, org, note.id, body);
+      }
+      return this.publish(user, org, {
+        ...body,
+        kind: "document",
+        transcript: "",
+      });
+    })();
+  }
+  documentDestinations(user: string, org: string, id: string) {
+    const room = this.chatRoom(user, org, id);
+    return this.spaces(user, org)
+      .filter(
+        (space) =>
+          space.role === "editor" &&
+          this.meetingAudience(user, org, room, space.id),
+      )
+      .map((space) => space.id);
+  }
   publish(user: string, org: string, body: Record<string, unknown>) {
     const space = text(body.space_id, "space", 100),
       folders = this.validateFolders(user, org, space, body.folder_ids);
@@ -746,14 +816,26 @@ export class TeamStore {
         409,
         "Workspace access changed after the preview opened. Review the destination again before publishing.",
       );
+    const kind = choice(
+      body.kind ?? "meeting",
+      ["meeting", "document"],
+      "note kind",
+    );
     const key = text(body.source_key, "source key", 200),
       title = text(body.title, "title", 500);
     const summary = text(body.summary, "notes", 300_000),
       transcript = text(body.transcript ?? "", "transcript", 1_000_000, true);
-    const occurredInput = text(body.occurred_at, "meeting date", 50);
+    if (kind === "document" && transcript)
+      fail(400, "A document has no transcript");
+    const occurredInput = text(body.occurred_at, `${kind} date`, 50);
     if (!Number.isFinite(Date.parse(occurredInput)))
-      fail(400, "Invalid meeting date");
+      fail(400, `Invalid ${kind} date`);
     const occurred = new Date(occurredInput).toISOString();
+    // The client finds a document's shared copy by its `document:` source key,
+    // so the prefix and the kind must agree or that lookup is a client-only
+    // promise and the duplicate message below can name the wrong kind.
+    if ((kind === "document") !== key.startsWith("document:"))
+      fail(400, "Invalid source key for this kind");
     const previous = this.get(
       "SELECT id FROM notes WHERE space_id=? AND owner_id=? AND source_key=?",
       space,
@@ -763,13 +845,15 @@ export class TeamStore {
     if (previous)
       fail(
         409,
-        "This meeting is already shared in this space. Open the shared copy to edit it.",
+        kind === "document"
+          ? "This document is already shared in this space. Open the shared copy to update it."
+          : "This meeting is already shared in this space. Open the shared copy to edit it.",
       );
     const id = uid(),
       at = now();
     this.db.transaction(() => {
       this.run(
-        "INSERT INTO notes(id,space_id,owner_id,source_key,title,summary,transcript,occurred_at,published_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO notes(id,space_id,owner_id,source_key,title,summary,transcript,occurred_at,published_at,updated_at,kind) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         id,
         space,
         user,
@@ -780,11 +864,12 @@ export class TeamStore {
         occurred,
         at,
         at,
+        kind,
       );
       folders.forEach((folder) =>
         this.run("INSERT INTO note_folders VALUES(?,?)", id, folder),
       );
-      this.audit(org, user, "meeting.published", id);
+      this.audit(org, user, `${kind}.published`, id);
     })();
     return this.note(user, org, id);
   }
@@ -795,10 +880,11 @@ export class TeamStore {
     body: Record<string, unknown>,
   ) {
     const n = this.note(user, org, id);
-    if (!n.can_edit) fail(403, "This meeting is read-only for you");
-    if (n.trashed_at) fail(409, "Restore this meeting before editing it");
+    const noun = n.kind === "document" ? "document" : "meeting";
+    if (!n.can_edit) fail(403, `This ${noun} is read-only for you`);
+    if (n.trashed_at) fail(409, `Restore this ${noun} before editing it`);
     if (body.revision !== n.revision)
-      fail(409, "Someone updated this meeting. Reload it before saving.");
+      fail(409, `Someone updated this ${noun}. Reload it before saving.`);
     const title = text(body.title, "title", 500),
       summary = text(body.summary, "notes", 300_000);
     const folders = this.validateFolders(
@@ -819,7 +905,7 @@ export class TeamStore {
       folders.forEach((folder) =>
         this.run("INSERT INTO note_folders VALUES(?,?)", id, folder),
       );
-      this.audit(org, user, "meeting.edited", id);
+      this.audit(org, user, `${n.kind}.edited`, id);
     })();
     return this.note(user, org, id);
   }
@@ -844,7 +930,7 @@ export class TeamStore {
       now(),
       id,
     );
-    this.audit(org, user, restore ? "meeting.restored" : "meeting.trashed", id);
+    this.audit(org, user, `${n.kind}.${restore ? "restored" : "trashed"}`, id);
   }
   private noteScope(
     user: string,
@@ -1042,9 +1128,10 @@ export class TeamStore {
         space_id: string;
         title: string;
         occurred_at: string;
+        kind: "meeting" | "document";
         excerpt: string;
       }>(
-        `SELECT n.id,n.space_id,n.title,n.occurred_at,substr(snippet(notes_fts,-1,?,?,'…',40),1,4096) AS excerpt
+        `SELECT n.id,n.space_id,n.title,n.occurred_at,n.kind,substr(snippet(notes_fts,-1,?,?,'…',40),1,4096) AS excerpt
          FROM notes_fts JOIN notes n ON n.rowid=notes_fts.rowid
          WHERE notes_fts MATCH ? AND ${scope.sql} AND n.trashed_at IS NULL
          AND (?='' OR n.owner_id=?) AND (?='' OR substr(n.occurred_at,1,10)>=?) AND (?='' OR substr(n.occurred_at,1,10)<=?)
@@ -1064,7 +1151,6 @@ export class TeamStore {
       );
       page.meetings.hits = rows.slice(0, limit).map(({ excerpt, ...hit }) => ({
         ...hit,
-        kind: "meeting",
         snippet: snippetParts(excerpt, start, end),
       }));
       page.meetings.cursor = cursor(
@@ -1084,8 +1170,16 @@ export class TeamStore {
     trash = false,
     limit = 100,
     offset = 0,
+    kind = "",
+    sourceKey = "",
   ): TeamNoteRow[] {
     const scope = this.noteScope(user, org, spaceId, folderId);
+    // An empty kind returns meetings and documents together so search and
+    // older callers see everything they could before documents existed.
+    choice(kind, ["", "meeting", "document"], "note kind");
+    // A source key is unique per (space, owner), not per space: two Macs can
+    // publish the same `document:<local id>`, so the lookup is always scoped
+    // to the caller's own rows and never resolves another owner's copy.
     let expression: string;
     try {
       expression = searchExpression(query);
@@ -1095,10 +1189,16 @@ export class TeamStore {
     if (query.trim() && !expression) return [];
     const rows = this.all<{ id: string }>(
       `SELECT n.id FROM notes n ${expression ? "JOIN notes_fts ON notes_fts.rowid=n.rowid" : ""}
-       WHERE ${scope.sql} AND n.trashed_at IS ${trash ? "NOT " : ""}NULL
+       WHERE ${scope.sql} AND n.trashed_at IS ${trash ? "NOT " : ""}NULL AND (?='' OR n.kind=?)
+       AND (?='' OR (n.owner_id=? AND n.source_key=?))
        ${expression ? "AND notes_fts MATCH ?" : ""}
        ORDER BY ${expression ? "bm25(notes_fts,5.0,2.0,1.0)," : ""}n.occurred_at DESC,n.id LIMIT ? OFFSET ?`,
       ...scope.values,
+      kind,
+      kind,
+      sourceKey,
+      user,
+      sourceKey,
       ...(expression ? [expression] : []),
       Math.min(100, limit),
       offset,
@@ -1750,6 +1850,8 @@ export class TeamStore {
       unread_navigation: true,
       pins_enabled: true,
       meeting_references_enabled: true,
+      document_references_enabled: true,
+      media_enabled: true,
       saved_messages_enabled: true,
       threads_enabled: true,
       // Derived from rows already loaded: chatRoom() runs for every room on
@@ -2703,6 +2805,11 @@ export class TeamStore {
     const room = this.chatRoom(user, org, id);
     if (!room.can_send) fail(403, "This conversation is read-only");
     const query = text(params.get("q") ?? "", "query", 200, true);
+    const kind = choice(
+      params.get("kind") ?? "",
+      ["", "meeting", "document"],
+      "note kind",
+    );
     const offset = Number(params.get("offset") ?? 0);
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100_000)
       fail(400, "Invalid offset");
@@ -2713,13 +2820,15 @@ export class TeamStore {
       .map((space) => space.id);
     if (!spaces.length) return { meetings: [], next_offset: null };
     const rows = this.all(
-      `SELECT n.id,n.title,n.revision,n.occurred_at,s.name AS collection
+      `SELECT n.id,n.title,n.revision,n.occurred_at,n.kind,s.name AS collection
        FROM notes n JOIN spaces s ON s.id=n.space_id
        WHERE n.space_id IN(${spaces.map(() => "?").join(",")})
-       AND n.trashed_at IS NULL
+       AND n.trashed_at IS NULL AND (?='' OR n.kind=?)
        AND (?='' OR instr(lower(n.title||char(10)||s.name),lower(?))>0)
        ORDER BY n.occurred_at DESC,n.id LIMIT 31 OFFSET ?`,
       ...spaces,
+      kind,
+      kind,
       query,
       query,
       offset,
@@ -2769,6 +2878,7 @@ export class TeamStore {
       return {
         available: true,
         id: note.id,
+        kind: note.kind,
         title: note.title,
         excerpt:
           note.revision === ref.revision
@@ -2970,6 +3080,95 @@ export class TeamStore {
       };
     })();
   }
+  // What a conversation has shared, newest first, gated by chatRoom() exactly
+  // like /threads. A document the viewer cannot open is left out rather than
+  // listed as unavailable: even its title would leak. Pages cut on a message
+  // boundary because keyset paging is by created_seq and one message can
+  // carry several attachments; a cut inside it would drop the rest next page.
+  chatMedia(
+    user: string,
+    org: string,
+    roomId: string,
+    query: URLSearchParams,
+  ): TeamMediaPage {
+    return this.db.transaction(() => {
+      this.chatRoom(user, org, roomId);
+      const kind = choice(
+        query.get("kind"),
+        ["images", "files", "documents"],
+        "media kind",
+      );
+      const before = query.has("before")
+        ? this.chatCursor(Number(query.get("before")), "media cursor")
+        : Number.MAX_SAFE_INTEGER;
+      const columns = `m.id AS message_id,m.created_seq,m.created_at,u.id AS author_id,u.name AS author_name,
+         COALESCE((SELECT avatar_version FROM user_profiles WHERE user_id=u.id),'') AS avatar_version`;
+      const readable = this.noteScope(user, org, "", "");
+      const rows =
+        kind === "documents"
+          ? this.all<Row>(
+              `SELECT ${columns},n.id AS note_id,n.title,n.revision<>ref.revision AS updated
+               FROM chat_meeting_refs ref JOIN chat_messages m ON m.id=ref.message_id
+               JOIN users u ON u.id=m.author_id JOIN notes n ON n.id=ref.note_id
+               WHERE m.room_id=? AND m.deleted_at IS NULL AND m.created_seq<?
+               AND n.kind='document' AND n.trashed_at IS NULL AND ${readable.sql}
+               ORDER BY m.created_seq DESC LIMIT 31`,
+              roomId,
+              before,
+              ...readable.values,
+            )
+          : this.all<Row>(
+              `SELECT ${columns},a.id,a.name,a.mime,a.size
+               FROM chat_attachments a JOIN chat_messages m ON m.id=a.message_id
+               JOIN users u ON u.id=m.author_id
+               WHERE m.room_id=? AND m.deleted_at IS NULL AND m.created_seq<?
+               AND (a.mime LIKE 'image/%')=?
+               ORDER BY m.created_seq DESC,a.rowid LIMIT 31`,
+              roomId,
+              before,
+              kind === "images" ? 1 : 0,
+            );
+      const kept =
+        rows.length > 30
+          ? rows.filter((r) => r.created_seq !== rows[30].created_seq)
+          : rows;
+      const items: TeamMediaItem[] = kept.map((r) => ({
+        message_id: String(r.message_id),
+        created_seq: Number(r.created_seq),
+        created_at: String(r.created_at),
+        author: {
+          id: String(r.author_id),
+          name: String(r.author_name),
+          avatar_version: String(r.avatar_version),
+        },
+        ...(kind === "documents"
+          ? {
+              document: {
+                note_id: String(r.note_id),
+                title: String(r.title),
+                updated: !!r.updated,
+              },
+            }
+          : {
+              attachment: {
+                id: String(r.id),
+                name: String(r.name),
+                mime: String(r.mime),
+                size: Number(r.size),
+              },
+            }),
+      }));
+      return {
+        items,
+        // A page is never empty while a message holds fewer than 31
+        // attachments; the fallback keeps the cursor typed if that cap moves.
+        next_before:
+          rows.length > 30
+            ? (items.at(-1)?.created_seq ?? Number(rows[30].created_seq))
+            : null,
+      };
+    })();
+  }
   attachment(user: string, org: string, id: string) {
     this.role(user, org);
     const row = this.get<{
@@ -3054,6 +3253,7 @@ export class TeamStore {
     const role = this.role(user, org);
     return {
       access_version: this.accessVersion(org),
+      document_publication_review: true,
       org: {
         ...this.get("SELECT id,name FROM organizations WHERE id=?", org),
         role,
@@ -3180,6 +3380,7 @@ export class TeamStore {
     const shape = (n: Row) => ({
       id: n.id,
       space_id: n.space_id,
+      kind: n.kind,
       title: n.title,
       summary: n.summary,
       ...(access.transcripts ? { transcript: n.transcript } : {}),
@@ -3198,7 +3399,12 @@ export class TeamStore {
     }
     const query = text(params.get("q") ?? "", "query", 500, true),
       space = params.get("space") ?? "",
-      folder = params.get("folder") ?? "";
+      folder = params.get("folder") ?? "",
+      kind = choice(
+        params.get("kind") ?? "",
+        ["", "meeting", "document"],
+        "note kind",
+      );
     if (space && !access.spaces.includes(space)) fail(404, "Space not found");
     if (
       folder &&
@@ -3215,13 +3421,16 @@ export class TeamStore {
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100_000)
       fail(400, "Invalid offset");
     const rows = this.all(
-      `SELECT id,space_id,title,substr(summary,1,240) AS excerpt,occurred_at,updated_at,revision FROM notes n WHERE space_id IN(${marks}) AND trashed_at IS NULL AND (?='' OR space_id=?)
+      `SELECT id,space_id,kind,title,substr(summary,1,240) AS excerpt,occurred_at,updated_at,revision FROM notes n WHERE space_id IN(${marks}) AND trashed_at IS NULL AND (?='' OR space_id=?)
+      AND (?='' OR kind=?)
       AND (?='' OR instr(lower(title||char(10)||summary${access.transcripts ? "||char(10)||transcript" : ""}),lower(?))>0)
       AND (?='' OR id IN(WITH RECURSIVE tree(id) AS(SELECT ? UNION SELECT f.id FROM folders f JOIN tree t ON f.parent_id=t.id) SELECT nf.note_id FROM note_folders nf JOIN tree t ON t.id=nf.folder_id))
       ORDER BY occurred_at DESC,id LIMIT 100 OFFSET ?`,
       ...access.spaces,
       space,
       space,
+      kind,
+      kind,
       query,
       query,
       folder,

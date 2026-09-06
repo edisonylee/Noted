@@ -16,12 +16,13 @@ validation gate:
 11. [Attachment previews](11-attachment-previews.md)
 12. [Full chat Markdown](12-chat-markdown.md)
 13. [Composer actions and meeting references](13-composer-actions.md)
+14. [Document sharing](14-document-sharing.md)
 
 ## Implementation and verification
 
-All thirteen are implemented. The team service suite passes **81 tests** across its
+All fourteen are implemented. The team service suite passes **93 tests** across its
 eight files, including HTTP authorization and isolated Docker runtime packaging,
-and `tests/team-messaging.test.ts` passes **12**; the two root-suite failures
+and `tests/team-messaging.test.ts` passes **15**; the two root-suite failures
 that remain (alpha bundle packaging and backup destination defaults) predate
 these features and are unrelated to team messaging. The frontend build passes;
 `cargo check --lib` passes for the native attachment Save command.
@@ -64,7 +65,9 @@ add a nullable `reply_to_id` column as an additive constructor migration; back
 up the SQLite database first, and note that editing or deleting a quoted
 original re-emits at most 100 quoting rows per change. Channel mentions change
 neither schema nor endpoints, so they carry no ordering constraint between
-server and client.
+server and client. Document sharing adds a `kind` column, the
+`/media` route and an owner-scoped `?source_key=` filter the client depends
+on, so deploy the team server before the client.
 
 Commits remain local on master for review. Pushing, production server deployment,
 and installed-app testing are left to the user.

@@ -1,7 +1,8 @@
 import { describe, test, expect, afterEach } from "bun:test";
 import { TeamStore } from "./store";
 import { createHandler, openServiceStore } from "./server";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { Database } from "bun:sqlite";
 import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { createMcpHandler, apiClient } from "./mcp";
@@ -2593,4 +2594,625 @@ test("conversation notification settings belong to the viewer, including DMs and
   expect(s.setConversationNotifications(alice.id, org, channel.id, { mode: "none" }).notification_mode).toBe("none");
   s.changeMember(owner, org, alice.id, "remove");
   expect(() => s.setConversationNotifications(alice.id, org, dm.id, { mode: "messages" })).toThrow();
+});
+
+describe("document sharing", () => {
+  const query = (value = "") => new URLSearchParams(value);
+  const publishDocument = (
+    s: TeamStore,
+    user: string,
+    org: string,
+    space: string,
+    overrides: Record<string, unknown> = {},
+  ) =>
+    s.publish(user, org, {
+      space_id: space,
+      source_key: `document:${crypto.randomUUID()}`,
+      kind: "document",
+      title: "Onboarding guide",
+      summary: "# Onboarding\n\nWelcome aboard. Badge pickup is on floor two.",
+      transcript: "",
+      occurred_at: "2026-09-05T10:00:00Z",
+      folder_ids: [],
+      ...overrides,
+    });
+  const reference = (
+    s: TeamStore,
+    user: string,
+    org: string,
+    room: string,
+    note: { id: string; revision: number },
+    start = 0,
+    length = 0,
+  ) =>
+    s.sendChatMessage(user, org, room, {
+      body: "",
+      client_id: crypto.randomUUID(),
+      meeting: { id: note.id, revision: note.revision, start, length },
+    });
+  test("a source key carries the document prefix exactly when the kind is document", () => {
+    const { s, owner, org, space } = fixture();
+    expect(() =>
+      publishDocument(s, owner, org, space, { source_key: "plain-key" }),
+    ).toThrow("Invalid source key for this kind");
+    expect(() =>
+      publishDocument(s, owner, org, space, {
+        kind: "meeting",
+        source_key: "document:not-a-document",
+      }),
+    ).toThrow("Invalid source key for this kind");
+    expect(publishDocument(s, owner, org, space).kind).toBe("document");
+  });
+  test("publishes a document without a transcript, audits it, and words duplicates by kind", () => {
+    const { s, owner, org, space, publish } = fixture();
+    const key = `document:${crypto.randomUUID()}`;
+    const doc = publishDocument(s, owner, org, space, { source_key: key });
+    expect(doc.kind).toBe("document");
+    expect(doc.transcript).toBe("");
+    expect(publish(owner).kind).toBe("meeting");
+    expect(
+      s
+        .activity(owner, org)
+        .filter((a) => a.action === "document.published")
+        .map((a) => a.target_id),
+    ).toEqual([doc.id]);
+    expect(() =>
+      publishDocument(s, owner, org, space, { transcript: "[00:01] Hi" }),
+    ).toThrow("A document has no transcript");
+    expect(() =>
+      publishDocument(s, owner, org, space, { source_key: key }),
+    ).toThrow(
+      "This document is already shared in this space. Open the shared copy to update it.",
+    );
+    const meetingKey = crypto.randomUUID();
+    s.publish(owner, org, {
+      space_id: space,
+      source_key: meetingKey,
+      title: "Standup",
+      summary: "Notes",
+      occurred_at: "2026-09-04T15:00:00Z",
+      folder_ids: [],
+    });
+    expect(() =>
+      publishDocument(s, owner, org, space, {
+        kind: "meeting",
+        source_key: meetingKey,
+        transcript: "x",
+      }),
+    ).toThrow(
+      "This meeting is already shared in this space. Open the shared copy to edit it.",
+    );
+    expect(() =>
+      publishDocument(s, owner, org, space, { kind: "memo" }),
+    ).toThrow("Invalid note kind");
+  });
+  test("kind filters listings, picker targets and full-text search; the default returns both", async () => {
+    const { s, owner, org, space, publish, token } = fixture();
+    const meeting = publish(owner),
+      doc = publishDocument(s, owner, org, space);
+    const ids = (rows: Record<string, unknown>[]) =>
+      rows.map((r) => String(r.id)).sort();
+    expect(ids(s.listNotes(owner, org))).toEqual([meeting.id, doc.id].sort());
+    expect(ids(s.listNotes(owner, org, "", "", "", false, 100, 0, "meeting")))
+      .toEqual([meeting.id]);
+    const documents = s.listNotes(
+      owner,
+      org,
+      "",
+      "",
+      "",
+      false,
+      100,
+      0,
+      "document",
+    );
+    expect(ids(documents)).toEqual([doc.id]);
+    expect(documents[0].kind).toBe("document");
+    expect(() =>
+      s.listNotes(owner, org, "", "", "", false, 100, 0, "memo"),
+    ).toThrow("Invalid note kind");
+    expect(
+      s.listNotes(owner, org, "Badge").map((r) => [r.id, r.kind]),
+    ).toEqual([[doc.id, "document"]]);
+    const hits = s.search(owner, org, query("q=Badge&kind=meetings")).meetings
+      .hits;
+    expect(hits.map((h) => [h.id, h.kind])).toEqual([[doc.id, "document"]]);
+    expect(
+      s
+        .search(owner, org, query("q=Launch"))
+        .meetings.hits.map((h) => h.kind),
+    ).toEqual(["meeting"]);
+    const room = s.chatRooms(owner, org)[0].id;
+    const targets = (value = "") =>
+      s.conversationMeetings(owner, org, room, query(value)).meetings;
+    expect(ids(targets())).toEqual([meeting.id, doc.id].sort());
+    expect(targets("kind=document").map((r) => [r.id, r.kind])).toEqual([
+      [doc.id, "document"],
+    ]);
+    expect(targets("kind=meeting").map((r) => r.kind)).toEqual(["meeting"]);
+    expect(() => targets("kind=memo")).toThrow("Invalid note kind");
+    const handler = createHandler(s);
+    const request = (path: string) =>
+      handler(
+        new Request(`https://team.test/v1/orgs/${org}/${path}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      );
+    const listed = await request("notes?kind=document");
+    expect(listed.status).toBe(200);
+    expect(
+      (await listed.json()).map((r: { id: string; kind: string }) => [
+        r.id,
+        r.kind,
+      ]),
+    ).toEqual([[doc.id, "document"]]);
+    expect((await request("notes?kind=memo")).status).toBe(400);
+    expect(
+      (await (await request(`chat-rooms/${room}/meeting-targets?kind=document`)).json())
+        .meetings,
+    ).toHaveLength(1);
+  });
+  test("a source key lookup resolves only the caller's own copy, never a teammate's with the same key", async () => {
+    const { s, owner, org, space, join } = fixture();
+    const peer = join("Peer", "admin"),
+      reader = join("Reader");
+    // Two Macs each hold local note 7, so both publish `document:7`.
+    const key = "document:7";
+    const mine = publishDocument(s, owner, org, space, { source_key: key });
+    const theirs = publishDocument(s, peer.id, org, space, {
+      source_key: key,
+      title: "Peer's guide",
+    });
+    const byKey = (user: string) =>
+      s
+        .listNotes(user, org, "", "", "", false, 100, 0, "document", key)
+        .map((r) => r.id);
+    expect(byKey(owner)).toEqual([mine.id]);
+    expect(byKey(peer.id)).toEqual([theirs.id]);
+    expect(byKey(reader.id)).toEqual([]);
+    expect(
+      s.listNotes(owner, org, "", "", "", false, 100, 0, "", "document:8"),
+    ).toEqual([]);
+    const handler = createHandler(s);
+    const request = (path: string, token: string) =>
+      handler(
+        new Request(`https://team.test/v1/orgs/${org}/${path}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      );
+    const listed = await request(
+      `notes?kind=document&source_key=${encodeURIComponent(key)}`,
+      peer.token!,
+    );
+    expect(listed.status).toBe(200);
+    expect((await listed.json()).map((r: { id: string }) => r.id)).toEqual([
+      theirs.id,
+    ]);
+    expect(
+      await (
+        await request(
+          `notes?kind=document&source_key=${encodeURIComponent(key)}`,
+          reader.token!,
+        )
+      ).json(),
+    ).toEqual([]);
+    expect(
+      (await request(`notes?source_key=${"x".repeat(201)}`, peer.token!))
+        .status,
+    ).toBe(400);
+  });
+  test("references carry kind and a summary excerpt, pin the revision, and go unavailable on trash, revoked access or a foreign org", () => {
+    const { s, owner, org, join } = fixture();
+    const peer = join("Peer").id;
+    const restricted = s.createSpace(owner, org, {
+      name: "Handbook",
+      visibility: "restricted",
+    }).id;
+    s.grant(owner, org, restricted, { kind: "member", id: peer, role: "viewer" });
+    const dm = s.createChatRoom(owner, org, { kind: "direct", member_id: peer });
+    const doc = publishDocument(s, owner, org, restricted);
+    const message = reference(s, owner, org, dm.id, doc, 2, 10);
+    expect(s.meetingReference(peer, org, message.id)).toEqual({
+      available: true,
+      id: doc.id,
+      kind: "document",
+      title: "Onboarding guide",
+      excerpt: "Onboarding",
+      updated: false,
+    });
+    const revised = s.updateNote(owner, org, doc.id, {
+      revision: doc.revision,
+      title: "Onboarding guide v2",
+      summary: "# Onboarding v2\n\nBadge pickup moved to reception.",
+      folder_ids: [],
+    });
+    expect(s.meetingReference(peer, org, message.id)).toMatchObject({
+      available: true,
+      kind: "document",
+      title: "Onboarding guide v2",
+      excerpt: "",
+      updated: true,
+    });
+    expect(() => reference(s, owner, org, dm.id, doc)).toThrow(
+      "The meeting changed",
+    );
+    s.grant(owner, org, restricted, { kind: "member", id: peer, role: "remove" });
+    expect(s.meetingReference(peer, org, message.id)).toEqual({
+      available: false,
+    });
+    expect(s.meetingReference(owner, org, message.id).available).toBe(true);
+    s.trash(owner, org, doc.id, revised.revision);
+    expect(s.meetingReference(owner, org, message.id)).toEqual({
+      available: false,
+    });
+    const beta = s.createOrg(owner, "Beta");
+    expect(() => s.meetingReference(owner, beta, message.id)).toThrow(
+      "Message not found",
+    );
+  });
+  test("MCP results report kind and filter by it through the integration boundary", async () => {
+    const { s, owner, org, space, publish } = fixture();
+    s.updateSpace(owner, org, space, {
+      ...s.space(owner, org, space),
+      api_enabled: true,
+    });
+    const key = s.createIntegrationKey(owner, org, {
+      name: "Research assistant",
+      space_ids: [space],
+      days: 30,
+      transcripts: false,
+    });
+    const meeting = publish(owner),
+      doc = publishDocument(s, owner, org, space);
+    const handler = createHandler(s);
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) => handler(request),
+    });
+    try {
+      const mcp = createMcpHandler(apiClient(server.url.toString(), key.token));
+      await mcp({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-11-25" },
+      });
+      const call = async (name: string, args: object) => {
+        const response = (await mcp({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: { name, arguments: args },
+        })) as { result?: { content: { text: string }[] }; error?: unknown };
+        return response.error
+          ? response
+          : JSON.parse(response.result!.content[0].text);
+      };
+      const both = await call("search_team_meetings", {});
+      expect(
+        both.notes
+          .map((n: { id: string; kind: string }) => [n.id, n.kind])
+          .sort(),
+      ).toEqual(
+        [
+          [meeting.id, "meeting"],
+          [doc.id, "document"],
+        ].sort(),
+      );
+      const filtered = await call("search_team_meetings", { kind: "document" });
+      expect(filtered.notes.map((n: { id: string }) => n.id)).toEqual([doc.id]);
+      expect(await call("search_team_meetings", { kind: "memo" })).toMatchObject(
+        { error: { code: -32602 } },
+      );
+      const read = await call("get_team_meeting", { id: doc.id });
+      expect(read.kind).toBe("document");
+      expect(read.text).toContain("Welcome aboard");
+      const tools = (await mcp({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/list",
+      })) as { result: { tools: { name: string; description: string }[] } };
+      expect(
+        tools.result.tools.find((t) => t.name === "search_team_meetings")!
+          .description,
+      ).toContain("meetings and documents");
+    } finally {
+      server.stop(true);
+    }
+  });
+  test("the notes.kind migration is idempotent and defaults rows that predate it to meeting", () => {
+    const dir = mkdtempSync(joinPath(tmpdir(), "noted-document-migrations-"));
+    const path = joinPath(dir, "team.sqlite");
+    try {
+      // A database from before the column existed: schema.sql alone, plus a
+      // note row written without a kind.
+      const legacy = new Database(path, { create: true, strict: true });
+      legacy.exec(readFileSync(new URL("./schema.sql", import.meta.url), "utf8"));
+      legacy.exec("PRAGMA foreign_keys=OFF");
+      legacy
+        .query(
+          "INSERT INTO notes(id,space_id,owner_id,source_key,title,summary,transcript,occurred_at,published_at,updated_at) VALUES('n1','s1','u1','k','Old','Body','','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+        )
+        .run();
+      legacy.close();
+      new TeamStore(path).db.close();
+      const s = new TeamStore(path);
+      try {
+        const columns = s.all<{ name: string; dflt_value: string }>(
+          "PRAGMA table_info(notes)",
+        );
+        expect(columns.filter((c) => c.name === "kind")).toHaveLength(1);
+        expect(columns.find((c) => c.name === "kind")!.dflt_value).toBe(
+          "'meeting'",
+        );
+        expect(s.get("SELECT kind FROM notes WHERE id='n1'")!.kind).toBe(
+          "meeting",
+        );
+      } finally {
+        s.db.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("conversation media", () => {
+  const query = (value = "") => new URLSearchParams(value);
+  // The smallest PNG validateAttachments accepts: signature, then an IHDR
+  // chunk declaring a 1x1 image.
+  const png = {
+    name: "shot.png",
+    data: Buffer.concat([
+      Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]),
+      Buffer.from("IHDR"),
+      Buffer.from([0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0, 0, 0, 0]),
+    ]).toString("base64"),
+  };
+  const txt = {
+    name: "notes.txt",
+    data: Buffer.from("plain notes").toString("base64"),
+  };
+  const sender =
+    (s: TeamStore, org: string, room: string) =>
+    (user: string, extra: Record<string, unknown>) =>
+      s.sendChatMessage(user, org, room, {
+        body: "",
+        client_id: crypto.randomUUID(),
+        ...extra,
+      });
+  const media = (
+    s: TeamStore,
+    user: string,
+    org: string,
+    room: string,
+    value: string,
+  ) => s.chatMedia(user, org, room, query(value));
+  const publishDocument = (
+    s: TeamStore,
+    user: string,
+    org: string,
+    space: string,
+    title = "Runbook",
+  ) =>
+    s.publish(user, org, {
+      space_id: space,
+      source_key: `document:${crypto.randomUUID()}`,
+      kind: "document",
+      title,
+      summary: "Restart the queue, then the workers.",
+      occurred_at: "2026-09-05T10:00:00Z",
+      folder_ids: [],
+    });
+  test("lists images, files and documents newest first with message-boundary keyset paging, skipping deleted messages", () => {
+    const { s, owner, org, space, publish, join } = fixture();
+    const taylor = join("Taylor").id;
+    const room = s.chatRooms(owner, org)[0].id;
+    const send = sender(s, org, room);
+    const shots = Array.from({ length: 36 }, () =>
+      send(owner, { attachments: [png] }),
+    );
+    s.changeChatMessage(owner, org, shots[0].id, { revision: shots[0].revision }, true);
+    const first = media(s, taylor, org, room, "kind=images");
+    expect(first.items).toHaveLength(30);
+    expect(first.items[0]).toMatchObject({
+      message_id: shots[35].id,
+      created_seq: shots[35].created_seq,
+      created_at: shots[35].created_at,
+      author: { id: owner, name: "Owner", avatar_version: "" },
+      attachment: { name: "shot.png", mime: "image/png", size: 33 },
+    });
+    expect(first.items[0].document).toBeUndefined();
+    expect(first.next_before).toBe(first.items[29].created_seq);
+    const second = media(
+      s,
+      taylor,
+      org,
+      room,
+      `kind=images&before=${first.next_before}`,
+    );
+    expect(second.items).toHaveLength(5);
+    expect(second.next_before).toBeNull();
+    const seen = [...first.items, ...second.items].map((i) => i.message_id);
+    expect(new Set(seen).size).toBe(35);
+    expect(seen).not.toContain(shots[0].id);
+    const seqs = [...first.items, ...second.items].map((i) => i.created_seq);
+    expect(seqs).toEqual([...seqs].sort((a, b) => b - a));
+    // Files are the non-image attachments of the same messages.
+    const mixed = send(taylor, { attachments: [png, png, txt] });
+    const files = media(s, owner, org, room, "kind=files");
+    expect(files.items).toHaveLength(1);
+    expect(files.items[0]).toMatchObject({
+      message_id: mixed.id,
+      author: { id: taylor, name: "Taylor" },
+      attachment: { name: "notes.txt", mime: "text/plain", size: 11 },
+    });
+    expect(media(s, owner, org, room, "kind=images").items.slice(0, 2)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message_id: mixed.id }),
+      ]),
+    );
+    // Documents come from references; meeting references never appear.
+    const meeting = publish(owner);
+    send(owner, { meeting: { id: meeting.id, revision: meeting.revision } });
+    const older = publishDocument(s, owner, org, space, "Older runbook"),
+      newer = publishDocument(s, owner, org, space, "Newer runbook");
+    send(owner, { meeting: { id: older.id, revision: older.revision } });
+    const latest = send(taylor, {
+      meeting: { id: newer.id, revision: newer.revision },
+    });
+    const docs = media(s, owner, org, room, "kind=documents");
+    expect(docs.items.map((i) => i.document!.title)).toEqual([
+      "Newer runbook",
+      "Older runbook",
+    ]);
+    expect(docs.items[0]).toMatchObject({
+      message_id: latest.id,
+      author: { id: taylor },
+      document: { note_id: newer.id, title: "Newer runbook", updated: false },
+    });
+    expect(docs.items[0].attachment).toBeUndefined();
+    expect(docs.next_before).toBeNull();
+    s.updateNote(owner, org, newer.id, {
+      revision: newer.revision,
+      title: "Newer runbook",
+      summary: "Restart the workers first.",
+      folder_ids: [],
+    });
+    expect(
+      media(s, owner, org, room, "kind=documents").items[0].document!.updated,
+    ).toBe(true);
+    expect(() => media(s, owner, org, room, "kind=videos")).toThrow(
+      "Invalid media kind",
+    );
+    expect(() => media(s, owner, org, room, "")).toThrow("Invalid media kind");
+    expect(() => media(s, owner, org, room, "kind=images&before=-1")).toThrow(
+      "Invalid media cursor",
+    );
+  });
+  test("pages never split a message's attachments across a boundary", () => {
+    const { s, owner, org } = fixture();
+    const channel = s.createChatRoom(owner, org, {
+      kind: "channel",
+      name: "Screenshots",
+    });
+    const send = sender(s, org, channel.id);
+    const messages = Array.from({ length: 11 }, () =>
+      send(owner, { attachments: [png, png, png] }),
+    );
+    const first = media(s, owner, org, channel.id, "kind=images");
+    expect(first.items).toHaveLength(30);
+    expect(first.items.map((i) => i.message_id)).not.toContain(messages[0].id);
+    expect(first.next_before).toBe(messages[1].created_seq);
+    const second = media(
+      s,
+      owner,
+      org,
+      channel.id,
+      `kind=images&before=${first.next_before}`,
+    );
+    expect(second.items.map((i) => i.message_id)).toEqual(
+      Array(3).fill(messages[0].id),
+    );
+    expect(second.next_before).toBeNull();
+    expect(
+      new Set([...first.items, ...second.items].map((i) => i.attachment!.id))
+        .size,
+    ).toBe(33);
+  });
+  test("documents the viewer cannot open are left out, and room, membership and org access are enforced", () => {
+    const { s, owner, org, join } = fixture();
+    const peer = join("Peer").id,
+      outsider = join("Outsider").id,
+      admin = join("Admin", "admin").id;
+    const restricted = s.createSpace(owner, org, {
+      name: "Handbook",
+      visibility: "restricted",
+    }).id;
+    s.grant(owner, org, restricted, { kind: "member", id: peer, role: "viewer" });
+    const dm = s.createChatRoom(owner, org, { kind: "direct", member_id: peer });
+    const doc = publishDocument(s, owner, org, restricted, "Secret handbook");
+    sender(s, org, dm.id)(owner, {
+      meeting: { id: doc.id, revision: doc.revision },
+    });
+    expect(media(s, peer, org, dm.id, "kind=documents").items).toHaveLength(1);
+    s.grant(owner, org, restricted, { kind: "member", id: peer, role: "remove" });
+    const hidden = media(s, peer, org, dm.id, "kind=documents");
+    expect(hidden).toEqual({ items: [], next_before: null });
+    expect(JSON.stringify(hidden)).not.toContain("Secret handbook");
+    expect(media(s, owner, org, dm.id, "kind=documents").items).toHaveLength(1);
+    s.trash(owner, org, doc.id, doc.revision);
+    expect(media(s, owner, org, dm.id, "kind=documents").items).toHaveLength(0);
+    for (const nonParticipant of [outsider, admin])
+      expect(() => media(s, nonParticipant, org, dm.id, "kind=images")).toThrow(
+        "access removed",
+      );
+    s.changeMember(owner, org, peer, "remove");
+    expect(() => media(s, peer, org, dm.id, "kind=images")).toThrow();
+    const beta = s.createOrg(owner, "Beta");
+    expect(() => media(s, owner, beta, dm.id, "kind=images")).toThrow();
+    expect(() =>
+      media(s, owner, org, `general-${beta}`, "kind=images"),
+    ).toThrow();
+  });
+  test("HTTP media listing requires a member session and accepts only GET with a valid kind and cursor", async () => {
+    const { s, owner, org, token, space } = fixture();
+    const handler = createHandler(s);
+    const request = (path: string, method = "GET", key = token) =>
+      handler(
+        new Request(`https://team.test/v1/orgs/${org}/${path}`, {
+          method,
+          headers: {
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+          },
+          body: method === "GET" ? undefined : "{}",
+        }),
+      );
+    const room = s.chatRooms(owner, org)[0].id;
+    sender(s, org, room)(owner, { attachments: [png] });
+    s.updateSpace(owner, org, space, {
+      ...s.space(owner, org, space),
+      api_enabled: true,
+    });
+    const integration = s.createIntegrationKey(owner, org, {
+      name: "Read shared meetings",
+      space_ids: [space],
+      transcripts: false,
+      days: 30,
+    });
+    const ok = await request(`chat-rooms/${room}/media?kind=images`);
+    expect(ok.status).toBe(200);
+    const json = await ok.json();
+    expect(json.items).toHaveLength(1);
+    expect(json.items[0].attachment.mime).toBe("image/png");
+    expect(json.next_before).toBeNull();
+    expect(
+      (await request(`chat-rooms/${room}/media?kind=images`, "GET", "")).status,
+    ).toBe(401);
+    expect(
+      (
+        await request(
+          `chat-rooms/${room}/media?kind=images`,
+          "GET",
+          String(integration.token),
+        )
+      ).status,
+    ).toBe(401);
+    expect(
+      (await request(`chat-rooms/${room}/media?kind=images`, "POST")).status,
+    ).toBe(404);
+    expect(
+      (await request(`chat-rooms/${room}/media?kind=images`, "PATCH")).status,
+    ).toBe(404);
+    expect((await request(`chat-rooms/${room}/media?kind=videos`)).status).toBe(
+      400,
+    );
+    expect((await request(`chat-rooms/${room}/media`)).status).toBe(400);
+    expect(
+      (await request(`chat-rooms/${room}/media?kind=images&before=x`)).status,
+    ).toBe(400);
+    expect((await request(`chat-rooms/${room}/media/extra`)).status).toBe(404);
+  });
 });

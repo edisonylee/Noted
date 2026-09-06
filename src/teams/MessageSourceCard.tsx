@@ -1,15 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, ArrowUpRight } from "lucide-react";
+import { BookOpen, FileText, ArrowUpRight } from "lucide-react";
 import { team, orgPath } from "./client";
+import type { TeamSourceReference } from "./types";
 import "./message-collections.css";
-type Source = {
-  available: boolean;
-  id?: string;
-  title?: string;
-  excerpt?: string;
-  updated?: boolean;
-};
-export function MessageMeetingCard({
+// The message body never carries the source's title or excerpt: the card is
+// derived per viewer from live permissions, so it is fetched here and reads
+// "unavailable" the moment access is lost, whatever kind the source is.
+export function MessageSourceCard({
   org,
   message,
   onOpen,
@@ -19,7 +16,7 @@ export function MessageMeetingCard({
   onOpen?: (id: string) => void;
 }) {
   const root = useRef<HTMLDivElement>(null);
-  const [source, setSource] = useState<Source | null>(null),
+  const [source, setSource] = useState<TeamSourceReference | null>(null),
     [error, setError] = useState(false),
     [retry, setRetry] = useState(0);
   useEffect(() => {
@@ -30,7 +27,7 @@ export function MessageMeetingCard({
       if (!visible || pending) return;
       pending = true;
       try {
-        const next = await team.request<Source>(
+        const next = await team.request<TeamSourceReference>(
           "GET",
           orgPath(org, `/chat-messages/${message}/source`),
         );
@@ -66,7 +63,7 @@ export function MessageMeetingCard({
     if (error)
       return (
         <div className="message-source-card">
-          <span>Meeting unavailable</span>
+          <span>Shared source unavailable</span>
           <button
             className="team-text-button"
             onClick={() => setRetry((n) => n + 1)}
@@ -78,22 +75,26 @@ export function MessageMeetingCard({
     if (!source)
       return (
         <div className="message-source-card" role="status">
-          Loading shared meeting…
+          Loading shared source…
         </div>
       );
     if (!source.available)
       return (
         <div className="message-source-card">
-          Meeting unavailable or access removed
+          Shared source unavailable or access removed
         </div>
       );
+    // Older servers omit kind; a meeting card is the safe reading.
+    const document = source.kind === "document";
+    const Icon = document ? FileText : BookOpen;
+    const noun = document ? "document" : "meeting";
     return (
       <button
         className="message-source-card"
-        onClick={() => source.id && onOpen?.(source.id)}
+        onClick={() => onOpen?.(source.id)}
         disabled={!onOpen}
       >
-        <BookOpen size={18} />
+        <Icon size={18} />
         <span>
           <strong>{source.title}</strong>
           {source.excerpt && (
@@ -101,8 +102,8 @@ export function MessageMeetingCard({
           )}
           <small>
             {source.updated
-              ? "Source updated · open current meeting"
-              : "Shared meeting · open source"}
+              ? `Updated since shared · open current ${noun}`
+              : `Shared ${noun} · open source`}
           </small>
         </span>
         <ArrowUpRight size={15} />

@@ -137,7 +137,9 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
                 "notifications",
                 "pins",
                 "meeting-targets",
+                "document-destinations",
                 "threads",
+                "media",
               ].includes(action)) ||
             (resource === "chat-messages" &&
               ["reactions", "pin", "source", "saved"].includes(action)) ||
@@ -198,7 +200,11 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
         method === "PUT"
       )
         return respond(store.pinMessage(user, org, id, body.active));
+      if (resource === "document-publications" && !id && method === "POST")
+        return respond(store.publishDocumentCopy(user, org, body), 201);
       if (resource === "chat-rooms") {
+        if (id && action === "document-destinations" && method === "GET")
+          return respond(store.documentDestinations(user, org, id));
         if (id && action === "meeting-targets" && method === "GET")
           return respond(
             store.conversationMeetings(user, org, id, url.searchParams),
@@ -207,6 +213,8 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
           return respond(store.pinnedMessages(user, org, id));
         if (id && action === "threads" && method === "GET")
           return respond(store.chatThreads(user, org, id, url.searchParams));
+        if (id && action === "media" && method === "GET")
+          return respond(store.chatMedia(user, org, id, url.searchParams));
         if (id && action === "unread" && method === "POST")
           return respond(store.markChatUnread(user, org, id, body.message_id));
         if (id && action === "notifications" && method === "PUT")
@@ -341,6 +349,13 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
               url.searchParams.get("trash") === "true",
               100,
               offset,
+              url.searchParams.get("kind") ?? "",
+              text(
+                url.searchParams.get("source_key") ?? "",
+                "source key",
+                200,
+                true,
+              ),
             ),
           );
         }

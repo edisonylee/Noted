@@ -158,7 +158,7 @@ seconds while Team is visible, keeping
 the navigation unread badge up to date. Focus triggers an immediate refresh.
 Read markers sync across devices when the conversation is viewed at the bottom;
 hidden conversations are not marked read. This release does not include group
-DMs, typing indicators, attachments, message-body search, or push notifications. Messages are not included in meeting search, model prompts,
+DMs, typing indicators, or remote push delivery. Messages are not included in meeting search, model prompts,
 read-only integration keys, or MCP responses.
 
 The service database gains additive `chat_*` tables on startup and a general
@@ -295,3 +295,18 @@ and [tool contract](https://modelcontextprotocol.io/specification/2025-11-25/ser
 It does not install itself in any client, access the local vault, use a member’s
 Keychain session, or expose write tools. Hosted OAuth MCP and webhook delivery
 are not implemented.
+
+### Message attachments
+
+Active conversation members can attach up to three PNG/JPEG, PDF, or UTF-8 text
+files, totaling 5 MiB. Team attachment storage is capped at 250 MiB. Files are
+stored in SQLite (include them in database backup/retention planning), downloaded
+only after current access checks, and deleted with their message. Files are never
+executed or rendered as HTML/PDF in the app. macOS saves use a native picker and
+quarantine metadata. File signatures are checked, but this is not malware
+scanning; no malware-free claim is made. Pending uploads stay in memory for the
+session and are sent atomically with the message. Deploy the server before the
+client; the composer is gated by `attachments_enabled`.
+
+The attachment design follows [OWASP upload guidance](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html)
+for type allowlists, bounded data, server-generated IDs, and authorized access.

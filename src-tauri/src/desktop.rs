@@ -2862,6 +2862,10 @@ async fn team_request(app: tauri::AppHandle, method: String, path: String, body:
     teams::request(&dir, &method, &path, body).await.map_err(|e| e.to_string())
 }
 #[tauri::command]
+async fn team_save_attachment(app: tauri::AppHandle, org: String, id: String) -> Result<bool, String> {
+    teams::save_attachment(app, org, id).await.map_err(|e| e.to_string())
+}
+#[tauri::command]
 async fn team_ask(app: tauri::AppHandle, org: String, body: Value) -> Result<Value, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     teams::ask(&dir, &org, body).await.map_err(|e| e.to_string())
@@ -5215,6 +5219,7 @@ pub fn run() {
             team_connect,
             team_disconnect,
             team_request,
+            team_save_attachment,
             team_ask,
             team_publish_meeting,
             meeting_set_notes,

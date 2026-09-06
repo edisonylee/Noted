@@ -39,11 +39,34 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
       } else attempts.set(key, { count: 1, reset: at + 60_000 });
       let body: Body = {};
       if (["POST", "PATCH", "PUT", "DELETE"].includes(method)) {
-        if (Number(request.headers.get("Content-Length") ?? 0) > 1_500_000)
+        const messageUpload =
+          method === "POST" &&
+          /^\/v1\/orgs\/[^/]+\/chat-rooms\/[^/]+\/messages$/.test(url.pathname);
+        const limit = messageUpload ? 7_100_000 : 1_500_000;
+        if (messageUpload) store.authenticate(token);
+        if (Number(request.headers.get("Content-Length") ?? 0) > limit)
           throw new TeamError(413, "Request too large");
-        const bytes = await request.arrayBuffer();
-        if (bytes.byteLength > 1_500_000)
-          throw new TeamError(413, "Request too large");
+        const chunks: Uint8Array[] = [];
+        let length = 0;
+        const reader = request.body?.getReader();
+        if (reader) {
+          while (true) {
+            const next = await reader.read();
+            if (next.done) break;
+            length += next.value.byteLength;
+            if (length > limit) {
+              await reader.cancel();
+              throw new TeamError(413, "Request too large");
+            }
+            chunks.push(next.value);
+          }
+        }
+        const bytes = new Uint8Array(length);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.length;
+        }
         if (bytes.byteLength) {
           try {
             body = JSON.parse(new TextDecoder().decode(bytes));
@@ -122,15 +145,24 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
         return respond(store.snapshot(user, org));
       if (path.length === 3 && method === "PATCH")
         return respond(store.renameOrg(user, org, body.name));
+      if (resource === "attachments" && id && !action && method === "GET")
+        return respond(store.attachment(user, org, id));
       if (resource === "search" && !id && method === "GET")
         return respond(store.search(user, org, url.searchParams));
-      if (resource === "mentions" && id && action === "read" && method === "POST")
+      if (
+        resource === "mentions" &&
+        id &&
+        action === "read" &&
+        method === "POST"
+      )
         return respond(store.readMention(user, org, id));
       if (resource === "mentions" && !id && method === "GET")
         return respond(store.mentions(user, org, url.searchParams));
       if (resource === "chat-rooms") {
         if (id && action === "notifications" && method === "PUT")
-          return respond(store.setConversationNotifications(user, org, id, body));
+          return respond(
+            store.setConversationNotifications(user, org, id, body),
+          );
         if (!id && method === "GET") return respond(store.chatRooms(user, org));
         if (!id && method === "POST")
           return respond(store.createChatRoom(user, org, body), 201);
@@ -179,7 +211,8 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
       )
         return respond(store.reactToMessage(user, org, id, body));
       if (resource === "chat-messages" && id && !action) {
-        if (method === "GET") return respond(store.messageLocation(user, org, id));
+        if (method === "GET")
+          return respond(store.messageLocation(user, org, id));
         if (method === "PATCH")
           return respond(store.changeChatMessage(user, org, id, body));
         if (method === "DELETE")
@@ -362,7 +395,7 @@ if (import.meta.main) {
   const server = Bun.serve({
     hostname: process.env.NOTED_TEAM_HOST ?? "127.0.0.1",
     port: Number(process.env.NOTED_TEAM_PORT ?? process.env.PORT ?? 8790),
-    maxRequestBodySize: 1_500_000,
+    maxRequestBodySize: 7_100_000,
     idleTimeout: 30,
     fetch: (request, server) =>
       handler(request, server.requestIP(request)?.address ?? "unknown"),

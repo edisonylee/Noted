@@ -110,10 +110,12 @@ export type TeamConversationRow = {
   available: boolean;
 };
 
-export type ConversationAlertMode = "default" | "messages" | "mentions" | "none";
+export type ConversationAlertMode =
+  "default" | "messages" | "mentions" | "none";
 export type TeamChatRoom = {
   notification_mode?: ConversationAlertMode;
   message_extras?: boolean;
+  attachments_enabled?: boolean;
   id: string;
   org_id: string;
   kind: "channel" | "direct";
@@ -143,7 +145,14 @@ export type TeamChatRoom = {
   can_manage: boolean;
   can_send: boolean;
 };
+export type TeamAttachment = {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+};
 export type TeamChatMessage = {
+  attachments?: TeamAttachment[];
   id: string;
   room_id: string;
   author_id: string;
@@ -172,13 +181,41 @@ export type TeamChatPage = {
   newer_after?: number | null;
 };
 
-export type TeamNotificationTarget = { server: string; org: string; user: string; message: string };
-export type TeamMessageLocation = { message: TeamChatMessage; room: TeamChatRoom; parent?: TeamChatMessage };
-export type TeamMentionPage = { items: (TeamMessageLocation & { unread: boolean })[]; next_before: number | null };
+export type TeamNotificationTarget = {
+  server: string;
+  org: string;
+  user: string;
+  message: string;
+};
+export type TeamMessageLocation = {
+  message: TeamChatMessage;
+  room: TeamChatRoom;
+  parent?: TeamChatMessage;
+};
+export type TeamMentionPage = {
+  items: (TeamMessageLocation & { unread: boolean })[];
+  next_before: number | null;
+};
 
 export type SearchSnippet = { text: string; match: boolean }[];
-export type TeamMessageSearchHit = { kind: "message"; id: string; room_id: string; room_label: string; author_id: string; author_name: string; created_at: string; snippet: SearchSnippet };
-export type TeamMeetingSearchHit = { kind: "meeting"; id: string; space_id: string; title: string; occurred_at: string; snippet: SearchSnippet };
+export type TeamMessageSearchHit = {
+  kind: "message";
+  id: string;
+  room_id: string;
+  room_label: string;
+  author_id: string;
+  author_name: string;
+  created_at: string;
+  snippet: SearchSnippet;
+};
+export type TeamMeetingSearchHit = {
+  kind: "meeting";
+  id: string;
+  space_id: string;
+  title: string;
+  occurred_at: string;
+  snippet: SearchSnippet;
+};
 export type TeamSearchHit = TeamMessageSearchHit | TeamMeetingSearchHit;
 export type TeamSearchPage = {
   messages: { hits: TeamMessageSearchHit[]; cursor: string | null };

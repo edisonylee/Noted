@@ -1,3 +1,4 @@
+import { AttachmentPicker, type PendingAttachment } from "./MessageAttachments";
 import { MessageSidebar } from "./MessageSidebar";
 import { ConversationNotifications } from "./ConversationNotifications";
 import { MentionsInbox } from "./MentionsInbox";
@@ -628,6 +629,11 @@ function MessageRoom({
     if (position) saveMessagePosition(positionKey, position);
   }, [positionKey]);
   const draftKey = thread?.id ?? room.id;
+  const [attachments, setAttachments] = useNavigationState<PendingAttachment[]>(
+    `team:${org}:${user}:${draftKey}:attachments`,
+    [],
+  );
+  const [readingFiles, setReadingFiles] = useState(false);
   const draft = drafts[draftKey] ?? "";
   const setDraft = (value: string) => setDraftFor(draftKey, value);
   const [threadRoot, setThreadRoot] = useState<TeamChatMessage | null>(
@@ -953,8 +959,21 @@ function MessageRoom({
   };
   const send = async () => {
     const body = draft.trim();
-    if (!isActive || !body || sending || !canSend || error) return;
-    const clientId = sendKeyFor(draftKey, body),
+    if (
+      !isActive ||
+      (!body && !attachments.length) ||
+      sending ||
+      readingFiles ||
+      !canSend ||
+      error
+    )
+      return;
+    const clientId = sendKeyFor(
+        draftKey,
+        attachments.length
+          ? JSON.stringify([body, attachments.map((f) => f.id)])
+          : body,
+      ),
       epoch = accessEpoch.current;
     setSending(true);
     setSendError("");
@@ -962,9 +981,15 @@ function MessageRoom({
       const message = await team.request<TeamChatMessage>(
         "POST",
         `${path}/messages`,
-        { body, client_id: clientId, thread_id: threadId },
+        {
+          body,
+          client_id: clientId,
+          thread_id: threadId,
+          attachments: attachments.map(({ name, data }) => ({ name, data })),
+        },
       );
       onSentFor(draftKey, body);
+      setAttachments([]);
       if (!alive.current || epoch !== accessEpoch.current) return;
       setMessages((old) => mergeMessages(old, [message]));
       toBottom();
@@ -1386,13 +1411,27 @@ function MessageRoom({
               }
             }}
           />
+          {room.attachments_enabled && (
+            <AttachmentPicker
+              files={attachments}
+              onChange={setAttachments}
+              disabled={sending || !canSend}
+              onBusy={setReadingFiles}
+            />
+          )}
           <div className="messages-compose-foot">
             <span>
               @ to mention · Enter to send · Shift + Enter for a new line
             </span>
             <button
               className="team-primary"
-              disabled={sending || !canSend || !draft.trim() || !!error}
+              disabled={
+                sending ||
+                readingFiles ||
+                !canSend ||
+                (!draft.trim() && !attachments.length) ||
+                !!error
+              }
             >
               {sending ? (
                 <Loader size={14} className="spin" />

@@ -131,7 +131,12 @@ async fn send(
         req = req.bearer_auth(token);
     }
     if let Some(body) = body {
-        if serde_json::to_vec(&body)?.len() > 1_500_000 {
+        let limit = if path.ends_with("/messages") {
+            7_100_000
+        } else {
+            1_500_000
+        };
+        if serde_json::to_vec(&body)?.len() > limit {
             bail!("This meeting is too large to share");
         }
         req = req.json(&body);
@@ -140,7 +145,12 @@ async fn send(
     let status = resp.status();
     let mut bytes = Vec::new();
     while let Some(chunk) = resp.chunk().await? {
-        if bytes.len() + chunk.len() > 3_000_000 {
+        let limit = if path.contains("/attachments/") {
+            7_100_000
+        } else {
+            3_000_000
+        };
+        if bytes.len() + chunk.len() > limit {
             bail!("Team response is too large");
         }
         bytes.extend_from_slice(&chunk);
@@ -425,4 +435,94 @@ mod tests {
         assert!(verify_review(&changed, &full).is_err());
         assert!(verify_review(&full, &json!({})).is_err());
     }
+}
+
+/// Download through the authenticated bridge; never navigate to an attachment URL.
+pub async fn save_attachment(app: tauri::AppHandle, org: String, id: String) -> Result<bool> {
+    use base64::Engine;
+    use tauri::Manager;
+    use tauri_plugin_dialog::DialogExt;
+    if [&org, &id].iter().any(|s| {
+        s.is_empty() || s.len() > 100 || !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    }) {
+        bail!("Invalid attachment identifier");
+    }
+    let dir = app.path().app_data_dir()?;
+    let value = request(
+        &dir,
+        "GET",
+        &format!("/v1/orgs/{org}/attachments/{id}"),
+        None,
+    )
+    .await?;
+    let name = value["name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Invalid filename"))?;
+    if name.len() > 720
+        || name.starts_with('.')
+        || name
+            .chars()
+            .any(|c| c.is_control() || c == '/' || c == '\\')
+    {
+        bail!("Invalid filename");
+    }
+    let extension = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    if !["png", "jpg", "jpeg", "pdf", "txt", "md", "csv"].contains(&extension.as_str()) {
+        bail!("Unsupported attachment type");
+    }
+    let data = value["data"]
+        .as_str()
+        .ok_or_else(|| anyhow!("Invalid attachment"))?;
+    if data.len() > 7_000_000 {
+        bail!("Attachment is too large");
+    }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data)?;
+    if bytes.is_empty() || bytes.len() > 5 * 1024 * 1024 {
+        bail!("Invalid attachment size");
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(name)
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(path) = rx.await? else {
+        return Ok(false);
+    };
+    let path = path.into_path().map_err(|e| anyhow!(e.to_string()))?;
+    // Stage in the chosen directory so the final rename is atomic. Never write
+    // through an existing destination symlink or execute downloaded content.
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("Invalid save location"))?;
+    let staging = parent.join(format!(".noted-attachment-{:032x}", rand::random::<u128>()));
+    let result = (|| -> Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&staging)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        #[cfg(target_os = "macos")]
+        {
+            let status = Command::new("/usr/bin/xattr")
+                .args(["-w", "com.apple.quarantine", "0083;00000000;Noted;"])
+                .arg(&staging)
+                .status()?;
+            if !status.success() {
+                bail!("Could not mark the download as quarantined");
+            }
+        }
+        std::fs::rename(&staging, &path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
+    result?;
+    Ok(true)
 }

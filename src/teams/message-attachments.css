@@ -1,0 +1,46 @@
+.message-attachments ul,
+.message-attachment-picker ul {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.message-attachments li,
+.message-attachment-picker li {
+  min-width: 0;
+  max-width: 360px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+.message-attachments li > span,
+.message-attachment-picker li > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.message-attachments small,
+.message-attachment-picker small {
+  display: block;
+  color: var(--muted);
+  margin-top: 3px;
+  font-size: 10px;
+}
+.message-attachments li > svg,
+.message-attachment-picker li > svg,
+.message-attachments button,
+.message-attachment-picker li button {
+  flex-shrink: 0;
+}
+.message-attachment-picker > p {
+  font-size: 11px;
+  margin: 4px 0;
+}

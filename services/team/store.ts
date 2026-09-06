@@ -1,3 +1,4 @@
+import { validateAttachments, TEAM_ATTACHMENT_QUOTA } from "./attachments";
 import { initializeSearch, searchExpression, snippetParts } from "./search";
 import { REACTION_NAMES } from "./reactions";
 import { findMentions } from "./mentions";
@@ -855,48 +856,109 @@ export class TeamStore {
     this.role(user, org);
     const q = query.get("q") ?? "";
     let expression: string;
-    try { expression = searchExpression(q); } catch (e) { fail(400, String((e as Error).message)); }
-    const kind = choice(query.get("kind") ?? "all", ["all", "messages", "meetings"], "search kind");
+    try {
+      expression = searchExpression(q);
+    } catch (e) {
+      fail(400, String((e as Error).message));
+    }
+    const kind = choice(
+      query.get("kind") ?? "all",
+      ["all", "messages", "meetings"],
+      "search kind",
+    );
     const bounded = (key: string, max = 200) => {
       const value = query.get(key) ?? "";
       if (value.length > max) fail(400, `Invalid ${key}`);
       return value;
     };
-    const room = bounded("room"), author = bounded("author"), space = bounded("space"), folder = bounded("folder");
+    const room = bounded("room"),
+      author = bounded("author"),
+      space = bounded("space"),
+      folder = bounded("folder");
     if (room) this.chatRoom(user, org, room);
     const date = (key: string) => {
       const value = bounded(key, 10);
-      if (value && (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value)) fail(400, `Invalid ${key} date`);
+      if (
+        value &&
+        (!/^\d{4}-\d{2}-\d{2}$/.test(value) ||
+          !Number.isFinite(Date.parse(value)) ||
+          new Date(value).toISOString().slice(0, 10) !== value)
+      )
+        fail(400, `Invalid ${key} date`);
       return value;
     };
-    const since = date("since"), until = date("until");
-    if (since && until && since > until) fail(400, "Start date must be before end date");
+    const since = date("since"),
+      until = date("until");
+    if (since && until && since > until)
+      fail(400, "Start date must be before end date");
     const limitValue = query.get("limit") ?? "20";
-    if (!/^\d{1,3}$/.test(limitValue) || Number(limitValue) < 1) fail(400, "Invalid search limit");
+    if (!/^\d{1,3}$/.test(limitValue) || Number(limitValue) < 1)
+      fail(400, "Invalid search limit");
     const limit = Math.min(50, Number(limitValue));
     const scope = this.noteScope(user, org, space, folder);
     // Cursors contain only bounded offsets. Scope binding prevents accidental
     // reuse across filters/accounts; authorization is rerun for every page.
-    const fingerprint = createHash("sha256").update(JSON.stringify([user, org, expression, room, author, space, folder, since, until])).digest("hex");
+    const fingerprint = createHash("sha256")
+      .update(
+        JSON.stringify([
+          user,
+          org,
+          expression,
+          room,
+          author,
+          space,
+          folder,
+          since,
+          until,
+        ]),
+      )
+      .digest("hex");
     const offset = (key: string) => {
       const value = bounded(key, 512);
       if (!value) return 0;
       try {
         const parsed = JSON.parse(Buffer.from(value, "base64url").toString());
-        if (parsed.scope !== fingerprint || parsed.group !== key || !Number.isSafeInteger(parsed.offset) || parsed.offset < 0 || parsed.offset > 10000) throw new Error();
+        if (
+          parsed.scope !== fingerprint ||
+          parsed.group !== key ||
+          !Number.isSafeInteger(parsed.offset) ||
+          parsed.offset < 0 ||
+          parsed.offset > 10000
+        )
+          throw new Error();
         return parsed.offset as number;
-      } catch { fail(400, "Invalid search cursor. Start a new search."); }
+      } catch {
+        fail(400, "Invalid search cursor. Start a new search.");
+      }
     };
-    const messageOffset = offset("messages_cursor"), meetingOffset = offset("meetings_cursor");
-    const cursor = (group: string, count: number, start: number) => count > limit && start + limit <= 10000
-      ? Buffer.from(JSON.stringify({ scope: fingerprint, group, offset: start + limit })).toString("base64url") : null;
-    const start = `\u0001${randomBytes(16).toString("hex")}\u0002`, end = `\u0001${randomBytes(16).toString("hex")}\u0002`;
+    const messageOffset = offset("messages_cursor"),
+      meetingOffset = offset("meetings_cursor");
+    const cursor = (group: string, count: number, start: number) =>
+      count > limit && start + limit <= 10000
+        ? Buffer.from(
+            JSON.stringify({
+              scope: fingerprint,
+              group,
+              offset: start + limit,
+            }),
+          ).toString("base64url")
+        : null;
+    const start = `\u0001${randomBytes(16).toString("hex")}\u0002`,
+      end = `\u0001${randomBytes(16).toString("hex")}\u0002`;
     const page: import("../../src/teams/types").TeamSearchPage = {
-      messages: { hits: [], cursor: null }, meetings: { hits: [], cursor: null },
+      messages: { hits: [], cursor: null },
+      meetings: { hits: [], cursor: null },
     };
     if (!expression) return page;
     if (kind !== "meetings") {
-      const rows = this.all<{ id: string; room_id: string; author_id: string; author_name: string; created_at: string; excerpt: string }>(
+      const rows = this.all<{
+        id: string;
+        room_id: string;
+        author_id: string;
+        author_name: string;
+        created_at: string;
+        excerpt: string;
+      }>(
         `SELECT m.id,m.room_id,m.author_id,u.name AS author_name,m.created_at,
          substr(snippet(chat_messages_fts,0,?,?,'…',40),1,4096) AS excerpt
          FROM chat_messages_fts JOIN chat_messages m ON m.rowid=chat_messages_fts.rowid
@@ -906,31 +968,89 @@ export class TeamStore {
          AND (?='' OR r.id=?) AND (?='' OR m.author_id=?)
          AND (?='' OR substr(m.created_at,1,10)>=?) AND (?='' OR substr(m.created_at,1,10)<=?)
          ORDER BY bm25(chat_messages_fts),m.created_seq DESC,m.id LIMIT ? OFFSET ?`,
-        start, end, expression, org, user, room, room, author, author, since, since, until, until, limit + 1, messageOffset,
+        start,
+        end,
+        expression,
+        org,
+        user,
+        room,
+        room,
+        author,
+        author,
+        since,
+        since,
+        until,
+        until,
+        limit + 1,
+        messageOffset,
       );
       const labels = new Map<string, string>();
       page.messages.hits = rows.slice(0, limit).map(({ excerpt, ...hit }) => {
         let label = labels.get(hit.room_id);
         if (!label) {
           const r = this.chatRoom(user, org, hit.room_id);
-          label = r.kind === "channel" ? (r.is_default ? "Team chat" : `#${r.name}`) : r.participants.filter((p) => p.id !== user).map((p) => p.name).join(", ") || "Direct message";
+          label =
+            r.kind === "channel"
+              ? r.is_default
+                ? "Team chat"
+                : `#${r.name}`
+              : r.participants
+                  .filter((p) => p.id !== user)
+                  .map((p) => p.name)
+                  .join(", ") || "Direct message";
           labels.set(hit.room_id, label);
         }
-        return { ...hit, kind: "message", room_label: label, snippet: snippetParts(excerpt, start, end) };
+        return {
+          ...hit,
+          kind: "message",
+          room_label: label,
+          snippet: snippetParts(excerpt, start, end),
+        };
       });
-      page.messages.cursor = cursor("messages_cursor", rows.length, messageOffset);
+      page.messages.cursor = cursor(
+        "messages_cursor",
+        rows.length,
+        messageOffset,
+      );
     }
     if (kind !== "messages" && !room) {
-      const rows = this.all<{ id: string; space_id: string; title: string; occurred_at: string; excerpt: string }>(
+      const rows = this.all<{
+        id: string;
+        space_id: string;
+        title: string;
+        occurred_at: string;
+        excerpt: string;
+      }>(
         `SELECT n.id,n.space_id,n.title,n.occurred_at,substr(snippet(notes_fts,-1,?,?,'…',40),1,4096) AS excerpt
          FROM notes_fts JOIN notes n ON n.rowid=notes_fts.rowid
          WHERE notes_fts MATCH ? AND ${scope.sql} AND n.trashed_at IS NULL
          AND (?='' OR n.owner_id=?) AND (?='' OR substr(n.occurred_at,1,10)>=?) AND (?='' OR substr(n.occurred_at,1,10)<=?)
          ORDER BY bm25(notes_fts,5.0,2.0,1.0),n.occurred_at DESC,n.id LIMIT ? OFFSET ?`,
-        start, end, expression, ...scope.values, author, author, since, since, until, until, limit + 1, meetingOffset,
+        start,
+        end,
+        expression,
+        ...scope.values,
+        author,
+        author,
+        since,
+        since,
+        until,
+        until,
+        limit + 1,
+        meetingOffset,
       );
-      page.meetings.hits = rows.slice(0, limit).map(({ excerpt, ...hit }) => ({ ...hit, kind: "meeting", snippet: snippetParts(excerpt, start, end) }));
-      page.meetings.cursor = cursor("meetings_cursor", rows.length, meetingOffset);
+      page.meetings.hits = rows
+        .slice(0, limit)
+        .map(({ excerpt, ...hit }) => ({
+          ...hit,
+          kind: "meeting",
+          snippet: snippetParts(excerpt, start, end),
+        }));
+      page.meetings.cursor = cursor(
+        "meetings_cursor",
+        rows.length,
+        meetingOffset,
+      );
     }
     return page;
   }
@@ -946,14 +1066,21 @@ export class TeamStore {
   ): TeamNoteRow[] {
     const scope = this.noteScope(user, org, spaceId, folderId);
     let expression: string;
-    try { expression = searchExpression(query); } catch (e) { fail(400, (e as Error).message); }
+    try {
+      expression = searchExpression(query);
+    } catch (e) {
+      fail(400, (e as Error).message);
+    }
     if (query.trim() && !expression) return [];
     const rows = this.all<{ id: string }>(
       `SELECT n.id FROM notes n ${expression ? "JOIN notes_fts ON notes_fts.rowid=n.rowid" : ""}
        WHERE ${scope.sql} AND n.trashed_at IS ${trash ? "NOT " : ""}NULL
        ${expression ? "AND notes_fts MATCH ?" : ""}
        ORDER BY ${expression ? "bm25(notes_fts,5.0,2.0,1.0)," : ""}n.occurred_at DESC,n.id LIMIT ? OFFSET ?`,
-      ...scope.values, ...(expression ? [expression] : []), Math.min(100, limit), offset,
+      ...scope.values,
+      ...(expression ? [expression] : []),
+      Math.min(100, limit),
+      offset,
     );
     return rows.map(({ id }) => {
       const n = this.note(user, org, id),
@@ -1536,17 +1663,39 @@ export class TeamStore {
       )!.n,
     );
     const mentionMembers = this.all<{ id: string; name: string }>(
-      "SELECT u.id,u.name FROM members m JOIN users u ON u.id=m.user_id WHERE m.org_id=?", org,
-    ).filter((m) => row.kind === "channel" || participants.some((p) => p.id === m.id && p.active));
-    const unreadMessages = this.all<{ id: string; body: string; created_seq: number }>(
+      "SELECT u.id,u.name FROM members m JOIN users u ON u.id=m.user_id WHERE m.org_id=?",
+      org,
+    ).filter(
+      (m) =>
+        row.kind === "channel" ||
+        participants.some((p) => p.id === m.id && p.active),
+    );
+    const unreadMessages = this.all<{
+      id: string;
+      body: string;
+      created_seq: number;
+    }>(
       `SELECT id,body,created_seq FROM chat_messages WHERE room_id=? AND author_id<>? AND deleted_at IS NULL
        AND created_seq>COALESCE((SELECT seq FROM chat_reads WHERE room_id=? AND user_id=?),0)`,
-      id, user, id, user,
+      id,
+      user,
+      id,
+      user,
     );
-    const seenMentions = new Set(this.all<{ message_id: string }>(
-      "SELECT mr.message_id FROM chat_mention_reads mr JOIN chat_messages m ON m.id=mr.message_id WHERE mr.user_id=? AND m.room_id=?", user, id,
-    ).map((row) => row.message_id));
-    const unreadMentions = unreadMessages.filter((m) => !seenMentions.has(m.id) && findMentions(m.body, mentionMembers).some((mention) => mention.user.id === user));
+    const seenMentions = new Set(
+      this.all<{ message_id: string }>(
+        "SELECT mr.message_id FROM chat_mention_reads mr JOIN chat_messages m ON m.id=mr.message_id WHERE mr.user_id=? AND m.room_id=?",
+        user,
+        id,
+      ).map((row) => row.message_id),
+    );
+    const unreadMentions = unreadMessages.filter(
+      (m) =>
+        !seenMentions.has(m.id) &&
+        findMentions(m.body, mentionMembers).some(
+          (mention) => mention.user.id === user,
+        ),
+    );
     const last = this.get(
       "SELECT MAX(COALESCE(deleted_at,edited_at,created_at)) AS at FROM chat_messages WHERE room_id=?",
       id,
@@ -1575,16 +1724,39 @@ export class TeamStore {
       revision: Number(row.revision),
       is_default: id === `general-${org}`,
       message_extras: true,
+      attachments_enabled: true,
       participants,
       unread,
       unread_mentions: unreadMentions.length,
-      latest_unread_message_id: unreadMessages.reduce<(typeof unreadMessages)[number] | undefined>((latest, m) => !latest || m.created_seq > latest.created_seq ? m : latest, undefined)?.id,
-      latest_unread_mention_id: unreadMentions.reduce<(typeof unreadMentions)[number] | undefined>((latest, m) => !latest || m.created_seq > latest.created_seq ? m : latest, undefined)?.id,
-      latest_unread_message_seq: unreadMessages.reduce((seq, m) => Math.max(seq, m.created_seq), 0),
-      latest_unread_mention_seq: unreadMentions.reduce((seq, m) => Math.max(seq, m.created_seq), 0),
+      latest_unread_message_id: unreadMessages.reduce<
+        (typeof unreadMessages)[number] | undefined
+      >(
+        (latest, m) =>
+          !latest || m.created_seq > latest.created_seq ? m : latest,
+        undefined,
+      )?.id,
+      latest_unread_mention_id: unreadMentions.reduce<
+        (typeof unreadMentions)[number] | undefined
+      >(
+        (latest, m) =>
+          !latest || m.created_seq > latest.created_seq ? m : latest,
+        undefined,
+      )?.id,
+      latest_unread_message_seq: unreadMessages.reduce(
+        (seq, m) => Math.max(seq, m.created_seq),
+        0,
+      ),
+      latest_unread_mention_seq: unreadMentions.reduce(
+        (seq, m) => Math.max(seq, m.created_seq),
+        0,
+      ),
       notification_cursor: this.latestChatCursor(id),
       notification_user_id: user,
-      notification_mode: (this.get("SELECT mode FROM chat_notification_preferences WHERE room_id=? AND user_id=?", id, user)?.mode ?? "default") as TeamChatRoom["notification_mode"],
+      notification_mode: (this.get(
+        "SELECT mode FROM chat_notification_preferences WHERE room_id=? AND user_id=?",
+        id,
+        user,
+      )?.mode ?? "default") as TeamChatRoom["notification_mode"],
       last_activity: String(last ?? row.created_at),
       last_message: preview
         ? {
@@ -1824,53 +1996,106 @@ export class TeamStore {
     if (!row) fail(404, "Message not found");
     return this.chatRoom(user, org, String(row.room_id));
   }
-  setConversationNotifications(user: string, org: string, id: string, body: Record<string, unknown>) {
+  setConversationNotifications(
+    user: string,
+    org: string,
+    id: string,
+    body: Record<string, unknown>,
+  ) {
     this.chatRoom(user, org, id);
-    const mode = choice(body.mode, ["default", "messages", "mentions", "none"], "notification mode");
-    if (mode === "default") this.run("DELETE FROM chat_notification_preferences WHERE room_id=? AND user_id=?", id, user);
-    else this.run(`INSERT INTO chat_notification_preferences(room_id,user_id,mode) VALUES(?,?,?)
-      ON CONFLICT(room_id,user_id) DO UPDATE SET mode=excluded.mode`, id, user, mode);
+    const mode = choice(
+      body.mode,
+      ["default", "messages", "mentions", "none"],
+      "notification mode",
+    );
+    if (mode === "default")
+      this.run(
+        "DELETE FROM chat_notification_preferences WHERE room_id=? AND user_id=?",
+        id,
+        user,
+      );
+    else
+      this.run(
+        `INSERT INTO chat_notification_preferences(room_id,user_id,mode) VALUES(?,?,?)
+      ON CONFLICT(room_id,user_id) DO UPDATE SET mode=excluded.mode`,
+        id,
+        user,
+        mode,
+      );
     return this.chatRoom(user, org, id);
   }
   messageLocation(user: string, org: string, id: string) {
     const room = this.messageRoom(user, org, id);
     const message = this.chatMessage(user, org, id, room);
     if (message.deleted_at) fail(404, "This message was deleted");
-    const parent = message.thread_id ? this.chatMessage(user, org, message.thread_id, room) : undefined;
+    const parent = message.thread_id
+      ? this.chatMessage(user, org, message.thread_id, room)
+      : undefined;
     return { room, message, parent };
   }
   readMention(user: string, org: string, id: string) {
     this.messageLocation(user, org, id);
-    this.run("INSERT OR IGNORE INTO chat_mention_reads(user_id,message_id) VALUES(?,?)", user, id);
+    this.run(
+      "INSERT OR IGNORE INTO chat_mention_reads(user_id,message_id) VALUES(?,?)",
+      user,
+      id,
+    );
     return { ok: true };
   }
   mentions(user: string, org: string, query: URLSearchParams) {
     this.role(user, org);
-    let before = query.has("before") ? this.chatCursor(Number(query.get("before")), "mentions cursor") : Number.MAX_SAFE_INTEGER;
+    let before = query.has("before")
+      ? this.chatCursor(Number(query.get("before")), "mentions cursor")
+      : Number.MAX_SAFE_INTEGER;
     const unreadOnly = query.get("unread") === "true";
     const members = this.all<{ id: string; name: string }>(
-      "SELECT u.id,u.name FROM members m JOIN users u ON u.id=m.user_id WHERE m.org_id=?", org,
+      "SELECT u.id,u.name FROM members m JOIN users u ON u.id=m.user_id WHERE m.org_id=?",
+      org,
     );
-    const items: (ReturnType<TeamStore["messageLocation"]> & { unread: boolean })[] = [];
+    const items: (ReturnType<TeamStore["messageLocation"]> & {
+      unread: boolean;
+    })[] = [];
     const rooms = new Map<string, TeamChatRoom>();
     while (true) {
-      const rows = this.all<{ id: string; room_id: string; body: string; created_seq: number; read_seq: number; mention_read: number }>(
+      const rows = this.all<{
+        id: string;
+        room_id: string;
+        body: string;
+        created_seq: number;
+        read_seq: number;
+        mention_read: number;
+      }>(
         `SELECT m.id,m.room_id,m.body,m.created_seq,COALESCE(rd.seq,0) AS read_seq,
          EXISTS(SELECT 1 FROM chat_mention_reads mr WHERE mr.user_id=? AND mr.message_id=m.id) AS mention_read
          FROM chat_messages m JOIN chat_rooms r ON r.id=m.room_id
          LEFT JOIN chat_reads rd ON rd.room_id=r.id AND rd.user_id=?
          WHERE r.org_id=? AND m.author_id<>? AND m.deleted_at IS NULL AND m.created_seq<?
          AND (r.kind='channel' OR EXISTS(SELECT 1 FROM chat_participants p WHERE p.room_id=r.id AND p.user_id=?))
-         ORDER BY m.created_seq DESC LIMIT 200`, user, user, org, user, before, user,
+         ORDER BY m.created_seq DESC LIMIT 200`,
+        user,
+        user,
+        org,
+        user,
+        before,
+        user,
       );
       for (const row of rows) {
         before = row.created_seq;
         const unread = row.created_seq > row.read_seq && !row.mention_read;
         if (unreadOnly && !unread) continue;
         let room = rooms.get(row.room_id);
-        if (!room) { room = this.chatRoom(user, org, row.room_id); rooms.set(row.room_id, room); }
-        const eligible = room.kind === "channel" ? members : members.filter((m) => room!.participants.some((p) => p.id === m.id && p.active));
-        if (!findMentions(row.body, eligible).some((m) => m.user.id === user)) continue;
+        if (!room) {
+          room = this.chatRoom(user, org, row.room_id);
+          rooms.set(row.room_id, room);
+        }
+        const eligible =
+          room.kind === "channel"
+            ? members
+            : members.filter((m) =>
+                room!.participants.some((p) => p.id === m.id && p.active),
+              );
+        if (!findMentions(row.body, eligible).some((m) => m.user.id === user))
+          continue;
         items.push({ ...this.messageLocation(user, org, row.id), unread });
         if (items.length === 30) return { items, next_before: before };
       }
@@ -1944,6 +2169,12 @@ export class TeamStore {
       author_id: String(row.author_id),
       author_name: String(row.author_name),
       body: row.deleted_at ? "" : String(row.body),
+      attachments: row.deleted_at
+        ? []
+        : this.all<import("../../src/teams/types").TeamAttachment>(
+            "SELECT id,name,mime,size FROM chat_attachments WHERE message_id=? ORDER BY rowid",
+            id,
+          ),
       thread_id: row.thread_id as string | null,
       reply_count: Number(
         this.get(
@@ -1990,7 +2221,10 @@ export class TeamStore {
   ): TeamChatPage {
     return this.db.transaction(() => {
       const room = this.chatRoom(user, org, id);
-      if (["before", "after", "around", "newer"].filter((key) => query.has(key)).length > 1)
+      if (
+        ["before", "after", "around", "newer"].filter((key) => query.has(key))
+          .length > 1
+      )
         fail(400, "Choose one history direction or live updates");
       const thread = query.get("thread") || null;
       const parent = thread
@@ -2003,27 +2237,66 @@ export class TeamStore {
         if (query.has("around")) {
           const anchorId = query.get("around")!;
           const anchor = this.chatMessage(user, org, anchorId, room);
-          if (anchor.room_id !== id || (anchor.thread_id ?? null) !== thread || anchor.deleted_at)
+          if (
+            anchor.room_id !== id ||
+            (anchor.thread_id ?? null) !== thread ||
+            anchor.deleted_at
+          )
             fail(404, "Message not found in this conversation");
           const before = this.all<{ id: string; created_seq: number }>(
-            "SELECT id,created_seq FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq<=? ORDER BY created_seq DESC LIMIT 26", id, thread, anchor.created_seq,
+            "SELECT id,created_seq FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq<=? ORDER BY created_seq DESC LIMIT 26",
+            id,
+            thread,
+            anchor.created_seq,
           ).reverse();
           const after = this.all<{ id: string; created_seq: number }>(
-            "SELECT id,created_seq FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq>? ORDER BY created_seq LIMIT 25", id, thread, anchor.created_seq,
+            "SELECT id,created_seq FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq>? ORDER BY created_seq LIMIT 25",
+            id,
+            thread,
+            anchor.created_seq,
           );
           rows = [...before, ...after];
         } else {
-          const after = this.chatCursor(Number(query.get("newer")), "history cursor");
+          const after = this.chatCursor(
+            Number(query.get("newer")),
+            "history cursor",
+          );
           rows = this.all<{ id: string; created_seq: number }>(
-            "SELECT id,created_seq FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq>? ORDER BY created_seq LIMIT 50", id, thread, after,
+            "SELECT id,created_seq FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq>? ORDER BY created_seq LIMIT 50",
+            id,
+            thread,
+            after,
           );
         }
-        const first = rows[0]?.created_seq, last = rows.at(-1)?.created_seq;
-        const older = first != null && this.get("SELECT 1 FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq<? LIMIT 1", id, thread, first);
-        const newer = last != null && this.get("SELECT 1 FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq>? LIMIT 1", id, thread, last);
+        const first = rows[0]?.created_seq,
+          last = rows.at(-1)?.created_seq;
+        const older =
+          first != null &&
+          this.get(
+            "SELECT 1 FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq<? LIMIT 1",
+            id,
+            thread,
+            first,
+          );
+        const newer =
+          last != null &&
+          this.get(
+            "SELECT 1 FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq>? LIMIT 1",
+            id,
+            thread,
+            last,
+          );
         return {
-          room, parent, live: true, messages: rows.map((row) => this.chatMessage(user, org, row.id, room)),
-          cursor: latest, has_more: false, older_before: older ? first! : null, newer_after: newer ? last! : null,
+          room,
+          parent,
+          live: true,
+          messages: rows.map((row) =>
+            this.chatMessage(user, org, row.id, room),
+          ),
+          cursor: latest,
+          has_more: false,
+          older_before: older ? first! : null,
+          newer_after: newer ? last! : null,
         };
       }
       if (query.has("after")) {
@@ -2096,7 +2369,25 @@ export class TeamStore {
       if (parent?.thread_id) fail(400, "Reply in the original thread");
       if (parent?.deleted_at)
         fail(409, "This thread's original message was deleted");
-      const content = text(body.body, "message", 10_000);
+      const attachments = validateAttachments(body.attachments);
+      const content = text(
+        body.body ?? "",
+        "message",
+        10_000,
+        attachments.length > 0,
+      );
+      const fingerprint = attachments.length
+        ? hash(
+            JSON.stringify([
+              content,
+              attachments.map((a) => [
+                a.name,
+                a.mime,
+                hash(a.bytes.toString("base64")),
+              ]),
+            ]),
+          )
+        : hash(content);
       const client = text(body.client_id, "message identifier", 80);
       if (!/^[a-zA-Z0-9_-]{16,80}$/.test(client))
         fail(400, "Invalid message identifier");
@@ -2108,12 +2399,23 @@ export class TeamStore {
       );
       if (old) {
         if (
-          old.original_hash !== hash(content) ||
+          old.original_hash !== fingerprint ||
           (old.thread_id ?? null) !== thread
         )
           fail(409, "This send attempt already belongs to another message");
         return this.chatMessage(user, org, String(old.id), room);
       }
+      const used = Number(
+        this.get(
+          "SELECT COALESCE(SUM(a.size),0) AS n FROM chat_attachments a JOIN chat_messages m ON m.id=a.message_id JOIN chat_rooms r ON r.id=m.room_id WHERE r.org_id=?",
+          org,
+        )!.n,
+      );
+      if (
+        used + attachments.reduce((n, a) => n + a.size, 0) >
+        TEAM_ATTACHMENT_QUOTA
+      )
+        fail(413, "This team has reached its attachment storage limit");
       const id = uid();
       this.run(
         "INSERT INTO chat_messages(id,room_id,author_id,client_id,original_hash,body,created_at,thread_id) VALUES(?,?,?,?,?,?,?,?)",
@@ -2121,11 +2423,21 @@ export class TeamStore {
         roomId,
         user,
         client,
-        hash(content),
+        fingerprint,
         content,
         now(),
         thread,
       );
+      for (const a of attachments)
+        this.run(
+          "INSERT INTO chat_attachments(id,message_id,name,mime,size,data) VALUES(?,?,?,?,?,?)",
+          uid(),
+          id,
+          a.name,
+          a.mime,
+          a.size,
+          a.bytes,
+        );
       const event = this.messageChanged(roomId, id, thread);
       this.run("UPDATE chat_messages SET created_seq=? WHERE id=?", event, id);
       return this.chatMessage(user, org, id, room);
@@ -2165,10 +2477,33 @@ export class TeamStore {
           now(),
           id,
         );
-      if (remove) this.run("DELETE FROM chat_reactions WHERE message_id=?", id);
+      if (remove) {
+        this.run("DELETE FROM chat_reactions WHERE message_id=?", id);
+        this.run("DELETE FROM chat_attachments WHERE message_id=?", id);
+      }
       this.messageChanged(room.id, id, message.thread_id);
       return this.chatMessage(user, org, id, room);
     })();
+  }
+  attachment(user: string, org: string, id: string) {
+    this.role(user, org);
+    const row = this.get<{
+      message_id: string;
+      name: string;
+      mime: string;
+      size: number;
+      data: Uint8Array;
+    }>("SELECT * FROM chat_attachments WHERE id=?", id);
+    if (!row) fail(404, "Attachment unavailable");
+    const location = this.messageLocation(user, org, row.message_id);
+    if (location.message.deleted_at) fail(404, "Attachment unavailable");
+    return {
+      id,
+      name: row.name,
+      mime: row.mime,
+      size: row.size,
+      data: Buffer.from(row.data).toString("base64"),
+    };
   }
   readChat(user: string, org: string, id: string, value: unknown) {
     this.chatRoom(user, org, id);

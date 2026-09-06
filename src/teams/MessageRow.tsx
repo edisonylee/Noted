@@ -1,3 +1,4 @@
+import { MessageAttachments } from "./MessageAttachments";
 import { useState, type ReactNode } from "react";
 import { MessageSquare, Pencil, SmilePlus, Trash2 } from "lucide-react";
 import { REACTIONS, REACTION_NAMES } from "../../services/team/reactions";
@@ -19,7 +20,8 @@ export function MessageRow({
   onProfile,
   renderBody,
   showReplies = true,
-  extras, highlighted = false,
+  extras,
+  highlighted = false,
 }: {
   org: string;
   user: string;
@@ -93,6 +95,9 @@ export function MessageRow({
           <p className="messages-deleted">Message deleted</p>
         ) : (
           <p>{renderBody ? renderBody(message.body) : message.body}</p>
+        )}
+        {!message.deleted_at && !!message.attachments?.length && (
+          <MessageAttachments org={org} files={message.attachments} />
         )}
         {!message.deleted_at && !!message.reactions?.length && (
           <div className="message-reactions" aria-label="Reactions">

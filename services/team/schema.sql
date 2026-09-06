@@ -75,3 +75,13 @@ CREATE TABLE IF NOT EXISTS chat_notification_preferences (
  mode TEXT NOT NULL CHECK(mode IN ('messages','mentions','none')),
  PRIMARY KEY(room_id,user_id)
 );
+
+CREATE TABLE IF NOT EXISTS chat_attachments (
+  id TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  mime TEXT NOT NULL,
+  size INTEGER NOT NULL CHECK(size > 0 AND size <= 5242880),
+  data BLOB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_attachments_message ON chat_attachments(message_id);

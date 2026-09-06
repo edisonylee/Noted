@@ -841,6 +841,7 @@ export const api = {
   teamConnect: (server: string, mode: string, secret: string, organization = "", name = "") =>
     invoke<import("./teams/types").TeamOrg[]>("team_connect", { server, mode, secret, organization, name }),
   teamDisconnect: () => invoke<void>("team_disconnect"),
+  teamSaveAttachment: (org: string, id: string) => invoke<boolean>("team_save_attachment", { org, id }),
   teamRequest: <T>(method: string, path: string, body?: unknown) => invoke<T>("team_request", { method, path, body }),
   teamAsk: (org: string, body: unknown) => invoke<import("./teams/types").TeamAnswer>("team_ask", { org, body }),
   teamPublishMeeting: (args: { org: string; id: number; spaceId: string; folderIds: string[]; summaryId: number | null; includeTranscript: boolean; sourceKey: string; reviewedContent: { title: string; summary: string; transcript: string; accessVersion: number } }) =>

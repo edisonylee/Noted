@@ -5,11 +5,13 @@ export function TeamDialog({
   children,
   onClose,
   busy = false,
+  className = "",
 }: {
   title: string;
   children: ReactNode;
   onClose: () => void;
   busy?: boolean;
+  className?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -23,7 +25,7 @@ export function TeamDialog({
   return (
     <dialog
       ref={ref}
-      className="team-dialog"
+      className={`team-dialog ${className}`}
       aria-label={title}
       onCancel={(e) => {
         e.preventDefault();

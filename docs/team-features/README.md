@@ -13,10 +13,11 @@ validation gate:
 8. [Threads](08-threads.md)
 9. [Inline replies](09-inline-replies.md)
 10. [Channel mentions](10-channel-mentions.md)
+11. [Attachment previews](11-attachment-previews.md)
 
 ## Implementation and verification
 
-All ten are implemented. The team service suite passes **81 tests** across its
+All eleven are implemented. The team service suite passes **81 tests** across its
 eight files, including HTTP authorization and isolated Docker runtime packaging,
 and `tests/team-messaging.test.ts` passes **12**; the two root-suite failures
 that remain (alpha bundle packaging and backup destination defaults) predate
@@ -30,6 +31,10 @@ source-card navigation, private save/open/remove, and compact layout without
 horizontal overflow. Light and dark themes were inspected. The installed app and
 native Save dialog still need the user's hands-on testing; no real team data was
 used in these checks.
+
+Attachment previews have three additional unit tests and synthetic browser checks
+for inline images, PDF navigation/zoom, literal text, compact layout, and access
+denial. They reuse the existing attachment endpoint and require only an app update.
 
 ## Rollout
 

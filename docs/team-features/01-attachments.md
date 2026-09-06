@@ -11,3 +11,7 @@ Store bounded attachment bytes and metadata transactionally alongside the messag
 ## Delivery gate
 
 Additive schema, explicit server capability flags for older servers, formatted source, focused regression tests, frontend build, and synthetic UI review. Include runtime packaging updates for new server files. Commit this feature independently on master; do not push. Server deployment by the owner is required before using new endpoints.
+
+
+The follow-up [attachment preview plan](11-attachment-previews.md) adds local image,
+PDF canvas, and literal text previews, superseding the initial download-only UX.

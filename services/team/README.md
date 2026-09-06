@@ -301,8 +301,10 @@ are not implemented.
 Active conversation members can attach up to three PNG/JPEG, PDF, or UTF-8 text
 files, totaling 5 MiB. Team attachment storage is capped at 250 MiB. Files are
 stored in SQLite (include them in database backup/retention planning), downloaded
-only after current access checks, and deleted with their message. Files are never
-executed or rendered as HTML/PDF in the app. macOS saves use a native picker and
+only after current access checks, and deleted with their message. The app previews PNG/JPEG images, plain text, and PDF pages through the same
+authenticated endpoint. PDF pages are rendered locally with PDF.js; document
+scripts, interactive annotations, and HTML are not executed. Preview URLs are
+local, temporary blobs and are released when their view closes. macOS saves use a native picker and
 quarantine metadata. File signatures are checked, but this is not malware
 scanning; no malware-free claim is made. Pending uploads stay in memory for the
 session and are sent atomically with the message. Deploy the server before the

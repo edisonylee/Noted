@@ -9,6 +9,9 @@ import { Download, FileText, Loader, X } from "lucide-react";
 import { api, isDesktop } from "../api";
 import { team, orgPath } from "./client";
 import type { TeamAttachment } from "./types";
+import { AttachmentPreview } from "./AttachmentPreview";
+import { attachmentPreviewKind } from "./attachmentPreviewData";
+import { useAttachmentPreview } from "./useAttachmentPreview";
 import "./message-attachments.css";
 
 export type PendingAttachment = {
@@ -158,6 +161,145 @@ export const AttachmentPicker = forwardRef<
     </div>
   );
 });
+function AttachmentDownload({
+  org,
+  file,
+}: {
+  org: string;
+  file: TeamAttachment;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <div className="attachment-download">
+      <button
+        type="button"
+        className="team-text-button"
+        disabled={busy}
+        aria-label={`Save ${file.name}`}
+        onClick={async () => {
+          setBusy(true);
+          setError("");
+          try {
+            if (isDesktop) await api.teamSaveAttachment(org, file.id);
+            else {
+              const result = await team.request<
+                TeamAttachment & { data: string }
+              >(
+                "GET",
+                orgPath(org, `/attachments/${encodeURIComponent(file.id)}`),
+              );
+              const blob = new Blob(
+                [Uint8Array.from(atob(result.data), (c) => c.charCodeAt(0))],
+                { type: "application/octet-stream" },
+              );
+              const url = URL.createObjectURL(blob);
+              const anchor = document.createElement("a");
+              anchor.href = url;
+              anchor.download = result.name;
+              anchor.click();
+              setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }
+          } catch (error) {
+            setError(
+              error instanceof Error ? error.message : "Could not save file.",
+            );
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        {busy ? <Loader size={14} className="spin" /> : <Download size={14} />}{" "}
+        Save
+      </button>
+      {error && (
+        <p className="team-error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+function AttachmentCard({ org, file }: { org: string; file: TeamAttachment }) {
+  const card = useRef<HTMLLIElement>(null);
+  const [visible, setVisible] = useState(false);
+  const [opened, setOpened] = useState(false);
+  const [imageError, setImageError] = useState(false);
+  const kind = attachmentPreviewKind(file.mime);
+  const { preview, error } = useAttachmentPreview(
+    org,
+    file,
+    visible && kind === "image" && !opened,
+  );
+  useEffect(() => {
+    const observer = new IntersectionObserver((entries) =>
+      setVisible(entries[0].isIntersecting),
+    );
+    if (card.current) observer.observe(card.current);
+    return () => observer.disconnect();
+  }, []);
+  return (
+    <li
+      ref={card}
+      className={`attachment-card ${kind === "image" ? "attachment-card-image" : ""}`}
+    >
+      {kind === "image" && (
+        <button
+          type="button"
+          className="attachment-inline-image"
+          aria-label={`Open image ${file.name}`}
+          onClick={() => setOpened(true)}
+        >
+          {preview && !imageError ? (
+            <img
+              src={preview.url}
+              alt={file.name}
+              decoding="async"
+              onError={() => setImageError(true)}
+            />
+          ) : (
+            <span>
+              {error || imageError ? (
+                "Image preview unavailable · Click to open"
+              ) : (
+                <>
+                  <Loader size={18} className="spin" /> Loading image…
+                </>
+              )}
+            </span>
+          )}
+        </button>
+      )}
+      <div className="attachment-card-details">
+        <button
+          type="button"
+          className="attachment-open"
+          aria-label={`Preview ${file.name}`}
+          disabled={!kind}
+          onClick={() => setOpened(true)}
+        >
+          <FileText size={18} />
+          <span>
+            <strong title={file.name}>{file.name}</strong>
+            <small>
+              {kind === "pdf" ? "PDF" : kind === "image" ? "Image" : "Text"} ·{" "}
+              {sizeLabel(file.size)} · Preview
+            </small>
+          </span>
+        </button>
+        <AttachmentDownload org={org} file={file} />
+      </div>
+      {opened && (
+        <AttachmentPreview
+          org={org}
+          file={file}
+          onClose={() => setOpened(false)}
+          download={<AttachmentDownload org={org} file={file} />}
+        />
+      )}
+    </li>
+  );
+}
 export function MessageAttachments({
   org,
   files,
@@ -165,69 +307,13 @@ export function MessageAttachments({
   org: string;
   files: TeamAttachment[];
 }) {
-  const [busy, setBusy] = useState("");
-  const [error, setError] = useState("");
   return (
     <div className="message-attachments">
       <ul aria-label="Attachments">
         {files.map((file) => (
-          <li key={file.id}>
-            <FileText size={18} />
-            <span title={file.name}>
-              {file.name}
-              <small>{sizeLabel(file.size)}</small>
-            </span>
-            <button
-              type="button"
-              className="team-text-button"
-              disabled={!!busy}
-              aria-label={`Save ${file.name}`}
-              onClick={async () => {
-                setBusy(file.id);
-                setError("");
-                try {
-                  if (isDesktop) await api.teamSaveAttachment(org, file.id);
-                  else {
-                    const result = await team.request<
-                      TeamAttachment & { data: string }
-                    >("GET", orgPath(org, `/attachments/${file.id}`));
-                    const blob = new Blob(
-                      [
-                        Uint8Array.from(atob(result.data), (c) =>
-                          c.charCodeAt(0),
-                        ),
-                      ],
-                      { type: "application/octet-stream" },
-                    );
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url;
-                    a.download = result.name;
-                    a.click();
-                    setTimeout(() => URL.revokeObjectURL(url), 1000);
-                  }
-                } catch (e) {
-                  setError(String(e));
-                } finally {
-                  setBusy("");
-                }
-              }}
-            >
-              {busy === file.id ? (
-                <Loader size={14} className="spin" />
-              ) : (
-                <Download size={14} />
-              )}{" "}
-              Save
-            </button>
-          </li>
+          <AttachmentCard key={file.id} org={org} file={file} />
         ))}
       </ul>
-      {error && (
-        <p className="team-error" role="alert">
-          {error}
-        </p>
-      )}
     </div>
   );
 }

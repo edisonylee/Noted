@@ -1,6 +1,7 @@
+import { sendTeamNotification } from "./teams/desktopNotification";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { useNavigationState } from "./useNavigationState";
-import { mentionNotificationsEnabled, setMentionNotificationsEnabled } from "./teams/mentionNotifications";
+import { messageAlertMode, setMessageAlertMode, type MessageAlertMode, mentionNotificationsEnabled, setMentionNotificationsEnabled } from "./teams/mentionNotifications";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -177,6 +178,7 @@ export function SettingsModal({ onClose, page = false, onOpenTeam }: { onClose: 
   const [gcalBusy, setGcalBusy] = useState<"" | "saving" | "connecting">("");
   const [gcalMsg, setGcalMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [reminders, setReminders] = useState<ReminderSettings | null>(null);
+  const [teamAlertMode, setTeamAlertMode] = useState(messageAlertMode);
   const [mentionAlerts, setMentionAlerts] = useState(mentionNotificationsEnabled);
   const [mentionAlertMessage, setMentionAlertMessage] = useState("");
   const [mentionAlertBusy, setMentionAlertBusy] = useState(false);
@@ -1626,8 +1628,8 @@ export function SettingsModal({ onClose, page = false, onOpenTeam }: { onClose: 
         <div className="settings-fields notification-settings">
           <section className="settings-group">
             <header className="settings-group-head">
-              <h4>Team mentions</h4>
-              <p>Get a Mac notification when a teammate @mentions you while Noted is running.</p>
+              <h4>Team messages</h4>
+              <p>Get a Mac notification with sound for incoming messages while Noted is running.</p>
             </header>
             <label className="vault-auto reminder-toggle">
               <input type="checkbox" checked={mentionAlerts} disabled={mentionAlertBusy} onChange={async (event) => {
@@ -1644,8 +1646,31 @@ export function SettingsModal({ onClose, page = false, onOpenTeam }: { onClose: 
                 } catch (error) { setMentionAlertMessage(`Could not update mention alerts: ${String(error)}`); }
                 finally { setMentionAlertBusy(false); }
               }} />
-              <span>Notify me about @mentions<em>Across all your teams. The conversation you are viewing stays quiet. Focus and macOS notification settings apply.</em></span>
+              <span>Desktop notifications and sound<em>Across all your teams. The conversation you are viewing stays quiet. Focus and macOS notification settings apply.</em></span>
             </label>
+            <label className="field">
+              <span className="field-label">Notify me about</span>
+              <select value={teamAlertMode} onChange={(event) => {
+                const mode = event.target.value as MessageAlertMode;
+                try { setMessageAlertMode(mode); setTeamAlertMode(mode); }
+                catch (error) { setMentionAlertMessage(String(error)); }
+              }}>
+                <option value="messages">All new messages</option>
+                <option value="mentions">Only @mentions</option>
+              </select>
+            </label>
+            <button type="button" className="ghost-btn" disabled={mentionAlertBusy} onClick={async () => {
+              setMentionAlertBusy(true);
+              try {
+                if (!(await isPermissionGranted()) && (await requestPermission()) !== "granted") {
+                  setMentionAlertMessage("Allow notifications and sounds for Noted in macOS System Settings.");
+                  return;
+                }
+                await sendTeamNotification({ title: "Noted message notification", body: "This notification requests the default macOS alert sound." });
+                setMentionAlertMessage("macOS accepted the test notification with its default sound. This confirms submission, not audible playback.");
+              } catch (error) { setMentionAlertMessage(String(error)); }
+              finally { setMentionAlertBusy(false); }
+            }}>Play test sound</button>
             {mentionAlertMessage && <p className="field-hint" role="status">{mentionAlertMessage}</p>}
           </section>
           <section className="settings-group">

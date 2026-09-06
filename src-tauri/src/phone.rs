@@ -296,6 +296,7 @@ fn legacy_phone_command_is_allowed(command: &str) -> bool {
 async fn handle_api(app: &AppHandle, cmd: &str, b: &Value) -> Result<Value, String> {
     let a = app.clone();
     match cmd {
+        "team_notification_send" => Err("Desktop-only command".into()),
         "theme_state" => crate::theme_state(a).await,
         "system_settings_get" => crate::system_settings_get()
             .await

@@ -1823,3 +1823,18 @@ test("unread mention indicators follow edits, reads, deletions and conversation 
   send("@Edison private", dm.id);
   expect(s.chatRooms(edison, org).some((r) => r.id === dm.id)).toBe(false);
 });
+
+test("ordinary message notification cursors exclude own, read and deleted messages", () => {
+  const { s, owner, org, join } = fixture();
+  const recipient = join("Recipient").id;
+  const room = s.chatRooms(owner, org)[0].id;
+  const sent = s.sendChatMessage(owner, org, room, { body: "Hello without a mention", client_id: crypto.randomUUID() });
+  expect(s.chatRoom(recipient, org, room).latest_unread_message_seq).toBe(sent.created_seq);
+  expect(s.chatRoom(recipient, org, room).latest_unread_mention_seq).toBe(0);
+  expect(s.chatRoom(owner, org, room).latest_unread_message_seq).toBe(0);
+  s.readChat(recipient, org, room, sent.created_seq);
+  expect(s.chatRoom(recipient, org, room).latest_unread_message_seq).toBe(0);
+  const deleted = s.sendChatMessage(owner, org, room, { body: "Removed", client_id: crypto.randomUUID() });
+  s.changeChatMessage(owner, org, deleted.id, { revision: 1 }, true);
+  expect(s.chatRoom(recipient, org, room).latest_unread_message_seq).toBe(0);
+});

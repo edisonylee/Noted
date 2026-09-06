@@ -91,6 +91,20 @@ test("desktop mentions baseline history, deduplicate polls and isolate recipient
   expect(tracker.update("other:org", [room(20, 20)])).toHaveLength(0);
 });
 
+test("message alerts include ordinary messages without replaying edits or reads", () => {
+  const tracker = new MentionNotificationTracker();
+  const room = (cursor: number, incoming: number) => ({
+    id: "dm", notification_user_id: "recipient", notification_cursor: cursor,
+    latest_unread_message_seq: incoming, latest_unread_mention_seq: 0,
+    archived_at: null,
+  }) as TeamChatRoom;
+  expect(tracker.update("org", [room(10, 10)], "messages")).toHaveLength(0);
+  expect(tracker.update("org", [room(11, 11)], "messages")).toHaveLength(1);
+  expect(tracker.update("org", [room(12, 11)], "messages")).toHaveLength(0);
+  expect(tracker.update("org", [room(12, 0)], "messages")).toHaveLength(0);
+  expect(tracker.update("org", [room(13, 13)], "mentions")).toHaveLength(0);
+});
+
 import { captureMessagePosition, restoreMessagePosition, saveMessagePosition, readMessagePosition } from "../src/teams/messageScroll";
 
 test("scroll anchors preserve a partially visible message when history and viewport change", () => {

@@ -11,6 +11,16 @@ export function setMentionNotificationsEnabled(enabled: boolean) {
   window.dispatchEvent(new Event(notificationPreferenceEvent));
 }
 
+export type MessageAlertMode = "messages" | "mentions";
+export function messageAlertMode(): MessageAlertMode {
+  try { return localStorage.getItem("noted:team-alert-mode") === "mentions" ? "mentions" : "messages"; }
+  catch { return "messages"; }
+}
+export function setMessageAlertMode(mode: MessageAlertMode) {
+  localStorage.setItem("noted:team-alert-mode", mode);
+  window.dispatchEvent(new Event(notificationPreferenceEvent));
+}
+
 let viewedRoom: string | null = null;
 export function setViewedMessageRoom(room: string | null) { viewedRoom = room; }
 export function isViewingMessageRoom(room: string) {
@@ -21,7 +31,7 @@ export function isViewingMessageRoom(room: string) {
 // replay older mentions. Advance even when alerts are suppressed in the UI.
 export class MentionNotificationTracker {
   private cursors = new Map<string, number>();
-  update(scope: string, rooms: TeamChatRoom[]) {
+  update(scope: string, rooms: TeamChatRoom[], mode: MessageAlertMode = "mentions") {
     const notify: TeamChatRoom[] = [];
     for (const room of rooms) {
       const key = `${scope}:${room.notification_user_id ?? ""}:${room.id}`;
@@ -29,7 +39,8 @@ export class MentionNotificationTracker {
       const cursor = room.notification_cursor;
       if (cursor == null) continue; // Compatible with older team servers.
       this.cursors.set(key, Math.max(previous ?? 0, cursor));
-      if (previous != null && !room.archived_at && (room.latest_unread_mention_seq ?? 0) > previous) notify.push(room);
+      const latest = mode === "messages" ? room.latest_unread_message_seq ?? room.latest_unread_mention_seq ?? 0 : room.latest_unread_mention_seq ?? 0;
+      if (previous != null && !room.archived_at && latest > previous) notify.push(room);
     }
     return notify;
   }

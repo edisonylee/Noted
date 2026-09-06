@@ -835,6 +835,7 @@ export type Trends = {
 };
 
 export const api = {
+  teamNotificationSend: (title: string, body: string) => invoke<void>("team_notification_send", { title, body }),
   teamStatus: () => invoke<import("./teams/types").TeamSession>("team_status"),
   teamConnect: (server: string, mode: string, secret: string, organization = "", name = "") =>
     invoke<import("./teams/types").TeamOrg[]>("team_connect", { server, mode, secret, organization, name }),

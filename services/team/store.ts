@@ -1453,11 +1453,12 @@ export class TeamStore {
     const mentionMembers = this.all<{ id: string; name: string }>(
       "SELECT u.id,u.name FROM members m JOIN users u ON u.id=m.user_id WHERE m.org_id=?", org,
     ).filter((m) => row.kind === "channel" || participants.some((p) => p.id === m.id && p.active));
-    const unreadMentions = this.all<{ body: string; created_seq: number }>(
+    const unreadMessages = this.all<{ body: string; created_seq: number }>(
       `SELECT body,created_seq FROM chat_messages WHERE room_id=? AND author_id<>? AND deleted_at IS NULL
        AND created_seq>COALESCE((SELECT seq FROM chat_reads WHERE room_id=? AND user_id=?),0)`,
       id, user, id, user,
-    ).filter((m) => findMentions(m.body, mentionMembers).some((mention) => mention.user.id === user));
+    );
+    const unreadMentions = unreadMessages.filter((m) => findMentions(m.body, mentionMembers).some((mention) => mention.user.id === user));
     const last = this.get(
       "SELECT MAX(COALESCE(deleted_at,edited_at,created_at)) AS at FROM chat_messages WHERE room_id=?",
       id,
@@ -1489,6 +1490,7 @@ export class TeamStore {
       participants,
       unread,
       unread_mentions: unreadMentions.length,
+      latest_unread_message_seq: unreadMessages.reduce((seq, m) => Math.max(seq, m.created_seq), 0),
       latest_unread_mention_seq: unreadMentions.reduce((seq, m) => Math.max(seq, m.created_seq), 0),
       notification_cursor: this.latestChatCursor(id),
       notification_user_id: user,

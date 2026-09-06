@@ -126,6 +126,7 @@ export type TeamChatRoom = {
   unread: number;
   unread_mentions?: number;
   latest_unread_mention_seq?: number;
+  latest_unread_message_seq?: number;
   notification_cursor?: number;
   notification_user_id?: string;
   last_activity: string;

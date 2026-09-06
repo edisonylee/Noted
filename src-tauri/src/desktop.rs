@@ -27,6 +27,7 @@ pub mod pipeline;
 pub mod provider;
 pub mod release_profile;
 pub mod reminders;
+mod team_notifications;
 pub mod sync_journal;
 pub mod system_settings;
 pub mod themes;
@@ -97,6 +98,14 @@ async fn system_settings_set(
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     system_settings::update(&dir, &time_zone, preferred_name.as_deref())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn team_notification_send(title: String, body: String) -> Result<(), String> {
+    if title.len() > 500 || body.len() > 2000 {
+        return Err("Notification text is too long".into());
+    }
+    team_notifications::send(title, body).await
 }
 
 #[tauri::command]
@@ -4947,6 +4956,7 @@ pub fn run() {
             gcal::init(&dir);
             applecal::cfg_init(&dir);
             reminders::init(&dir);
+            team_notifications::init();
             let conn = db::init(&dir.join("noted.db"))?;
             app.manage(Db(Mutex::new(conn)));
             #[cfg(all(target_os = "macos", feature = "sanitized-development-fixtures"))]
@@ -5110,6 +5120,7 @@ pub fn run() {
             theme_state,
             system_settings_get,
             system_settings_set,
+            team_notification_send,
             reminder_settings_get,
             reminder_settings_set,
             theme_list,

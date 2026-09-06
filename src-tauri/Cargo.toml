@@ -125,6 +125,7 @@ mdns-sd = "0.20.3"
 # calendar prompt to the binary that asks, so this keeps it as noted itself
 # rather than a spawned helper. Full access is macOS 14+, gated at runtime.
 objc2 = "0.6"
+objc2-user-notifications = "0.3"
 # The EventKit access prompt is delivered through an Objective-C block.
 block2 = "0.6"
 objc2-core-graphics = "0.3"

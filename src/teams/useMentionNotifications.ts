@@ -1,9 +1,10 @@
+import { sendTeamNotification } from "./desktopNotification";
 import { useEffect } from "react";
-import { isPermissionGranted, sendNotification } from "@tauri-apps/plugin-notification";
+import { isPermissionGranted } from "@tauri-apps/plugin-notification";
 import { isDesktop } from "../api";
 import { team, orgPath } from "./client";
 import type { TeamChatRoom, TeamOrg } from "./types";
-import { isViewingMessageRoom, mentionNotificationsEnabled, MentionNotificationTracker, notificationPreferenceEvent } from "./mentionNotifications";
+import { messageAlertMode, isViewingMessageRoom, mentionNotificationsEnabled, MentionNotificationTracker, notificationPreferenceEvent } from "./mentionNotifications";
 
 export function useMentionNotifications() {
   useEffect(() => {
@@ -31,13 +32,14 @@ export function useMentionNotifications() {
                 continue; // One revoked workspace must not silence the others.
               }
               if (stopped || epoch !== generation) break;
-              const mentions = tracker.update(`${session.server}:${org.id}`, rooms);
+              const mode = messageAlertMode();
+              const mentions = tracker.update(`${session.server}:${org.id}`, rooms, mode);
               for (const room of mentions) {
+                if (stopped || epoch !== generation) break;
                 if (!permitted || !mentionNotificationsEnabled() || isViewingMessageRoom(room.id)) continue;
-                sendNotification({
-                  title: `You were mentioned in ${org.name}`,
-                  body: room.kind === "direct" ? "A teammate mentioned you in a direct message." : `New mention in ${room.is_default ? "Team chat" : `#${room.name}`}.`,
-                  sound: "default",
+                await sendTeamNotification({
+                  title: mode === "mentions" ? `You were mentioned in ${org.name}` : `New message in ${org.name}`,
+                  body: room.kind === "direct" ? "You have a new direct message." : `New ${mode === "mentions" ? "mention" : "message"} in ${room.is_default ? "Team chat" : `#${room.name}`}.`,
                 });
               }
             }
@@ -46,7 +48,7 @@ export function useMentionNotifications() {
       } catch {
         // A disconnected server or revoked membership is retried on the next poll.
       } finally {
-        if (!stopped) timer = setTimeout(poll, 10_000);
+        if (!stopped) timer = setTimeout(poll, 3_000);
       }
     };
     window.addEventListener(notificationPreferenceEvent, reset);

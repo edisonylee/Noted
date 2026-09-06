@@ -69,3 +69,9 @@ CREATE TABLE IF NOT EXISTS chat_mention_reads (
  message_id TEXT NOT NULL REFERENCES chat_messages(id),
  PRIMARY KEY(user_id,message_id)
 );
+CREATE TABLE IF NOT EXISTS chat_notification_preferences (
+ room_id TEXT NOT NULL REFERENCES chat_rooms(id),
+ user_id TEXT NOT NULL REFERENCES users(id),
+ mode TEXT NOT NULL CHECK(mode IN ('messages','mentions','none')),
+ PRIMARY KEY(room_id,user_id)
+);

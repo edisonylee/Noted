@@ -1,5 +1,6 @@
 import type { TeamChatRoom } from "./types";
 
+export const conversationNotificationEvent = "noted:conversation-notifications-changed";
 const preferenceKey = "noted:team-mention-notifications";
 export const notificationPreferenceEvent = "noted:team-notifications-changed";
 export function mentionNotificationsEnabled() {
@@ -21,6 +22,10 @@ export function setMessageAlertMode(mode: MessageAlertMode) {
   window.dispatchEvent(new Event(notificationPreferenceEvent));
 }
 
+export function conversationAlertMode(room: TeamChatRoom, fallback: MessageAlertMode = messageAlertMode()): MessageAlertMode | "none" {
+  return room.notification_mode && room.notification_mode !== "default" ? room.notification_mode : fallback;
+}
+
 let viewedRoom: string | null = null;
 export function setViewedMessageRoom(room: string | null) { viewedRoom = room; }
 export function isViewingMessageRoom(room: string) {
@@ -31,7 +36,7 @@ export function isViewingMessageRoom(room: string) {
 // replay older mentions. Advance even when alerts are suppressed in the UI.
 export class MentionNotificationTracker {
   private cursors = new Map<string, number>();
-  update(scope: string, rooms: TeamChatRoom[], mode: MessageAlertMode = "mentions") {
+  update(scope: string, rooms: TeamChatRoom[], mode: MessageAlertMode | ((room: TeamChatRoom) => MessageAlertMode | "none") = "mentions") {
     const notify: TeamChatRoom[] = [];
     for (const room of rooms) {
       const key = `${scope}:${room.notification_user_id ?? ""}:${room.id}`;
@@ -39,7 +44,9 @@ export class MentionNotificationTracker {
       const cursor = room.notification_cursor;
       if (cursor == null) continue; // Compatible with older team servers.
       this.cursors.set(key, Math.max(previous ?? 0, cursor));
-      const latest = mode === "messages" ? room.latest_unread_message_seq ?? room.latest_unread_mention_seq ?? 0 : room.latest_unread_mention_seq ?? 0;
+      const resolved = typeof mode === "function" ? mode(room) : mode;
+      if (resolved === "none") continue;
+      const latest = resolved === "messages" ? room.latest_unread_message_seq ?? room.latest_unread_mention_seq ?? 0 : room.latest_unread_mention_seq ?? 0;
       if (previous != null && !room.archived_at && latest > previous) notify.push(room);
     }
     return notify;

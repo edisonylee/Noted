@@ -1499,6 +1499,7 @@ export class TeamStore {
       latest_unread_mention_seq: unreadMentions.reduce((seq, m) => Math.max(seq, m.created_seq), 0),
       notification_cursor: this.latestChatCursor(id),
       notification_user_id: user,
+      notification_mode: (this.get("SELECT mode FROM chat_notification_preferences WHERE room_id=? AND user_id=?", id, user)?.mode ?? "default") as TeamChatRoom["notification_mode"],
       last_activity: String(last ?? row.created_at),
       last_message: preview
         ? {
@@ -1737,6 +1738,14 @@ export class TeamStore {
     );
     if (!row) fail(404, "Message not found");
     return this.chatRoom(user, org, String(row.room_id));
+  }
+  setConversationNotifications(user: string, org: string, id: string, body: Record<string, unknown>) {
+    this.chatRoom(user, org, id);
+    const mode = choice(body.mode, ["default", "messages", "mentions", "none"], "notification mode");
+    if (mode === "default") this.run("DELETE FROM chat_notification_preferences WHERE room_id=? AND user_id=?", id, user);
+    else this.run(`INSERT INTO chat_notification_preferences(room_id,user_id,mode) VALUES(?,?,?)
+      ON CONFLICT(room_id,user_id) DO UPDATE SET mode=excluded.mode`, id, user, mode);
+    return this.chatRoom(user, org, id);
   }
   messageLocation(user: string, org: string, id: string) {
     const room = this.messageRoom(user, org, id);

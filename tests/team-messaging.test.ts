@@ -131,3 +131,22 @@ test("scroll anchors preserve a partially visible message when history and viewp
   expect(captureMessagePosition(viewport)).toEqual(anchor);
   expect(restoreMessagePosition(viewport, { ...anchor, id: "missing" })).toBe(false);
 });
+
+import { conversationAlertMode } from "../src/teams/mentionNotifications";
+test("conversation overrides support mute, mentions, defaults and unmute without old alerts", () => {
+  const tracker = new MentionNotificationTracker();
+  const room = (cursor: number, incoming: number, mention: number, mode: TeamChatRoom["notification_mode"]) => ({
+    id: "room", notification_user_id: "recipient", notification_cursor: cursor,
+    latest_unread_message_seq: incoming, latest_unread_mention_seq: mention, notification_mode: mode,
+    archived_at: null,
+  }) as TeamChatRoom;
+  const effective = (r: TeamChatRoom) => conversationAlertMode(r, "messages");
+  expect(tracker.update("org", [room(10, 10, 0, "default")], effective)).toHaveLength(0);
+  expect(tracker.update("org", [room(11, 11, 11, "none")], effective)).toHaveLength(0);
+  expect(tracker.update("org", [room(11, 11, 11, "messages")], effective)).toHaveLength(0);
+  expect(tracker.update("org", [room(12, 12, 11, "mentions")], effective)).toHaveLength(0);
+  expect(tracker.update("org", [room(13, 13, 13, "mentions")], effective)).toHaveLength(1);
+  expect(tracker.update("org", [room(14, 14, 13, "default")], effective)).toHaveLength(1);
+  expect(conversationAlertMode(room(14, 14, 13, "messages"), "mentions")).toBe("messages");
+  expect(conversationAlertMode(room(14, 14, 13, "default"), "mentions")).toBe("mentions");
+});

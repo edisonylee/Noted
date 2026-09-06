@@ -1896,3 +1896,31 @@ describe("mentions inbox and message destinations", () => {
     expect(() => s.mentions(user, org, new URLSearchParams("before=bad"))).toThrow();
   });
 });
+
+test("conversation notification settings belong to the viewer, including DMs and archived channels", async () => {
+  const { s, owner, org, join } = fixture();
+  const alice = join("Alice"), bob = join("Bob");
+  const room = s.chatRooms(owner, org)[0].id;
+  expect(s.chatRoom(alice.id, org, room).notification_mode).toBe("default");
+  expect(s.setConversationNotifications(alice.id, org, room, { mode: "none", user_id: bob.id }).notification_mode).toBe("none");
+  expect(s.chatRoom(bob.id, org, room).notification_mode).toBe("default");
+  expect(s.setConversationNotifications(alice.id, org, room, { mode: "mentions" }).notification_mode).toBe("mentions");
+  expect(s.setConversationNotifications(alice.id, org, room, { mode: "messages" }).notification_mode).toBe("messages");
+  expect(s.setConversationNotifications(alice.id, org, room, { mode: "default" }).notification_mode).toBe("default");
+  expect(() => s.setConversationNotifications(alice.id, org, room, { mode: "invalid" })).toThrow();
+  const dm = s.createChatRoom(alice.id, org, { kind: "direct", member_id: bob.id });
+  expect(() => s.setConversationNotifications(owner, org, dm.id, { mode: "none" })).toThrow();
+  const handler = createHandler(s);
+  const response = await handler(new Request(`https://team.test/v1/orgs/${org}/chat-rooms/${dm.id}/notifications`, {
+    method: "PUT", headers: { Authorization: `Bearer ${alice.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ mode: "none" }),
+  }));
+  expect(response.status).toBe(200);
+  expect((await response.json()).notification_mode).toBe("none");
+  expect(s.chatRooms(alice.id, org).find((r) => r.id === dm.id)?.notification_mode).toBe("none");
+  expect(s.chatRoom(bob.id, org, dm.id).notification_mode).toBe("default");
+  const channel = s.createChatRoom(owner, org, { kind: "channel", name: "Archived topic" });
+  s.updateChatRoom(owner, org, channel.id, { name: channel.name, description: "", archived: true, revision: channel.revision });
+  expect(s.setConversationNotifications(alice.id, org, channel.id, { mode: "none" }).notification_mode).toBe("none");
+  s.changeMember(owner, org, alice.id, "remove");
+  expect(() => s.setConversationNotifications(alice.id, org, dm.id, { mode: "messages" })).toThrow();
+});

@@ -110,7 +110,9 @@ export type TeamConversationRow = {
   available: boolean;
 };
 
+export type ConversationAlertMode = "default" | "messages" | "mentions" | "none";
 export type TeamChatRoom = {
+  notification_mode?: ConversationAlertMode;
   message_extras?: boolean;
   id: string;
   org_id: string;

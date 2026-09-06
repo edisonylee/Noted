@@ -4,7 +4,7 @@ import { isPermissionGranted } from "@tauri-apps/plugin-notification";
 import { isDesktop } from "../api";
 import { team, orgPath } from "./client";
 import type { TeamChatRoom, TeamOrg } from "./types";
-import { messageAlertMode, isViewingMessageRoom, mentionNotificationsEnabled, MentionNotificationTracker, notificationPreferenceEvent } from "./mentionNotifications";
+import { conversationAlertMode, conversationNotificationEvent, messageAlertMode, isViewingMessageRoom, mentionNotificationsEnabled, MentionNotificationTracker, notificationPreferenceEvent } from "./mentionNotifications";
 
 export function useMentionNotifications() {
   useEffect(() => {
@@ -13,6 +13,7 @@ export function useMentionNotifications() {
     let generation = 0;
     let timer: ReturnType<typeof setTimeout>;
     let tracker = new MentionNotificationTracker();
+    const invalidate = () => { ++generation; };
     const reset = () => { ++generation; tracker = new MentionNotificationTracker(); };
     const poll = async () => {
       const epoch = generation;
@@ -32,10 +33,12 @@ export function useMentionNotifications() {
                 continue; // One revoked workspace must not silence the others.
               }
               if (stopped || epoch !== generation) break;
-              const mode = messageAlertMode();
-              const mentions = tracker.update(`${session.server}:${org.id}`, rooms, mode);
+              const fallback = messageAlertMode();
+              const mentions = tracker.update(`${session.server}:${org.id}`, rooms, (room) => conversationAlertMode(room, fallback));
               for (const room of mentions) {
                 if (stopped || epoch !== generation) break;
+                const mode = conversationAlertMode(room, fallback);
+                if (mode === "none") continue;
                 if (!permitted || !mentionNotificationsEnabled() || isViewingMessageRoom(room.id)) continue;
                 const message = mode === "mentions" ? room.latest_unread_mention_id : room.latest_unread_message_id;
                 await sendTeamNotification({
@@ -54,7 +57,8 @@ export function useMentionNotifications() {
       }
     };
     window.addEventListener(notificationPreferenceEvent, reset);
+    window.addEventListener(conversationNotificationEvent, invalidate);
     void poll();
-    return () => { stopped = true; clearTimeout(timer); window.removeEventListener(notificationPreferenceEvent, reset); };
+    return () => { stopped = true; clearTimeout(timer); window.removeEventListener(notificationPreferenceEvent, reset); window.removeEventListener(conversationNotificationEvent, invalidate); };
   }, []);
 }

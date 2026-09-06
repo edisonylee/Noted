@@ -106,7 +106,7 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
             (resource === "notes" && action === "restore") ||
             (resource === "spaces" && action === "grants") ||
             (resource === "chat-rooms" &&
-              ["messages", "read"].includes(action)) ||
+              ["messages", "read", "notifications"].includes(action)) ||
             (resource === "chat-messages" && action === "reactions") ||
             (resource === "mentions" && action === "read") ||
             (resource === "profiles" && action === "avatar")
@@ -127,6 +127,8 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
       if (resource === "mentions" && !id && method === "GET")
         return respond(store.mentions(user, org, url.searchParams));
       if (resource === "chat-rooms") {
+        if (id && action === "notifications" && method === "PUT")
+          return respond(store.setConversationNotifications(user, org, id, body));
         if (!id && method === "GET") return respond(store.chatRooms(user, org));
         if (!id && method === "POST")
           return respond(store.createChatRoom(user, org, body), 201);

@@ -1,3 +1,4 @@
+import { ConversationNotifications } from "./ConversationNotifications";
 import { MentionsInbox } from "./MentionsInbox";
 import type { TeamMessageLocation, TeamNotificationTarget } from "./types";
 import { captureMessagePosition, readMessagePosition, restoreMessagePosition, saveMessagePosition } from "./messageScroll";
@@ -14,6 +15,7 @@ import {
 } from "react";
 import {
   ArrowDown,
+  BellOff,
   AtSign,
   Hash,
   Lock,
@@ -270,6 +272,7 @@ export function TeamMessages({
                     : "Team channel"}
         </small>
       </span>
+      {room.notification_mode === "none" && <BellOff size={14} aria-label="Muted conversation" />}
       {(room.unread_mentions ?? 0) > 0 && <b className="messages-unread" aria-label={`${room.unread_mentions} unread mentions`}>@</b>}
       {room.unread > 0 && (
         <b
@@ -1029,6 +1032,7 @@ function MessageRoom({
               <X size={18} />
             </button>
           )}
+          {!threadId && <ConversationNotifications org={org} room={room} onSaved={onRoom} />}
           {!threadId && room.can_manage && (
             <button
               className="team-text-button"

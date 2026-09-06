@@ -1,3 +1,4 @@
+import type { TeamNotificationTarget } from "./types";
 import { useNavigationState, clearNavigationState } from "../useNavigationState";
 import {
   useCallback,
@@ -170,13 +171,14 @@ export function TeamConnect({
   );
 }
 export function TeamWorkspace({
-  onOpenLibrary,
-}: { onOpenLibrary?: () => void } = {}) {
+  onOpenLibrary, notificationTarget, onNotificationHandled,
+}: { onOpenLibrary?: () => void; notificationTarget?: TeamNotificationTarget | null; onNotificationHandled?: () => void } = {}) {
   const [orgs, setOrgs] = useState<TeamOrg[] | null>(null);
   const [org, setOrg] = useNavigationState("team:org", "");
   const [connected, setConnected] = useState<boolean | null>(null);
   const [error, setError] = useState("");
   const [addWorkspace, setAddWorkspace] = useState(false);
+  const [validatedTarget, setValidatedTarget] = useState<TeamNotificationTarget | null>(null);
   useEffect(() => {
     let active = true;
     team
@@ -202,6 +204,19 @@ export function TeamWorkspace({
       active = false;
     };
   }, []);
+  useEffect(() => {
+    if (!notificationTarget) { setValidatedTarget(null); return; }
+    if (!orgs) return;
+    let alive = true;
+    void team.status().then((status) => {
+      if (!alive) return;
+      if (status.server.replace(/\/$/, "") !== notificationTarget.server.replace(/\/$/, "") || !orgs.some((o) => o.id === notificationTarget.org)) {
+        setError("This notification belongs to a team or server that is no longer connected.");
+        onNotificationHandled?.();
+      } else { setOrg(notificationTarget.org); setValidatedTarget(notificationTarget); }
+    }).catch((e) => { if (alive) setError(String(e)); });
+    return () => { alive = false; };
+  }, [notificationTarget, orgs, onNotificationHandled]);
   const updateTeam = useCallback(
     (next: TeamOrg) =>
       setOrgs(
@@ -293,6 +308,8 @@ export function TeamWorkspace({
             org={org}
             onOpenLibrary={onOpenLibrary}
             onTeamUpdate={updateTeam}
+          notificationTarget={validatedTarget === notificationTarget && validatedTarget?.org === org ? validatedTarget : null}
+          onNotificationHandled={onNotificationHandled}
           />
         </TeamAvatars>
       ) : (
@@ -393,8 +410,10 @@ function AddWorkspace({
 function TeamLibrary({
   org,
   onOpenLibrary,
-  onTeamUpdate,
+  onTeamUpdate, notificationTarget, onNotificationHandled,
 }: {
+  notificationTarget?: TeamNotificationTarget | null;
+  onNotificationHandled?: () => void;
   org: string;
   onOpenLibrary?: () => void;
   onTeamUpdate: (team: TeamOrg) => void;
@@ -406,6 +425,9 @@ function TeamLibrary({
     "notes" | "admin" | "trash" | "answers" | "messages" | "people"
   >(`team:${org}:view`, "notes");
   const [unread, setUnread] = useState(0);
+  useEffect(() => {
+    if (notificationTarget) setView("messages");
+  }, [notificationTarget]);
   const [requestedRoom, setRequestedRoom] = useState<TeamChatRoom | null>(null);
   const [shareHelp, setShareHelp] = useState(false);
   const [query, setQuery] = useNavigationState(`team:${org}:query`, "");
@@ -637,6 +659,8 @@ function TeamLibrary({
             active={view === "messages"}
             requestedRoom={requestedRoom}
             onUnread={setUnread}
+            notificationTarget={notificationTarget}
+            onNotificationHandled={onNotificationHandled}
           />
         </div>
       )}

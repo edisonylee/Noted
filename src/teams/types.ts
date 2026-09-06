@@ -127,6 +127,8 @@ export type TeamChatRoom = {
   unread_mentions?: number;
   latest_unread_mention_seq?: number;
   latest_unread_message_seq?: number;
+  latest_unread_message_id?: string;
+  latest_unread_mention_id?: string;
   notification_cursor?: number;
   notification_user_id?: string;
   last_activity: string;
@@ -166,3 +168,7 @@ export type TeamChatPage = {
   has_more: boolean;
   older_before: number | null;
 };
+
+export type TeamNotificationTarget = { server: string; org: string; user: string; message: string };
+export type TeamMessageLocation = { message: TeamChatMessage; room: TeamChatRoom; parent?: TeamChatMessage };
+export type TeamMentionPage = { items: (TeamMessageLocation & { unread: boolean })[]; next_before: number | null };

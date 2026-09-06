@@ -1838,3 +1838,61 @@ test("ordinary message notification cursors exclude own, read and deleted messag
   s.changeChatMessage(owner, org, deleted.id, { revision: 1 }, true);
   expect(s.chatRoom(recipient, org, room).latest_unread_message_seq).toBe(0);
 });
+
+describe("mentions inbox and message destinations", () => {
+  test("includes channel mentions and thread replies, with independent read receipts", () => {
+    const { s, owner, org, join } = fixture();
+    const edison = join("Edison").id;
+    const room = s.chatRooms(owner, org)[0].id;
+    const send = (body: string, thread_id?: string) => s.sendChatMessage(owner, org, room, { body, thread_id, client_id: crypto.randomUUID() });
+    const root = send("@Edison please review");
+    const reply = send("@Edison one more detail", root.id);
+    const inbox = s.mentions(edison, org, new URLSearchParams("unread=true"));
+    expect(inbox.items.map((item) => item.message.id)).toEqual([reply.id, root.id]);
+    expect(inbox.items[0].parent?.id).toBe(root.id);
+    expect(s.messageLocation(edison, org, reply.id).room.id).toBe(room);
+    s.readMention(edison, org, reply.id);
+    expect(s.mentions(edison, org, new URLSearchParams("unread=true")).items.map((i) => i.message.id)).toEqual([root.id]);
+    expect(s.chatRoom(edison, org, room).unread_mentions).toBe(1);
+    expect(s.chatRoom(edison, org, room).unread).toBe(2);
+    expect(s.mentions(edison, org, new URLSearchParams()).items[0].unread).toBe(false);
+    s.changeChatMessage(owner, org, root.id, { body: "No mention now", revision: s.messageLocation(owner, org, root.id).message.revision });
+    expect(s.mentions(edison, org, new URLSearchParams()).items).toHaveLength(1);
+    s.changeChatMessage(owner, org, reply.id, { revision: 1 }, true);
+    expect(() => s.messageLocation(edison, org, reply.id)).toThrow("deleted");
+    expect(s.mentions(edison, org, new URLSearchParams()).items).toHaveLength(0);
+  });
+  test("private mentions stay private and HTTP routes recheck access", async () => {
+    const { s, owner, org, join, token } = fixture();
+    const alice = join("Alice"), bob = join("Bob");
+    const dm = s.createChatRoom(alice.id, org, { kind: "direct", member_id: bob.id });
+    const message = s.sendChatMessage(alice.id, org, dm.id, { body: "@Bob @Owner private", client_id: crypto.randomUUID() });
+    expect(s.mentions(owner, org, new URLSearchParams()).items).toHaveLength(0);
+    expect(() => s.messageLocation(owner, org, message.id)).toThrow();
+    expect(() => s.readMention(owner, org, message.id)).toThrow();
+    const handler = createHandler(s);
+    const request = (path: string, auth: string, method = "GET") => handler(new Request(`https://team.test/v1/orgs/${org}/${path}`, { method, headers: { Authorization: `Bearer ${auth}`, "Content-Type": "application/json" }, ...(method === "POST" ? { body: "{}" } : {}) }));
+    expect((await request(`chat-messages/${message.id}`, token)).status).toBe(404);
+    expect((await request(`chat-messages/${message.id}`, bob.token!)).status).toBe(200);
+    expect((await request(`mentions/${message.id}/read`, bob.token!, "POST")).status).toBe(200);
+    expect((await (await request("mentions?unread=true", bob.token!)).json()).items).toHaveLength(0);
+    s.changeMember(owner, org, bob.id, "remove");
+    expect((await request("mentions", bob.token!)).status).toBe(404);
+  });
+  test("keyset pagination does not skip mentions across nonmatching history", () => {
+    const { s, owner, org, join } = fixture();
+    const user = join("Edison").id;
+    const room = s.chatRooms(owner, org)[0].id;
+    const ids: string[] = [];
+    for (let i = 0; i < 36; i++) {
+      ids.push(s.sendChatMessage(owner, org, room, { body: `@Edison ${i}`, client_id: crypto.randomUUID() }).id);
+      s.sendChatMessage(owner, org, room, { body: "Unrelated", client_id: crypto.randomUUID() });
+    }
+    const first = s.mentions(user, org, new URLSearchParams());
+    expect(first.items).toHaveLength(30);
+    const second = s.mentions(user, org, new URLSearchParams(`before=${first.next_before}`));
+    expect([...first.items, ...second.items].map((i) => i.message.id)).toEqual(ids.reverse());
+    expect(second.next_before).toBeNull();
+    expect(() => s.mentions(user, org, new URLSearchParams("before=bad"))).toThrow();
+  });
+});

@@ -1,3 +1,4 @@
+import type { TeamNotificationTarget } from "./teams/types";
 import { useMentionNotifications } from "./teams/useMentionNotifications";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -144,6 +145,23 @@ function homeGreeting(): { dateLine: string; title: string } {
 
 export default function App() {
   useMentionNotifications();
+  const [notificationTarget, setNotificationTarget] = useState<TeamNotificationTarget | null>(null);
+  useEffect(() => {
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    const open = async () => {
+      try {
+        const target = await api.teamNotificationTakeTarget();
+        if (alive && target) { setNotificationTarget(target); setView("team"); }
+      } catch { /* Browser preview has no native notification queue. */ }
+    };
+    void listen("team-notification-open", () => { void open(); }).then((stop) => {
+      if (!alive) { stop(); return; }
+      unlisten = stop;
+      void open();
+    });
+    return () => { alive = false; unlisten?.(); };
+  }, []);
   const { theme, toggle } = useTheme();
   const [appTimeZone, setAppTimeZone] = useState(APP_TZ);
   const [view, setView] = useState<View>("ask");
@@ -1073,7 +1091,7 @@ export default function App() {
           </WeatherHome>
         ) : view === "team" ? (
           <Suspense fallback={<p role="status">Opening team workspace…</p>}>
-            <TeamWorkspace onOpenLibrary={() => setView("library")} />
+            <TeamWorkspace onOpenLibrary={() => setView("library")} notificationTarget={notificationTarget} onNotificationHandled={() => setNotificationTarget(null)} />
           </Suspense>
         ) : view === "documents" ? (
           <DocumentsView key="documents" notes={notes} cats={cats} onChanged={() => refresh().catch(handleErr)} />

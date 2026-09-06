@@ -1453,12 +1453,15 @@ export class TeamStore {
     const mentionMembers = this.all<{ id: string; name: string }>(
       "SELECT u.id,u.name FROM members m JOIN users u ON u.id=m.user_id WHERE m.org_id=?", org,
     ).filter((m) => row.kind === "channel" || participants.some((p) => p.id === m.id && p.active));
-    const unreadMessages = this.all<{ body: string; created_seq: number }>(
-      `SELECT body,created_seq FROM chat_messages WHERE room_id=? AND author_id<>? AND deleted_at IS NULL
+    const unreadMessages = this.all<{ id: string; body: string; created_seq: number }>(
+      `SELECT id,body,created_seq FROM chat_messages WHERE room_id=? AND author_id<>? AND deleted_at IS NULL
        AND created_seq>COALESCE((SELECT seq FROM chat_reads WHERE room_id=? AND user_id=?),0)`,
       id, user, id, user,
     );
-    const unreadMentions = unreadMessages.filter((m) => findMentions(m.body, mentionMembers).some((mention) => mention.user.id === user));
+    const seenMentions = new Set(this.all<{ message_id: string }>(
+      "SELECT mr.message_id FROM chat_mention_reads mr JOIN chat_messages m ON m.id=mr.message_id WHERE mr.user_id=? AND m.room_id=?", user, id,
+    ).map((row) => row.message_id));
+    const unreadMentions = unreadMessages.filter((m) => !seenMentions.has(m.id) && findMentions(m.body, mentionMembers).some((mention) => mention.user.id === user));
     const last = this.get(
       "SELECT MAX(COALESCE(deleted_at,edited_at,created_at)) AS at FROM chat_messages WHERE room_id=?",
       id,
@@ -1490,6 +1493,8 @@ export class TeamStore {
       participants,
       unread,
       unread_mentions: unreadMentions.length,
+      latest_unread_message_id: unreadMessages.reduce<(typeof unreadMessages)[number] | undefined>((latest, m) => !latest || m.created_seq > latest.created_seq ? m : latest, undefined)?.id,
+      latest_unread_mention_id: unreadMentions.reduce<(typeof unreadMentions)[number] | undefined>((latest, m) => !latest || m.created_seq > latest.created_seq ? m : latest, undefined)?.id,
       latest_unread_message_seq: unreadMessages.reduce((seq, m) => Math.max(seq, m.created_seq), 0),
       latest_unread_mention_seq: unreadMentions.reduce((seq, m) => Math.max(seq, m.created_seq), 0),
       notification_cursor: this.latestChatCursor(id),
@@ -1732,6 +1737,51 @@ export class TeamStore {
     );
     if (!row) fail(404, "Message not found");
     return this.chatRoom(user, org, String(row.room_id));
+  }
+  messageLocation(user: string, org: string, id: string) {
+    const room = this.messageRoom(user, org, id);
+    const message = this.chatMessage(user, org, id, room);
+    if (message.deleted_at) fail(404, "This message was deleted");
+    const parent = message.thread_id ? this.chatMessage(user, org, message.thread_id, room) : undefined;
+    return { room, message, parent };
+  }
+  readMention(user: string, org: string, id: string) {
+    this.messageLocation(user, org, id);
+    this.run("INSERT OR IGNORE INTO chat_mention_reads(user_id,message_id) VALUES(?,?)", user, id);
+    return { ok: true };
+  }
+  mentions(user: string, org: string, query: URLSearchParams) {
+    this.role(user, org);
+    let before = query.has("before") ? this.chatCursor(Number(query.get("before")), "mentions cursor") : Number.MAX_SAFE_INTEGER;
+    const unreadOnly = query.get("unread") === "true";
+    const members = this.all<{ id: string; name: string }>(
+      "SELECT u.id,u.name FROM members m JOIN users u ON u.id=m.user_id WHERE m.org_id=?", org,
+    );
+    const items: (ReturnType<TeamStore["messageLocation"]> & { unread: boolean })[] = [];
+    const rooms = new Map<string, TeamChatRoom>();
+    while (true) {
+      const rows = this.all<{ id: string; room_id: string; body: string; created_seq: number; read_seq: number; mention_read: number }>(
+        `SELECT m.id,m.room_id,m.body,m.created_seq,COALESCE(rd.seq,0) AS read_seq,
+         EXISTS(SELECT 1 FROM chat_mention_reads mr WHERE mr.user_id=? AND mr.message_id=m.id) AS mention_read
+         FROM chat_messages m JOIN chat_rooms r ON r.id=m.room_id
+         LEFT JOIN chat_reads rd ON rd.room_id=r.id AND rd.user_id=?
+         WHERE r.org_id=? AND m.author_id<>? AND m.deleted_at IS NULL AND m.created_seq<?
+         AND (r.kind='channel' OR EXISTS(SELECT 1 FROM chat_participants p WHERE p.room_id=r.id AND p.user_id=?))
+         ORDER BY m.created_seq DESC LIMIT 200`, user, user, org, user, before, user,
+      );
+      for (const row of rows) {
+        before = row.created_seq;
+        const unread = row.created_seq > row.read_seq && !row.mention_read;
+        if (unreadOnly && !unread) continue;
+        let room = rooms.get(row.room_id);
+        if (!room) { room = this.chatRoom(user, org, row.room_id); rooms.set(row.room_id, room); }
+        const eligible = room.kind === "channel" ? members : members.filter((m) => room!.participants.some((p) => p.id === m.id && p.active));
+        if (!findMentions(row.body, eligible).some((m) => m.user.id === user)) continue;
+        items.push({ ...this.messageLocation(user, org, row.id), unread });
+        if (items.length === 30) return { items, next_before: before };
+      }
+      if (rows.length < 200) return { items, next_before: null };
+    }
   }
   reactToMessage(
     user: string,

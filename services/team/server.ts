@@ -108,6 +108,7 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
             (resource === "chat-rooms" &&
               ["messages", "read"].includes(action)) ||
             (resource === "chat-messages" && action === "reactions") ||
+            (resource === "mentions" && action === "read") ||
             (resource === "profiles" && action === "avatar")
           ))
       )
@@ -121,6 +122,10 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
         return respond(store.snapshot(user, org));
       if (path.length === 3 && method === "PATCH")
         return respond(store.renameOrg(user, org, body.name));
+      if (resource === "mentions" && id && action === "read" && method === "POST")
+        return respond(store.readMention(user, org, id));
+      if (resource === "mentions" && !id && method === "GET")
+        return respond(store.mentions(user, org, url.searchParams));
       if (resource === "chat-rooms") {
         if (!id && method === "GET") return respond(store.chatRooms(user, org));
         if (!id && method === "POST")
@@ -170,6 +175,7 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
       )
         return respond(store.reactToMessage(user, org, id, body));
       if (resource === "chat-messages" && id && !action) {
+        if (method === "GET") return respond(store.messageLocation(user, org, id));
         if (method === "PATCH")
           return respond(store.changeChatMessage(user, org, id, body));
         if (method === "DELETE")

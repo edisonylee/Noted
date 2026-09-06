@@ -64,3 +64,8 @@ CREATE TABLE IF NOT EXISTS chat_reactions (
  message_id TEXT NOT NULL REFERENCES chat_messages(id), user_id TEXT NOT NULL REFERENCES users(id),
  emoji TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(message_id,user_id,emoji)
 );
+CREATE TABLE IF NOT EXISTS chat_mention_reads (
+ user_id TEXT NOT NULL REFERENCES users(id),
+ message_id TEXT NOT NULL REFERENCES chat_messages(id),
+ PRIMARY KEY(user_id,message_id)
+);

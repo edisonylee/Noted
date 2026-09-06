@@ -19,7 +19,7 @@ export function MessageRow({
   onProfile,
   renderBody,
   showReplies = true,
-  extras,
+  extras, highlighted = false,
 }: {
   org: string;
   user: string;
@@ -36,6 +36,7 @@ export function MessageRow({
   renderBody?: (body: string) => ReactNode;
   showReplies?: boolean;
   extras: boolean;
+  highlighted?: boolean;
 }) {
   const [picker, setPicker] = useState(false);
   const [search, setSearch] = useState("");
@@ -64,7 +65,7 @@ export function MessageRow({
     <article
       data-message-id={message.id}
       data-message-seq={message.created_seq}
-      className={`messages-message${message.author_id === user ? " own" : ""}`}
+      className={`messages-message${message.author_id === user ? " own" : ""}${highlighted ? " message-target" : ""}`}
       aria-label={`Message from ${person.name}`}
     >
       <button

@@ -37,7 +37,9 @@ export function useMentionNotifications() {
               for (const room of mentions) {
                 if (stopped || epoch !== generation) break;
                 if (!permitted || !mentionNotificationsEnabled() || isViewingMessageRoom(room.id)) continue;
+                const message = mode === "mentions" ? room.latest_unread_mention_id : room.latest_unread_message_id;
                 await sendTeamNotification({
+                  target: message && room.notification_user_id ? { server: session.server, org: org.id, user: room.notification_user_id, message } : undefined,
                   title: mode === "mentions" ? `You were mentioned in ${org.name}` : `New message in ${org.name}`,
                   body: room.kind === "direct" ? "You have a new direct message." : `New ${mode === "mentions" ? "mention" : "message"} in ${room.is_default ? "Team chat" : `#${room.name}`}.`,
                 });

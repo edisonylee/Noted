@@ -1,3 +1,5 @@
+import { MentionsInbox } from "./MentionsInbox";
+import type { TeamMessageLocation, TeamNotificationTarget } from "./types";
 import { captureMessagePosition, readMessagePosition, restoreMessagePosition, saveMessagePosition } from "./messageScroll";
 import { useNavigationState } from "../useNavigationState";
 import { setViewedMessageRoom } from "./mentionNotifications";
@@ -12,6 +14,7 @@ import {
 } from "react";
 import {
   ArrowDown,
+  AtSign,
   Hash,
   Lock,
   Loader,
@@ -46,8 +49,10 @@ export function TeamMessages({
   data,
   active,
   requestedRoom,
-  onUnread,
+  onUnread, notificationTarget, onNotificationHandled,
 }: {
+  notificationTarget?: TeamNotificationTarget | null;
+  onNotificationHandled?: () => void;
   data: TeamSnapshot;
   active: boolean;
   requestedRoom: TeamChatRoom | null;
@@ -56,6 +61,38 @@ export function TeamMessages({
   const org = data.org.id,
     user = data.user.id;
   const [rooms, setRooms] = useState<TeamChatRoom[]>([]);
+  const [inbox, setInbox] = useNavigationState(`team:${org}:${user}:mentions-inbox`, false);
+  const [jump, setJump] = useState<(TeamMessageLocation & { nonce: number }) | null>(null);
+  const [opening, setOpening] = useState(false);
+  const [openError, setOpenError] = useState("");
+  const openEpoch = useRef(0);
+  useEffect(() => () => { ++openEpoch.current; }, []);
+  const openMessage = useCallback(async (message: string) => {
+    const epoch = ++openEpoch.current;
+    setOpening(true); setOpenError("");
+    try {
+      const location = await team.request<TeamMessageLocation>("GET", orgPath(org, `/chat-messages/${encodeURIComponent(message)}`));
+      if (epoch !== openEpoch.current) return;
+      setRooms((old) => [...old.filter((r) => r.id !== location.room.id), location.room]);
+      setSelected(location.room.id);
+      setJump({ ...location, nonce: epoch });
+      setInbox(false);
+      // Opening one mention does not mark the entire conversation as read.
+      await team.request("POST", orgPath(org, `/mentions/${encodeURIComponent(message)}/read`));
+      if (epoch === openEpoch.current) setRetry((n) => n + 1);
+    } catch (e) { if (epoch === openEpoch.current) setOpenError(String(e)); }
+    finally { if (epoch === openEpoch.current) setOpening(false); }
+  }, [org]);
+  useEffect(() => {
+    if (!notificationTarget) return;
+    if (notificationTarget.org !== org || notificationTarget.user !== user) {
+      setOpenError("This notification belongs to a different team account.");
+      onNotificationHandled?.();
+      return;
+    }
+    void openMessage(notificationTarget.message);
+    onNotificationHandled?.();
+  }, [notificationTarget, org, user, openMessage, onNotificationHandled]);
   const [selected, setSelected] = useNavigationState(`team:${org}:${user}:room`, "");
   const [search, setSearch] = useNavigationState(`team:${org}:${user}:room-search`, "");
   const [error, setError] = useState("");
@@ -144,6 +181,7 @@ export function TeamMessages({
     if (requestedRoom) {
       updateRoom(requestedRoom);
       setSelected(requestedRoom.id);
+      setInbox(false); setJump(null);
       setSearch("");
     }
   }, [requestedRoom, updateRoom]);
@@ -152,9 +190,9 @@ export function TeamMessages({
   }, [active]);
   const current = rooms.find((r) => r.id === selected);
   useEffect(() => {
-    setViewedMessageRoom(active ? selected : null);
+    setViewedMessageRoom(active && !inbox ? selected : null);
     return () => setViewedMessageRoom(null);
-  }, [active, selected]);
+  }, [active, selected, inbox]);
   const matches = (room: TeamChatRoom) =>
     roomLabel(room, user).toLowerCase().includes(search.trim().toLowerCase());
   const directRooms = rooms
@@ -172,9 +210,9 @@ export function TeamMessages({
   const roomButton = (room: TeamChatRoom) => (
     <button
       key={room.id}
-      className={`messages-conversation-row${selected === room.id ? " on" : ""}`}
-      onClick={() => setSelected(room.id)}
-      aria-current={selected === room.id ? "page" : undefined}
+      className={`messages-conversation-row${!inbox && selected === room.id ? " on" : ""}`}
+      onClick={() => { ++openEpoch.current; setOpening(false); setSelected(room.id); setInbox(false); setJump(null); }}
+      aria-current={!inbox && selected === room.id ? "page" : undefined}
     >
       <span
         className={`messages-person-mark${room.is_default ? " team" : ""}`}
@@ -272,6 +310,10 @@ export function TeamMessages({
             />
           </label>
         </div>
+        <button className={`messages-mentions-nav${inbox ? " on" : ""}`} aria-current={inbox ? "page" : undefined} onClick={() => { ++openEpoch.current; setOpening(false); setInbox(true); }}>
+          <AtSign size={17} /> Mentions
+          {rooms.reduce((count, room) => count + (room.unread_mentions ?? 0), 0) > 0 && <b>{rooms.reduce((count, room) => count + (room.unread_mentions ?? 0), 0)}</b>}
+        </button>
         {rooms
           .filter((room) => room.is_default && matches(room))
           .map(roomButton)}
@@ -328,9 +370,11 @@ export function TeamMessages({
           )}
         </div>
       </aside>
-      {current ? (
+      {openError && <p className="team-error messages-open-error" role="alert">{openError}</p>}
+      {opening ? <p className="messages-empty">Opening message…</p> : inbox ? <MentionsInbox org={org} user={user} onOpen={(id) => void openMessage(id)} /> : current ? (
         <MessageRoom
-          key={current.id}
+          key={`${current.id}:${jump?.nonce ?? "normal"}`}
+          jump={jump?.room.id === current.id ? jump : undefined}
           org={org}
           user={user}
           room={current}
@@ -564,8 +608,9 @@ function MessageRoom({
   onRoom,
   onRead,
   thread,
-  onCloseThread,
+  onCloseThread, jump,
 }: {
+  jump?: TeamMessageLocation;
   org: string;
   user: string;
   room: TeamChatRoom;
@@ -582,7 +627,8 @@ function MessageRoom({
   onCloseThread?: () => void;
 }) {
   const positionKey = `${org}:${user}:${room.id}:${thread?.id ?? "main"}`;
-  const restorePosition = useRef(readMessagePosition(positionKey));
+  const destination = jump ? (thread ? jump.message : jump.parent ?? jump.message) : undefined;
+  const restorePosition = useRef(destination ? { id: destination.id, seq: destination.created_seq, offset: 40 } : readMessagePosition(positionKey));
   const positionReady = useRef(false);
   const holdPosition = useRef(!!restorePosition.current);
   const wasActive = useRef(isActive);
@@ -595,7 +641,7 @@ function MessageRoom({
   const draftKey = thread?.id ?? room.id;
   const draft = drafts[draftKey] ?? "";
   const setDraft = (value: string) => setDraftFor(draftKey, value);
-  const [threadRoot, setThreadRoot] = useState<TeamChatMessage | null>(null);
+  const [threadRoot, setThreadRoot] = useState<TeamChatMessage | null>(jump?.parent ?? null);
   const [parent, setParent] = useState(thread);
   const [profile, setProfile] = useState<TeamUser | null>(null);
   const threadId = thread?.id;
@@ -916,6 +962,7 @@ function MessageRoom({
         org={org}
         user={user}
         message={message}
+        highlighted={destination?.id === message.id}
         person={person}
         canSend={canSend}
         renderBody={renderBody}
@@ -1190,6 +1237,7 @@ function MessageRoom({
             memberCount={memberCount}
             members={members}
             thread={threadRoot}
+            jump={jump?.parent?.id === threadRoot.id ? jump : undefined}
             drafts={drafts}
             setDraftFor={setDraftFor}
             sendKeyFor={sendKeyFor}

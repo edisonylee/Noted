@@ -101,11 +101,16 @@ async fn system_settings_set(
 }
 
 #[tauri::command]
-async fn team_notification_send(title: String, body: String) -> Result<(), String> {
+async fn team_notification_send(title: String, body: String, target: Option<team_notifications::Target>) -> Result<(), String> {
     if title.len() > 500 || body.len() > 2000 {
         return Err("Notification text is too long".into());
     }
-    team_notifications::send(title, body).await
+    team_notifications::send(title, body, target).await
+}
+
+#[tauri::command]
+fn team_notification_take_target() -> Option<team_notifications::Target> {
+    team_notifications::take_target()
 }
 
 #[tauri::command]
@@ -4956,7 +4961,7 @@ pub fn run() {
             gcal::init(&dir);
             applecal::cfg_init(&dir);
             reminders::init(&dir);
-            team_notifications::init();
+            team_notifications::init(app.handle().clone());
             let conn = db::init(&dir.join("noted.db"))?;
             app.manage(Db(Mutex::new(conn)));
             #[cfg(all(target_os = "macos", feature = "sanitized-development-fixtures"))]
@@ -5121,6 +5126,7 @@ pub fn run() {
             system_settings_get,
             system_settings_set,
             team_notification_send,
+            team_notification_take_target,
             reminder_settings_get,
             reminder_settings_set,
             theme_list,

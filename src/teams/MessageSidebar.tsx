@@ -12,7 +12,7 @@ import {
   X,
 } from "lucide-react";
 import { TeamAvatar } from "./TeamAvatar";
-import { roomLabel } from "./messaging";
+import { roomLabel, shortTime } from "./messaging";
 import { useNavigationState } from "../useNavigationState";
 import type { TeamChatRoom, TeamSnapshot } from "./types";
 import "./message-sidebar.css";
@@ -100,12 +100,6 @@ export function MessageSidebar({
           : room.kind === "direct"
             ? "Start the conversation"
             : "No messages yet";
-    const date = last && new Date(last.created_at);
-    const time = date
-      ? date.toDateString() === new Date().toDateString()
-        ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
-        : date.toLocaleDateString([], { month: "short", day: "numeric" })
-      : "";
     const unread = room.unread > 0;
     const mentionCount = room.unread_mentions ?? 0;
     return (
@@ -146,7 +140,9 @@ export function MessageSidebar({
           </span>
         </span>
         <span className="message-list-meta">
-          {date && <time dateTime={last!.created_at}>{time}</time>}
+          {last && (
+            <time dateTime={last.created_at}>{shortTime(last.created_at)}</time>
+          )}
           {(unread || mentionCount > 0) && (
             <span
               className="message-list-badge"

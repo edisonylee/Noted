@@ -89,9 +89,30 @@ photos, job titles, and bios, with member-authenticated photo access.
 The three-second message polling gap was replaced with authenticated long polling.
 React layout effects position new content before the next paint, preserving the
 reading position when scrolled into earlier history. The thread panel focuses its
-composer on opening and closes with Escape. Profile upload validation rejects
+composer on opening and closes with Escape. A Threads control in the
+conversation header lists a conversation's threads, newest reply first, in that
+same panel. Profile upload validation rejects
 remote URLs and active image formats. Identity and history survive display-name
 changes.
+
+Inline replies sit beside threads: a Reply action on a message row (before
+Reply in thread) starts a quote-reply at the same conversation level, shown as
+a quiet bar above the composer with the author, the first line of the original
+and a cancel control. The sent reply carries a one-line reference above its
+author line; activating it jumps to and briefly highlights the original in
+place, or reloads around it when it is outside the loaded window, and a deleted
+original becomes a non-interactive tombstone. Escape is layered: it dismisses
+the mention picker first, then cancels a pending reply, then acts on the thread
+panel as usual (Back when the thread came from the list, Close otherwise).
+
+Channel references round out the composer: `#` opens the same picker as `@`,
+labelled "Link a channel", listing Team chat first and then the other open
+channels by prefix, and inserts the canonical slug. The body stores the text
+as typed; at render time a name matching one of the reader's own channels
+becomes a quiet inline chip (hover-soft background, `--line` on hover, muted
+when the channel is archived) that closes any thread panel and opens the
+channel in place. Unresolved names, code spans and URL fragments stay plain,
+and a channel reference never pings anyone.
 
 The service suite now has 44 passing tests (338 assertions), plus the message-merge
 regression test. New checks cover thread pagination and isolation, idempotent

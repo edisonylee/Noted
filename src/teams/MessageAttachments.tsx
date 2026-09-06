@@ -5,7 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Download, FileText, Loader, Paperclip, X } from "lucide-react";
+import { Download, FileText, Loader, X } from "lucide-react";
 import { api, isDesktop } from "../api";
 import { team, orgPath } from "./client";
 import type { TeamAttachment } from "./types";
@@ -22,7 +22,10 @@ const sizeLabel = (size: number) =>
   size < 1024 * 1024
     ? `${Math.ceil(size / 1024)} KB`
     : `${(size / 1024 / 1024).toFixed(1)} MB`;
-export type AttachmentPickerHandle = { addFiles: (files: File[]) => void };
+export type AttachmentPickerHandle = {
+  addFiles: (files: File[]) => void;
+  open: () => void;
+};
 export const AttachmentPicker = forwardRef<
   AttachmentPickerHandle,
   {
@@ -95,6 +98,7 @@ export const AttachmentPicker = forwardRef<
     addFiles: (chosen) => {
       void addFiles(chosen);
     },
+    open: () => input.current?.click(),
   }));
   return (
     <div className="message-attachment-picker">
@@ -110,16 +114,6 @@ export const AttachmentPicker = forwardRef<
           void addFiles(chosen);
         }}
       />
-      <button
-        type="button"
-        className="team-text-button"
-        disabled={disabled || busy || files.length >= 3}
-        onClick={() => input.current?.click()}
-        title="PNG, JPEG, PDF, or text · 5 MiB total"
-      >
-        {busy ? <Loader size={14} className="spin" /> : <Paperclip size={14} />}{" "}
-        Attach files
-      </button>
       {files.length > 0 && (
         <ul aria-label="Files to send">
           {files.map((file) => (

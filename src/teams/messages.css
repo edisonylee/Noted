@@ -199,60 +199,68 @@
 .messages-actions button {
   padding: 6px;
 }
+/* The composer is one quiet rounded box: staged files, the editor, then an
+   action bar with attach on the left and a compact send on the right. The
+   hint sits under the box so it never competes with the message itself. */
 .messages-compose {
-  margin: 0 26px 22px;
-  padding: 12px 14px 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  background: var(--surface);
-}
-.messages-compose:focus-within {
-  border-color: var(--accent);
-}
-.messages-compose-label {
-  display: block;
-  color: var(--muted);
-  font-size: 10px;
-  margin-bottom: 5px;
-}
-.messages-compose textarea {
-  display: block;
-  width: 100%;
-  min-height: 58px;
-  max-height: 220px;
-  resize: vertical;
-  border: 0;
-  border-radius: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--ink);
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.6;
-  padding: 3px 0;
-}
-.messages-compose textarea::placeholder {
-  color: var(--faint);
-}
-.messages-compose-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 7px;
-}
-.messages-compose-foot > span {
-  color: var(--muted);
-  font-size: 10px;
-}
-.messages-compose-foot .team-primary {
-  min-height: 31px;
-  padding: 6px 11px;
-  font-size: 11px;
+  margin: 0 20px 14px;
 }
 .messages-compose .team-error {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   font-size: 12px;
+}
+.messages-compose-box {
+  padding: 8px 8px 6px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.messages-compose-box:focus-within {
+  border-color: var(--accent);
+}
+.messages-compose-box .message-attachment-picker ul {
+  margin: 2px 0 8px;
+}
+.messages-compose-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+}
+/* Two class names, not one: the base .icon-btn lives in App.css and the
+   team stylesheet is a lazy chunk, so a single-class override would depend
+   on which sheet happened to load last. */
+.messages-compose-bar .messages-compose-attach {
+  width: 30px;
+  height: 30px;
+  margin-left: -6px;
+  border-radius: 50%;
+}
+.messages-compose-send {
+  margin-left: auto;
+  width: 30px;
+  height: 30px;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--on-ink);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease);
+}
+.messages-compose-send:hover:not(:disabled) {
+  background: var(--ink-hover);
+}
+.messages-compose-send:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.messages-compose-hint {
+  margin: 6px 0 0;
+  text-align: center;
+  color: var(--faint);
+  font-size: 10.5px;
 }
 .messages-empty,
 .messages-unavailable {
@@ -287,7 +295,7 @@
 }
 .messages-new {
   position: absolute;
-  bottom: 183px;
+  bottom: 136px;
   align-self: center;
   padding: 7px 12px;
   min-height: 32px;
@@ -359,8 +367,8 @@
     margin-top: 12px;
     padding-top: 0;
   }
-  .messages-compose-foot > span {
-    font-size: 9px;
+  .messages-compose-hint {
+    font-size: 9.5px;
   }
   .messages-actions {
     opacity: 1;
@@ -532,22 +540,6 @@
 }
 .messages-room-head h1 {
   font-size: 19px;
-}
-.messages-compose {
-  margin: 0 20px 18px;
-  padding: 10px 13px;
-}
-.messages-compose textarea {
-  min-height: 42px;
-}
-.messages-compose-label.sr-only {
-  margin: 0;
-}
-.messages-compose-foot {
-  margin-top: 3px;
-}
-.messages-new {
-  bottom: 140px;
 }
 @media (max-width: 1050px) {
   .team-messages {
@@ -747,6 +739,10 @@
   padding: 1px 3px;
 }
 .messages-mention.self {
+  /* App.css's Self knowledge-graph view owns a bare .self rule (display: flex;
+     flex: 1) that would otherwise stretch this mark across the whole line. */
+  display: inline;
+  flex: none;
   background: var(--accent-tint);
   color: var(--ink);
   box-shadow: inset 0 -1px 0 var(--accent);
@@ -886,4 +882,168 @@
   flex: 1;
   height: 1px;
   background: var(--line-strong);
+}
+.messages-head-count {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.messages-thread-list {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.messages-thread-list .message-collection-list {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  padding: 0 16px 16px;
+}
+.messages-thread-list-error {
+  margin: 12px 24px;
+}
+.thread-list-row .thread-list-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+.thread-list-row time {
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.thread-list-row small {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.thread-list-row small .message-list-badge {
+  margin-left: auto;
+}
+.thread-list-row.is-unread strong {
+  color: var(--ink);
+  font-weight: 650;
+}
+.thread-list-row .messages-deleted {
+  font-style: italic;
+  color: var(--muted);
+}
+/* Scoped under the content column so the rules outrank the body-paragraph
+   rule above: the deleted-original tombstone is a <p>, and both states of the
+   reference line must share one size and rhythm. */
+.messages-message-content .message-reply-ref {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin: 0 0 3px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--muted);
+  cursor: pointer;
+  text-align: left;
+}
+.messages-message-content .message-reply-ref svg {
+  flex: none;
+  color: var(--faint);
+}
+.messages-message-content .message-reply-ref b {
+  flex: none;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+.messages-message-content .message-reply-ref span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.messages-message-content .message-reply-ref:not(.is-deleted):hover {
+  color: var(--ink);
+}
+.messages-message-content .message-reply-ref:not(.is-deleted):hover span {
+  text-decoration: underline;
+}
+.messages-message-content .message-reply-ref.is-deleted {
+  font-style: italic;
+  cursor: default;
+}
+.messages-compose-reply {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 5px 6px 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+.messages-compose-reply > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.messages-compose-reply b {
+  color: var(--ink);
+  font-weight: 600;
+}
+/* Outranks team-layout.css's workspace-wide 34px button minimum on
+   specificity rather than load order. */
+.team-workspace .messages-compose-reply .team-text-button {
+  margin-left: auto;
+  padding: 4px;
+  min-height: 26px;
+}
+/* Below 650px the actions pill is always visible and floats over the row's
+   first line, which is now the reference; keep the quote clear of it. */
+@media (max-width: 650px) {
+  .messages-message-content .message-reply-ref {
+    padding-right: 180px;
+  }
+}
+/* A resolved #channel reference: the "#" glyph is the icon, so no Lucide mark;
+   the accent stays reserved for the self @ mark and the .message-target flash. */
+.messages-channel-link {
+  display: inline;
+  font: inherit;
+  font-weight: 550;
+  color: var(--ink);
+  background: var(--hover-soft);
+  border: 0;
+  border-radius: 4px;
+  padding: 1px 3px;
+  cursor: pointer;
+}
+.messages-channel-link:hover,
+.messages-channel-link:focus-visible {
+  background: var(--line);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.messages-channel-link.is-archived {
+  color: var(--muted);
+}
+/* Muted text on the --line hover background is 4.3:1 in the light theme;
+   archived chips keep the rest background and signal hover by underline only. */
+.messages-channel-link.is-archived:hover,
+.messages-channel-link.is-archived:focus-visible {
+  background: var(--hover-soft);
+}
+.messages-mention-picker button small {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--muted);
 }

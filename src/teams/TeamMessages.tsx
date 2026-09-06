@@ -24,6 +24,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -31,10 +32,13 @@ import {
 import {
   ArrowDown,
   ChevronLeft,
+  CornerUpLeft,
   Hash,
   Lock,
   Loader,
   MessageSquare,
+  MessagesSquare,
+  Paperclip,
   RefreshCw,
   Send,
   Settings2,
@@ -48,18 +52,27 @@ import type {
   TeamChatMessage,
   TeamChatPage,
   TeamChatRoom,
+  TeamReplyReference,
   TeamSnapshot,
   TeamUser,
 } from "./types";
-import { mergeMessages, roomLabel } from "./messaging";
+import {
+  canReplyInline,
+  mergeMessages,
+  quotePreview,
+  replyReference,
+  roomLabel,
+  sendAttemptKey,
+} from "./messaging";
 import {
   draftKey as draftStorageKey,
   readDrafts,
   writeDrafts,
 } from "./messageDrafts";
-import { findMentions, mentionQuery } from "./mentions";
+import { bodyMentions, channelQuery, mentionQuery } from "./mentions";
 import { TeamProfileCard } from "./TeamProfile";
 import { MessageRow } from "./MessageRow";
+import { ThreadList } from "./ThreadList";
 import "./messages.css";
 
 export function TeamMessages({
@@ -291,6 +304,12 @@ export function TeamMessages({
     if (!active) setDialog(null);
   }, [active]);
   const current = rooms.find((r) => r.id === selected);
+  // Archived and default rooms included: old #references keep resolving to
+  // their read-only history. Memoized so row rendering sees a stable prop.
+  const channels = useMemo(
+    () => rooms.filter((r) => r.kind === "channel"),
+    [rooms],
+  );
   useEffect(() => {
     setViewedMessageRoom(
       active && !inbox && !savedView && (!compact || !listVisible)
@@ -308,6 +327,24 @@ export function TeamMessages({
     setSavedView(false);
     setJump(null);
     setListVisible(false);
+  };
+  // A #channel chip: the same path as a sidebar click, plus the filter clear
+  // the sidebar's own handlers do. Focus is best-effort: the new room's
+  // composer when it is editable, otherwise its first header control, so a
+  // chip activated by keyboard never strands focus on <body> — in the compact
+  // layout the toolbar focus effect does not re-run because the list is
+  // already hidden, and a read-only room has no editable composer.
+  const openRoom = (id: string) => {
+    selectRoom(id);
+    setSearch("");
+    requestAnimationFrame(() => {
+      const root = shell.current;
+      const target =
+        root?.querySelector<HTMLElement>(
+          '.messages-room-main .message-composer-editor .ProseMirror[contenteditable="true"]',
+        ) ?? root?.querySelector<HTMLElement>(".messages-room-head button");
+      target?.focus({ preventScroll: true });
+    });
   };
   return (
     <div className="messages-shell" ref={shell}>
@@ -384,6 +421,8 @@ export function TeamMessages({
               active={active && (!compact || !listVisible)}
               memberCount={data.members.length}
               members={data.members}
+              channels={channels}
+              onOpenRoom={openRoom}
               drafts={drafts}
               setDraftFor={(key, value) =>
                 setDrafts((old) => ({ ...old, [key]: value }))
@@ -611,6 +650,8 @@ function MessageRoom({
   active: isActive,
   memberCount,
   members,
+  channels,
+  onOpenRoom,
   drafts,
   setDraftFor,
   sendKeyFor,
@@ -619,6 +660,7 @@ function MessageRoom({
   onRead,
   thread,
   onCloseThread,
+  onBackToThreads,
   onOpenMessage,
   onMeeting,
   jump,
@@ -632,6 +674,10 @@ function MessageRoom({
   active: boolean;
   memberCount: number;
   members: TeamUser[];
+  // The reader's own channel list, archived ones included; #references in
+  // bodies resolve against it and nowhere else.
+  channels: TeamChatRoom[];
+  onOpenRoom?: (id: string) => void;
   drafts: Record<string, string>;
   setDraftFor: (key: string, value: string) => void;
   sendKeyFor: (key: string, body: string) => string;
@@ -640,6 +686,8 @@ function MessageRoom({
   onRead: (id: string) => void;
   thread?: TeamChatMessage;
   onCloseThread?: () => void;
+  // Present only when the thread was opened from the thread list.
+  onBackToThreads?: () => void;
   onOpenMessage?: (id: string) => void;
   onMeeting?: (id: string) => void;
 }) {
@@ -688,12 +736,43 @@ function MessageRoom({
     `team:${org}:${user}:${draftKey}:attachments`,
     [],
   );
+  // Same lifecycle as staged attachments: survives room and thread switches
+  // and the jump remount, dropped on reload. Never the full message.
+  const [replyTo, setReplyTo] = useNavigationState<TeamReplyReference | null>(
+    `team:${org}:${user}:${draftKey}:reply-to`,
+    null,
+  );
+  const [flash, setFlash] = useState<string | null>(null);
+  const flashTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(flashTimer.current), []);
   const [readingFiles, setReadingFiles] = useState(false);
   const draft = drafts[draftKey] ?? "";
   const setDraft = (value: string) => setDraftFor(draftKey, value);
   const [threadRoot, setThreadRoot] = useState<TeamChatMessage | null>(
     jump?.parent ?? null,
   );
+  // The thread-panel slot shows either the thread list or one thread; these
+  // stay plain state because a jump remounts the room and discards them.
+  const [threadList, setThreadList] = useState(false);
+  const [threadFromList, setThreadFromList] = useState(false);
+  const [threadListFocus, setThreadListFocus] = useState<string | null>(null);
+  const [threadsVersion, setThreadsVersion] = useState(0);
+  const threadsButton = useRef<HTMLButtonElement>(null);
+  // Every exit from the panel goes through here so no caller forgets a piece.
+  const resetThreadPanel = useCallback(() => {
+    setThreadRoot(null);
+    setThreadList(false);
+    setThreadFromList(false);
+    setThreadListFocus(null);
+  }, []);
+  // A chip inside the thread panel reaches the main room's handler through the
+  // nested instance's onOpenRoom, so the panel closes explicitly here: a
+  // same-room chip never remounts, and a stale list would keep the main pane
+  // inert.
+  const openRoom = (id: string) => {
+    resetThreadPanel();
+    onOpenRoom?.(id);
+  };
   const [parent, setParent] = useState(thread);
   const [profile, setProfile] = useState<TeamUser | null>(null);
   const threadId = thread?.id;
@@ -732,6 +811,14 @@ function MessageRoom({
   useEffect(() => {
     if (threadId && isActive) composer.current?.focus();
   }, [threadId, isActive]);
+  // Only rows in the loaded window are visible here; a target deleted outside
+  // it is caught by the server's 409 at send time instead.
+  useEffect(() => {
+    if (replyTo && messages.find((m) => m.id === replyTo.id)?.deleted_at) {
+      setReplyTo(null);
+      setSendError("The message you were replying to was deleted.");
+    }
+  }, [messages, replyTo, setReplyTo]);
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -911,6 +998,16 @@ function MessageRoom({
               ),
         );
         if (initial) setOlderBefore(page.older_before);
+        // Reply sends, edits and deletes re-emit their root, so an open
+        // thread list refreshes within long-poll latency. quotedChanged()
+        // fan-out re-emits quoting rows too, so a root with replies that is
+        // also quoted can trigger one extra, harmless refetch.
+        if (
+          !initial &&
+          !threadId &&
+          page.messages.some((m) => m.thread_id || (m.reply_count ?? 0) > 0)
+        )
+          setThreadsVersion((v) => v + 1);
         cursor.current = page.cursor;
         if (
           !pinned.current &&
@@ -928,7 +1025,7 @@ function MessageRoom({
         setEditing(null);
         setDeleting(null);
         setSettings(false);
-        setThreadRoot(null);
+        resetThreadPanel();
         setProfile(null);
         setParent(undefined);
         setLoaded(true);
@@ -952,7 +1049,7 @@ function MessageRoom({
       clearTimeout(timer);
       window.removeEventListener("focus", wake);
     };
-  }, [path, onRoom, retry, isActive, threadId]);
+  }, [path, onRoom, retry, isActive, threadId, resetThreadPanel]);
   const newer = async () => {
     if (newerAfter.current == null || loadingNewer) return;
     setLoadingNewer(true);
@@ -979,7 +1076,7 @@ function MessageRoom({
         cursor.current = null;
         newerAfter.current = null;
         setHasNewer(false);
-        setThreadRoot(null);
+        resetThreadPanel();
         setParent(undefined);
         setProfile(null);
       }
@@ -1012,7 +1109,7 @@ function MessageRoom({
         setEditing(null);
         setDeleting(null);
         setSettings(false);
-        setThreadRoot(null);
+        resetThreadPanel();
         setParent(undefined);
         setProfile(null);
         cursor.current = null;
@@ -1036,11 +1133,14 @@ function MessageRoom({
       error
     )
       return;
+    const replyToId = replyTo?.id ?? null;
     const clientId = sendKeyFor(
         draftKey,
-        attachments.length
-          ? JSON.stringify([body, attachments.map((f) => f.id)])
-          : body,
+        sendAttemptKey(
+          body,
+          attachments.map((f) => f.id),
+          replyToId,
+        ),
       ),
       epoch = accessEpoch.current;
     setSending(true);
@@ -1053,11 +1153,13 @@ function MessageRoom({
           body,
           client_id: clientId,
           thread_id: threadId,
+          reply_to_id: replyToId,
           attachments: attachments.map(({ name, data }) => ({ name, data })),
         },
       );
       onSentFor(draftKey, body);
       setAttachments([]);
+      setReplyTo(null);
       if (!alive.current || epoch !== accessEpoch.current) return;
       setMessages((old) => mergeMessages(old, [message]));
       toBottom();
@@ -1065,10 +1167,39 @@ function MessageRoom({
         composer.current?.focus({ preventScroll: true }),
       );
     } catch (e) {
-      if (alive.current) setSendError(String(e));
+      if (!alive.current) return;
+      setSendError(String(e));
+      // A failed send keeps the bar so the draft can be retried as written,
+      // except when the target itself is gone: that retry can never succeed.
+      if (String(e).includes("replying to was deleted")) setReplyTo(null);
     } finally {
       if (alive.current) setSending(false);
     }
+  };
+  const quote = (message: TeamChatMessage) => {
+    setReplyTo(replyReference(message));
+    requestAnimationFrame(() =>
+      composer.current?.focus({ preventScroll: true }),
+    );
+  };
+  // In-window first so a jump keeps the loaded page, drafts and scroll state;
+  // a target outside the window goes through the normal open flow (an
+  // around= remount, thread panel reopened when the target is a reply).
+  const jumpToMessage = (target: string) => {
+    const el = viewport.current;
+    if (el && restoreMessagePosition(el, { id: target, seq: 0, offset: 40 })) {
+      // onScroll recomputes pinned from holdPosition, so both must change
+      // before the scroll event lands or the next poll snaps to the bottom.
+      holdPosition.current = true;
+      pinned.current = false;
+      setNewBelow(el.scrollHeight - el.scrollTop - el.clientHeight >= 8);
+      setFlash(target);
+      window.clearTimeout(flashTimer.current);
+      flashTimer.current = window.setTimeout(
+        () => setFlash((f) => (f === target ? null : f)),
+        1600,
+      );
+    } else onOpenMessage?.(target);
   };
   const [caret, setCaret] = useState(0);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -1079,50 +1210,99 @@ function MessageRoom({
           room.participants.some((p) => p.id === m.id && p.active),
         )
       : members;
-  const query = dismissed ? null : mentionQuery(draft, caret);
-  const suggestions = query
-    ? eligible
-        .filter((m) =>
-          m.name
-            .toLocaleLowerCase()
-            .startsWith(query.query.toLocaleLowerCase()),
+  // One picker for every trigger. The trigger closest to the caret wins:
+  // channelQuery forbids whitespace while mentionQuery's [^@\n]* swallows
+  // "#des", so "@Ed #de" belongs to the channel picker and "#design @Ed" to
+  // the member picker. A third trigger adds a query function and a branch
+  // here, and a render branch in the listbox; keys, Escape and arrows are
+  // shared. No channels yet (rooms still loading) means no empty listbox.
+  type Suggestion =
+    | { kind: "member"; member: TeamUser }
+    | { kind: "channel"; room: TeamChatRoom };
+  const channelQ =
+    dismissed || !channels.length ? null : channelQuery(draft, caret);
+  const query = dismissed || channelQ ? null : mentionQuery(draft, caret);
+  const target = channelQ ?? query;
+  const suggestions: Suggestion[] = channelQ
+    ? channels
+        .filter(
+          (r) =>
+            !r.archived_at &&
+            r.name.startsWith(channelQ.query.toLocaleLowerCase()),
+        )
+        // Same order as the sidebar: Team chat first, then alphabetical.
+        .sort(
+          (a, b) =>
+            Number(b.is_default) - Number(a.is_default) ||
+            a.name.localeCompare(b.name),
         )
         .slice(0, 8)
-    : [];
-  const chooseMention = (member: TeamUser) => {
-    if (!query) return;
-    const insertion = `@${member.name} `;
+        .map((room) => ({ kind: "channel" as const, room }))
+    : query
+      ? eligible
+          .filter((m) =>
+            m.name
+              .toLocaleLowerCase()
+              .startsWith(query.query.toLocaleLowerCase()),
+          )
+          .slice(0, 8)
+          .map((member) => ({ kind: "member" as const, member }))
+      : [];
+  const chooseSuggestion = (s: Suggestion) => {
+    if (!target) return;
+    const insertion =
+      s.kind === "channel" ? `#${s.room.name} ` : `@${s.member.name} `;
     const next =
-      draft.slice(0, query.start) + insertion + draft.slice(query.end);
+      draft.slice(0, target.start) + insertion + draft.slice(target.end);
     if (next.length > 10_000) return;
     setDraft(next);
     setDismissed(true);
     requestAnimationFrame(() => {
       composer.current?.focus();
       composer.current?.setSelectionRange(
-        query.start + insertion.length,
-        query.start + insertion.length,
+        target.start + insertion.length,
+        target.start + insertion.length,
       );
     });
   };
-  // Passed to MessageRow so the row itself stays unaware of mentions.
+  // Passed to MessageRow so the row itself stays unaware of mentions. A
+  // channel chip shows the text exactly as typed; resolution is the reader's
+  // own room list, so a name never links across workspaces.
   const renderPlainBody = (body: string) => {
     let end = 0;
-    const parts = findMentions(body, eligible).map((mention) => {
-      const before = body.slice(end, mention.start);
-      end = mention.end;
+    const parts = bodyMentions(body, eligible, channels).map((hit) => {
+      const before = body.slice(end, hit.start);
+      end = hit.end;
+      const text = body.slice(hit.start, hit.end);
       return (
-        <Fragment key={mention.start}>
+        <Fragment key={hit.start}>
           {before}
-          <mark
-            className={
-              mention.user.id === user
-                ? "messages-mention self"
-                : "messages-mention"
-            }
-          >
-            {body.slice(mention.start, mention.end)}
-          </mark>
+          {hit.kind === "member" ? (
+            <mark
+              className={
+                hit.user.id === user
+                  ? "messages-mention self"
+                  : "messages-mention"
+              }
+            >
+              {text}
+            </mark>
+          ) : (
+            <button
+              type="button"
+              className={`messages-channel-link${hit.room.archived_at ? " is-archived" : ""}`}
+              title={
+                hit.room.is_default
+                  ? "Open Team chat"
+                  : hit.room.archived_at
+                    ? `Open #${hit.room.name} · Archived channel`
+                    : `Open #${hit.room.name}`
+              }
+              onClick={() => openRoom(hit.room.id)}
+            >
+              {text}
+            </button>
+          )}
         </Fragment>
       );
     });
@@ -1156,6 +1336,7 @@ function MessageRoom({
     );
   };
   const label = roomLabel(room, user);
+  const unreadThreads = room.unread_threads ?? 0;
   const renderEpoch = accessEpoch.current;
   const changed = (message: TeamChatMessage) => {
     if (!alive.current || renderEpoch !== accessEpoch.current) return;
@@ -1173,7 +1354,7 @@ function MessageRoom({
         org={org}
         user={user}
         message={message}
-        highlighted={destination?.id === message.id}
+        highlighted={destination?.id === message.id || flash === message.id}
         person={person}
         onMarkUnread={
           room.unread_navigation
@@ -1208,6 +1389,14 @@ function MessageRoom({
         onReply={() =>
           threadId ? composer.current?.focus() : setThreadRoot(message)
         }
+        // The thread panel's parent row sits at the other level, so it never
+        // gets the action; an older server without the flag shows nothing.
+        onQuote={
+          room.inline_replies && canSend && canReplyInline(message, threadId)
+            ? () => quote(message)
+            : undefined
+        }
+        onOpenQuoted={jumpToMessage}
         onEdit={() => setEditing(message)}
         onDelete={() => setDeleting(message)}
         onProfile={() => setProfile(person)}
@@ -1218,6 +1407,10 @@ function MessageRoom({
     <section
       className="messages-room"
       aria-label={threadId ? "Thread" : `Conversation: ${label}`}
+      // Escape precedence, outermost last: autocomplete picker → cancel
+      // pending reply (both in the composer onKeyDown, which stops
+      // propagation) → back to threads → close thread. An open <dialog>
+      // suppresses all of them.
       onKeyDown={(event) => {
         if (
           threadId &&
@@ -1225,13 +1418,13 @@ function MessageRoom({
           !document.querySelector("dialog[open]")
         ) {
           event.stopPropagation();
-          onCloseThread?.();
+          (onBackToThreads ?? onCloseThread)?.();
         }
       }}
     >
       <div
         className="messages-room-main"
-        inert={!!threadRoot || undefined}
+        inert={!!threadRoot || threadList || undefined}
         onDragEnter={(event) => {
           if (!event.dataTransfer.types.includes("Files")) return;
           event.preventDefault();
@@ -1326,6 +1519,16 @@ function MessageRoom({
                       : room.description || "Open to everyone in this team"}
             </p>
           </div>
+          {threadId && onBackToThreads && (
+            <button
+              className="team-text-button"
+              aria-label="Back to threads"
+              title="Back to threads"
+              onClick={onBackToThreads}
+            >
+              <ChevronLeft size={18} />
+            </button>
+          )}
           {threadId && (
             <button
               className="team-text-button"
@@ -1349,6 +1552,29 @@ function MessageRoom({
               onClick={() => setShowPins(true)}
             >
               Pinned
+            </button>
+          )}
+          {!threadId && room.threads_enabled && (
+            <button
+              ref={threadsButton}
+              className="team-text-button"
+              aria-expanded={threadList}
+              aria-controls={threadList ? `threads-${room.id}` : undefined}
+              aria-label={
+                unreadThreads
+                  ? `Threads, ${unreadThreads} with new replies`
+                  : "Threads"
+              }
+              onClick={() => {
+                const open = !threadList;
+                resetThreadPanel();
+                setThreadList(open);
+              }}
+            >
+              <MessagesSquare size={17} /> Threads
+              {unreadThreads > 0 && (
+                <span className="messages-head-count">{unreadThreads}</span>
+              )}
             </button>
           )}
           {!threadId && onSearch && (
@@ -1527,33 +1753,85 @@ function MessageRoom({
             className="messages-compose-label sr-only"
             htmlFor={`compose-${draftKey}`}
           >
-            {threadId
-              ? "Reply in thread"
-              : room.kind === "channel" && !room.is_default
-                ? `Message #${label}`
-                : `Message ${label}`}
+            {replyTo
+              ? `Reply to ${replyTo.author_name}`
+              : threadId
+                ? "Reply in thread"
+                : room.kind === "channel" && !room.is_default
+                  ? `Message #${label}`
+                  : `Message ${label}`}
           </label>
+          {/* Always rendered so assistive tech announces the bar appearing and
+              leaving; the composer's name and description point at it too. */}
+          <div className="messages-compose-reply-live" aria-live="polite">
+            {replyTo && (
+              <div
+                className="messages-compose-reply"
+                id={`reply-to-${draftKey}`}
+              >
+                <CornerUpLeft size={13} aria-hidden="true" />
+                <span>
+                  Replying to <b>{replyTo.author_name}</b>
+                  {quotePreview(replyTo) ? ` · ${quotePreview(replyTo)}` : ""}
+                </span>
+                <button
+                  type="button"
+                  className="team-text-button"
+                  aria-label="Cancel reply"
+                  title="Cancel reply · Escape"
+                  onClick={() => {
+                    setReplyTo(null);
+                    composer.current?.focus({ preventScroll: true });
+                  }}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+          </div>
           {suggestions.length > 0 && (
             <div
               className="messages-mention-picker"
               id={`mentions-${draftKey}`}
               role="listbox"
-              aria-label="Mention a teammate"
+              aria-label={channelQ ? "Link a channel" : "Mention a teammate"}
             >
-              {suggestions.map((member, index) => (
+              {suggestions.map((s, index) => (
                 <button
                   type="button"
                   role="option"
                   id={`mention-${draftKey}-${index}`}
                   aria-selected={index === mentionIndex % suggestions.length}
-                  key={member.id}
+                  key={s.kind === "channel" ? s.room.id : s.member.id}
                   onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => chooseMention(member)}
+                  onClick={() => chooseSuggestion(s)}
                 >
-                  @{member.name}
+                  {s.kind === "channel" ? (
+                    <>
+                      #{s.room.name}
+                      {s.room.is_default && (
+                        <>
+                          {" "}
+                          <small>Team chat</small>
+                        </>
+                      )}
+                    </>
+                  ) : (
+                    `@${s.member.name}`
+                  )}
                 </button>
               ))}
             </div>
+          )}
+          <div className="messages-compose-box">
+          {room.attachments_enabled && (
+            <AttachmentPicker
+              ref={attachmentPicker}
+              files={attachments}
+              onChange={setAttachments}
+              disabled={sending || !canSend}
+              onBusy={setReadingFiles}
+            />
           )}
           <MessageComposer
             aria-controls={
@@ -1564,15 +1842,18 @@ function MessageRoom({
                 ? `mention-${draftKey}-${mentionIndex % suggestions.length}`
                 : undefined
             }
+            aria-describedby={replyTo ? `reply-to-${draftKey}` : undefined}
             id={`compose-${draftKey}`}
             ref={composer}
             value={draft}
             disabled={sending || !canSend}
             placeholder={
               canSend
-                ? threadId
-                  ? "Reply in thread"
-                  : `Message ${room.kind === "channel" && !room.is_default ? "#" : ""}${label}`
+                ? replyTo
+                  ? `Reply to ${replyTo.author_name}`
+                  : threadId
+                    ? "Reply in thread"
+                    : `Message ${room.kind === "channel" && !room.is_default ? "#" : ""}${label}`
                 : "This conversation is read-only"
             }
             onChange={(value, caret) => {
@@ -1603,9 +1884,19 @@ function MessageRoom({
                 }
                 if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
                   e.preventDefault();
-                  chooseMention(suggestions[mentionIndex % suggestions.length]);
+                  chooseSuggestion(
+                    suggestions[mentionIndex % suggestions.length],
+                  );
                   return;
                 }
+              }
+              if (e.key === "Escape" && replyTo) {
+                e.preventDefault();
+                // Without this the section handler would also back out of or
+                // close the thread on the same keypress.
+                e.stopPropagation();
+                setReplyTo(null);
+                return;
               }
               if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
                 e.preventDefault();
@@ -1613,22 +1904,27 @@ function MessageRoom({
               }
             }}
           />
-          {room.attachments_enabled && (
-            <AttachmentPicker
-              ref={attachmentPicker}
-              files={attachments}
-              onChange={setAttachments}
-              disabled={sending || !canSend}
-              onBusy={setReadingFiles}
-            />
-          )}
-          <div className="messages-compose-foot">
-            <span>
-              Markdown supported · @ to mention · Enter to send · Shift + Enter
-              for a new line
-            </span>
+          <div className="messages-compose-bar">
+            {room.attachments_enabled && (
+              <button
+                type="button"
+                className="icon-btn messages-compose-attach"
+                disabled={
+                  sending || readingFiles || !canSend || attachments.length >= 3
+                }
+                onClick={() => attachmentPicker.current?.open()}
+                aria-label="Attach files"
+                title="Attach files · PNG, JPEG, PDF, or text · 5 MiB total"
+              >
+                {readingFiles ? (
+                  <Loader size={15} className="spin" />
+                ) : (
+                  <Paperclip size={15} />
+                )}
+              </button>
+            )}
             <button
-              className="team-primary"
+              className="messages-compose-send"
               disabled={
                 sending ||
                 readingFiles ||
@@ -1636,15 +1932,21 @@ function MessageRoom({
                 (!draft.trim() && !attachments.length) ||
                 !!error
               }
+              aria-label={threadId ? "Reply" : "Send"}
+              title={threadId ? "Reply · Enter" : "Send · Enter"}
             >
               {sending ? (
                 <Loader size={14} className="spin" />
               ) : (
                 <Send size={14} />
-              )}{" "}
-              {threadId ? "Reply" : "Send"}
+              )}
             </button>
           </div>
+          </div>
+          <p className="messages-compose-hint">
+            Markdown · @ mention · # channel · Enter to send · Shift + Enter for
+            a new line
+          </p>
         </form>
       </div>
       {showPins && (
@@ -1655,33 +1957,67 @@ function MessageRoom({
           onOpen={(id) => onOpenMessage?.(id)}
         />
       )}
-      {threadRoot && !threadId && (
+      {(threadRoot || threadList) && !threadId && (
         <div className="messages-thread-panel">
-          <MessageRoom
-            key={threadRoot.id}
-            org={org}
-            user={user}
-            room={room}
-            active={isActive}
-            memberCount={memberCount}
-            members={members}
-            thread={threadRoot}
-            jump={jump?.parent?.id === threadRoot.id ? jump : undefined}
-            drafts={drafts}
-            setDraftFor={setDraftFor}
-            sendKeyFor={sendKeyFor}
-            onSentFor={onSentFor}
-            onRoom={onRoom}
-            onRead={onRead}
-            onOpenMessage={onOpenMessage}
-            onMeeting={onMeeting}
-            onCloseThread={() => {
-              setThreadRoot(null);
-              requestAnimationFrame(() =>
-                composer.current?.focus({ preventScroll: true }),
-              );
-            }}
-          />
+          {threadRoot ? (
+            <MessageRoom
+              key={threadRoot.id}
+              org={org}
+              user={user}
+              room={room}
+              active={isActive}
+              memberCount={memberCount}
+              members={members}
+              channels={channels}
+              onOpenRoom={openRoom}
+              thread={threadRoot}
+              jump={jump?.parent?.id === threadRoot.id ? jump : undefined}
+              drafts={drafts}
+              setDraftFor={setDraftFor}
+              sendKeyFor={sendKeyFor}
+              onSentFor={onSentFor}
+              onRoom={onRoom}
+              onRead={onRead}
+              onOpenMessage={onOpenMessage}
+              onMeeting={onMeeting}
+              onBackToThreads={
+                threadFromList
+                  ? () => {
+                      setThreadListFocus(threadRoot.id);
+                      setThreadRoot(null);
+                      setThreadList(true);
+                    }
+                  : undefined
+              }
+              onCloseThread={() => {
+                resetThreadPanel();
+                requestAnimationFrame(() =>
+                  composer.current?.focus({ preventScroll: true }),
+                );
+              }}
+            />
+          ) : (
+            <ThreadList
+              id={`threads-${room.id}`}
+              org={org}
+              user={user}
+              room={room}
+              active={isActive}
+              version={threadsVersion}
+              focusRoot={threadListFocus}
+              onOpen={(root) => {
+                setThreadFromList(true);
+                setThreadList(false);
+                setThreadRoot(root);
+              }}
+              onClose={() => {
+                resetThreadPanel();
+                requestAnimationFrame(() =>
+                  threadsButton.current?.focus({ preventScroll: true }),
+                );
+              }}
+            />
+          )}
         </div>
       )}
       {profile && (

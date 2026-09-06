@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS chat_rooms (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS chat_channel_name ON chat_rooms(org_id,name COLLATE NOCASE) WHERE kind='channel';
 CREATE TABLE IF NOT EXISTS chat_participants (room_id TEXT NOT NULL REFERENCES chat_rooms(id), user_id TEXT NOT NULL REFERENCES users(id), PRIMARY KEY(room_id,user_id));
+-- chat_messages.thread_id and reply_to_id, with the chat_thread_history /
+-- chat_thread_replies / chat_reply_refs indexes, are added by TeamStore's
+-- constructor (ensureColumn) after this file runs, so a fresh database can
+-- create each index once its column exists.
 CREATE TABLE IF NOT EXISTS chat_messages (
  id TEXT PRIMARY KEY, room_id TEXT NOT NULL REFERENCES chat_rooms(id), author_id TEXT NOT NULL REFERENCES users(id),
  client_id TEXT NOT NULL, original_hash TEXT NOT NULL, body TEXT NOT NULL,

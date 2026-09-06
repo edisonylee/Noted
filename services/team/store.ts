@@ -17,6 +17,8 @@ import type {
   TeamChatRoom,
   TeamChatMessage,
   TeamChatPage,
+  TeamThreadPage,
+  TeamThreadSummary,
   TeamUser,
   TeamProfile,
 } from "../../src/teams/types";
@@ -71,6 +73,11 @@ function ids(value: unknown, name: string, max = 100): string[] {
   return [...new Set((value as unknown[]).map((v) => text(v, name, 100)))];
 }
 const admin = (role: TeamRole) => role === "owner" || role === "admin";
+// One preview wording for every list surface; the client mirrors it in
+// messagePreview() so a sidebar row and a thread row never disagree.
+function previewBody(body: string) {
+  return body.slice(0, 160) || "Shared an attachment or meeting";
+}
 
 function validateAvatar(value: string) {
   const match = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/]+={0,2})$/.exec(
@@ -129,30 +136,45 @@ export class TeamStore {
     this.db.exec(
       readFileSync(new URL("./schema.sql", import.meta.url), "utf8"),
     );
-    if (
-      !this.all<{ name: string }>("PRAGMA table_info(spaces)").some(
-        (c) => c.name === "api_enabled",
-      )
-    )
-      this.db.exec(
-        "ALTER TABLE spaces ADD COLUMN api_enabled INTEGER NOT NULL DEFAULT 0",
-      );
-    if (
-      !this.all<{ name: string }>("PRAGMA table_info(chat_messages)").some(
-        (c) => c.name === "thread_id",
-      )
-    )
-      this.db.exec(
-        "ALTER TABLE chat_messages ADD COLUMN thread_id TEXT REFERENCES chat_messages(id)",
-      );
+    this.ensureColumn("spaces", "api_enabled", "INTEGER NOT NULL DEFAULT 0");
+    // Columns added after schema.sql shipped live here, so any index over
+    // them must follow the ALTER instead of living in schema.sql.
+    this.ensureColumn(
+      "chat_messages",
+      "thread_id",
+      "TEXT REFERENCES chat_messages(id)",
+    );
     this.db.exec(
       "CREATE INDEX IF NOT EXISTS chat_thread_history ON chat_messages(room_id,thread_id,created_seq)",
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS chat_thread_replies ON chat_messages(thread_id,created_seq) WHERE thread_id IS NOT NULL",
+    );
+    this.ensureColumn(
+      "chat_messages",
+      "reply_to_id",
+      "TEXT REFERENCES chat_messages(id)",
+    );
+    // Backs the quotedChanged() fan-out; `reply_to_id=?` implies NOT NULL, so
+    // the partial index is used and stays small.
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS chat_reply_refs ON chat_messages(reply_to_id) WHERE reply_to_id IS NOT NULL",
     );
     initializeSearch(this.db);
     this
       .run(`INSERT OR IGNORE INTO chat_rooms(id,org_id,kind,name,description,created_by,created_at)
       SELECT 'general-' || o.id,o.id,'channel','general','A place for everyone in the workspace.',m.user_id,o.created_at
       FROM organizations o JOIN members m ON m.org_id=o.id AND m.role='owner'`);
+  }
+  // Additive-only migration: an existing column is left untouched, so the
+  // constructor stays idempotent across restarts.
+  private ensureColumn(table: string, column: string, ddl: string) {
+    if (
+      !this.all<{ name: string }>(`PRAGMA table_info(${table})`).some(
+        (c) => c.name === column,
+      )
+    )
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
   }
   all<T = Row>(sql: string, ...values: SQLQueryBindings[]): T[] {
     return this.db.query(sql).all(...values) as T[];
@@ -1673,8 +1695,9 @@ export class TeamStore {
       id: string;
       body: string;
       created_seq: number;
+      thread_id: string | null;
     }>(
-      `SELECT id,body,created_seq FROM chat_messages WHERE room_id=? AND author_id<>? AND deleted_at IS NULL
+      `SELECT id,body,created_seq,thread_id FROM chat_messages WHERE room_id=? AND author_id<>? AND deleted_at IS NULL
        AND created_seq>COALESCE((SELECT seq FROM chat_reads WHERE room_id=? AND user_id=?),0)`,
       id,
       user,
@@ -1727,6 +1750,13 @@ export class TeamStore {
       unread_navigation: true,
       pins_enabled: true,
       saved_messages_enabled: true,
+      threads_enabled: true,
+      // Derived from rows already loaded: chatRoom() runs for every room on
+      // every sidebar poll, so thread discovery must not add SQL here.
+      unread_threads: new Set(
+        unreadMessages.map((m) => m.thread_id).filter(Boolean),
+      ).size,
+      inline_replies: true,
       first_unread_root_id: this.get(
         "SELECT COALESCE(thread_id,id) AS id FROM chat_messages WHERE room_id=? AND author_id<>? AND deleted_at IS NULL AND created_seq>COALESCE((SELECT seq FROM chat_reads WHERE room_id=? AND user_id=?),0) ORDER BY created_seq LIMIT 1",
         id,
@@ -1808,7 +1838,7 @@ export class TeamStore {
             author_name: preview.author_name,
             body: preview.deleted_at
               ? "Message deleted"
-              : preview.body.slice(0, 160) || "Shared an attachment or meeting",
+              : previewBody(preview.body),
             created_at: preview.created_at,
           }
         : null,
@@ -2200,8 +2230,16 @@ export class TeamStore {
     id: string,
     room: TeamChatRoom,
   ): TeamChatMessage {
+    // The quoted message rides the same SELECT so a reference costs no extra
+    // query. p.room_id=m.room_id is the tamper guard: a cross-room pointer
+    // serializes as null instead of leaking another conversation's text.
     const row = this.get(
-      `SELECT m.*,u.name AS author_name FROM chat_messages m JOIN users u ON u.id=m.author_id
+      `SELECT m.*,u.name AS author_name,
+        p.id AS quoted_id,p.author_id AS quoted_author_id,pu.name AS quoted_author_name,
+        substr(p.body,1,160) AS quoted_body,p.deleted_at AS quoted_deleted_at,p.created_seq AS quoted_seq
+      FROM chat_messages m JOIN users u ON u.id=m.author_id
+      LEFT JOIN chat_messages p ON p.id=m.reply_to_id AND p.room_id=m.room_id
+      LEFT JOIN users pu ON pu.id=p.author_id
       WHERE m.id=? AND m.room_id=?`,
       id,
       room.id,
@@ -2239,6 +2277,20 @@ export class TeamStore {
         "SELECT MAX(created_at) AS at FROM chat_messages WHERE thread_id=? AND deleted_at IS NULL",
         id,
       )?.at as string | null,
+      reply_to_id: (row.reply_to_id as string | null) ?? null,
+      reply_to:
+        row.deleted_at || !row.quoted_id
+          ? null
+          : {
+              id: String(row.quoted_id),
+              author_id: String(row.quoted_author_id),
+              author_name: String(row.quoted_author_name),
+              body: row.quoted_deleted_at
+                ? ""
+                : previewBody(String(row.quoted_body)),
+              deleted_at: row.quoted_deleted_at as string | null,
+              created_seq: Number(row.quoted_seq),
+            },
       reactions: row.deleted_at
         ? []
         : this.all<{ emoji: string; count: number; reacted: number }>(
@@ -2422,6 +2474,20 @@ export class TeamStore {
       if (parent?.thread_id) fail(400, "Reply in the original thread");
       if (parent?.deleted_at)
         fail(409, "This thread's original message was deleted");
+      // chatMessage() already 404s any id outside this room, so a quote can
+      // never point at another conversation; the level check keeps the jump
+      // target inside the same timeline the reply is shown in.
+      const replyTo =
+        body.reply_to_id == null
+          ? null
+          : text(body.reply_to_id, "reply target", 100);
+      const quoted = replyTo
+        ? this.chatMessage(user, org, replyTo, room)
+        : null;
+      if (quoted && (quoted.thread_id ?? null) !== thread)
+        fail(400, "Reply to a message in this conversation");
+      if (quoted?.deleted_at)
+        fail(409, "The message you are replying to was deleted");
       const attachments = validateAttachments(body.attachments);
       const meeting =
         body.meeting == null
@@ -2451,7 +2517,7 @@ export class TeamStore {
       if (!/^[a-zA-Z0-9_-]{16,80}$/.test(client))
         fail(400, "Invalid message identifier");
       const old = this.get(
-        "SELECT id,original_hash,thread_id FROM chat_messages WHERE room_id=? AND author_id=? AND client_id=?",
+        "SELECT id,original_hash,thread_id,reply_to_id FROM chat_messages WHERE room_id=? AND author_id=? AND client_id=?",
         roomId,
         user,
         client,
@@ -2459,7 +2525,8 @@ export class TeamStore {
       if (old) {
         if (
           old.original_hash !== fingerprint ||
-          (old.thread_id ?? null) !== thread
+          (old.thread_id ?? null) !== thread ||
+          (old.reply_to_id ?? null) !== replyTo
         )
           fail(409, "This send attempt already belongs to another message");
         return this.chatMessage(user, org, String(old.id), room);
@@ -2477,7 +2544,7 @@ export class TeamStore {
         fail(413, "This team has reached its attachment storage limit");
       const id = uid();
       this.run(
-        "INSERT INTO chat_messages(id,room_id,author_id,client_id,original_hash,body,created_at,thread_id) VALUES(?,?,?,?,?,?,?,?)",
+        "INSERT INTO chat_messages(id,room_id,author_id,client_id,original_hash,body,created_at,thread_id,reply_to_id) VALUES(?,?,?,?,?,?,?,?,?)",
         id,
         roomId,
         user,
@@ -2486,6 +2553,7 @@ export class TeamStore {
         content,
         now(),
         thread,
+        replyTo,
       );
       for (const a of attachments)
         this.run(
@@ -2553,8 +2621,22 @@ export class TeamStore {
         this.run("DELETE FROM chat_saved_messages WHERE message_id=?", id);
       }
       this.messageChanged(room.id, id, message.thread_id);
+      this.quotedChanged(room.id, id);
       return this.chatMessage(user, org, id, room);
     })();
+  }
+  // Re-emits the rows quoting an edited or deleted message so open windows
+  // pick up the new excerpt or tombstone from the live cursor. Their revision
+  // is deliberately untouched: the client merges on revision >= current, and a
+  // bump would 409 anyone mid-edit of a quoting reply. Capped so one delete
+  // of a much-quoted message cannot flood chat_events; older quoting rows
+  // refresh on their next full page load.
+  private quotedChanged(room: string, id: string) {
+    this.run(
+      "INSERT INTO chat_events(room_id,message_id) SELECT room_id,id FROM chat_messages WHERE reply_to_id=? AND room_id=? AND deleted_at IS NULL ORDER BY created_seq DESC LIMIT 100",
+      id,
+      room,
+    );
   }
   private validateMeetingShare(
     user: string,
@@ -2787,6 +2869,70 @@ export class TeamStore {
       pinned_at: row.pinned_at,
       pinned_by: row.pinned_by,
     }));
+  }
+  // A thread is any root with a live reply — the same predicate chatMessage()
+  // uses for reply_count, so the listing never disagrees with the timeline.
+  // Deleted roots stay listed as tombstones; a thread whose replies are all
+  // deleted disappears. Unread is room-level: the viewer's read cursor.
+  chatThreads(
+    user: string,
+    org: string,
+    roomId: string,
+    query: URLSearchParams,
+  ): TeamThreadPage {
+    return this.db.transaction(() => {
+      const room = this.chatRoom(user, org, roomId);
+      const before = query.has("before")
+        ? this.chatCursor(Number(query.get("before")), "threads cursor")
+        : Number.MAX_SAFE_INTEGER;
+      const rows = this.all<{
+        id: string;
+        replies: number;
+        last_seq: number;
+        last_at: string;
+        unread: number | null;
+      }>(
+        `SELECT r.thread_id AS id,COUNT(*) AS replies,MAX(r.created_seq) AS last_seq,MAX(r.created_at) AS last_at,
+         SUM(r.author_id<>? AND r.created_seq>?) AS unread
+         FROM chat_messages r JOIN chat_messages root ON root.id=r.thread_id AND root.room_id=r.room_id AND root.thread_id IS NULL
+         WHERE r.room_id=? AND r.thread_id IS NOT NULL AND r.deleted_at IS NULL
+         GROUP BY r.thread_id HAVING MAX(r.created_seq)<?
+         ORDER BY last_seq DESC LIMIT 31`,
+        user,
+        room.read_cursor ?? 0,
+        roomId,
+        before,
+      );
+      const person =
+        "SELECT u.id,u.name,COALESCE((SELECT avatar_version FROM user_profiles WHERE user_id=u.id),'') AS avatar_version";
+      const items: TeamThreadSummary[] = rows.slice(0, 30).map((row) => ({
+        root: this.chatMessage(user, org, row.id, room),
+        reply_count: Number(row.replies),
+        unread_replies: Number(row.unread ?? 0),
+        last_reply_seq: Number(row.last_seq),
+        last_reply_at: String(row.last_at),
+        last_reply_by: this.get<TeamUser>(
+          `${person} FROM chat_messages m JOIN users u ON u.id=m.author_id WHERE m.room_id=? AND m.created_seq=?`,
+          roomId,
+          row.last_seq,
+        )!,
+        participants: this.all<TeamUser>(
+          `${person} FROM (SELECT author_id,MIN(created_seq) AS first FROM chat_messages WHERE thread_id=? AND deleted_at IS NULL GROUP BY author_id) a
+           JOIN users u ON u.id=a.author_id ORDER BY a.first LIMIT 5`,
+          row.id,
+        ),
+        participant_count: Number(
+          this.get(
+            "SELECT COUNT(DISTINCT author_id) AS n FROM chat_messages WHERE thread_id=? AND deleted_at IS NULL",
+            row.id,
+          )!.n,
+        ),
+      }));
+      return {
+        items,
+        next_before: rows.length > 30 ? items[29].last_reply_seq : null,
+      };
+    })();
   }
   attachment(user: string, org: string, id: string) {
     this.role(user, org);

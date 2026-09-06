@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { createMcpHandler, apiClient } from "./mcp";
 import { ensureExampleWorkspace } from "./examples";
+import { findChannelMentions } from "./mentions";
 const stores: TeamStore[] = [];
 afterEach(() => {
   stores.splice(0).forEach((s) => s.db.close());
@@ -383,6 +384,11 @@ describe("threaded chat, reactions, and profiles", () => {
       emoji: "✅",
       active: true,
     });
+    const quote = s.sendChatMessage(owner, session.org, room.id, {
+      body: "Quote",
+      reply_to_id: root.id,
+      client_id: crypto.randomUUID(),
+    });
     s.updateProfile(owner, { name: "New Name", title: "Founder", revision: 0 });
     s.db.close();
     s = new TeamStore(path);
@@ -398,10 +404,564 @@ describe("threaded chat, reactions, and profiles", () => {
       expect(page.messages[0].reactions?.[0].emoji).toBe("✅");
       expect(page.messages[0].author_name).toBe("New Name");
       expect(s.profile(owner).title).toBe("Founder");
+      // The thread index is created by the constructor on an existing file.
+      expect(
+        s.chatThreads(owner, session.org, room.id, new URLSearchParams())
+          .items[0].reply_count,
+      ).toBe(1);
+      // Inline replies: the reply_to_id column survives the reopen guard and
+      // quotes resolve the author's current name.
+      const quoted = s.messageLocation(owner, session.org, quote.id).message;
+      expect(quoted.reply_to_id).toBe(root.id);
+      expect(quoted.reply_to?.author_name).toBe("New Name");
+      expect(quoted.reply_to?.body).toBe("Root");
+      expect(s.chatRoom(owner, session.org, room.id).inline_replies).toBe(true);
     } finally {
       s.db.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("thread listing", () => {
+  const query = (value = "") => new URLSearchParams(value);
+  const threads = (
+    s: TeamStore,
+    user: string,
+    org: string,
+    room: string,
+    value = "",
+  ) => s.chatThreads(user, org, room, query(value));
+  const sender =
+    (s: TeamStore, org: string, room: string) =>
+    (user: string, body: string, thread_id?: string) =>
+      s.sendChatMessage(user, org, room, {
+        body,
+        thread_id,
+        client_id: crypto.randomUUID(),
+      });
+  test("lists a room's threads newest reply first with counts, participants, last replier, unread and keyset paging", () => {
+    const { s, owner, org, join } = fixture();
+    const taylor = join("Taylor").id,
+      casey = join("Casey").id;
+    const room = s.chatRooms(owner, org)[0];
+    const send = sender(s, org, room.id);
+    const a = send(owner, "A"),
+      b = send(owner, "B"),
+      c = send(owner, "C");
+    send(taylor, "A1", a.id);
+    send(taylor, "A2", a.id);
+    const c1 = send(taylor, "C1", c.id);
+    for (const body of ["B1", "B2", "B3"]) send(casey, body, b.id);
+    const page = threads(s, owner, org, room.id);
+    expect(page.items.map((t) => t.root.id)).toEqual([b.id, c.id, a.id]);
+    expect(page.next_before).toBeNull();
+    const [tb, tc, ta] = page.items;
+    expect(tb.reply_count).toBe(3);
+    expect(tb.participants.map((p) => p.id)).toEqual([casey]);
+    expect(tb.participant_count).toBe(1);
+    expect(ta.participants.map((p) => p.id)).toEqual([taylor]);
+    expect(tc.last_reply_by.name).toBe("Taylor");
+    expect(tc.last_reply_at).toBe(c1.created_at);
+    expect(tc.last_reply_seq).toBe(c1.created_seq);
+    for (const t of page.items) {
+      expect(t.root.thread_id).toBeNull();
+      expect(t.root.reply_count).toBe(t.reply_count);
+    }
+    expect([ta, tb, tc].map((t) => t.unread_replies)).toEqual([2, 3, 1]);
+    const before = s.chatRoom(owner, org, room.id);
+    expect(before.threads_enabled).toBe(true);
+    expect(before.unread_threads).toBe(3);
+    s.readChat(owner, org, room.id, c1.created_seq, 0);
+    const unread = Object.fromEntries(
+      threads(s, owner, org, room.id).items.map((t) => [
+        t.root.id,
+        t.unread_replies,
+      ]),
+    );
+    expect(unread).toEqual({ [a.id]: 0, [b.id]: 3, [c.id]: 0 });
+    expect(s.chatRoom(owner, org, room.id).unread_threads).toBe(1);
+    expect(
+      threads(s, taylor, org, room.id).items.find((t) => t.root.id === a.id)
+        ?.unread_replies,
+    ).toBe(0);
+    for (let i = 0; i < 35; i++)
+      send(taylor, `Follow-up ${i}`, send(owner, `Topic ${i}`).id);
+    const first = threads(s, owner, org, room.id);
+    expect(first.items).toHaveLength(30);
+    expect(first.next_before).toBe(first.items[29].last_reply_seq);
+    const second = threads(
+      s,
+      owner,
+      org,
+      room.id,
+      `before=${first.next_before}`,
+    );
+    expect(second.items).toHaveLength(8);
+    expect(second.next_before).toBeNull();
+    expect(second.items.map((t) => t.last_reply_seq)).toEqual(
+      [...second.items.map((t) => t.last_reply_seq)].sort((x, y) => y - x),
+    );
+    expect(second.items[0].last_reply_seq).toBeLessThan(first.next_before!);
+    expect(
+      new Set([...first.items, ...second.items].map((t) => t.root.id)).size,
+    ).toBe(38);
+    expect(() => threads(s, owner, org, room.id, "before=bad")).toThrow(
+      "Invalid threads cursor",
+    );
+  });
+  test("deleted replies and roots keep the listing consistent with reply counts", () => {
+    const { s, owner, org, join } = fixture();
+    const taylor = join("Taylor").id;
+    const room = s.chatRooms(owner, org)[0];
+    const send = sender(s, org, room.id);
+    const remove = (user: string, id: string) => {
+      const current = s.messageLocation(user, org, id).message;
+      s.changeChatMessage(user, org, id, { revision: current.revision }, true);
+    };
+    const lone = send(owner, "Lone");
+    const loneReply = send(taylor, "Only reply", lone.id);
+    const early = send(owner, "Early");
+    const late = send(owner, "Late");
+    send(taylor, "Late first", late.id);
+    const earlyReply = send(taylor, "Old surviving reply", early.id);
+    const lateReply = send(taylor, "Late latest", late.id);
+    expect(threads(s, owner, org, room.id).items.map((t) => t.root.id)).toEqual(
+      [late.id, early.id, lone.id],
+    );
+    remove(taylor, loneReply.id);
+    expect(
+      threads(s, owner, org, room.id).items.some((t) => t.root.id === lone.id),
+    ).toBe(false);
+    expect(
+      s
+        .chatMessages(owner, org, room.id, query())
+        .messages.find((m) => m.id === lone.id)?.reply_count,
+    ).toBe(0);
+    remove(owner, early.id);
+    const tombstone = threads(s, owner, org, room.id).items.find(
+      (t) => t.root.id === early.id,
+    )!;
+    expect(tombstone.root.deleted_at).toBeTruthy();
+    expect(tombstone.root.body).toBe("");
+    expect(tombstone.reply_count).toBe(1);
+    expect(
+      s
+        .chatMessages(owner, org, room.id, query(`thread=${early.id}`))
+        .messages.map((m) => m.id),
+    ).toEqual([earlyReply.id]);
+    s.changeChatMessage(taylor, org, earlyReply.id, {
+      body: "Edited old reply",
+      revision: earlyReply.revision,
+    });
+    expect(threads(s, owner, org, room.id).items.map((t) => t.root.id)).toEqual(
+      [late.id, early.id],
+    );
+    remove(taylor, lateReply.id);
+    expect(threads(s, owner, org, room.id).items.map((t) => t.root.id)).toEqual(
+      [early.id, late.id],
+    );
+  });
+  test("thread listing enforces conversation, org and membership access", () => {
+    const { s, owner, org, join } = fixture();
+    const alice = join("Alice").id,
+      bob = join("Bob").id,
+      admin = join("Admin", "admin").id;
+    const dm = s.createChatRoom(alice, org, { kind: "direct", member_id: bob });
+    const send = sender(s, org, dm.id);
+    send(bob, "Private reply", send(alice, "Private root").id);
+    for (const outsider of [owner, admin])
+      expect(() => threads(s, outsider, org, dm.id)).toThrow("access removed");
+    expect(threads(s, bob, org, dm.id).items).toHaveLength(1);
+    s.changeMember(owner, org, bob, "remove");
+    expect(() => threads(s, bob, org, dm.id)).toThrow();
+    const remaining = threads(s, alice, org, dm.id);
+    expect(remaining.items).toHaveLength(1);
+    expect(remaining.items[0].root.can_edit).toBe(false);
+    const beta = s.createOrg(owner, "Beta");
+    expect(() => threads(s, owner, org, `general-${beta}`)).toThrow();
+    const channel = s.createChatRoom(owner, org, {
+      kind: "channel",
+      name: "Archive me",
+    });
+    const post = sender(s, org, channel.id);
+    post(alice, "Archived reply", post(owner, "Archived root").id);
+    s.updateChatRoom(owner, org, channel.id, {
+      revision: channel.revision,
+      archived: true,
+    });
+    expect(threads(s, owner, org, channel.id).items).toHaveLength(1);
+    expect(threads(s, owner, org, `general-${org}`)).toEqual({
+      items: [],
+      next_before: null,
+    });
+  });
+  test("HTTP thread listing requires a member session, rejects integration keys and unknown routes", async () => {
+    const { s, owner, org, token, space, join } = fixture();
+    const handler = createHandler(s);
+    const request = (path: string, method = "GET", key = token) =>
+      handler(
+        new Request(`https://team.test/v1/orgs/${org}/${path}`, {
+          method,
+          headers: {
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+          },
+          body: method === "GET" ? undefined : "{}",
+        }),
+      );
+    const room = s.chatRooms(owner, org)[0].id;
+    const taylor = join("Taylor").id;
+    const send = sender(s, org, room);
+    const root = send(owner, "Seeded root");
+    send(taylor, "Seeded reply", root.id);
+    s.updateSpace(owner, org, space, {
+      ...s.space(owner, org, space),
+      api_enabled: true,
+    });
+    const integration = s.createIntegrationKey(owner, org, {
+      name: "Read shared meetings",
+      space_ids: [space],
+      transcripts: false,
+      days: 30,
+    });
+    const ok = await request(`chat-rooms/${room}/threads`);
+    expect(ok.status).toBe(200);
+    const json = await ok.json();
+    expect(Array.isArray(json.items)).toBe(true);
+    expect(json.items.map((t: { root: { id: string } }) => t.root.id)).toEqual([
+      root.id,
+    ]);
+    expect(
+      (await request(`chat-rooms/${room}/threads`, "GET", "")).status,
+    ).toBe(401);
+    expect(
+      (
+        await request(
+          `chat-rooms/${room}/threads`,
+          "GET",
+          String(integration.token),
+        )
+      ).status,
+    ).toBe(401);
+    expect((await request(`chat-rooms/${room}/threads?before=x`)).status).toBe(
+      400,
+    );
+    expect((await request(`chat-rooms/${room}/threadz`)).status).toBe(404);
+    expect((await request(`chat-rooms/${room}/threads/extra`)).status).toBe(
+      404,
+    );
+    expect((await request(`chat-rooms/${room}/threads`, "POST")).status).toBe(
+      404,
+    );
+    expect((await request(`chat-rooms/${room}/threads`, "PATCH")).status).toBe(
+      404,
+    );
+    const dm = s.createChatRoom(taylor, org, {
+      kind: "direct",
+      member_id: join("Morgan").id,
+    });
+    expect((await request(`chat-rooms/${dm.id}/threads`)).status).toBe(404);
+  });
+  test("constructor migrations are idempotent across reopens of the same file", () => {
+    const dir = mkdtempSync(joinPath(tmpdir(), "noted-thread-migrations-"));
+    const path = joinPath(dir, "team.sqlite");
+    try {
+      new TeamStore(path).db.close();
+      const s = new TeamStore(path);
+      try {
+        const columns = s.all<{ name: string }>(
+          "PRAGMA table_info(chat_messages)",
+        );
+        expect(columns.filter((c) => c.name === "thread_id")).toHaveLength(1);
+        expect(columns.filter((c) => c.name === "reply_to_id")).toHaveLength(
+          1,
+        );
+        const indexes = s
+          .all<{ name: string }>("PRAGMA index_list(chat_messages)")
+          .map((i) => i.name);
+        expect(indexes).toContain("chat_thread_history");
+        expect(indexes).toContain("chat_thread_replies");
+        expect(indexes).toContain("chat_reply_refs");
+      } finally {
+        s.db.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("inline replies", () => {
+  const query = (value = "") => new URLSearchParams(value);
+  const sender =
+    (s: TeamStore, org: string, room: string) =>
+    (
+      user: string,
+      body: string,
+      extra: { thread_id?: string; reply_to_id?: unknown } = {},
+    ) =>
+      s.sendChatMessage(user, org, room, {
+        body,
+        ...extra,
+        client_id: crypto.randomUUID(),
+      });
+  test("replies quote a message in the same conversation and read live", () => {
+    const { s, owner, org, join } = fixture();
+    const member = join("Taylor").id;
+    const room = s.chatRooms(owner, org)[0].id;
+    const send = sender(s, org, room);
+    const a = send(member, "A body");
+    const b = send(owner, "B body", { reply_to_id: a.id });
+    expect(b.reply_to_id).toBe(a.id);
+    expect(b.reply_to).toEqual({
+      id: a.id,
+      author_id: member,
+      author_name: "Taylor",
+      body: "A body",
+      deleted_at: null,
+      created_seq: a.created_seq,
+    });
+    // A quote never changes the quoted row.
+    expect(s.messageLocation(owner, org, a.id).message.revision).toBe(
+      a.revision,
+    );
+    const page = s.chatMessages(owner, org, room, query());
+    expect(page.messages.find((m) => m.id === b.id)?.reply_to?.id).toBe(a.id);
+    expect(page.messages.find((m) => m.id === a.id)?.reply_to).toBeNull();
+    const around = s.chatMessages(owner, org, room, query(`around=${a.id}`));
+    expect(around.messages.find((m) => m.id === b.id)?.reply_to_id).toBe(a.id);
+    const long = send(member, "x".repeat(400));
+    expect(
+      send(owner, "Quoting a long one", { reply_to_id: long.id }).reply_to
+        ?.body.length,
+    ).toBe(160);
+    const file = s.sendChatMessage(member, org, room, {
+      body: "",
+      client_id: crypto.randomUUID(),
+      attachments: [
+        { name: "notes.txt", mime: "text/plain", data: btoa("hello") },
+      ],
+    });
+    expect(
+      send(owner, "Quoting a file", { reply_to_id: file.id }).reply_to?.body,
+    ).toBe("Shared an attachment or meeting");
+    expect(send(owner, "Self", { reply_to_id: b.id }).reply_to?.author_id).toBe(
+      owner,
+    );
+    const c = send(member, "C body", { reply_to_id: b.id });
+    expect(c.reply_to?.id).toBe(b.id);
+    expect(c.reply_to?.body).toBe("B body");
+  });
+  test("thread scope is enforced", () => {
+    const { s, owner, org, join } = fixture();
+    const member = join("Taylor").id;
+    const room = s.chatRooms(owner, org)[0].id;
+    const send = sender(s, org, room);
+    const root = send(member, "Root");
+    const t1 = send(member, "In thread", { thread_id: root.id });
+    expect(() => send(owner, "Main quoting thread", { reply_to_id: t1.id }))
+      .toThrow("in this conversation");
+    expect(() =>
+      send(owner, "Thread quoting root", {
+        thread_id: root.id,
+        reply_to_id: root.id,
+      }),
+    ).toThrow("in this conversation");
+    const t2 = send(owner, "Thread quoting t1", {
+      thread_id: root.id,
+      reply_to_id: t1.id,
+    });
+    expect(t2.thread_id).toBe(root.id);
+    expect(t2.reply_to?.id).toBe(t1.id);
+    const thread = s.chatMessages(owner, org, room, query(`thread=${root.id}`));
+    expect(thread.messages.map((m) => m.id)).toEqual([t1.id, t2.id]);
+    expect(thread.parent?.reply_count).toBe(2);
+    expect(
+      s
+        .chatMessages(owner, org, room, query(`thread=${root.id}&around=${t1.id}`))
+        .messages.map((m) => m.id),
+    ).toContain(t2.id);
+    expect(
+      s.chatMessages(owner, org, room, query()).messages[0].reply_count,
+    ).toBe(2);
+  });
+  test("cross-room and private targets are not found", () => {
+    const { s, owner, org, join } = fixture();
+    const alice = join("Alice").id,
+      bob = join("Bob").id;
+    const channel = s.chatRooms(owner, org)[0].id;
+    const dm = s.createChatRoom(alice, org, { kind: "direct", member_id: bob });
+    const secret = sender(s, org, dm.id)(alice, "Private");
+    expect(() =>
+      sender(s, org, channel)(alice, "Leak", { reply_to_id: secret.id }),
+    ).toThrow("Message not found");
+    expect(() =>
+      sender(s, org, dm.id)(owner, "Intrude", { reply_to_id: secret.id }),
+    ).toThrow("access removed");
+    const other = s.createChatRoom(owner, org, { kind: "channel", name: "Y" });
+    const y = sender(s, org, other.id)(owner, "In Y");
+    expect(() =>
+      sender(s, org, channel)(owner, "From X", { reply_to_id: y.id }),
+    ).toThrow("Message not found");
+    expect(() =>
+      sender(s, org, channel)(owner, "Unknown", { reply_to_id: "nope" }),
+    ).toThrow("Message not found");
+  });
+  test("deleted originals become tombstones and cannot be targeted", () => {
+    const { s, owner, org, join } = fixture();
+    const member = join("Taylor").id;
+    const room = s.chatRooms(owner, org)[0].id;
+    const send = sender(s, org, room);
+    const a = send(member, "Original");
+    const b = send(owner, "Quote", { reply_to_id: a.id });
+    s.changeChatMessage(member, org, a.id, { revision: a.revision }, true);
+    expect(() => send(owner, "Late", { reply_to_id: a.id })).toThrow(
+      "replying to was deleted",
+    );
+    const location = s.messageLocation(owner, org, b.id);
+    expect(location.message.reply_to?.deleted_at).toBeTruthy();
+    expect(location.message.reply_to?.body).toBe("");
+    expect(location.message.reply_to_id).toBe(a.id);
+    expect(() => s.messageLocation(owner, org, a.id)).toThrow("deleted");
+    s.changeChatMessage(owner, org, b.id, { revision: b.revision }, true);
+    const deleted = s
+      .chatMessages(owner, org, room, query())
+      .messages.find((m) => m.id === b.id);
+    expect(deleted?.deleted_at).toBeTruthy();
+    expect(deleted?.reply_to).toBeNull();
+  });
+  test("editing or deleting an original refreshes references live without bumping their revision", () => {
+    const { s, owner, org, join } = fixture();
+    const member = join("Taylor").id;
+    const room = s.chatRooms(owner, org)[0].id;
+    const send = sender(s, org, room);
+    const a = send(member, "Original");
+    const b = send(owner, "Quote", { reply_to_id: a.id });
+    const c = send(owner, "Stale quote", { reply_to_id: a.id });
+    s.changeChatMessage(owner, org, c.id, { revision: c.revision }, true);
+    const cursor = s.chatMessages(owner, org, room, query()).cursor;
+    const unreadBefore = s.chatRoom(member, org, room).unread;
+    const edited = s.changeChatMessage(member, org, a.id, {
+      body: "Edited",
+      revision: a.revision,
+    });
+    expect(edited.revision).toBe(a.revision + 1);
+    const afterEdit = s.chatMessages(owner, org, room, query(`after=${cursor}`));
+    expect(afterEdit.messages.map((m) => m.id).sort()).toEqual(
+      [a.id, b.id].sort(),
+    );
+    const quoting = afterEdit.messages.find((m) => m.id === b.id)!;
+    expect(quoting.reply_to?.body).toBe("Edited");
+    expect(quoting.revision).toBe(b.revision);
+    // Fan-out re-emits rows the reader already saw, so it is never unread.
+    expect(s.chatRoom(member, org, room).unread).toBe(unreadBefore);
+    s.changeChatMessage(member, org, a.id, { revision: edited.revision }, true);
+    const afterDelete = s.chatMessages(
+      owner,
+      org,
+      room,
+      query(`after=${afterEdit.cursor}`),
+    );
+    const tombstoned = afterDelete.messages.find((m) => m.id === b.id)!;
+    expect(tombstoned.reply_to?.deleted_at).toBeTruthy();
+    expect(tombstoned.revision).toBe(b.revision);
+    expect(
+      afterDelete.messages.find((m) => m.id === a.id)?.revision,
+    ).toBe(edited.revision + 1);
+    // Thread-level quoting rows reach only the thread panel.
+    const root = send(member, "Root");
+    const t1 = send(member, "T1", { thread_id: root.id });
+    send(owner, "Quoting T1", { thread_id: root.id, reply_to_id: t1.id });
+    const mainCursor = s.chatMessages(owner, org, room, query()).cursor;
+    s.changeChatMessage(member, org, t1.id, { body: "T1 edited", revision: 1 });
+    expect(
+      s
+        .chatMessages(owner, org, room, query(`after=${mainCursor}`))
+        .messages.every((m) => (m.thread_id ?? null) === null),
+    ).toBe(true);
+    expect(
+      s
+        .chatMessages(
+          owner,
+          org,
+          room,
+          query(`thread=${root.id}&after=${mainCursor}`),
+        )
+        .messages.find((m) => m.reply_to_id === t1.id)?.reply_to?.body,
+    ).toBe("T1 edited");
+    // Fan-out is capped: 120 quoting rows produce at most 100 events plus
+    // the edited row's own event.
+    const popular = send(member, "Popular");
+    for (let i = 0; i < 120; i++)
+      send(owner, `Quote ${i}`, { reply_to_id: popular.id });
+    const seq = Number(
+      s.get("SELECT MAX(seq) AS seq FROM chat_events WHERE room_id=?", room)!
+        .seq,
+    );
+    s.changeChatMessage(member, org, popular.id, {
+      body: "Popular edited",
+      revision: popular.revision,
+    });
+    expect(
+      Number(
+        s.get(
+          "SELECT COUNT(*) AS n FROM chat_events WHERE room_id=? AND seq>?",
+          room,
+          seq,
+        )!.n,
+      ),
+    ).toBe(101);
+  });
+  test("retries cannot change the reply target", () => {
+    const { s, owner, org, join } = fixture();
+    const member = join("Taylor").id;
+    const room = s.chatRooms(owner, org)[0].id;
+    const send = sender(s, org, room);
+    const a = send(member, "A");
+    const other = send(member, "Other");
+    const payload = {
+      body: "Quote",
+      client_id: crypto.randomUUID(),
+      reply_to_id: a.id,
+    };
+    const first = s.sendChatMessage(owner, org, room, payload);
+    expect(s.sendChatMessage(owner, org, room, payload).id).toBe(first.id);
+    expect(() =>
+      s.sendChatMessage(owner, org, room, { ...payload, reply_to_id: null }),
+    ).toThrow("another message");
+    expect(() =>
+      s.sendChatMessage(owner, org, room, {
+        ...payload,
+        reply_to_id: other.id,
+      }),
+    ).toThrow("another message");
+    expect(() => send(owner, "Bad", { reply_to_id: 42 })).toThrow(
+      "Invalid reply target",
+    );
+    expect(() =>
+      send(owner, "Bad", { reply_to_id: "x".repeat(101) }),
+    ).toThrow("Invalid reply target");
+  });
+  test("search indexes only the reply body, never the quoted text", () => {
+    const { s, owner, org, join } = fixture();
+    const member = join("Taylor").id;
+    const room = s.chatRooms(owner, org)[0].id;
+    const send = sender(s, org, room);
+    const original = send(member, "quotedsecretword");
+    const reply = send(owner, "replybodyword", { reply_to_id: original.id });
+    const hits = (q: string) =>
+      s.search(owner, org, query(`q=${q}`)).messages.hits.map((h) => h.id);
+    expect(hits("replybodyword")).toEqual([reply.id]);
+    expect(hits("quotedsecretword")).toEqual([original.id]);
+    expect(
+      s.all<{ rowid: number }>(
+        "SELECT rowid FROM chat_messages_fts WHERE chat_messages_fts MATCH 'quotedsecretword'",
+      ),
+    ).toHaveLength(1);
+    s.changeChatMessage(member, org, original.id, { revision: 1 }, true);
+    expect(hits("quotedsecretword")).toEqual([]);
+    expect(hits("replybodyword")).toEqual([reply.id]);
   });
 });
 
@@ -529,6 +1089,80 @@ describe("team member messaging", () => {
     expect(() =>
       s.updateChatRoom(owner, org, general.id, { revision: 1, archived: true }),
     ).toThrow("general");
+  });
+  test("channel references are plain text: verbatim, unpinged, searchable, and resolvable by every member", () => {
+    const { s, owner, org, join } = fixture();
+    const member = join("Taylor").id;
+    const design = s.createChatRoom(owner, org, {
+      kind: "channel",
+      name: "Design Review",
+    });
+    expect(design.name).toBe("design-review");
+    const general = s.chatRooms(member, org).find((r) => r.is_default)!;
+    const sent = s.sendChatMessage(
+      owner,
+      org,
+      general.id,
+      message("see #design-review and #General"),
+    );
+    expect(s.messageLocation(member, org, sent.id).message.body).toBe(
+      "see #design-review and #General",
+    );
+    // A channel reference is not a people mention: nothing here may ever
+    // count as unread mentions or reach the inbox.
+    const room = s.chatRoom(member, org, general.id);
+    expect(room.unread).toBe(1);
+    expect(room.unread_mentions).toBe(0);
+    expect(room.latest_unread_mention_seq ?? 0).toBe(0);
+    expect(s.mentions(member, org, query()).items).toHaveLength(0);
+    const resolve = (user: string) =>
+      findChannelMentions(
+        sent.body,
+        s.chatRooms(user, org).filter((r) => r.kind === "channel"),
+      ).map((h) => h.room.id);
+    expect(resolve(member)).toEqual([design.id, general.id]);
+    const hits = (q: string) =>
+      s.search(member, org, query(`q=${encodeURIComponent(q)}&kind=messages`))
+        .messages.hits.some((h) => h.id === sent.id);
+    expect(hits("design")).toBe(true);
+    expect(hits("#design")).toBe(true);
+    const renamed = s.updateChatRoom(owner, org, design.id, {
+      name: "Design Ops",
+      revision: design.revision,
+    });
+    expect(renamed.name).toBe("design-ops");
+    expect(renamed.name).toMatch(/^[a-z0-9][a-z0-9_-]*$/);
+    // Rename rot is the accepted cost of plain text: the old text degrades
+    // to readable prose rather than pointing at the wrong room.
+    expect(resolve(member)).toEqual([general.id]);
+    const archived = s.updateChatRoom(owner, org, design.id, {
+      archived: true,
+      revision: renamed.revision,
+    });
+    expect(archived.can_send).toBe(false);
+    expect(
+      s.chatRooms(member, org).some((r) => r.id === design.id && r.archived_at),
+    ).toBe(true);
+    const mention = s.sendChatMessage(
+      member,
+      org,
+      general.id,
+      message("history lives in #design-ops"),
+    );
+    const resolveOps = () =>
+      findChannelMentions(
+        mention.body,
+        s.chatRooms(member, org).filter((r) => r.kind === "channel"),
+      ).map((h) => [h.room.id, !!h.room.archived_at]);
+    expect(resolveOps()).toEqual([[design.id, true]]);
+    const restored = s.updateChatRoom(owner, org, design.id, {
+      archived: false,
+      revision: archived.revision,
+    });
+    expect(restored.can_send).toBe(true);
+    expect(resolveOps()).toEqual([[design.id, false]]);
+    s.changeMember(owner, org, member, "remove");
+    expect(() => s.chatRooms(member, org)).toThrow("access removed");
   });
   test("direct messages are private even from workspace owners and admins; cross-workspace IDs fail", async () => {
     const { s, owner, org, join, token } = fixture();
@@ -730,7 +1364,7 @@ describe("team member messaging", () => {
     expect(s.chatMessages(owner, org, room, query()).messages).toHaveLength(4);
   });
   test("HTTP messaging requires a member session and supports send, edit, history and read routes", async () => {
-    const { s, owner, org, token, space } = fixture();
+    const { s, owner, org, token, space, join } = fixture();
     const handler = createHandler(s);
     const request = (
       path: string,
@@ -801,6 +1435,39 @@ describe("team member messaging", () => {
       (await request(`chat-messages/${saved.id}`, "DELETE", { revision: 2 }))
         .status,
     ).toBe(200);
+    const original = await (
+      await request(`chat-rooms/${room}/messages`, "POST", message("Original"))
+    ).json();
+    const other = await (
+      await request(`chat-rooms/${room}/messages`, "POST", message("Other"))
+    ).json();
+    const quote = await request(`chat-rooms/${room}/messages`, "POST", {
+      ...message("Quoting"),
+      reply_to_id: original.id,
+    });
+    expect(quote.status).toBe(201);
+    const quoted = await quote.json();
+    expect(quoted.reply_to.id).toBe(original.id);
+    const taylor = join("Taylor").id;
+    const dm = s.createChatRoom(owner, org, { kind: "direct", member_id: taylor });
+    const secret = s.sendChatMessage(owner, org, dm.id, message("Private"));
+    const leak = await request(`chat-rooms/${room}/messages`, "POST", {
+      ...message("Leak"),
+      reply_to_id: secret.id,
+    });
+    expect(leak.status).toBe(404);
+    expect(await leak.json()).toEqual({ error: "Message not found" });
+    // The target is immutable: PATCH ignores reply_to_id.
+    const patched = await request(`chat-messages/${quoted.id}`, "PATCH", {
+      body: "Quoting, edited",
+      revision: quoted.revision,
+      reply_to_id: other.id,
+    });
+    expect(patched.status).toBe(200);
+    expect((await patched.json()).reply_to_id).toBe(original.id);
+    const located = await (await request(`chat-messages/${quoted.id}`)).json();
+    expect(located.message.reply_to.id).toBe(original.id);
+    expect(located.message.reply_to.body).toBe("Original");
   });
   test("old workspaces gain one general channel and messages/read state survive a restart", () => {
     const dir = mkdtempSync(joinPath(tmpdir(), "noted-chat-restart-"));
@@ -1849,6 +2516,9 @@ describe("mentions inbox and message destinations", () => {
     const reply = send("@Edison one more detail", root.id);
     const inbox = s.mentions(edison, org, new URLSearchParams("unread=true"));
     expect(inbox.items.map((item) => item.message.id)).toEqual([reply.id, root.id]);
+    const quoting = s.sendChatMessage(owner, org, room, { body: "@Edison see above", reply_to_id: root.id, client_id: crypto.randomUUID() });
+    expect(s.mentions(edison, org, new URLSearchParams()).items.find((item) => item.message.id === quoting.id)?.message.reply_to?.id).toBe(root.id);
+    s.changeChatMessage(owner, org, quoting.id, { revision: quoting.revision }, true);
     expect(inbox.items[0].parent?.id).toBe(root.id);
     expect(s.messageLocation(edison, org, reply.id).room.id).toBe(room);
     s.readMention(edison, org, reply.id);

@@ -7,6 +7,7 @@ const message = (
   seq: number,
   revision = 1,
   body = "Hello",
+  overrides: Partial<TeamChatMessage> = {},
 ): TeamChatMessage => ({
   id,
   created_seq: seq,
@@ -20,6 +21,7 @@ const message = (
   deleted_at: null,
   can_edit: true,
   can_delete: true,
+  ...overrides,
 });
 test("out-of-order history and send acknowledgments cannot replace newer edits or resurrect deletions", () => {
   const deleted = {
@@ -34,10 +36,88 @@ test("out-of-order history and send acknowledgments cannot replace newer edits o
   expect(rows[0].deleted_at).not.toBeNull();
   expect(rows[0].body).toBe("");
   expect(rows[1].body).toBe("Edited");
+  // Fan-out re-emits a quoting row at an unchanged revision with a fresh
+  // reply_to; equal revisions must replace, lower ones must not.
+  const quoted = { id: "a", author_id: "u", author_name: "Taylor", body: "Old", deleted_at: null, created_seq: 1 };
+  const refreshed = { ...quoted, body: "", deleted_at: "2026-09-05T00:02:00Z" };
+  const live = mergeMessages(
+    [message("reply", 4, 2, "Sure", { reply_to_id: "a", reply_to: quoted })],
+    [message("reply", 4, 2, "Sure", { reply_to_id: "a", reply_to: refreshed })],
+  );
+  expect(live[0].reply_to?.deleted_at).not.toBeNull();
+  const stale = mergeMessages(
+    [message("reply", 4, 2, "Sure", { reply_to_id: "a", reply_to: refreshed })],
+    [message("reply", 4, 1, "Sure", { reply_to_id: "a", reply_to: quoted })],
+  );
+  expect(stale[0].reply_to?.deleted_at).not.toBeNull();
 });
 
-import { findMentions, mentionQuery } from "../src/teams/mentions";
+import { canReplyInline, quotePreview, replyReference, sendAttemptKey } from "../src/teams/messaging";
+
+test("inline reply helpers key sends by target, preview quotes on one line and mirror the level rule", () => {
+  expect(sendAttemptKey("Hi", [], null)).toBe("Hi");
+  const keys = [sendAttemptKey("Hi", [], "a"), sendAttemptKey("Hi", [], "b"), sendAttemptKey("Hi", ["f"], null), sendAttemptKey("Hi", ["f"], "a")];
+  expect(new Set([...keys, "Hi"]).size).toBe(5);
+  const original = message("a", 1, 1, "First line\n\n  second   line ".padEnd(200, "x"));
+  const ref = replyReference(original);
+  expect(ref).toMatchObject({ id: "a", author_id: "user", author_name: "Taylor", deleted_at: null, created_seq: 1 });
+  expect(ref.body).toHaveLength(160);
+  expect(quotePreview(ref)).toMatch(/^First line second line x+…$/);
+  expect(quotePreview(ref)).toHaveLength(121);
+  expect(quotePreview(replyReference(message("b", 2, 1, "Short")))).toBe("Short");
+  expect(replyReference(message("f", 3, 1, "", { attachments: [{ id: "x", name: "a.png", mime: "image/png", size: 1 }] })).body).toBe("Shared an attachment or meeting");
+  expect(quotePreview({ ...ref, body: "", deleted_at: "2026-09-05T00:01:00Z" })).toBe("Original message deleted");
+  expect(quotePreview(null)).toBe("");
+  expect(quotePreview(undefined)).toBe("");
+  expect(canReplyInline(message("m", 4), undefined)).toBe(true);
+  expect(canReplyInline(message("t", 5, 1, "Hi", { thread_id: "root" }), "root")).toBe(true);
+  expect(canReplyInline(message("d", 6, 1, "", { deleted_at: "2026-09-05T00:01:00Z" }), undefined)).toBe(false);
+  expect(canReplyInline(message("t", 7, 1, "Hi", { thread_id: "root" }), undefined)).toBe(false);
+  expect(canReplyInline(message("root", 8, 1, "Hi", { thread_id: null }), "root")).toBe(false);
+});
+
+import { bodyMentions, channelQuery, findChannelMentions, findMentions, mentionQuery } from "../src/teams/mentions";
 import { draftKey, readDrafts, writeDrafts } from "../src/teams/messageDrafts";
+
+test("channel references resolve only exact visible names and never inside words or URLs", () => {
+  const channels = [
+    { id: "d", name: "design" },
+    { id: "g", name: "general" },
+    { id: "a", name: "old-topic", archived_at: "2026-09-01T00:00:00Z" },
+  ];
+  const body = "see #design, #Design. (#general) #design-system #nope C#design issue#12 ##design https://x/p#design https://x.test/#design # heading";
+  expect(findChannelMentions(body, channels).map((h) => [h.room.id, h.start, h.end])).toEqual([["d", 4, 11], ["d", 13, 20], ["g", 23, 31]]);
+  expect(findChannelMentions("back in #old-topic", channels).map((h) => h.room.id)).toEqual(["a"]);
+  expect(findChannelMentions("#design-", channels)).toEqual([]);
+  expect(findChannelMentions("", channels)).toEqual([]);
+  expect(findChannelMentions("#", channels)).toEqual([]);
+  expect(findChannelMentions("#design", [])).toEqual([]);
+});
+
+test("channel query opens on # after whitespace, filters without spaces, and takes precedence over a mention query", () => {
+  expect(channelQuery("see #des", 8)).toEqual({ start: 4, end: 8, query: "des" });
+  expect(channelQuery("#", 1)).toEqual({ start: 0, end: 1, query: "" });
+  expect(channelQuery("a#b", 3)).toBeNull();
+  expect(channelQuery("#des ign", 8)).toBeNull();
+  expect(channelQuery("# title", 7)).toBeNull();
+  // mentionQuery's [^@\n]* swallows "#de", so the component must evaluate
+  // channelQuery first for "@Ed #de" to reach the channel picker.
+  expect(channelQuery("@Ed #de", 7)).toEqual({ start: 4, end: 7, query: "de" });
+  expect(mentionQuery("@Ed #de", 7)).not.toBeNull();
+  expect(channelQuery("#design @Ed", 11)).toBeNull();
+  expect(mentionQuery("#design @Ed", 11)?.query).toBe("Ed");
+});
+
+test("body mentions merge people and channels in order and drop overlaps", () => {
+  const members = [{ id: "a", name: "Edison Chen" }, { id: "b", name: "Ed Smith" }];
+  const channels = [{ id: "d", name: "design" }];
+  const hits = bodyMentions("@Edison see #design and @Ed Smith", members, channels);
+  expect(hits.map((h) => h.kind)).toEqual(["member", "channel", "member"]);
+  for (let i = 1; i < hits.length; i++) expect(hits[i].start).toBeGreaterThanOrEqual(hits[i - 1].end);
+  const overlap = bodyMentions("@Team #1", [{ id: "t", name: "Team #1" }], [{ id: "one", name: "1" }]);
+  expect(overlap).toHaveLength(1);
+  expect(overlap[0].kind).toBe("member");
+});
 
 test("mentions match full names and unique first names, avoiding emails and ambiguous pings", () => {
   const members = [{ id: "a", name: "Edison Chen" }, { id: "b", name: "Ed Smith" }];
@@ -149,4 +229,35 @@ test("conversation overrides support mute, mentions, defaults and unmute without
   expect(tracker.update("org", [room(14, 14, 13, "default")], effective)).toHaveLength(1);
   expect(conversationAlertMode(room(14, 14, 13, "messages"), "mentions")).toBe("messages");
   expect(conversationAlertMode(room(14, 14, 13, "default"), "mentions")).toBe("mentions");
+});
+
+import { messagePreview, shortTime } from "../src/teams/messaging";
+import { mergeThreads, threadParticipants } from "../src/teams/threads";
+import type { TeamThreadSummary, TeamUser } from "../src/teams/types";
+
+test("thread summaries merge by root, label participants and preview roots", () => {
+  const taylor = { id: "t", name: "Taylor" }, alex = { id: "a", name: "Alex" }, me = { id: "me", name: "Me" };
+  const thread = (root: TeamChatMessage, lastSeq: number, participants: TeamUser[] = [taylor]): TeamThreadSummary => ({
+    root, reply_count: 1, unread_replies: 0, last_reply_seq: lastSeq, last_reply_at: "2026-09-05T00:00:00Z",
+    last_reply_by: participants[0], participants, participant_count: participants.length,
+  });
+  const merged = mergeThreads(
+    [thread(message("a", 1), 10), thread(message("b", 2), 20)],
+    [thread(message("a", 1), 30), thread(message("b", 2), 15), thread(message("c", 3), 25)],
+  );
+  expect(merged.map((t) => [t.root.id, t.last_reply_seq])).toEqual([["a", 30], ["c", 25], ["b", 20]]);
+  expect(mergeThreads([thread(message("a", 1), 10)], [thread(message("a", 1), 10, [alex])])[0].participants).toEqual([alex]);
+  expect(threadParticipants([taylor], 1, "me")).toBe("Taylor");
+  expect(threadParticipants([taylor, me], 2, "me")).toBe("Taylor and you");
+  expect(threadParticipants([me, taylor, alex], 3, "me")).toBe("Taylor, Alex and you");
+  expect(threadParticipants([taylor, alex], 5, "me")).toBe("Taylor, Alex and 3 others");
+  expect(threadParticipants([taylor], 2, "me")).toBe("Taylor and 1 other");
+  expect(threadParticipants([], 0, "me")).toBe("");
+  expect(messagePreview(message("d", 4, 1, "", { deleted_at: "2026-09-05T00:01:00Z" }))).toBe("Message deleted");
+  expect(messagePreview(message("f", 5, 1, "", { attachments: [{ id: "x", name: "a.png", mime: "image/png", size: 1 }] }))).toBe("Shared an attachment or meeting");
+  expect(messagePreview(message("m", 6, 1, "", { has_meeting: true }))).toBe("Shared an attachment or meeting");
+  expect(messagePreview(message("r", 7, 1, "Plain body", { thread_id: null, reply_count: 2, last_reply_at: null }))).toBe("Plain body");
+  const now = new Date(2026, 8, 5, 20, 0);
+  expect(shortTime(new Date(2026, 8, 5, 14, 30).toISOString(), now)).toMatch(/2:30/);
+  expect(shortTime(new Date(2026, 8, 4, 14, 30).toISOString(), now)).toMatch(/^Sep 4$/);
 });

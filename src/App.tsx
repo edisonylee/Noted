@@ -900,7 +900,9 @@ export default function App() {
                 ? " graphmode"
                 : view === "today"
                   ? " schedmode"
-                  : "")
+                  : view === "team"
+                    ? " teammode"
+                    : "")
       }
     >
       {reconnectingOverlay}

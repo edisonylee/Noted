@@ -1,0 +1,52 @@
+.message-collection-list {
+  display: grid;
+  gap: 0;
+}
+.message-collection-item {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  gap: 7px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  padding: 14px 8px;
+  text-align: left;
+  cursor: pointer;
+}
+.message-collection-item:hover {
+  background: var(--hover-soft);
+}
+.message-collection-item strong {
+  font-size: 13px;
+}
+.message-collection-item > span,
+.message-pin-preview {
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.message-collection-item small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.message-collection-empty {
+  padding: 32px 12px;
+  text-align: center;
+  color: var(--muted);
+}
+.message-collection-empty h3 {
+  color: var(--ink);
+  font-size: 15px;
+}
+.message-pin-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}

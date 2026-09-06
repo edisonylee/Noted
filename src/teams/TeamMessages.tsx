@@ -1,3 +1,4 @@
+import { PinnedMessages } from "./PinnedMessages";
 import { AttachmentPicker, type PendingAttachment } from "./MessageAttachments";
 import { MessageSidebar } from "./MessageSidebar";
 import { ConversationNotifications } from "./ConversationNotifications";
@@ -610,6 +611,7 @@ function MessageRoom({
   );
   const readState = useRef(room);
   readState.current = room;
+  const [showPins, setShowPins] = useState(false);
   const [readBusy, setReadBusy] = useState(false);
   const positionKey = `${org}:${user}:${room.id}:${thread?.id ?? "main"}`;
   const destination = jump
@@ -1137,6 +1139,7 @@ function MessageRoom({
         renderBody={renderBody}
         showReplies={showReplies}
         extras={!!room.message_extras}
+        pinsEnabled={!!room.pins_enabled}
         onChanged={changed}
         onReply={() =>
           threadId ? composer.current?.focus() : setThreadRoot(message)
@@ -1234,6 +1237,14 @@ function MessageRoom({
               onClick={() => onOpenMessage?.(room.first_unread_id!)}
             >
               Jump to unread
+            </button>
+          )}
+          {!threadId && room.pins_enabled && (
+            <button
+              className="team-text-button"
+              onClick={() => setShowPins(true)}
+            >
+              Pinned
             </button>
           )}
           {!threadId && onSearch && (
@@ -1536,6 +1547,14 @@ function MessageRoom({
           </div>
         </form>
       </div>
+      {showPins && (
+        <PinnedMessages
+          org={org}
+          room={room.id}
+          onClose={() => setShowPins(false)}
+          onOpen={(id) => onOpenMessage?.(id)}
+        />
+      )}
       {threadRoot && !threadId && (
         <div className="messages-thread-panel">
           <MessageRoom

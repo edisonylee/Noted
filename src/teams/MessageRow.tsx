@@ -1,6 +1,13 @@
 import { MessageAttachments } from "./MessageAttachments";
 import { useState, type ReactNode } from "react";
-import { MessageSquare, Pencil, SmilePlus, Trash2, Mail } from "lucide-react";
+import {
+  MessageSquare,
+  Pencil,
+  SmilePlus,
+  Trash2,
+  Mail,
+  Pin,
+} from "lucide-react";
 import { REACTIONS, REACTION_NAMES } from "../../services/team/reactions";
 import { TeamAvatar } from "./TeamAvatar";
 import { TeamDialog } from "./TeamDialog";
@@ -19,6 +26,7 @@ export function MessageRow({
   onDelete,
   onProfile,
   onMarkUnread,
+  pinsEnabled = false,
   renderBody,
   showReplies = true,
   extras,
@@ -35,6 +43,7 @@ export function MessageRow({
   onDelete: () => void;
   onProfile: () => void;
   onMarkUnread?: () => void;
+  pinsEnabled?: boolean;
   /** Lets the caller decorate the body (mention marks) without this row
    *  knowing what a mention is. Plain text when omitted. */
   renderBody?: (body: string) => ReactNode;
@@ -42,6 +51,7 @@ export function MessageRow({
   extras: boolean;
   highlighted?: boolean;
 }) {
+  const [pinConfirm, setPinConfirm] = useState(false);
   const [picker, setPicker] = useState(false);
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
@@ -91,6 +101,11 @@ export function MessageRow({
               minute: "2-digit",
             })}
           </time>
+          {message.pinned && (
+            <small className="message-pin-label">
+              <Pin size={11} /> Pinned
+            </small>
+          )}
           {message.edited_at && !message.deleted_at && <small>edited</small>}
         </header>
         {message.deleted_at ? (
@@ -146,6 +161,16 @@ export function MessageRow({
         )}
       </div>
       <div className="messages-actions">
+        {!message.deleted_at && pinsEnabled && canSend && (
+          <button
+            className="team-text-button"
+            title={message.pinned ? "Unpin message" : "Pin message"}
+            aria-label={message.pinned ? "Unpin message" : "Pin message"}
+            onClick={() => setPinConfirm(true)}
+          >
+            <Pin size={14} />
+          </button>
+        )}
         {!message.deleted_at && onMarkUnread && (
           <button
             className="team-text-button"
@@ -201,6 +226,57 @@ export function MessageRow({
           </button>
         )}
       </div>
+      {pinConfirm && (
+        <TeamDialog
+          title={message.pinned ? "Unpin this message?" : "Pin this message?"}
+          busy={busy}
+          onClose={() => setPinConfirm(false)}
+        >
+          <div className="team-form">
+            <p>
+              {message.pinned
+                ? "Remove this message from the conversation’s pinned list."
+                : "Everyone in this conversation will see it in Pinned messages."}
+            </p>
+            <p className="message-pin-preview">
+              {message.body || "File attachment"}
+            </p>
+            {error && (
+              <p className="team-error" role="alert">
+                {error}
+              </p>
+            )}
+            <button
+              className="team-primary"
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true);
+                setError("");
+                try {
+                  onChanged(
+                    await team.request<TeamChatMessage>(
+                      "PUT",
+                      orgPath(org, `/chat-messages/${message.id}/pin`),
+                      { active: !message.pinned },
+                    ),
+                  );
+                  setPinConfirm(false);
+                } catch (e) {
+                  setError(String(e));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              {busy
+                ? "Saving…"
+                : message.pinned
+                  ? "Unpin for everyone"
+                  : "Pin for everyone"}
+            </button>
+          </div>
+        </TeamDialog>
+      )}
       {picker && (
         <TeamDialog
           title="Add a reaction"

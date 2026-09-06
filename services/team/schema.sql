@@ -93,3 +93,9 @@ CREATE TABLE IF NOT EXISTS chat_read_state (
   held INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(room_id,user_id)
 );
+
+CREATE TABLE IF NOT EXISTS chat_pins (
+  message_id TEXT PRIMARY KEY REFERENCES chat_messages(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  created_at TEXT NOT NULL
+);

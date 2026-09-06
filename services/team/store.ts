@@ -1724,6 +1724,7 @@ export class TeamStore {
       message_extras: true,
       attachments_enabled: true,
       unread_navigation: true,
+      pins_enabled: true,
       first_unread_root_id: this.get(
         "SELECT COALESCE(thread_id,id) AS id FROM chat_messages WHERE room_id=? AND author_id<>? AND deleted_at IS NULL AND created_seq>COALESCE((SELECT seq FROM chat_reads WHERE room_id=? AND user_id=?),0) ORDER BY created_seq LIMIT 1",
         id,
@@ -2207,6 +2208,7 @@ export class TeamStore {
     return {
       id,
       room_id: room.id,
+      pinned: !!this.get("SELECT 1 FROM chat_pins WHERE message_id=?", id),
       author_id: String(row.author_id),
       author_name: String(row.author_name),
       body: row.deleted_at ? "" : String(row.body),
@@ -2521,10 +2523,55 @@ export class TeamStore {
       if (remove) {
         this.run("DELETE FROM chat_reactions WHERE message_id=?", id);
         this.run("DELETE FROM chat_attachments WHERE message_id=?", id);
+        this.run("DELETE FROM chat_pins WHERE message_id=?", id);
       }
       this.messageChanged(room.id, id, message.thread_id);
       return this.chatMessage(user, org, id, room);
     })();
+  }
+  pinMessage(user: string, org: string, id: string, active: unknown) {
+    if (typeof active !== "boolean") fail(400, "Invalid pin state");
+    return this.db.transaction(() => {
+      const { room, message } = this.messageLocation(user, org, id);
+      if (!room.can_send) fail(403, "This conversation is read-only");
+      const old = this.get("SELECT 1 FROM chat_pins WHERE message_id=?", id);
+      if (!!old === active) return message;
+      if (active) {
+        if (
+          Number(
+            this.get(
+              "SELECT count(*) n FROM chat_pins p JOIN chat_messages m ON m.id=p.message_id WHERE m.room_id=?",
+              room.id,
+            )!.n,
+          ) >= 50
+        )
+          fail(400, "Unpin a message before adding more (50 maximum)");
+        this.run(
+          "INSERT INTO chat_pins(message_id,user_id,created_at) VALUES(?,?,?)",
+          id,
+          user,
+          now(),
+        );
+      } else this.run("DELETE FROM chat_pins WHERE message_id=?", id);
+      this.run("UPDATE chat_messages SET revision=revision+1 WHERE id=?", id);
+      this.messageChanged(room.id, id, message.thread_id);
+      return this.chatMessage(user, org, id, room);
+    })();
+  }
+  pinnedMessages(user: string, org: string, roomId: string) {
+    this.chatRoom(user, org, roomId);
+    return this.all<{
+      message_id: string;
+      pinned_at: string;
+      pinned_by: string;
+    }>(
+      "SELECT p.message_id,p.created_at AS pinned_at,u.name AS pinned_by FROM chat_pins p JOIN chat_messages m ON m.id=p.message_id JOIN users u ON u.id=p.user_id WHERE m.room_id=? AND m.deleted_at IS NULL ORDER BY p.created_at DESC,p.message_id LIMIT 50",
+      roomId,
+    ).map((row) => ({
+      ...this.messageLocation(user, org, row.message_id),
+      pinned_at: row.pinned_at,
+      pinned_by: row.pinned_by,
+    }));
   }
   attachment(user: string, org: string, id: string) {
     this.role(user, org);

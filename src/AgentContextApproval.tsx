@@ -1,3 +1,4 @@
+import { useBackdropDismiss } from "./ui/useDismissal";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Bot, Check, ChevronDown, FileText, Loader2, ShieldAlert, X } from "lucide-react";
 import { api, isDesktop, type AgentContextOptions, type AgentContextPreview, type AgentContextRequest } from "./api";
@@ -139,10 +140,13 @@ export function AgentContextApproval() {
     }
   }
 
+  // Cancelling a consent dialog can only deny; it must never grant access.
+  const backdrop = useBackdropDismiss(() => { void resolve("deny"); }, !!busy);
+
   if (!isDesktop || !request) return null;
 
   return (
-    <div className="modal-overlay agent-approval-overlay" role="presentation">
+    <div className="modal-overlay agent-approval-overlay" role="presentation" {...backdrop}>
       <section className="agent-approval" role="dialog" aria-modal="true" aria-labelledby="agent-approval-title">
         <header className="agent-approval-head">
           <span className="agent-approval-icon"><Bot size={18} /></span>

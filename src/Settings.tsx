@@ -1,3 +1,4 @@
+import { useBackdropDismiss } from "./ui/useDismissal";
 import { sendTeamNotification } from "./teams/desktopNotification";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { useNavigationState } from "./useNavigationState";
@@ -142,6 +143,7 @@ function AppleCalendarSettings() {
 }
 
 export function SettingsModal({ onClose, page = false, onOpenTeam }: { onClose: () => void; page?: boolean; onOpenTeam?: () => void }) {
+  const backdrop = useBackdropDismiss(onClose);
   const [section, setSection] = useNavigationState<SettingsSection>("settings:section", "system");
   const [savedHint, setSavedHint] = useState(false);
   const [s, setS] = useState<ProviderSettings | null>(null);
@@ -2590,7 +2592,7 @@ export function SettingsModal({ onClose, page = false, onOpenTeam }: { onClose: 
     );
   }
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" {...backdrop}>
       <div className="modal settings-modal" onClick={(e) => e.stopPropagation()}>
         <button className="icon-btn modal-close" onClick={onClose} aria-label="Close">
           <X size={16} />

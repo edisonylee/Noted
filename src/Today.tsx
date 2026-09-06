@@ -1133,28 +1133,28 @@ export function TodayView({
   // Dismiss the peek popover on outside-click or Escape.
   useEffect(() => {
     if (!calOpen) return;
-    const onDown = (e: MouseEvent) => {
+    const onDown = (e: PointerEvent) => {
       if (calWrapRef.current && !calWrapRef.current.contains(e.target as Node)) setCalOpen(false);
     };
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setCalOpen(false);
-    document.addEventListener("mousedown", onDown);
+    document.addEventListener("pointerdown", onDown);
     document.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("pointerdown", onDown);
       document.removeEventListener("keydown", onKey);
     };
   }, [calOpen]);
 
   useEffect(() => {
     if (!addOpen) return;
-    const onDown = (event: MouseEvent) => {
+    const onDown = (event: PointerEvent) => {
       if (addWrapRef.current && !addWrapRef.current.contains(event.target as Node)) setAddOpen(false);
     };
     const onKey = (event: KeyboardEvent) => event.key === "Escape" && setAddOpen(false);
-    document.addEventListener("mousedown", onDown);
+    document.addEventListener("pointerdown", onDown);
     document.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("pointerdown", onDown);
       document.removeEventListener("keydown", onKey);
     };
   }, [addOpen]);

@@ -1,3 +1,4 @@
+import { useOutsideDismiss } from "./ui/useDismissal";
 // The meeting page: pre-meeting prep → live recording (notes front and center,
 // transcript hidden behind a toggle, Granola-style) → summary tabs (PLAUD's
 // multidimensional model: "+" regenerates with another template as a new tab).
@@ -402,6 +403,10 @@ export function MeetingPage({
   const [playingSeg, setPlayingSeg] = useState<number | null>(null);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
+  const shareMenuRef = useRef<HTMLDivElement>(null);
+  const templateMenuRef = useRef<HTMLDivElement>(null);
+  useOutsideDismiss(shareOpen, [shareMenuRef], () => setShareOpen(false));
+  useOutsideDismiss(pickTemplate, [templateMenuRef], () => setPickTemplate(false));
   const [publishOpen, setPublishOpen] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
@@ -1604,7 +1609,7 @@ export function MeetingPage({
           </span>
         ) : null}
         {id != null && !recording && (summaries.length > 0 || notes.trim().length > 0 || liveSegments.length > 0) && (
-          <div className="meeting-share">
+          <div className="meeting-share" ref={shareMenuRef}>
             <button
               className="btn ghost"
               onClick={() => setShareOpen((open) => !open)}
@@ -1729,7 +1734,7 @@ export function MeetingPage({
           </button>
         )}
         {id != null && !recording && liveSegments.length > 0 && remainingTemplates.length > 0 && (
-          <div className="tab-add">
+          <div className="tab-add" ref={templateMenuRef}>
             <button
               className="tab-add-button"
               onClick={() => setPickTemplate((v) => !v)}

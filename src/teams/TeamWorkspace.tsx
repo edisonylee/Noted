@@ -1,3 +1,4 @@
+import { useOutsideDismiss } from "../ui/useDismissal";
 import { ShareMeetingDialog } from "./ShareMeetingDialog";
 import { TeamSearch } from "./TeamSearch";
 import type { TeamNotificationTarget } from "./types";
@@ -186,6 +187,12 @@ export function TeamWorkspace({
   notificationTarget?: TeamNotificationTarget | null;
   onNotificationHandled?: () => void;
 } = {}) {
+  const accountMenuRef = useRef<HTMLDetailsElement>(null);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  useOutsideDismiss(accountMenuOpen, [accountMenuRef], () => {
+    if (accountMenuRef.current) accountMenuRef.current.open = false;
+    setAccountMenuOpen(false);
+  });
   const [orgs, setOrgs] = useState<TeamOrg[] | null>(null);
   const [org, setOrg] = useNavigationState("team:org", "");
   const [connected, setConnected] = useState<boolean | null>(null);
@@ -300,7 +307,11 @@ export function TeamWorkspace({
           </select>
         </label>
 
-        <details className="team-account-menu">
+        <details
+          className="team-account-menu"
+          ref={accountMenuRef}
+          onToggle={(event) => setAccountMenuOpen(event.currentTarget.open)}
+        >
           <summary aria-label="Team options">
             <ChevronDown size={16} />
           </summary>

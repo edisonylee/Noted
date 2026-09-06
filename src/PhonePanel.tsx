@@ -1,3 +1,4 @@
+import { useBackdropDismiss } from "./ui/useDismissal";
 import { useEffect, useMemo, useState } from "react";
 import { Check, Copy, Laptop, ShieldCheck, Smartphone, X } from "lucide-react";
 import QRCode from "qrcode";
@@ -9,6 +10,7 @@ export function PhonePanel({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
+  const backdrop = useBackdropDismiss(onClose, busy);
   const pairingCode = useMemo(() => info ? JSON.stringify({
     invitationJson: info.invitationJson,
     address: `${info.address}:${info.port}`,
@@ -83,7 +85,7 @@ export function PhonePanel({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
+    <div className="modal-overlay" {...backdrop}>
       <div className="modal phone-pairing-modal" onClick={(event) => event.stopPropagation()}>
         <button className="modal-close" onClick={onClose} aria-label="Close"><X /></button>
         <div className="phone-pairing-modal__title"><span><Laptop /></span><div><p>IPHONE COMPANION</p><h3>Connect your iPhone</h3></div></div>

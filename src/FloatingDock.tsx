@@ -1,3 +1,4 @@
+import { useBackdropDismiss } from "./ui/useDismissal";
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowUpRight, FileText, Mic, Search, X, type LucideIcon } from 'lucide-react';
 import type { NoteRow } from './api';
@@ -25,6 +26,7 @@ export function FloatingDock({ open, onOpenChange, destinations, notes, onOpenNo
   const recent = notes.filter(note => !note.trashed_at && (!needle || `${note.title} ${note.raw_text}`.toLowerCase().includes(needle)))
     .sort((a, b) => (b.updated_at || b.created_at).localeCompare(a.updated_at || a.created_at)).slice(0, 8);
 
+  const backdrop = useBackdropDismiss(() => onOpenChange(false), false, true);
   useEffect(() => {
     const element = dialog.current;
     if (!element) return;
@@ -71,7 +73,7 @@ export function FloatingDock({ open, onOpenChange, destinations, notes, onOpenNo
         <Mic size={20} strokeWidth={1.6} /><span className="dock-tooltip" aria-hidden>{recording ? 'Recording in progress' : 'Record a meeting'}</span>
       </button>
     </nav>
-    <dialog ref={dialog} className="mission-dialog" aria-labelledby="mission-title" onCancel={event => { event.preventDefault(); onOpenChange(false); }} onClick={event => { if (event.target === event.currentTarget) onOpenChange(false); }}>
+    <dialog ref={dialog} className="mission-dialog" aria-labelledby="mission-title" onCancel={event => { event.preventDefault(); onOpenChange(false); }} {...backdrop}>
       <div className="mission-surface">
         <header className="mission-heading"><div><h2 id="mission-title">Your space</h2><p>Find a thought. Pick up where you left off.</p></div><button aria-label="Close navigation" onClick={() => onOpenChange(false)}><X size={18} /></button></header>
         <label className="mission-search"><Search size={18} /><input ref={search} aria-label="Search destinations, documents, and captures" placeholder="Search your space…" value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => {

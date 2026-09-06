@@ -1,3 +1,4 @@
+import { useOutsideDismiss } from "./ui/useDismissal";
 import { useEffect, useRef, useState } from "react";
 import { ArrowUp, Check, Loader2, MessageCircle, Mic, Palette, Settings2, Square, Volume2, VolumeX, X } from "lucide-react";
 import { api, isDesktop, type AskEntity, type AskSource, type BrainVaultStatus, type ChatProposal } from "./api";
@@ -39,11 +40,12 @@ export function FloatingChat({
   const [petPosition, setPetPosition] = useState(() => restorePet(preferences.position, preferences.side, viewport, PET_SIZES[preferences.size]));
   const [customizing, setCustomizing] = useState(false);
   const launcherRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const { themes, previewTheme, clearPreview, activateTheme } = useTheme();
   const open = openProp ?? false;
   const openRef = useRef(open);
   openRef.current = open;
-  const setOpen = (o: boolean) => {
+  const setOpen = (o: boolean, restoreFocus = true) => {
     openRef.current = o;
     onOpenChange?.(o);
     if (!o) {
@@ -51,7 +53,7 @@ export function FloatingChat({
       recorderRef.current = null;
       setRecording(false);
       setCustomizing(false);
-      requestAnimationFrame(() => launcherRef.current?.focus());
+      if (restoreFocus) requestAnimationFrame(() => launcherRef.current?.focus());
     }
   };
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -85,14 +87,7 @@ export function FloatingChat({
     const frame = requestAnimationFrame(() => inputRef.current?.focus());
     return () => cancelAnimationFrame(frame);
   }, [open, customizing]);
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onOpenChange]);
+  useOutsideDismiss(open && !recording, [launcherRef, panelRef], reason => setOpen(false, reason === "escape"));
   useEffect(() => () => clearPreview(), [clearPreview]);
   useEffect(() => () => recorderRef.current?.cancel(), []);
   useEffect(() => {
@@ -236,6 +231,7 @@ export function FloatingChat({
     {variant === "floating" && <CompanionLauncher open={open} activity={petActivity} onClick={() => setOpen(!open)} onMove={setPetPosition} buttonRef={launcherRef} />}
     {open && (
     <div
+      ref={panelRef}
       id={variant === "floating" ? "companion-chat" : undefined}
       style={variant === "floating" ? { ...panelNearPet(petPosition, viewport, PET_SIZES[preferences.size], Math.min(customizing ? 480 : 420, viewport.width - 24), customizing ? 680 : 570), right: "auto", bottom: "auto" } : undefined}
       className={"chat-panel" + (variant === "sheet" ? " chat-sheet" : ` companion-panel companion-panel-${preferences.side}${customizing ? " companion-customizing" : ""}`)}

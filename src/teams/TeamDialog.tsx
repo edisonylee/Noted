@@ -1,3 +1,4 @@
+import { useBackdropDismiss } from "../ui/useDismissal";
 import { useEffect, useRef, type ReactNode } from "react";
 
 export function TeamDialog({
@@ -14,6 +15,7 @@ export function TeamDialog({
   className?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const backdrop = useBackdropDismiss(onClose, busy, true);
   useEffect(() => {
     const d = ref.current;
     d?.showModal();
@@ -25,6 +27,7 @@ export function TeamDialog({
   return (
     <dialog
       ref={ref}
+      {...backdrop}
       className={`team-dialog ${className}`}
       aria-label={title}
       onCancel={(e) => {

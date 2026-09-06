@@ -617,7 +617,7 @@ function LibraryWorkspace({
 
   useEffect(() => {
     if (!spaceMenuOpen) return;
-    const dismiss = (event: MouseEvent) => {
+    const dismiss = (event: PointerEvent) => {
       if (!spaceSwitcherRef.current?.contains(event.target as Node)) {
         setSpaceMenuOpen(false);
       }
@@ -625,10 +625,10 @@ function LibraryWorkspace({
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setSpaceMenuOpen(false);
     };
-    document.addEventListener("mousedown", dismiss);
+    document.addEventListener("pointerdown", dismiss);
     document.addEventListener("keydown", closeOnEscape);
     return () => {
-      document.removeEventListener("mousedown", dismiss);
+      document.removeEventListener("pointerdown", dismiss);
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [spaceMenuOpen]);
@@ -641,7 +641,7 @@ function LibraryWorkspace({
       );
       (firstAction ?? noteContextMenuRef.current)?.focus();
     });
-    const dismiss = (event: MouseEvent) => {
+    const dismiss = (event: PointerEvent) => {
       if (!noteContextMenuRef.current?.contains(event.target as Node)) {
         setNoteContextMenu(null);
       }
@@ -663,14 +663,14 @@ function LibraryWorkspace({
       setNoteContextMenu(null);
     };
     const closeWithoutRestoringFocus = () => setNoteContextMenu(null);
-    document.addEventListener("mousedown", dismiss);
+    document.addEventListener("pointerdown", dismiss);
     document.addEventListener("keydown", closeOnEscape);
     document.addEventListener("scroll", closeOnPageScroll, true);
     window.addEventListener("blur", closeWithoutRestoringFocus);
     window.addEventListener("resize", closeWithoutRestoringFocus);
     return () => {
       window.cancelAnimationFrame(focusFrame);
-      document.removeEventListener("mousedown", dismiss);
+      document.removeEventListener("pointerdown", dismiss);
       document.removeEventListener("keydown", closeOnEscape);
       document.removeEventListener("scroll", closeOnPageScroll, true);
       window.removeEventListener("blur", closeWithoutRestoringFocus);
@@ -687,7 +687,7 @@ function LibraryWorkspace({
       : window.requestAnimationFrame(() => {
           folderMenuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
         });
-    const dismiss = (event: MouseEvent) => {
+    const dismiss = (event: PointerEvent) => {
       const target = event.target as Node;
       if (folderMenuRef.current?.contains(target)) return;
       if ((target as Element).closest?.(".folder-more")) return;
@@ -704,12 +704,12 @@ function LibraryWorkspace({
       setMenuFolder(null);
       setFolderContextPoint(null);
     };
-    document.addEventListener("mousedown", dismiss);
+    document.addEventListener("pointerdown", dismiss);
     document.addEventListener("keydown", closeOnEscape);
     document.addEventListener("scroll", closeOnScroll, true);
     return () => {
       if (focusFrame != null) window.cancelAnimationFrame(focusFrame);
-      document.removeEventListener("mousedown", dismiss);
+      document.removeEventListener("pointerdown", dismiss);
       document.removeEventListener("keydown", closeOnEscape);
       document.removeEventListener("scroll", closeOnScroll, true);
     };

@@ -1,3 +1,4 @@
+import { useBackdropDismiss } from "./ui/useDismissal";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlignLeft,
@@ -255,6 +256,7 @@ export function CalendarEventForm({
   onSave: (f: CalendarEventFormState) => void;
   onCancel: () => void;
 }) {
+  const backdrop = useBackdropDismiss(onCancel, busy);
   const [f, setF] = useState<CalendarEventFormState>(init);
   const groups = writableCals(status, lockAccount);
   const set = (patch: Partial<CalendarEventFormState>) => setF((prev) => ({ ...prev, ...patch }));
@@ -284,7 +286,7 @@ export function CalendarEventForm({
   }
 
   return (
-    <div className="cal-overlay" onMouseDown={(e) => e.target === e.currentTarget && onCancel()}>
+    <div className="cal-overlay" {...backdrop}>
       <div className="cal-form" role="dialog" aria-modal="true" aria-label={heading}>
         <div className="cal-form-head">
           <span>{heading}</span>
@@ -583,7 +585,7 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
   // Dismiss popovers on outside click / Escape.
   useEffect(() => {
     if (!sel && !filterOpen) return;
-    const onDown = (e: MouseEvent) => {
+    const onDown = (e: PointerEvent) => {
       const t = e.target as Node;
       if (sel && selRef.current && !selRef.current.contains(t)) setSel(null);
       if (filterOpen && filterRef.current && !filterRef.current.contains(t)) setFilterOpen(false);
@@ -594,10 +596,10 @@ export function CalendarView({ onOpenSettings }: { onOpenSettings?: () => void }
         setFilterOpen(false);
       }
     };
-    document.addEventListener("mousedown", onDown);
+    document.addEventListener("pointerdown", onDown);
     document.addEventListener("keydown", onKey);
     return () => {
-      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("pointerdown", onDown);
       document.removeEventListener("keydown", onKey);
     };
   }, [sel, filterOpen]);

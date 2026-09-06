@@ -1,3 +1,4 @@
+import { useOutsideDismiss } from "./ui/useDismissal";
 import { AppUpdateIndicator } from "./AppUpdateIndicator";
 import brandWordmark from "./design-system/assets/wordmark.png";
 import type { TeamNotificationTarget } from "./teams/types";
@@ -284,6 +285,9 @@ export default function App() {
   const [meetingControlAction, setMeetingControlAction] = useState<"starting" | "stopping" | null>(null);
   const [meetingControlError, setMeetingControlError] = useState<string | null>(null);
   const [recordModeMenu, setRecordModeMenu] = useState(false);
+  const recordMenuRef = useRef<HTMLDivElement>(null);
+  const recordTriggerRef = useRef<HTMLButtonElement>(null);
+  useOutsideDismiss(recordModeMenu, [recordMenuRef, recordTriggerRef], () => setRecordModeMenu(false));
   useEffect(() => {
     api
       .meetingState()
@@ -924,7 +928,7 @@ export default function App() {
         </nav>
         <span className="spacer" data-tauri-drag-region />
         {recordModeMenu && !recMeeting && (
-          <div className="record-mode-menu" role="menu" aria-label="Recording type">
+          <div ref={recordMenuRef} className="record-mode-menu" role="menu" aria-label="Recording type">
             <button role="menuitem" onClick={() => void toggleMeetingRecording("in_person")}>
               <Mic size={15} />
               <span><strong>In-person meeting</strong><small>Room microphone · separates speakers after</small></span>
@@ -973,6 +977,7 @@ export default function App() {
           </div>
         ) : (
           <button
+            ref={recordTriggerRef}
             className="rec-pill"
             onClick={() => void toggleMeetingRecording()}
             disabled={meetingControlAction != null}

@@ -1,5 +1,5 @@
 import { useNavigationState } from "../useNavigationState";
-import { MessageSquare, Settings, Users } from "lucide-react";
+import { MessageSquare, Settings, Search } from "lucide-react";
 import { useState } from "react";
 import type { TeamSnapshot } from "./types";
 import { TeamAvatar } from "./TeamAvatar";
@@ -16,17 +16,21 @@ export function TeamPeople({
   onManage: () => void;
 }) {
   const [profile, setProfile] = useState<TeamUser | null>(null);
-  const [query, setQuery] = useNavigationState(`team:${data.org.id}:${data.user.id}:people-query`, "");
+  const [query, setQuery] = useNavigationState(
+    `team:${data.org.id}:${data.user.id}:people-query`,
+    "",
+  );
   const [pending, setPending] = useState("");
   const [error, setError] = useState("");
-  const members = data.members.filter((person) =>
-    person.name.toLowerCase().includes(query.trim().toLowerCase()),
-  );
+  const members = data.members
+    .filter((person) =>
+      person.name.toLowerCase().includes(query.trim().toLowerCase()),
+    )
+    .sort((a, b) => a.name.localeCompare(b.name));
   return (
     <main className="team-people-page">
       <header className="team-library-head">
         <div>
-          <span className="team-eyebrow">{data.org.name}</span>
           <h1>People</h1>
           <p>Find a teammate and start a private conversation.</p>
         </div>
@@ -35,16 +39,21 @@ export function TeamPeople({
           {data.org.role === "member" ? "Team settings" : "Invite & manage"}
         </button>
       </header>
-      <label className="team-people-search">
-        <Users size={16} />
-        <input
-          type="search"
-          aria-label="Find a teammate"
-          placeholder="Find a teammate"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-      </label>
+      <div className="team-people-tools">
+        <label className="team-people-search">
+          <Search size={16} />
+          <input
+            type="search"
+            aria-label="Find a teammate"
+            placeholder="Find a teammate"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
+        <span className="team-muted" role="status">
+          {members.length} {members.length === 1 ? "person" : "people"}
+        </span>
+      </div>
       {error && (
         <p className="team-error" role="alert">
           {error}
@@ -104,7 +113,12 @@ export function TeamPeople({
         ))}
       </div>
       {!members.length && (
-        <p className="team-empty">No teammates match that name.</p>
+        <div className="team-empty">
+          <p>No teammates match that name.</p>
+          <button className="team-text-button" onClick={() => setQuery("")}>
+            Clear filter
+          </button>
+        </div>
       )}
       {profile && (
         <TeamProfileCard

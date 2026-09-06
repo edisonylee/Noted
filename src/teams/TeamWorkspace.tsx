@@ -1,6 +1,9 @@
 import { TeamSearch } from "./TeamSearch";
 import type { TeamNotificationTarget } from "./types";
-import { useNavigationState, clearNavigationState } from "../useNavigationState";
+import {
+  useNavigationState,
+  clearNavigationState,
+} from "../useNavigationState";
 import {
   useCallback,
   useEffect,
@@ -49,6 +52,8 @@ import { SavedAnswers } from "./SavedAnswers";
 import { TeamChat } from "./TeamChat";
 import { TeamAdministration } from "./TeamAdministration";
 import "./teams.css";
+import "./meetings-layout.css";
+import "./team-layout.css";
 
 export function TeamConnect({
   onConnected,
@@ -172,14 +177,21 @@ export function TeamConnect({
   );
 }
 export function TeamWorkspace({
-  onOpenLibrary, notificationTarget, onNotificationHandled,
-}: { onOpenLibrary?: () => void; notificationTarget?: TeamNotificationTarget | null; onNotificationHandled?: () => void } = {}) {
+  onOpenLibrary,
+  notificationTarget,
+  onNotificationHandled,
+}: {
+  onOpenLibrary?: () => void;
+  notificationTarget?: TeamNotificationTarget | null;
+  onNotificationHandled?: () => void;
+} = {}) {
   const [orgs, setOrgs] = useState<TeamOrg[] | null>(null);
   const [org, setOrg] = useNavigationState("team:org", "");
   const [connected, setConnected] = useState<boolean | null>(null);
   const [error, setError] = useState("");
   const [addWorkspace, setAddWorkspace] = useState(false);
-  const [validatedTarget, setValidatedTarget] = useState<TeamNotificationTarget | null>(null);
+  const [validatedTarget, setValidatedTarget] =
+    useState<TeamNotificationTarget | null>(null);
   useEffect(() => {
     let active = true;
     team
@@ -191,7 +203,11 @@ export function TeamWorkspace({
           const values = await team.request<TeamOrg[]>("GET", "/v1/orgs");
           if (active) {
             setOrgs(values);
-            setOrg((previous) => values.some((value) => value.id === previous) ? previous : values[0]?.id ?? "");
+            setOrg((previous) =>
+              values.some((value) => value.id === previous)
+                ? previous
+                : (values[0]?.id ?? ""),
+            );
           }
         }
       })
@@ -206,17 +222,36 @@ export function TeamWorkspace({
     };
   }, []);
   useEffect(() => {
-    if (!notificationTarget) { setValidatedTarget(null); return; }
+    if (!notificationTarget) {
+      setValidatedTarget(null);
+      return;
+    }
     if (!orgs) return;
     let alive = true;
-    void team.status().then((status) => {
-      if (!alive) return;
-      if (status.server.replace(/\/$/, "") !== notificationTarget.server.replace(/\/$/, "") || !orgs.some((o) => o.id === notificationTarget.org)) {
-        setError("This notification belongs to a team or server that is no longer connected.");
-        onNotificationHandled?.();
-      } else { setOrg(notificationTarget.org); setValidatedTarget(notificationTarget); }
-    }).catch((e) => { if (alive) setError(String(e)); });
-    return () => { alive = false; };
+    void team
+      .status()
+      .then((status) => {
+        if (!alive) return;
+        if (
+          status.server.replace(/\/$/, "") !==
+            notificationTarget.server.replace(/\/$/, "") ||
+          !orgs.some((o) => o.id === notificationTarget.org)
+        ) {
+          setError(
+            "This notification belongs to a team or server that is no longer connected.",
+          );
+          onNotificationHandled?.();
+        } else {
+          setOrg(notificationTarget.org);
+          setValidatedTarget(notificationTarget);
+        }
+      })
+      .catch((e) => {
+        if (alive) setError(String(e));
+      });
+    return () => {
+      alive = false;
+    };
   }, [notificationTarget, orgs, onNotificationHandled]);
   const updateTeam = useCallback(
     (next: TeamOrg) =>
@@ -263,7 +298,7 @@ export function TeamWorkspace({
             ))}
           </select>
         </label>
-        <span className="team-purpose">Shared meetings. Connected people.</span>
+
         <details className="team-account-menu">
           <summary aria-label="Team options">
             <ChevronDown size={16} />
@@ -309,8 +344,13 @@ export function TeamWorkspace({
             org={org}
             onOpenLibrary={onOpenLibrary}
             onTeamUpdate={updateTeam}
-          notificationTarget={validatedTarget === notificationTarget && validatedTarget?.org === org ? validatedTarget : null}
-          onNotificationHandled={onNotificationHandled}
+            notificationTarget={
+              validatedTarget === notificationTarget &&
+              validatedTarget?.org === org
+                ? validatedTarget
+                : null
+            }
+            onNotificationHandled={onNotificationHandled}
           />
         </TeamAvatars>
       ) : (
@@ -411,7 +451,9 @@ function AddWorkspace({
 function TeamLibrary({
   org,
   onOpenLibrary,
-  onTeamUpdate, notificationTarget, onNotificationHandled,
+  onTeamUpdate,
+  notificationTarget,
+  onNotificationHandled,
 }: {
   notificationTarget?: TeamNotificationTarget | null;
   onNotificationHandled?: () => void;
@@ -425,9 +467,15 @@ function TeamLibrary({
   const [view, setView] = useNavigationState<
     "notes" | "admin" | "trash" | "answers" | "messages" | "people" | "search"
   >(`team:${org}:view`, "notes");
-  const [searchRoom, setSearchRoom] = useNavigationState(`team:${org}:search-room`, "");
+  const [searchRoom, setSearchRoom] = useNavigationState(
+    `team:${org}:search-room`,
+    "",
+  );
   const [searchMeeting, setSearchMeeting] = useState<string | null>(null);
-  const [requestedMessage, setRequestedMessage] = useState<{ id: string; nonce: number } | null>(null);
+  const [requestedMessage, setRequestedMessage] = useState<{
+    id: string;
+    nonce: number;
+  } | null>(null);
   const [unread, setUnread] = useState(0);
   useEffect(() => {
     if (notificationTarget) setView("messages");
@@ -437,11 +485,20 @@ function TeamLibrary({
   const [query, setQuery] = useNavigationState(`team:${org}:query`, "");
   const [rows, setRows] = useState<TeamNoteRow[]>([]);
   const [more, setMore] = useState(false);
-  const [selected, setSelected] = useNavigationState<string[]>(`team:${org}:selected`, []);
-  const [noteId, setNoteId] = useNavigationState<string | null>(`team:${org}:note`, null);
+  const [selected, setSelected] = useNavigationState<string[]>(
+    `team:${org}:selected`,
+    [],
+  );
+  const [noteId, setNoteId] = useNavigationState<string | null>(
+    `team:${org}:note`,
+    null,
+  );
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [conversationId, setConversationId] = useNavigationState<string | null>(`team:${org}:conversation`, null);
+  const [conversationId, setConversationId] = useNavigationState<string | null>(
+    `team:${org}:conversation`,
+    null,
+  );
   const [editor, setEditor] = useState<
     "space" | "folder" | "editFolder" | null
   >(null);
@@ -470,8 +527,12 @@ function TeamLibrary({
       setAccessEpoch((v) => v + 1);
     }
     accessVersion.current = next.access_version;
-    setSpace((current) => next.spaces.some((item) => item.id === current) ? current : "");
-    setFolder((current) => next.folders.some((item) => item.id === current) ? current : "");
+    setSpace((current) =>
+      next.spaces.some((item) => item.id === current) ? current : "",
+    );
+    setFolder((current) =>
+      next.folders.some((item) => item.id === current) ? current : "",
+    );
     setData(next);
     onTeamUpdate(next.org);
     return next;
@@ -594,7 +655,11 @@ function TeamLibrary({
         <div key={f.id}>
           <button
             style={{ paddingLeft: `${20 + Math.min(depth, 5) * 12}px` }}
-            className={folder === f.id ? "on" : ""}
+            title={f.name}
+            aria-current={
+              view === "notes" && folder === f.id ? "page" : undefined
+            }
+            className={view === "notes" && folder === f.id ? "on" : ""}
             onClick={() => navigate(spaceId, f.id)}
           >
             <Folder size={14} />
@@ -639,7 +704,16 @@ function TeamLibrary({
             </b>
           )}
         </button>
-        <button aria-current={view === "search" ? "page" : undefined} className={view === "search" ? "on" : ""} onClick={() => { setSearchMeeting(null); setView("search"); }}><Search size={17} /> Search</button>
+        <button
+          aria-current={view === "search" ? "page" : undefined}
+          className={view === "search" ? "on" : ""}
+          onClick={() => {
+            setSearchMeeting(null);
+            setView("search");
+          }}
+        >
+          <Search size={17} /> Search
+        </button>
         <button
           aria-current={view === "people" ? "page" : undefined}
           className={view === "people" ? "on" : ""}
@@ -665,18 +739,44 @@ function TeamLibrary({
             requestedRoom={requestedRoom}
             requestedMessage={requestedMessage}
             onRequestedMessageHandled={() => setRequestedMessage(null)}
-            onSearch={(room) => { setSearchRoom(room); setSearchMeeting(null); setView("search"); }}
+            onSearch={(room) => {
+              setSearchRoom(room);
+              setSearchMeeting(null);
+              setView("search");
+            }}
             onUnread={setUnread}
             notificationTarget={notificationTarget}
             onNotificationHandled={onNotificationHandled}
           />
         </div>
       )}
-      {data && view === "search" && (searchMeeting ? <SharedMeeting key={searchMeeting} org={org} id={searchMeeting} folders={data.folders} accessEpoch={accessEpoch} backLabel="Search results" onBack={() => setSearchMeeting(null)} /> :
-        <TeamSearch key={`${org}:${data.user.id}`} data={data} room={searchRoom} onRoom={setSearchRoom} onOpen={(hit) => {
-          if (hit.kind === "meeting") setSearchMeeting(hit.id);
-          else { setRequestedMessage({ id: hit.id, nonce: Date.now() }); setView("messages"); }
-        }} />)}
+      {data &&
+        view === "search" &&
+        (searchMeeting ? (
+          <SharedMeeting
+            key={searchMeeting}
+            org={org}
+            id={searchMeeting}
+            folders={data.folders}
+            accessEpoch={accessEpoch}
+            backLabel="Search results"
+            onBack={() => setSearchMeeting(null)}
+          />
+        ) : (
+          <TeamSearch
+            key={`${org}:${data.user.id}`}
+            data={data}
+            room={searchRoom}
+            onRoom={setSearchRoom}
+            onOpen={(hit) => {
+              if (hit.kind === "meeting") setSearchMeeting(hit.id);
+              else {
+                setRequestedMessage({ id: hit.id, nonce: Date.now() });
+                setView("messages");
+              }
+            }}
+          />
+        ))}
       {data && view === "people" && (
         <TeamPeople
           data={data}
@@ -689,54 +789,85 @@ function TeamLibrary({
           <TeamAdministration data={data} refresh={refresh} />
         </main>
       )}
-      <div className="team-layout" hidden={!knowledgeView}>
-        <aside className="team-sidebar" aria-label="Meeting collections">
+      <div className="team-layout meetings-layout" hidden={!knowledgeView}>
+        <aside
+          className="team-sidebar meetings-sidebar"
+          aria-label="Meeting collections"
+        >
+          <h2 className="meetings-sidebar-title">Library</h2>
           <button
+            aria-current={view === "notes" && !space ? "page" : undefined}
             className={view === "notes" && !space ? "on" : ""}
             onClick={() => navigate()}
           >
             <BookOpen size={15} /> All meetings
           </button>
-          <div className="team-sidebar-label">
-            <span>Collections</span>
+          <div className="meetings-collections">
+            <details open>
+              <summary>
+                <ChevronDown size={13} />
+                <span>Collections</span>
+              </summary>
+              <div className="meetings-collection-list">
+                {data?.spaces
+                  .slice()
+                  .sort((a, b) =>
+                    collectionName(a).localeCompare(collectionName(b)),
+                  )
+                  .map((s) => (
+                    <div key={s.id} className="team-space-nav">
+                      <button
+                        aria-current={
+                          view === "notes" && space === s.id && !folder
+                            ? "page"
+                            : undefined
+                        }
+                        title={collectionName(s)}
+                        className={
+                          view === "notes" && space === s.id && !folder
+                            ? "on"
+                            : ""
+                        }
+                        onClick={() => navigate(s.id)}
+                      >
+                        {s.visibility === "restricted" ? (
+                          <Lock size={14} />
+                        ) : (
+                          <Users size={14} />
+                        )}
+                        <span className="team-collection-name">
+                          {collectionName(s)}
+                          <small>
+                            {s.visibility === "team"
+                              ? "All members"
+                              : "Restricted"}
+                          </small>
+                        </span>
+                      </button>
+                      {nestedFolders(s.id)}
+                    </div>
+                  ))}
+                {!data?.spaces.length && (
+                  <p className="meetings-collection-empty">
+                    Collections organize shared meetings by project or topic.
+                  </p>
+                )}
+              </div>
+            </details>
             {isAdmin && (
               <button
+                className="meetings-create-collection"
                 aria-label="Create collection"
+                title="Create collection"
                 onClick={() => setEditor("space")}
               >
-                <Plus size={15} />
+                <Plus size={16} />
               </button>
             )}
           </div>
-          <p className="team-sidebar-help">
-            Group meetings by project or topic.
-          </p>
-          {data?.spaces
-            .slice()
-            .sort((a, b) => collectionName(a).localeCompare(collectionName(b)))
-            .map((s) => (
-              <div key={s.id} className="team-space-nav">
-                <button
-                  className={space === s.id && !folder ? "on" : ""}
-                  onClick={() => navigate(s.id)}
-                >
-                  {s.visibility === "restricted" ? (
-                    <Lock size={14} />
-                  ) : (
-                    <Users size={14} />
-                  )}
-                  <span className="team-collection-name">
-                    {collectionName(s)}
-                    <small>
-                      {s.visibility === "team" ? "All members" : "Restricted"}
-                    </small>
-                  </span>
-                </button>
-                {nestedFolders(s.id)}
-              </div>
-            ))}
           <div className="team-sidebar-bottom">
             <button
+              aria-current={view === "answers" ? "page" : undefined}
               className={view === "answers" ? "on" : ""}
               onClick={() => {
                 setView("answers");
@@ -746,6 +877,7 @@ function TeamLibrary({
               <BookOpen size={15} /> Saved answers
             </button>
             <button
+              aria-current={view === "trash" ? "page" : undefined}
               className={view === "trash" ? "on" : ""}
               onClick={() => {
                 setView("trash");
@@ -801,18 +933,13 @@ function TeamLibrary({
               <>
                 <header className="team-library-head">
                   <div>
-                    <span className="team-eyebrow">
-                      {currentSpace
-                        ? "Meeting collection"
-                        : "Company knowledge"}
-                    </span>
                     <h1>{view === "trash" ? "Trash" : scopeName}</h1>
                     <p>
                       {view === "trash"
                         ? "Removed shared copies. Local originals remain in their owners’ libraries."
                         : currentFolder?.description ||
                           currentSpace?.description ||
-                          "Your team’s meeting notes, decisions, and answers in one place."}
+                          "Shared notes, transcripts, and decisions."}
                     </p>
                     {currentSpace && (
                       <span className="team-collection-audience">

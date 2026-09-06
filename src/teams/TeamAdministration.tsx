@@ -35,7 +35,10 @@ export function TeamAdministration({
   data: TeamSnapshot;
   refresh: () => Promise<TeamSnapshot>;
 }) {
-  const [tab, setTab] = useNavigationState(`team:${data.org.id}:${data.user.id}:admin-tab`, "members"),
+  const [tab, setTab] = useNavigationState(
+      `team:${data.org.id}:${data.user.id}:admin-tab`,
+      "members",
+    ),
     [error, setError] = useState("");
   const [busy, setBusy] = useState(false),
     [message, setMessage] = useState("");
@@ -142,7 +145,33 @@ export function TeamAdministration({
           </p>
         </div>
       </header>
-      {admin && tab !== "profile" && (
+      <nav className="team-tabs" aria-label="Team settings">
+        {[
+          "profile",
+          "members",
+          ...(admin ? ["spaces", "groups"] : []),
+          "prompts",
+          ...(admin ? ["integrations", "activity"] : []),
+        ].map((name) => (
+          <button
+            key={name}
+            aria-current={tab === name ? "page" : undefined}
+            className={tab === name ? "on" : ""}
+            onClick={() => {
+              setTab(name);
+              setError("");
+              setMessage("");
+            }}
+          >
+            {name === "prompts"
+              ? "Recipes & templates"
+              : name === "spaces"
+                ? "Collections"
+                : name.charAt(0).toUpperCase() + name.slice(1)}
+          </button>
+        ))}
+      </nav>
+      {admin && tab === "members" && (
         <form
           className="team-name-form"
           onSubmit={(event) => {
@@ -172,31 +201,7 @@ export function TeamAdministration({
           </button>
         </form>
       )}
-      <nav className="team-tabs" aria-label="Team settings">
-        {[
-          "profile",
-          "members",
-          ...(admin ? ["spaces", "groups"] : []),
-          "prompts",
-          ...(admin ? ["integrations", "activity"] : []),
-        ].map((name) => (
-          <button
-            key={name}
-            className={tab === name ? "on" : ""}
-            onClick={() => {
-              setTab(name);
-              setError("");
-              setMessage("");
-            }}
-          >
-            {name === "prompts"
-              ? "Recipes & templates"
-              : name === "spaces"
-                ? "Collections"
-                : name.charAt(0).toUpperCase() + name.slice(1)}
-          </button>
-        ))}
-      </nav>
+
       {error && (
         <p className="team-error" role="alert">
           {error}

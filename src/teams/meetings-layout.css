@@ -1,0 +1,194 @@
+.team-layout.meetings-layout {
+  grid-template-columns: clamp(220px, 23%, 280px) minmax(0, 1fr);
+}
+.meetings-layout .meetings-sidebar {
+  min-width: 0;
+  padding: 16px 10px;
+  gap: 4px;
+  background: var(--surface-2);
+}
+.meetings-sidebar-title {
+  margin: 0 8px 12px;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+.meetings-sidebar button {
+  min-width: 0;
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 13px;
+}
+.meetings-sidebar button.on {
+  background: color-mix(in srgb, var(--ink) 9%, transparent);
+}
+.meetings-sidebar button:focus-visible,
+.meetings-sidebar summary:focus-visible,
+.meetings-layout .team-note-row button:focus-visible,
+.meetings-layout .team-list-tools label:focus-within {
+  outline: 2px solid var(--ink-soft);
+  outline-offset: -2px;
+}
+.meetings-collections {
+  position: relative;
+  margin-top: 14px;
+}
+.meetings-collections summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 38px 6px 8px;
+  border-radius: 6px;
+  list-style: none;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  cursor: pointer;
+}
+.meetings-collections summary::-webkit-details-marker {
+  display: none;
+}
+.meetings-collections details:not([open]) summary svg {
+  transform: rotate(-90deg);
+}
+.meetings-sidebar .meetings-create-collection {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  width: 30px;
+  min-height: 30px;
+  padding: 7px;
+}
+.meetings-collection-list {
+  min-width: 0;
+}
+.meetings-collection-empty {
+  margin: 8px 10px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.meetings-sidebar .team-space-nav {
+  margin: 2px 0;
+}
+.meetings-sidebar .team-collection-name {
+  flex: 1;
+}
+.meetings-sidebar .team-collection-name small {
+  font-size: 11px;
+}
+.meetings-sidebar .team-sidebar-bottom {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.meetings-layout .team-main {
+  padding: 22px 28px 40px;
+}
+.meetings-layout .team-library-head {
+  margin-bottom: 20px;
+}
+.meetings-layout .team-library-head h1 {
+  font-size: 23px;
+  margin-bottom: 6px;
+}
+.meetings-layout .team-library-head p {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.meetings-layout .team-ask {
+  margin-bottom: 22px;
+}
+.meetings-layout .team-chat-tools {
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.meetings-layout .team-ask form {
+  padding: 10px 12px;
+  gap: 12px;
+}
+.meetings-layout .team-chat-privacy {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.meetings-layout .team-list-tools {
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.meetings-layout .team-list-tools label {
+  min-width: 0;
+  background: var(--hover-soft);
+  padding: 0 10px;
+  border-radius: 8px;
+}
+.meetings-layout .team-list-tools input {
+  min-width: 0;
+}
+.meetings-layout .team-note-row {
+  padding: 0 10px;
+  gap: 12px;
+}
+.meetings-layout .team-note-row > button {
+  padding: 16px 0;
+  gap: 6px;
+}
+.meetings-layout .team-note-row strong {
+  font-size: 14px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.meetings-layout .team-excerpt {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.meetings-layout .team-note-meta {
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 900px) {
+  .team-layout.meetings-layout {
+    grid-template-columns: 210px minmax(0, 1fr);
+  }
+  .meetings-layout .team-main {
+    padding: 20px 18px 32px;
+  }
+}
+@media (max-width: 650px) {
+  .team-layout.meetings-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .meetings-layout .meetings-sidebar {
+    max-height: 270px;
+    overflow: auto;
+    padding: 12px;
+  }
+  .meetings-sidebar-title {
+    margin-bottom: 6px;
+  }
+  .meetings-collections {
+    margin-top: 6px;
+  }
+  .meetings-sidebar .team-sidebar-bottom {
+    display: flex;
+    margin-top: 8px;
+    padding-top: 8px;
+  }
+  .meetings-layout .team-main {
+    padding: 20px 14px;
+  }
+  .meetings-layout .team-ask form {
+    flex-wrap: wrap;
+  }
+  .meetings-layout .team-ask textarea {
+    flex-basis: 100%;
+  }
+  .meetings-layout .team-ask-footer {
+    width: 100%;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+  }
+}

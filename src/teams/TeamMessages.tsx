@@ -1,3 +1,11 @@
+import { useOutsideDismiss } from "../ui/useDismissal";
+import { ComposerActions, ActionIcon } from "./ComposerActions";
+import { slashCommands, type ComposerAction } from "./composerCommands";
+import {
+  MeetingPicker,
+  StagedMeeting,
+  type PendingMeeting,
+} from "./MeetingPicker";
 import { MessageComposer, type MessageComposerHandle } from "./MessageComposer";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { SavedMessages } from "./SavedMessages";
@@ -38,7 +46,6 @@ import {
   Loader,
   MessageSquare,
   MessagesSquare,
-  Paperclip,
   RefreshCw,
   Send,
   Settings2,
@@ -736,6 +743,11 @@ function MessageRoom({
     `team:${org}:${user}:${draftKey}:attachments`,
     [],
   );
+  const [meeting, setMeeting] = useNavigationState<PendingMeeting | null>(
+    `team:${org}:${user}:${draftKey}:meeting`,
+    null,
+  );
+  const [meetingPicker, setMeetingPicker] = useState(false);
   // Same lifecycle as staged attachments: survives room and thread switches
   // and the jump remount, dropped on reload. Never the full message.
   const [replyTo, setReplyTo] = useNavigationState<TeamReplyReference | null>(
@@ -1126,7 +1138,7 @@ function MessageRoom({
     const body = draft.trim();
     if (
       !isActive ||
-      (!body && !attachments.length) ||
+      (!body && !attachments.length && !meeting) ||
       sending ||
       readingFiles ||
       !canSend ||
@@ -1140,6 +1152,7 @@ function MessageRoom({
           body,
           attachments.map((f) => f.id),
           replyToId,
+          meeting,
         ),
       ),
       epoch = accessEpoch.current;
@@ -1154,11 +1167,20 @@ function MessageRoom({
           client_id: clientId,
           thread_id: threadId,
           reply_to_id: replyToId,
+          meeting: meeting
+            ? {
+                id: meeting.id,
+                revision: meeting.revision,
+                start: 0,
+                length: 0,
+              }
+            : undefined,
           attachments: attachments.map(({ name, data }) => ({ name, data })),
         },
       );
       onSentFor(draftKey, body);
       setAttachments([]);
+      setMeeting(null);
       setReplyTo(null);
       if (!alive.current || epoch !== accessEpoch.current) return;
       setMessages((old) => mergeMessages(old, [message]));
@@ -1204,6 +1226,37 @@ function MessageRoom({
   const [caret, setCaret] = useState(0);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
+  const availableActions: ComposerAction[] = [
+    ...(room.attachments_enabled && attachments.length < 3
+      ? ["attach" as const]
+      : []),
+    ...(room.meeting_references_enabled ? ["meeting" as const] : []),
+  ];
+  const commandBoundary = useRef<HTMLFormElement>(null);
+  const commands =
+    dismissed || sending || !canSend || readingFiles
+      ? []
+      : slashCommands(draft, caret, availableActions);
+  useOutsideDismiss(commands.length > 0, [commandBoundary], () =>
+    setDismissed(true),
+  );
+  const chooseAction = (action: ComposerAction, slash = false) => {
+    if (
+      sending ||
+      readingFiles ||
+      !canSend ||
+      !availableActions.includes(action)
+    )
+      return;
+    if (slash) {
+      setDraft(draft.slice(caret).replace(/^ /, ""));
+      setCaret(0);
+      setDismissed(true);
+      requestAnimationFrame(() => composer.current?.setSelectionRange(0, 0));
+    }
+    if (action === "meeting") setMeetingPicker(true);
+    else attachmentPicker.current?.open();
+  };
   const eligible =
     room.kind === "direct"
       ? members.filter((m) =>
@@ -1220,8 +1273,13 @@ function MessageRoom({
     | { kind: "member"; member: TeamUser }
     | { kind: "channel"; room: TeamChatRoom };
   const channelQ =
-    dismissed || !channels.length ? null : channelQuery(draft, caret);
-  const query = dismissed || channelQ ? null : mentionQuery(draft, caret);
+    dismissed || commands.length || !channels.length
+      ? null
+      : channelQuery(draft, caret);
+  const query =
+    dismissed || commands.length || channelQ
+      ? null
+      : mentionQuery(draft, caret);
   const target = channelQ ?? query;
   const suggestions: Suggestion[] = channelQ
     ? channels
@@ -1719,6 +1777,7 @@ function MessageRoom({
           </button>
         )}
         <form
+          ref={commandBoundary}
           className="messages-compose"
           onSubmit={(e) => {
             e.preventDefault();
@@ -1805,131 +1864,202 @@ function MessageRoom({
             </div>
           )}
           <div className="messages-compose-box">
-          {room.attachments_enabled && (
-            <AttachmentPicker
-              ref={attachmentPicker}
-              files={attachments}
-              onChange={setAttachments}
-              disabled={sending || !canSend}
-              onBusy={setReadingFiles}
-            />
-          )}
-          <MessageComposer
-            aria-controls={
-              suggestions.length ? `mentions-${draftKey}` : undefined
-            }
-            aria-activedescendant={
-              suggestions.length
-                ? `mention-${draftKey}-${mentionIndex % suggestions.length}`
-                : undefined
-            }
-            aria-describedby={replyTo ? `reply-to-${draftKey}` : undefined}
-            id={`compose-${draftKey}`}
-            ref={composer}
-            value={draft}
-            disabled={sending || !canSend}
-            placeholder={
-              canSend
-                ? replyTo
-                  ? `Reply to ${replyTo.author_name}`
-                  : threadId
-                    ? "Reply in thread"
-                    : `Message ${room.kind === "channel" && !room.is_default ? "#" : ""}${label}`
-                : "This conversation is read-only"
-            }
-            onChange={(value, caret) => {
-              setDraft(value);
-              setCaret(caret);
-              setMentionIndex(0);
-              setDismissed(false);
-            }}
-            onSelect={setCaret}
-            onKeyDown={(e) => {
-              if (e.isComposing) return;
-              if (suggestions.length) {
-                if (e.key === "Escape") {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setDismissed(true);
-                  return;
-                }
-                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-                  e.preventDefault();
-                  setMentionIndex(
-                    (old) =>
-                      (old +
-                        (e.key === "ArrowDown" ? 1 : suggestions.length - 1)) %
-                      suggestions.length,
-                  );
-                  return;
-                }
-                if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
-                  e.preventDefault();
-                  chooseSuggestion(
-                    suggestions[mentionIndex % suggestions.length],
-                  );
-                  return;
-                }
-              }
-              if (e.key === "Escape" && replyTo) {
-                e.preventDefault();
-                // Without this the section handler would also back out of or
-                // close the thread on the same keypress.
-                e.stopPropagation();
-                setReplyTo(null);
-                return;
-              }
-              if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-                e.preventDefault();
-                void send();
-              }
-            }}
-          />
-          <div className="messages-compose-bar">
-            {room.attachments_enabled && (
-              <button
-                type="button"
-                className="icon-btn messages-compose-attach"
-                disabled={
-                  sending || readingFiles || !canSend || attachments.length >= 3
-                }
-                onClick={() => attachmentPicker.current?.open()}
-                aria-label="Attach files"
-                title="Attach files · PNG, JPEG, PDF, or text · 5 MiB total"
+            {commands.length > 0 && (
+              <div
+                className="composer-command-list"
+                id={`commands-${draftKey}`}
+                role="listbox"
+                aria-label="Message commands"
               >
-                {readingFiles ? (
-                  <Loader size={15} className="spin" />
+                {commands.map((action, index) => (
+                  <button
+                    type="button"
+                    role="option"
+                    key={action.id}
+                    id={`command-${draftKey}-${index}`}
+                    aria-selected={index === mentionIndex % commands.length}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => chooseAction(action.id, true)}
+                  >
+                    <ActionIcon action={action.id} />
+                    <span>{action.label}</span>
+                    <small>/{action.id}</small>
+                  </button>
+                ))}
+              </div>
+            )}
+            {meeting && (
+              <StagedMeeting
+                meeting={meeting}
+                disabled={sending}
+                onRemove={() => {
+                  setMeeting(null);
+                  composer.current?.focus();
+                }}
+              />
+            )}
+
+            {room.attachments_enabled && (
+              <AttachmentPicker
+                ref={attachmentPicker}
+                files={attachments}
+                onChange={setAttachments}
+                disabled={sending || !canSend}
+                onBusy={setReadingFiles}
+              />
+            )}
+            <MessageComposer
+              aria-controls={
+                commands.length
+                  ? `commands-${draftKey}`
+                  : suggestions.length
+                    ? `mentions-${draftKey}`
+                    : undefined
+              }
+              aria-activedescendant={
+                commands.length
+                  ? `command-${draftKey}-${mentionIndex % commands.length}`
+                  : suggestions.length
+                    ? `mention-${draftKey}-${mentionIndex % suggestions.length}`
+                    : undefined
+              }
+              aria-describedby={replyTo ? `reply-to-${draftKey}` : undefined}
+              id={`compose-${draftKey}`}
+              ref={composer}
+              value={draft}
+              disabled={sending || !canSend}
+              placeholder={
+                canSend
+                  ? replyTo
+                    ? `Reply to ${replyTo.author_name}`
+                    : threadId
+                      ? "Reply in thread"
+                      : `Message ${room.kind === "channel" && !room.is_default ? "#" : ""}${label}`
+                  : "This conversation is read-only"
+              }
+              onChange={(value, caret) => {
+                setDraft(value);
+                setCaret(caret);
+                setMentionIndex(0);
+                setDismissed(false);
+              }}
+              onSelect={setCaret}
+              onKeyDown={(e) => {
+                if (e.isComposing) return;
+                if (commands.length) {
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDismissed(true);
+                    return;
+                  }
+                  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setMentionIndex(
+                      (old) =>
+                        (old +
+                          (e.key === "ArrowDown" ? 1 : commands.length - 1)) %
+                        commands.length,
+                    );
+                    return;
+                  }
+                  if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+                    e.preventDefault();
+                    chooseAction(
+                      commands[mentionIndex % commands.length].id,
+                      true,
+                    );
+                    return;
+                  }
+                }
+                if (suggestions.length) {
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDismissed(true);
+                    return;
+                  }
+                  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                    e.preventDefault();
+                    setMentionIndex(
+                      (old) =>
+                        (old +
+                          (e.key === "ArrowDown"
+                            ? 1
+                            : suggestions.length - 1)) %
+                        suggestions.length,
+                    );
+                    return;
+                  }
+                  if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+                    e.preventDefault();
+                    chooseSuggestion(
+                      suggestions[mentionIndex % suggestions.length],
+                    );
+                    return;
+                  }
+                }
+                if (e.key === "Escape" && replyTo) {
+                  e.preventDefault();
+                  // Without this the section handler would also back out of or
+                  // close the thread on the same keypress.
+                  e.stopPropagation();
+                  setReplyTo(null);
+                  return;
+                }
+                if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+                  e.preventDefault();
+                  void send();
+                }
+              }}
+            />
+            <div className="messages-compose-bar">
+              <ComposerActions
+                available={availableActions}
+                disabled={sending || readingFiles || !canSend || !!error}
+                onChoose={chooseAction}
+              />
+              <button
+                className="messages-compose-send"
+                disabled={
+                  sending ||
+                  readingFiles ||
+                  !canSend ||
+                  (!draft.trim() && !attachments.length && !meeting) ||
+                  !!error
+                }
+                aria-label={threadId ? "Reply" : "Send"}
+                title={threadId ? "Reply · Enter" : "Send · Enter"}
+              >
+                {sending ? (
+                  <Loader size={14} className="spin" />
                 ) : (
-                  <Paperclip size={15} />
+                  <Send size={14} />
                 )}
               </button>
-            )}
-            <button
-              className="messages-compose-send"
-              disabled={
-                sending ||
-                readingFiles ||
-                !canSend ||
-                (!draft.trim() && !attachments.length) ||
-                !!error
-              }
-              aria-label={threadId ? "Reply" : "Send"}
-              title={threadId ? "Reply · Enter" : "Send · Enter"}
-            >
-              {sending ? (
-                <Loader size={14} className="spin" />
-              ) : (
-                <Send size={14} />
-              )}
-            </button>
-          </div>
+            </div>
           </div>
           <p className="messages-compose-hint">
-            Markdown · @ mention · # channel · Enter to send · Shift + Enter for
-            a new line
+            Markdown · / commands · @ mention · # channel · Enter to send ·
+            Shift + Enter for a new line
           </p>
         </form>
       </div>
+      {meetingPicker && isActive && canSend && (
+        <MeetingPicker
+          org={org}
+          room={room.id}
+          onClose={() => {
+            setMeetingPicker(false);
+            requestAnimationFrame(() => composer.current?.focus());
+          }}
+          onChoose={(value) => {
+            setMeeting(value);
+            setMeetingPicker(false);
+            requestAnimationFrame(() => composer.current?.focus());
+          }}
+        />
+      )}
       {showPins && (
         <PinnedMessages
           org={org}

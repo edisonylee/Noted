@@ -136,6 +136,7 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
                 "unread",
                 "notifications",
                 "pins",
+                "meeting-targets",
                 "threads",
               ].includes(action)) ||
             (resource === "chat-messages" &&
@@ -198,6 +199,10 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
       )
         return respond(store.pinMessage(user, org, id, body.active));
       if (resource === "chat-rooms") {
+        if (id && action === "meeting-targets" && method === "GET")
+          return respond(
+            store.conversationMeetings(user, org, id, url.searchParams),
+          );
         if (id && action === "pins" && method === "GET")
           return respond(store.pinnedMessages(user, org, id));
         if (id && action === "threads" && method === "GET")

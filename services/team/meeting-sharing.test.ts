@@ -132,3 +132,112 @@ test("meeting sharing validates recipient access, quote revision, and live sourc
     s.db.close();
   }
 });
+
+test("composer meeting picker scopes metadata by conversation audience and paginates safely", async () => {
+  const s = new TeamStore(":memory:", "setup");
+  try {
+    const a = s.bootstrap("setup", "Team", "Owner"),
+      owner = s.authenticate(a.token);
+    const peer = s.authenticate(
+      s.accept(s.invite(owner, a.org, { name: "Peer", role: "member" }).token)
+        .token!,
+    );
+    const channel = s.chatRooms(owner, a.org)[0];
+    const dm = s.createChatRoom(owner, a.org, {
+      kind: "direct",
+      member_id: peer,
+    });
+    const shared = s.spaces(owner, a.org)[0];
+    const restricted = s.createSpace(owner, a.org, {
+      name: "Restricted",
+      visibility: "restricted",
+    });
+    const publish = (space: string, title: string) =>
+      s.publish(owner, a.org, {
+        space_id: space,
+        source_key: crypto.randomUUID(),
+        title,
+        summary: "Secret body not included in picker",
+        transcript: "Private transcript",
+        occurred_at: "2026-09-04T00:00:00Z",
+        folder_ids: [],
+      });
+    const secret = publish(restricted.id, "Confidential");
+    for (let i = 0; i < 32; i++) publish(shared.id, `Launch ${i}`);
+    const list = (room: string, query = "") =>
+      s.conversationMeetings(owner, a.org, room, new URLSearchParams(query));
+    expect(list(channel.id).meetings).toHaveLength(30);
+    expect(list(channel.id).next_offset).toBe(30);
+    expect(list(channel.id, "offset=30").meetings).toHaveLength(2);
+    expect(list(channel.id, "q=Confidential").meetings).toHaveLength(0);
+    expect(list(dm.id, "q=Confidential").meetings).toHaveLength(0);
+    expect(JSON.stringify(list(channel.id))).not.toContain("Secret body");
+    expect(JSON.stringify(list(channel.id))).not.toContain("transcript");
+    expect(list(channel.id, "q=%25").meetings).toHaveLength(0);
+    expect(() => list(channel.id, "offset=-1")).toThrow("Invalid offset");
+    expect(() => list(channel.id, `q=${"x".repeat(201)}`)).toThrow();
+    s.grant(owner, a.org, restricted.id, {
+      kind: "member",
+      id: peer,
+      role: "viewer",
+    });
+    expect(list(dm.id, "q=Confidential").meetings.map((n) => n.id)).toEqual([
+      secret.id,
+    ]);
+    expect(list(channel.id, "q=Confidential").meetings).toHaveLength(0);
+    const payload = {
+      body: "Please review",
+      client_id: crypto.randomUUID(),
+      meeting: { id: secret.id, revision: secret.revision },
+    };
+    const message = s.sendChatMessage(owner, a.org, dm.id, payload);
+    expect(message.body).toBe("Please review");
+    expect(message.has_meeting).toBe(true);
+    s.grant(owner, a.org, restricted.id, {
+      kind: "member",
+      id: peer,
+      role: "remove",
+    });
+    expect(list(dm.id, "q=Confidential").meetings).toHaveLength(0);
+    expect(() =>
+      s.sendChatMessage(owner, a.org, dm.id, {
+        ...payload,
+        client_id: crypto.randomUUID(),
+      }),
+    ).toThrow("cannot access");
+    s.trash(owner, a.org, secret.id, secret.revision);
+    expect(list(dm.id, "q=Confidential").meetings).toHaveLength(0);
+    const archived = s.createChatRoom(owner, a.org, {
+      kind: "channel",
+      name: "archived",
+    });
+    s.updateChatRoom(owner, a.org, archived.id, {
+      revision: archived.revision,
+      archived: true,
+    });
+    expect(() => list(archived.id)).toThrow("read-only");
+    const outsider = s.authenticate(
+      s.accept(
+        s.invite(owner, a.org, { name: "Outsider", role: "member" }).token,
+      ).token!,
+    );
+    expect(() =>
+      s.conversationMeetings(outsider, a.org, dm.id, new URLSearchParams()),
+    ).toThrow();
+    const foreign = s.createOrg(owner, "Foreign");
+    expect(() =>
+      s.conversationMeetings(owner, foreign, channel.id, new URLSearchParams()),
+    ).toThrow();
+    const handler = createHandler(s);
+    const response = await handler(
+      new Request(
+        `https://test/v1/orgs/${a.org}/chat-rooms/${channel.id}/meeting-targets?q=Launch`,
+        { headers: { Authorization: `Bearer ${a.token}` } },
+      ),
+    );
+    expect(response.status).toBe(200);
+    expect((await response.json()).meetings).toHaveLength(30);
+  } finally {
+    s.db.close();
+  }
+});

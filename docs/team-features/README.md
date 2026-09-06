@@ -15,10 +15,11 @@ validation gate:
 10. [Channel mentions](10-channel-mentions.md)
 11. [Attachment previews](11-attachment-previews.md)
 12. [Full chat Markdown](12-chat-markdown.md)
+13. [Composer actions and meeting references](13-composer-actions.md)
 
 ## Implementation and verification
 
-All twelve are implemented. The team service suite passes **81 tests** across its
+All thirteen are implemented. The team service suite passes **81 tests** across its
 eight files, including HTTP authorization and isolated Docker runtime packaging,
 and `tests/team-messaging.test.ts` passes **12**; the two root-suite failures
 that remain (alpha bundle packaging and backup destination defaults) predate

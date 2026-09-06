@@ -47,7 +47,16 @@ export function sendAttemptKey(
   body: string,
   attachmentIds: string[],
   replyToId: string | null,
+  meeting?: { id: string; revision: number } | null,
 ) {
+  if (meeting)
+    return JSON.stringify([
+      body,
+      attachmentIds,
+      replyToId,
+      meeting.id,
+      meeting.revision,
+    ]);
   return attachmentIds.length || replyToId
     ? JSON.stringify([body, attachmentIds, replyToId])
     : body;

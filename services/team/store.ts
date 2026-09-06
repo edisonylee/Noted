@@ -1749,6 +1749,7 @@ export class TeamStore {
       attachments_enabled: true,
       unread_navigation: true,
       pins_enabled: true,
+      meeting_references_enabled: true,
       saved_messages_enabled: true,
       threads_enabled: true,
       // Derived from rows already loaded: chatRoom() runs for every room on
@@ -2692,6 +2693,41 @@ export class TeamStore {
             (p) => p.active && !!this.spaceRole(p.id, org, spaceId),
           ))
     );
+  }
+  conversationMeetings(
+    user: string,
+    org: string,
+    id: string,
+    params: URLSearchParams,
+  ) {
+    const room = this.chatRoom(user, org, id);
+    if (!room.can_send) fail(403, "This conversation is read-only");
+    const query = text(params.get("q") ?? "", "query", 200, true);
+    const offset = Number(params.get("offset") ?? 0);
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 100_000)
+      fail(400, "Invalid offset");
+    // Filter collections with the exact same audience rule used at send time.
+    // Only bounded metadata leaves the server; no private summaries/transcripts.
+    const spaces = this.spaces(user, org)
+      .filter((space) => this.meetingAudience(user, org, room, space.id))
+      .map((space) => space.id);
+    if (!spaces.length) return { meetings: [], next_offset: null };
+    const rows = this.all(
+      `SELECT n.id,n.title,n.revision,n.occurred_at,s.name AS collection
+       FROM notes n JOIN spaces s ON s.id=n.space_id
+       WHERE n.space_id IN(${spaces.map(() => "?").join(",")})
+       AND n.trashed_at IS NULL
+       AND (?='' OR instr(lower(n.title||char(10)||s.name),lower(?))>0)
+       ORDER BY n.occurred_at DESC,n.id LIMIT 31 OFFSET ?`,
+      ...spaces,
+      query,
+      query,
+      offset,
+    );
+    return {
+      meetings: rows.slice(0, 30),
+      next_offset: rows.length > 30 ? offset + 30 : null,
+    };
   }
   meetingShareTargets(user: string, org: string, id: string) {
     const note = this.note(user, org, id);

@@ -119,6 +119,7 @@ export type TeamChatRoom = {
   attachments_enabled?: boolean;
   unread_navigation?: boolean;
   pins_enabled?: boolean;
+  meeting_references_enabled?: boolean;
   saved_messages_enabled?: boolean;
   // Capability flags: each gates one control so an older server never shows
   // a control it cannot serve. threads_enabled gates the header "Threads"

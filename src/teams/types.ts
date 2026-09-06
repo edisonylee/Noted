@@ -1,6 +1,19 @@
 export type TeamRole = "owner" | "admin" | "member";
 export type SpaceRole = "viewer" | "editor";
-export type TeamUser = { id: string; name: string };
+export type TeamUser = {
+  id: string;
+  name: string;
+  title?: string;
+  about?: string;
+  avatar_version?: string;
+};
+export type TeamProfile = TeamUser & { avatar_data: string; revision: number };
+export type TeamReaction = {
+  emoji: string;
+  count: number;
+  reacted: boolean;
+  names: string[];
+};
 export type TeamOrg = { id: string; name: string; role: TeamRole };
 export type TeamSpace = {
   id: string;
@@ -98,6 +111,7 @@ export type TeamConversationRow = {
 };
 
 export type TeamChatRoom = {
+  message_extras?: boolean;
   id: string;
   org_id: string;
   kind: "channel" | "direct";
@@ -126,6 +140,10 @@ export type TeamChatMessage = {
   author_id: string;
   author_name: string;
   body: string;
+  thread_id?: string | null;
+  reply_count?: number;
+  last_reply_at?: string | null;
+  reactions?: TeamReaction[];
   created_at: string;
   edited_at: string | null;
   deleted_at: string | null;
@@ -135,6 +153,8 @@ export type TeamChatMessage = {
   can_delete: boolean;
 };
 export type TeamChatPage = {
+  live?: boolean;
+  parent?: TeamChatMessage;
   room: TeamChatRoom;
   messages: TeamChatMessage[];
   cursor: number;

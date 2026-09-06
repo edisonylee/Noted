@@ -3,6 +3,7 @@ import { Copy, Plus, Users } from "lucide-react";
 import { api, isDesktop } from "../api";
 import { team, orgPath, copyTeamText } from "./client";
 import { TeamIntegrations } from "./TeamIntegrations";
+import { TeamProfileSettings } from "./TeamProfile";
 import { TeamDialog } from "./TeamDialog";
 import { collectionName } from "./presentation";
 import type {
@@ -140,7 +141,7 @@ export function TeamAdministration({
           </p>
         </div>
       </header>
-      {admin && (
+      {admin && tab !== "profile" && (
         <form
           className="team-name-form"
           onSubmit={(event) => {
@@ -172,6 +173,7 @@ export function TeamAdministration({
       )}
       <nav className="team-tabs" aria-label="Team settings">
         {[
+          "profile",
           "members",
           ...(admin ? ["spaces", "groups"] : []),
           "prompts",
@@ -204,6 +206,7 @@ export function TeamAdministration({
           {message}
         </p>
       )}
+      {tab === "profile" && <TeamProfileSettings onSaved={refresh} />}
       {tab === "members" && (
         <>
           <div className="team-section-head">

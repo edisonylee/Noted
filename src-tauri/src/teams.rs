@@ -202,12 +202,20 @@ pub async fn connect(
     std::fs::rename(temporary, dir.join(FILE))?;
     Ok(orgs)
 }
-pub async fn request(dir: &Path, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
-    let (server, token) = credential(dir)?;
+fn validate_request(method: &str, path: &str) -> Result<()> {
+    let url = endpoint("https://team.invalid", path)?;
+    let path = url.path();
     // Session creation is handled separately so credentials never reach the webview.
-    if !path.starts_with("/v1/orgs") {
+    let organization = path == "/v1/orgs" || path.starts_with("/v1/orgs/");
+    let profile = path == "/v1/profile" && matches!(method, "GET" | "PATCH");
+    if !organization && !profile {
         bail!("Use the team connection controls for this operation");
     }
+    Ok(())
+}
+pub async fn request(dir: &Path, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
+    validate_request(method, path)?;
+    let (server, token) = credential(dir)?;
     send(&server, &token, method, path, body).await
 }
 pub async fn disconnect(dir: &Path) -> Result<()> {
@@ -351,6 +359,33 @@ pub async fn ask(dir: &Path, org: &str, body: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn webview_profile_access_preserves_session_boundary() {
+        for method in ["GET", "PATCH"] {
+            assert!(validate_request(method, "/v1/profile").is_ok());
+        }
+        for path in [
+            "/v1/orgs",
+            "/v1/orgs/team/profiles/member/avatar",
+            "/v1/orgs/team/chat-rooms/room/messages?after=5&wait=20000",
+        ] {
+            assert!(validate_request("GET", path).is_ok(), "{path}");
+        }
+        for path in [
+            "/v1/session",
+            "/v1/bootstrap",
+            "/v1/accept",
+            "/v1/orgs-extra",
+            "/v1/profile/session",
+            "/v1/orgs/%2e%2e/session",
+            "//other.example/v1/profile",
+        ] {
+            assert!(validate_request("GET", path).is_err(), "{path}");
+        }
+        for method in ["POST", "PUT", "DELETE"] {
+            assert!(validate_request(method, "/v1/profile").is_err());
+        }
+    }
     #[test]
     fn server_credentials_stay_on_verified_origin() {
         assert!(normalize_server("https://team.example").is_ok());

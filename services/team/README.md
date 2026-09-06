@@ -152,22 +152,64 @@ same request identifier without creating a second copy. Edits reject stale
 revisions, and deletion removes the body while leaving a visible tombstone.
 Backups may retain earlier content.
 
-While Messages is visible, the open conversation refreshes every three seconds.
-The conversation list refreshes every ten seconds while Team is visible, keeping
+While Messages is visible, the open conversation receives live updates through
+an authenticated waiting request. The conversation list refreshes every ten
+seconds while Team is visible, keeping
 the navigation unread badge up to date. Focus triggers an immediate refresh.
 Read markers sync across devices when the conversation is viewed at the bottom;
 hidden conversations are not marked read. This release does not include group
-DMs, typing indicators, attachments, threads, message-body search, or push
-notifications. Messages are not included in meeting search, model prompts,
+DMs, typing indicators, attachments, message-body search, or push notifications. Messages are not included in meeting search, model prompts,
 read-only integration keys, or MCP responses.
 
 The service database gains additive `chat_*` tables on startup and a general
 channel for each existing team. The navigation refresh requires no additional
-schema migration. Conversation previews are limited to 160 characters and are
+schema migration; the later thread/profile release adds the fields described below. Conversation previews are limited to 160 characters and are
 returned only after the room's membership/participant checks. Older service
 versions without previews still render the conversation list. Use the normal
 service backup and deployment process; no separate chat server or model
 subscription is needed.
+
+## Threads, reactions, and profiles
+
+Hover or focus a message and choose **Reply in thread**. Replies stay attached to
+that message in a separate panel in channels and DMs. The parent shows a reply
+count; reopening it restores the discussion. A compact window shows the thread
+in the conversation area, while wide windows show it alongside the main chat.
+**Escape** or **Close thread** returns to the conversation. Unsent reply drafts
+stay in memory while Team remains open. Replies can be edited, deleted, and reacted
+to under the same rules as other messages. Deleted parents retain existing reply
+history but cannot receive new replies. Nested replies use the original thread.
+
+Choose **Add reaction** for a searchable set of 64 emoji. Click a reaction pill to
+add yours, or click one you already added to remove it. Counts and names are
+visible to conversation participants; reactions on private messages do not grant
+any new access. Repeated requests set the desired state without double-counting.
+
+Open **Team settings → Profile** to edit your display name, job title, bio, and
+photo. Your profile is shared across your teams on the connected server. Click a
+person's avatar or message author to view it. Photos are cropped and resized on
+the device before upload; the server accepts only bounded JPEG/PNG image data.
+It stores photos in the team database and serves them through member-authenticated
+requests, rather than public image URLs. Removing a photo restores initials.
+Avatar requests are deduplicated within the team view. Name changes preserve the
+account ID, memberships, message authorship, and DM history.
+
+The open conversation now uses authenticated HTTP long polling: after the initial
+history request, a request waits for up to 20 seconds and wakes when a message,
+reply, reaction, edit, or deletion changes. Authorization is checked again before
+returning data, including after membership removal or sign-out. A client using an
+older server falls back to the previous polling interval and does not expose
+unsupported thread/reaction actions. There is no required WebSocket endpoint or
+separate chat service. Network transit time still applies.
+
+Scrolling runs immediately after React commits new messages, before paint. The
+view follows the latest message when already at the bottom and after sending;
+reading earlier history keeps its position and exposes a **New messages** button.
+The conversation list and member directory retain their existing periodic refresh.
+
+Database changes are additive: a nullable thread-parent column, a thread-history
+index, reaction records, and profile records. Back up before deploying. The
+container and local installer include the shared reaction catalog.
 
 ## Data and authority boundaries
 

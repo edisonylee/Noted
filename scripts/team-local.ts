@@ -100,7 +100,7 @@ chmodSync(database, 0o600);
 
 const source = join(root, "services", "team");
 const version = createHash("sha256");
-for (const file of ["server.ts", "store.ts", "schema.sql"])
+for (const file of ["server.ts", "store.ts", "reactions.ts", "schema.sql"])
   version.update(readFileSync(join(source, file)));
 const runtime = join(state, "runtime", version.digest("hex").slice(0, 16));
 mkdirSync(runtime, { recursive: true, mode: 0o700 });

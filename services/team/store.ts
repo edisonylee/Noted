@@ -1,3 +1,4 @@
+import { REACTION_NAMES } from "./reactions";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
@@ -13,6 +14,8 @@ import type {
   TeamChatRoom,
   TeamChatMessage,
   TeamChatPage,
+  TeamUser,
+  TeamProfile,
 } from "../../src/teams/types";
 
 type Row = Record<string, string | number | null>;
@@ -66,8 +69,55 @@ function ids(value: unknown, name: string, max = 100): string[] {
 }
 const admin = (role: TeamRole) => role === "owner" || role === "admin";
 
+function validateAvatar(value: string) {
+  const match = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/]+={0,2})$/.exec(
+    value,
+  );
+  if (!match) fail(400, "Choose a JPEG or PNG profile photo");
+  const bytes = Buffer.from(match[2], "base64");
+  if (bytes.toString("base64") !== match[2]) fail(400, "Invalid profile photo");
+  let width = 0,
+    height = 0;
+  if (
+    match[1] === "png" &&
+    bytes.length >= 33 &&
+    bytes
+      .subarray(0, 8)
+      .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) &&
+    bytes.toString("ascii", 12, 16) === "IHDR"
+  ) {
+    width = bytes.readUInt32BE(16);
+    height = bytes.readUInt32BE(20);
+  } else if (
+    match[1] === "jpeg" &&
+    bytes[0] === 255 &&
+    bytes[1] === 216 &&
+    bytes.at(-2) === 255 &&
+    bytes.at(-1) === 217
+  ) {
+    let at = 2;
+    while (at + 8 < bytes.length) {
+      if (bytes[at++] !== 255) break;
+      while (bytes[at] === 255) at++;
+      const marker = bytes[at++];
+      if (marker === 218 || marker === 217 || at + 2 > bytes.length) break;
+      const length = bytes.readUInt16BE(at);
+      if (length < 2 || at + length > bytes.length) break;
+      if ([192, 193, 194].includes(marker) && length >= 8) {
+        height = bytes.readUInt16BE(at + 3);
+        width = bytes.readUInt16BE(at + 5);
+        break;
+      }
+      at += length;
+    }
+  }
+  if (!width || !height || width > 512 || height > 512)
+    fail(400, "Profile photos must be JPEG or PNG images up to 512 pixels");
+}
+
 export class TeamStore {
   readonly db: Database;
+  private chatWaiters = new Map<string, Set<() => void>>();
   constructor(
     path = ":memory:",
     private bootstrapKey = "",
@@ -84,6 +134,17 @@ export class TeamStore {
       this.db.exec(
         "ALTER TABLE spaces ADD COLUMN api_enabled INTEGER NOT NULL DEFAULT 0",
       );
+    if (
+      !this.all<{ name: string }>("PRAGMA table_info(chat_messages)").some(
+        (c) => c.name === "thread_id",
+      )
+    )
+      this.db.exec(
+        "ALTER TABLE chat_messages ADD COLUMN thread_id TEXT REFERENCES chat_messages(id)",
+      );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS chat_thread_history ON chat_messages(room_id,thread_id,created_seq)",
+    );
     this
       .run(`INSERT OR IGNORE INTO chat_rooms(id,org_id,kind,name,description,created_by,created_at)
       SELECT 'general-' || o.id,o.id,'channel','general','A place for everyone in the workspace.',m.user_id,o.created_at
@@ -98,7 +159,41 @@ export class TeamStore {
   run(sql: string, ...values: SQLQueryBindings[]) {
     return this.db.query(sql).run(...values);
   }
+  private notifyChat(room?: string) {
+    queueMicrotask(() => {
+      if (room) this.chatWaiters.get(room)?.forEach((wake) => wake());
+      else
+        for (const listeners of this.chatWaiters.values())
+          listeners.forEach((wake) => wake());
+    });
+  }
+  async waitForChat(
+    room: string,
+    after: number,
+    signal: AbortSignal,
+    wait: number,
+  ) {
+    if (signal.aborted || this.latestChatCursor(room) !== after) return;
+    await new Promise<void>((resolve) => {
+      const listeners = this.chatWaiters.get(room) ?? new Set<() => void>();
+      if (listeners.size >= 100)
+        fail(429, "Too many open conversations. Try again shortly.");
+      this.chatWaiters.set(room, listeners);
+      const finish = () => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", finish);
+        listeners.delete(finish);
+        if (!listeners.size) this.chatWaiters.delete(room);
+        resolve();
+      };
+      const timer = setTimeout(finish, wait);
+      listeners.add(finish);
+      signal.addEventListener("abort", finish, { once: true });
+      if (signal.aborted || this.latestChatCursor(room) !== after) finish();
+    });
+  }
   audit(org: string, actor: string, action: string, target: string) {
+    this.notifyChat();
     this.run(
       "INSERT INTO audit(org_id,actor_id,action,target_id,at) VALUES(?,?,?,?,?)",
       org,
@@ -129,6 +224,7 @@ export class TeamStore {
     return row ? String(row.user_id) : fail(401, "Sign in again");
   }
   signout(token: string) {
+    this.notifyChat();
     this.run("DELETE FROM sessions WHERE hash=?", hash(token));
   }
   bootstrap(key: string, organization: unknown, name: unknown) {
@@ -204,7 +300,7 @@ export class TeamStore {
   members(user: string, org: string) {
     this.role(user, org);
     return this.all(
-      "SELECT u.id,u.name,m.role FROM members m JOIN users u ON u.id=m.user_id WHERE m.org_id=? ORDER BY u.name",
+      "SELECT u.id,u.name,m.role,COALESCE(p.title,'') AS title,COALESCE(p.about,'') AS about,COALESCE(p.avatar_version,'') AS avatar_version FROM members m JOIN users u ON u.id=m.user_id LEFT JOIN user_profiles p ON p.user_id=u.id WHERE m.org_id=? ORDER BY u.name",
       org,
     );
   }
@@ -1336,7 +1432,7 @@ export class TeamStore {
     const participants =
       row.kind === "direct"
         ? this.all<{ id: string; name: string; active: number }>(
-            `SELECT u.id,u.name,EXISTS(SELECT 1 FROM members m WHERE m.org_id=? AND m.user_id=u.id) AS active
+            `SELECT u.id,u.name,COALESCE((SELECT avatar_version FROM user_profiles WHERE user_id=u.id),'') AS avatar_version,EXISTS(SELECT 1 FROM members m WHERE m.org_id=? AND m.user_id=u.id) AS active
        FROM chat_participants p JOIN users u ON u.id=p.user_id WHERE p.room_id=? ORDER BY u.name,u.id`,
             org,
             id,
@@ -1380,6 +1476,7 @@ export class TeamStore {
       archived_at: row.archived_at as string | null,
       revision: Number(row.revision),
       is_default: id === `general-${org}`,
+      message_extras: true,
       participants,
       unread,
       last_activity: String(last ?? row.created_at),
@@ -1531,6 +1628,131 @@ export class TeamStore {
       return this.chatRoom(user, org, id);
     })();
   }
+  private profileSummary(user: string): TeamUser {
+    return this.get<TeamUser>(
+      `SELECT u.id,u.name,COALESCE(p.title,'') AS title,COALESCE(p.about,'') AS about,
+      COALESCE(p.avatar_version,'') AS avatar_version FROM users u LEFT JOIN user_profiles p ON p.user_id=u.id WHERE u.id=?`,
+      user,
+    )!;
+  }
+  profile(user: string): TeamProfile {
+    return {
+      ...this.profileSummary(user),
+      avatar_data: String(
+        this.get("SELECT avatar_data FROM user_profiles WHERE user_id=?", user)
+          ?.avatar_data ?? "",
+      ),
+      revision: Number(
+        this.get("SELECT revision FROM user_profiles WHERE user_id=?", user)
+          ?.revision ?? 0,
+      ),
+    };
+  }
+  profileAvatar(user: string, org: string, member: string) {
+    this.role(user, org);
+    this.role(member, org);
+    return {
+      data:
+        this.get(
+          "SELECT avatar_data FROM user_profiles WHERE user_id=?",
+          member,
+        )?.avatar_data ?? "",
+    };
+  }
+  updateProfile(user: string, body: Record<string, unknown>) {
+    const name = text(body.name, "display name", 100);
+    const title = text(body.title ?? "", "job title", 120, true);
+    const about = text(body.about ?? "", "about", 500, true);
+    const avatar = text(body.avatar_data ?? "", "profile photo", 100_000, true);
+    if (avatar) validateAvatar(avatar);
+    return this.db.transaction(() => {
+      const old = this.profile(user);
+      if (body.revision !== old.revision)
+        fail(409, "Your profile changed. Reload before saving.");
+      this.run("UPDATE users SET name=? WHERE id=?", name, user);
+      this.run(
+        `INSERT INTO user_profiles(user_id,title,about,avatar_data,avatar_version,revision) VALUES(?,?,?,?,?,1)
+        ON CONFLICT(user_id) DO UPDATE SET title=excluded.title,about=excluded.about,avatar_data=excluded.avatar_data,
+        avatar_version=excluded.avatar_version,revision=user_profiles.revision+1`,
+        user,
+        title,
+        about,
+        avatar,
+        avatar ? hash(avatar) : "",
+      );
+      this.notifyChat();
+      return this.profile(user);
+    })();
+  }
+  private messageChanged(
+    room: string,
+    id: string,
+    parent: string | null = null,
+  ) {
+    const event = this.run(
+      "INSERT INTO chat_events(room_id,message_id) VALUES(?,?)",
+      room,
+      id,
+    );
+    if (parent) {
+      this.run(
+        "UPDATE chat_messages SET revision=revision+1 WHERE id=?",
+        parent,
+      );
+      this.run(
+        "INSERT INTO chat_events(room_id,message_id) VALUES(?,?)",
+        room,
+        parent,
+      );
+    }
+    this.notifyChat(room);
+    return Number(event.lastInsertRowid);
+  }
+  private messageRoom(user: string, org: string, id: string) {
+    this.role(user, org);
+    const row = this.get(
+      "SELECT m.room_id FROM chat_messages m JOIN chat_rooms r ON r.id=m.room_id WHERE m.id=? AND r.org_id=?",
+      id,
+      org,
+    );
+    if (!row) fail(404, "Message not found");
+    return this.chatRoom(user, org, String(row.room_id));
+  }
+  reactToMessage(
+    user: string,
+    org: string,
+    id: string,
+    body: Record<string, unknown>,
+  ) {
+    const emoji = text(body.emoji, "emoji", 24);
+    if (!REACTION_NAMES.has(emoji) || typeof body.active !== "boolean")
+      fail(400, "Choose a supported reaction");
+    return this.db.transaction(() => {
+      const room = this.messageRoom(user, org, id);
+      const message = this.chatMessage(user, org, id, room);
+      if (!room.can_send || message.deleted_at)
+        fail(403, "This message cannot receive reactions");
+      const result = body.active
+        ? this.run(
+            "INSERT OR IGNORE INTO chat_reactions(message_id,user_id,emoji,created_at) VALUES(?,?,?,?)",
+            id,
+            user,
+            emoji,
+            now(),
+          )
+        : this.run(
+            "DELETE FROM chat_reactions WHERE message_id=? AND user_id=? AND emoji=?",
+            id,
+            user,
+            emoji,
+          );
+      if (result.changes) {
+        this.run("UPDATE chat_messages SET revision=revision+1 WHERE id=?", id);
+        this.messageChanged(room.id, id);
+      }
+      return this.chatMessage(user, org, id, room);
+    })();
+  }
   private chatCursor(value: unknown, name: string) {
     if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
       fail(400, `Invalid ${name}`);
@@ -1563,6 +1785,32 @@ export class TeamStore {
       author_id: String(row.author_id),
       author_name: String(row.author_name),
       body: row.deleted_at ? "" : String(row.body),
+      thread_id: row.thread_id as string | null,
+      reply_count: Number(
+        this.get(
+          "SELECT COUNT(*) AS n FROM chat_messages WHERE thread_id=? AND deleted_at IS NULL",
+          id,
+        )!.n,
+      ),
+      last_reply_at: this.get(
+        "SELECT MAX(created_at) AS at FROM chat_messages WHERE thread_id=? AND deleted_at IS NULL",
+        id,
+      )?.at as string | null,
+      reactions: row.deleted_at
+        ? []
+        : this.all<{ emoji: string; count: number; reacted: number }>(
+            "SELECT emoji,COUNT(*) AS count,MAX(user_id=?) AS reacted FROM chat_reactions WHERE message_id=? GROUP BY emoji ORDER BY MIN(created_at),emoji",
+            user,
+            id,
+          ).map((r) => ({
+            ...r,
+            reacted: !!r.reacted,
+            names: this.all<{ name: string }>(
+              "SELECT u.name FROM chat_reactions r JOIN users u ON u.id=r.user_id WHERE r.message_id=? AND r.emoji=? ORDER BY r.created_at LIMIT 20",
+              id,
+              r.emoji,
+            ).map((p) => p.name),
+          })),
       created_at: String(row.created_at),
       edited_at: row.edited_at as string | null,
       deleted_at: row.deleted_at as string | null,
@@ -1585,6 +1833,11 @@ export class TeamStore {
       const room = this.chatRoom(user, org, id);
       if (query.has("before") && query.has("after"))
         fail(400, "Choose history or updates, not both");
+      const thread = query.get("thread") || null;
+      const parent = thread
+        ? this.chatMessage(user, org, thread, room)
+        : undefined;
+      if (parent?.thread_id) fail(400, "Reply in the original thread");
       const latest = this.latestChatCursor(id);
       if (query.has("after")) {
         const after = this.chatCursor(
@@ -1601,9 +1854,11 @@ export class TeamStore {
         const page = events.slice(0, 100);
         return {
           room,
-          messages: [...new Set(page.map((e) => e.message_id))].map((m) =>
-            this.chatMessage(user, org, m, room),
-          ),
+          parent,
+          live: true,
+          messages: [...new Set(page.map((e) => e.message_id))]
+            .map((m) => this.chatMessage(user, org, m, room))
+            .filter((m) => (m.thread_id ?? null) === thread),
           cursor: page.at(-1)?.seq ?? after,
           has_more: events.length > 100,
           older_before: null,
@@ -1613,8 +1868,9 @@ export class TeamStore {
         ? this.chatCursor(Number(query.get("before")), "history cursor")
         : Number.MAX_SAFE_INTEGER;
       const rows = this.all<{ id: string }>(
-        "SELECT id FROM chat_messages WHERE room_id=? AND created_seq<? ORDER BY created_seq DESC LIMIT 51",
+        "SELECT id FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq<? ORDER BY created_seq DESC LIMIT 51",
         id,
+        thread,
         before,
       );
       const messages = rows
@@ -1623,6 +1879,8 @@ export class TeamStore {
         .map((r) => this.chatMessage(user, org, r.id, room));
       return {
         room,
+        parent,
+        live: true,
         messages,
         cursor: latest,
         has_more: rows.length > 50,
@@ -1645,24 +1903,33 @@ export class TeamStore {
             ? "This channel is archived"
             : "This teammate is no longer in the workspace",
         );
+      const thread =
+        body.thread_id == null ? null : text(body.thread_id, "thread", 100);
+      const parent = thread ? this.chatMessage(user, org, thread, room) : null;
+      if (parent?.thread_id) fail(400, "Reply in the original thread");
+      if (parent?.deleted_at)
+        fail(409, "This thread's original message was deleted");
       const content = text(body.body, "message", 10_000);
       const client = text(body.client_id, "message identifier", 80);
       if (!/^[a-zA-Z0-9_-]{16,80}$/.test(client))
         fail(400, "Invalid message identifier");
       const old = this.get(
-        "SELECT id,original_hash FROM chat_messages WHERE room_id=? AND author_id=? AND client_id=?",
+        "SELECT id,original_hash,thread_id FROM chat_messages WHERE room_id=? AND author_id=? AND client_id=?",
         roomId,
         user,
         client,
       );
       if (old) {
-        if (old.original_hash !== hash(content))
+        if (
+          old.original_hash !== hash(content) ||
+          (old.thread_id ?? null) !== thread
+        )
           fail(409, "This send attempt already belongs to another message");
         return this.chatMessage(user, org, String(old.id), room);
       }
       const id = uid();
       this.run(
-        "INSERT INTO chat_messages(id,room_id,author_id,client_id,original_hash,body,created_at) VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO chat_messages(id,room_id,author_id,client_id,original_hash,body,created_at,thread_id) VALUES(?,?,?,?,?,?,?,?)",
         id,
         roomId,
         user,
@@ -1670,17 +1937,10 @@ export class TeamStore {
         hash(content),
         content,
         now(),
+        thread,
       );
-      const event = this.run(
-        "INSERT INTO chat_events(room_id,message_id) VALUES(?,?)",
-        roomId,
-        id,
-      );
-      this.run(
-        "UPDATE chat_messages SET created_seq=? WHERE id=?",
-        event.lastInsertRowid,
-        id,
-      );
+      const event = this.messageChanged(roomId, id, thread);
+      this.run("UPDATE chat_messages SET created_seq=? WHERE id=?", event, id);
       return this.chatMessage(user, org, id, room);
     })();
   }
@@ -1718,11 +1978,8 @@ export class TeamStore {
           now(),
           id,
         );
-      this.run(
-        "INSERT INTO chat_events(room_id,message_id) VALUES(?,?)",
-        room.id,
-        id,
-      );
+      if (remove) this.run("DELETE FROM chat_reactions WHERE message_id=?", id);
+      this.messageChanged(room.id, id, message.thread_id);
       return this.chatMessage(user, org, id, room);
     })();
   }
@@ -1747,7 +2004,7 @@ export class TeamStore {
         ...this.get("SELECT id,name FROM organizations WHERE id=?", org),
         role,
       },
-      user: this.get("SELECT * FROM users WHERE id=?", user),
+      user: this.profileSummary(user),
       spaces: this.spaces(user, org),
       folders: this.folders(user, org),
       members: this.members(user, org),

@@ -50,15 +50,17 @@ conversation navigation documented in [Slack's sidebar guidance](https://slack.c
 
 - Keeping Messages mounted within Team preserves unsent drafts when switching
   Meetings, Messages, and People. Drafts do not survive leaving Team or restarting.
-- Hidden conversations are not polled for message bodies or marked read. The room
+- Hidden conversations stop requesting new message bodies and are not marked read.
+  An already waiting native request can finish, but its result is discarded. The room
   list refreshes for the navigation's unread count while Team is visible.
 - Recent previews are bounded to 160 characters and returned after room access
   checks. Deleted messages show a tombstone. A missing preview field from an older
   server is tolerated.
 - Team rename uses an authenticated, admin-only endpoint. Existing organizational
   and DM authorization checks remain authoritative.
-- Group DMs, attachments, threads, typing, push notifications, and searching message
-  bodies remain outside this implementation. Messages do not enter meeting prompts.
+- Threads and emoji reactions were added in the subsequent chat update. Group DMs,
+  attachments, typing, push notifications, and searching message bodies remain
+  outside this implementation. Messages do not enter meeting prompts.
 
 ## Verification
 
@@ -75,3 +77,29 @@ conversation navigation documented in [Slack's sidebar guidance](https://slack.c
 - Visual inspection covered a compact browser layout and the installed dark-theme
   desktop layout. Accessibility names and active-navigation semantics were checked;
   a full screen-reader, contrast, and large-team usability audit was not performed.
+
+## Chat interaction update
+
+Threads now keep replies beside their original message, with counts, history,
+editing, deletion, and emoji reactions. The searchable reaction picker supports
+64 emoji and shows who reacted. Profiles in team settings add display names,
+photos, job titles, and bios, with member-authenticated photo access.
+
+The three-second message polling gap was replaced with authenticated long polling.
+React layout effects position new content before the next paint, preserving the
+reading position when scrolled into earlier history. The thread panel focuses its
+composer on opening and closes with Escape. Profile upload validation rejects
+remote URLs and active image formats. Identity and history survive display-name
+changes.
+
+The service suite now has 44 passing tests (338 assertions), plus the message-merge
+regression test. New checks cover thread pagination and isolation, idempotent
+reactions, live wake-up/revocation, profile authority and upload validation, and
+restart persistence. Synthetic browser checks exercise message/reply sends,
+reaction add/remove, profile upload/save, avatar/bio display, and live arrival.
+An incoming message preserved an earlier reading position exactly and showed the
+new-message control. The native request boundary has three passing Rust tests,
+including profile read/update access without exposing session-creation routes.
+
+This follows the discussion pattern in [Slack's thread documentation](https://slack.com/help/articles/115000769927-Use-threads-to-organize-discussions-).
+Scroll timing follows [React's layout-effect contract](https://react.dev/reference/react/useLayoutEffect).

@@ -39,6 +39,372 @@ function fixture() {
   return { s, owner, org, space, join, publish, token: setup.token };
 }
 
+describe("threaded chat, reactions, and profiles", () => {
+  test("replies remain in one thread, update its summary, paginate, and reject cross-room parents", () => {
+    const { s, owner, org, join } = fixture();
+    const member = join("Taylor").id;
+    const room = s.chatRooms(owner, org)[0];
+    const send = (body: string, thread_id?: string) =>
+      s.sendChatMessage(member, org, room.id, {
+        body,
+        thread_id,
+        client_id: crypto.randomUUID(),
+      });
+    const root = send("Release review");
+    const before = s.chatMessages(
+      owner,
+      org,
+      room.id,
+      new URLSearchParams(),
+    ).cursor;
+    const replies = Array.from({ length: 56 }, (_, i) =>
+      send(`Reply ${i}`, root.id),
+    );
+    const main = s.chatMessages(owner, org, room.id, new URLSearchParams());
+    expect(main.messages.map((m) => m.id)).toEqual([root.id]);
+    expect(main.messages[0].reply_count).toBe(56);
+    const thread = s.chatMessages(
+      owner,
+      org,
+      room.id,
+      new URLSearchParams({ thread: root.id }),
+    );
+    expect(thread.parent?.id).toBe(root.id);
+    expect(thread.messages).toHaveLength(50);
+    const earlier = s.chatMessages(
+      owner,
+      org,
+      room.id,
+      new URLSearchParams({
+        thread: root.id,
+        before: String(thread.older_before),
+      }),
+    );
+    expect(earlier.messages).toHaveLength(6);
+    expect(earlier.messages[0].id).toBe(replies[0].id);
+    expect(
+      s
+        .chatMessages(
+          owner,
+          org,
+          room.id,
+          new URLSearchParams({ after: String(before) }),
+        )
+        .messages.every((m) => !m.thread_id),
+    ).toBe(true);
+    expect(() => send("Nested", replies[0].id)).toThrow("original thread");
+    const other = s.createChatRoom(owner, org, {
+      kind: "channel",
+      name: "Other",
+    });
+    expect(() =>
+      s.sendChatMessage(owner, org, other.id, {
+        body: "Cross-room",
+        thread_id: root.id,
+        client_id: crypto.randomUUID(),
+      }),
+    ).toThrow();
+    const edited = s.changeChatMessage(member, org, replies[0].id, {
+      body: "Revised",
+      revision: replies[0].revision,
+    });
+    s.changeChatMessage(
+      member,
+      org,
+      replies[0].id,
+      { revision: edited.revision },
+      true,
+    );
+    expect(
+      s.chatMessages(owner, org, room.id, new URLSearchParams()).messages[0]
+        .reply_count,
+    ).toBe(55);
+    const currentRoot = s.chatMessages(
+      owner,
+      org,
+      room.id,
+      new URLSearchParams(),
+    ).messages[0];
+    s.changeChatMessage(
+      member,
+      org,
+      root.id,
+      { revision: currentRoot.revision },
+      true,
+    );
+    expect(
+      s.chatMessages(
+        owner,
+        org,
+        room.id,
+        new URLSearchParams({ thread: root.id }),
+      ).parent?.deleted_at,
+    ).toBeTruthy();
+    expect(() => send("New reply", root.id)).toThrow("deleted");
+  });
+  test("reply retries cannot move between threads and DM threads and reactions stay private", () => {
+    const { s, owner, org, join } = fixture();
+    const alice = join("Alice").id,
+      bob = join("Bob").id;
+    const room = s.createChatRoom(alice, org, {
+      kind: "direct",
+      member_id: bob,
+    });
+    const root = s.sendChatMessage(alice, org, room.id, {
+      body: "Private",
+      client_id: crypto.randomUUID(),
+    });
+    const payload = {
+      body: "Private reply",
+      client_id: crypto.randomUUID(),
+      thread_id: root.id,
+    };
+    const reply = s.sendChatMessage(bob, org, room.id, payload);
+    expect(s.sendChatMessage(bob, org, room.id, payload).id).toBe(reply.id);
+    expect(() =>
+      s.sendChatMessage(bob, org, room.id, { ...payload, thread_id: null }),
+    ).toThrow();
+    expect(() =>
+      s.chatMessages(
+        owner,
+        org,
+        room.id,
+        new URLSearchParams({ thread: root.id }),
+      ),
+    ).toThrow();
+    expect(() =>
+      s.reactToMessage(owner, org, reply.id, { emoji: "👍", active: true }),
+    ).toThrow();
+    s.changeMember(owner, org, bob, "remove");
+    expect(() =>
+      s.chatMessages(
+        bob,
+        org,
+        room.id,
+        new URLSearchParams({ thread: root.id }),
+      ),
+    ).toThrow();
+    expect(() =>
+      s.reactToMessage(alice, org, reply.id, { emoji: "👍", active: true }),
+    ).toThrow();
+  });
+  test("reactions are idempotent per person, appear in live changes, and disappear on deletion", () => {
+    const { s, owner, org, join } = fixture();
+    const member = join("Taylor").id,
+      room = s.chatRooms(owner, org)[0];
+    const message = s.sendChatMessage(owner, org, room.id, {
+      body: "Ready",
+      client_id: crypto.randomUUID(),
+    });
+    const before = s.chatMessages(
+      owner,
+      org,
+      room.id,
+      new URLSearchParams(),
+    ).cursor;
+    s.reactToMessage(member, org, message.id, { emoji: "🎉", active: true });
+    const again = s.reactToMessage(member, org, message.id, {
+      emoji: "🎉",
+      active: true,
+    });
+    expect(again.reactions?.[0].count).toBe(1);
+    expect(again.reactions?.[0].reacted).toBe(true);
+    const both = s.reactToMessage(owner, org, message.id, {
+      emoji: "🎉",
+      active: true,
+    });
+    expect(both.reactions?.[0].count).toBe(2);
+    expect(both.reactions?.[0].names).toContain("Taylor");
+    const onlyMember = s.reactToMessage(owner, org, message.id, {
+      emoji: "🎉",
+      active: false,
+    });
+    expect(onlyMember.reactions?.[0].count).toBe(1);
+    expect(onlyMember.reactions?.[0].reacted).toBe(false);
+    expect(
+      s.chatMessages(
+        owner,
+        org,
+        room.id,
+        new URLSearchParams({ after: String(before) }),
+      ).messages[0].revision,
+    ).toBe(onlyMember.revision);
+    expect(() =>
+      s.reactToMessage(member, org, message.id, {
+        emoji: "<script>",
+        active: true,
+      }),
+    ).toThrow();
+    s.changeChatMessage(
+      owner,
+      org,
+      message.id,
+      { revision: onlyMember.revision },
+      true,
+    );
+    expect(
+      s.chatMessages(owner, org, room.id, new URLSearchParams()).messages[0]
+        .reactions,
+    ).toEqual([]);
+    expect(() =>
+      s.reactToMessage(member, org, message.id, { emoji: "👍", active: true }),
+    ).toThrow();
+  });
+  test("live HTTP waits wake immediately and recheck membership and session authorization", async () => {
+    const { s, owner, org, join, token } = fixture();
+    const member = join("Taylor"),
+      room = s.chatRooms(owner, org)[0],
+      handler = createHandler(s);
+    const cursor = s.chatMessages(
+      owner,
+      org,
+      room.id,
+      new URLSearchParams(),
+    ).cursor;
+    const wait = (session: string, after: number, signal?: AbortSignal) =>
+      handler(
+        new Request(
+          `https://team.test/v1/orgs/${org}/chat-rooms/${room.id}/messages?after=${after}&wait=20000`,
+          { headers: { authorization: `Bearer ${session}` }, signal },
+        ),
+      );
+    // Flush earlier setup notifications before opening a live request.
+    await Promise.resolve();
+    const request = wait(member.token!, cursor);
+    const message = s.sendChatMessage(owner, org, room.id, {
+      body: "Delivered live",
+      client_id: crypto.randomUUID(),
+    });
+    const response = await Promise.race([
+      request,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Live update did not wake")), 1000),
+      ),
+    ]);
+    expect(response.status).toBe(200);
+    const page = await response.json();
+    expect(page.messages[0].id).toBe(message.id);
+    const revoked = wait(member.token!, page.cursor);
+    s.changeMember(owner, org, member.id, "remove");
+    expect((await revoked).status).toBe(404);
+    const signedOut = wait(token, page.cursor);
+    s.signout(token);
+    expect((await signedOut).status).toBe(401);
+  });
+  test("profile edits are self-only, validate uploads, and preserve identity and historical authorship", async () => {
+    const { s, owner, org, join, token } = fixture();
+    const member = join("Taylor"),
+      handler = createHandler(s),
+      room = s.chatRooms(owner, org)[0];
+    const message = s.sendChatMessage(member.id, org, room.id, {
+      body: "Hello",
+      client_id: crypto.randomUUID(),
+    });
+    const photo =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5VQAAAAASUVORK5CYII=";
+    const profile = s.updateProfile(member.id, {
+      name: "Taylor Chen",
+      title: "Designer",
+      about: "Product and research",
+      avatar_data: photo,
+      revision: 0,
+    });
+    expect(profile.id).toBe(member.id);
+    expect(profile.name).toBe("Taylor Chen");
+    expect(
+      s.members(owner, org).find((p) => p.id === member.id)?.avatar_version,
+    ).toBeTruthy();
+    expect(s.profileAvatar(owner, org, member.id).data).toBe(photo);
+    expect(
+      s
+        .chatMessages(owner, org, room.id, new URLSearchParams())
+        .messages.find((m) => m.id === message.id)?.author_name,
+    ).toBe("Taylor Chen");
+    expect(() =>
+      s.updateProfile(member.id, { ...profile, revision: 0 }),
+    ).toThrow("changed");
+    expect(() =>
+      s.updateProfile(member.id, {
+        ...profile,
+        avatar_data: "https://example.com/image.png",
+      }),
+    ).toThrow();
+    expect(() =>
+      s.updateProfile(member.id, {
+        ...profile,
+        avatar_data: "data:image/svg+xml;base64,PHN2Zz4=",
+      }),
+    ).toThrow();
+    const res = await handler(
+      new Request("https://team.test/v1/profile", {
+        method: "PATCH",
+        headers: {
+          authorization: `Bearer ${member.token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          ...profile,
+          user_id: owner,
+          name: "Taylor Updated",
+          avatar_data: "",
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(s.profile(owner).name).toBe("Owner");
+    expect(s.profile(member.id).avatar_data).toBe("");
+    const other = s.createOrg(owner, "Other");
+    expect(() => s.profileAvatar(owner, other, member.id)).toThrow();
+    const unauthorized = await handler(
+      new Request(
+        `https://team.test/v1/orgs/${other}/profiles/${member.id}/avatar`,
+        { headers: { authorization: `Bearer ${token}` } },
+      ),
+    );
+    expect(unauthorized.status).toBe(404);
+  });
+  test("thread replies, reactions and profiles survive a database restart", () => {
+    const dir = mkdtempSync(joinPath(tmpdir(), "noted-chat-details-"));
+    const path = joinPath(dir, "team.sqlite");
+    let s = new TeamStore(path, "test-bootstrap-key");
+    const session = s.bootstrap("test-bootstrap-key", "Team", "Owner"),
+      owner = s.authenticate(session.token),
+      room = s.chatRooms(owner, session.org)[0];
+    const root = s.sendChatMessage(owner, session.org, room.id, {
+      body: "Root",
+      client_id: crypto.randomUUID(),
+    });
+    const reply = s.sendChatMessage(owner, session.org, room.id, {
+      body: "Reply",
+      thread_id: root.id,
+      client_id: crypto.randomUUID(),
+    });
+    s.reactToMessage(owner, session.org, reply.id, {
+      emoji: "✅",
+      active: true,
+    });
+    s.updateProfile(owner, { name: "New Name", title: "Founder", revision: 0 });
+    s.db.close();
+    s = new TeamStore(path);
+    try {
+      expect(s.authenticate(session.token)).toBe(owner);
+      const page = s.chatMessages(
+        owner,
+        session.org,
+        room.id,
+        new URLSearchParams({ thread: root.id }),
+      );
+      expect(page.parent?.reply_count).toBe(1);
+      expect(page.messages[0].reactions?.[0].emoji).toBe("✅");
+      expect(page.messages[0].author_name).toBe("New Name");
+      expect(s.profile(owner).title).toBe("Founder");
+    } finally {
+      s.db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("team navigation data", () => {
   test("conversation previews stay inside the participant boundary and reflect edits and deletions", () => {
     const { s, owner, org, join } = fixture();

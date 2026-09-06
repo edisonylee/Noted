@@ -40,6 +40,7 @@ import type {
 import { TeamDialog } from "./TeamDialog";
 import { TeamMessages } from "./TeamMessages";
 import { TeamPeople } from "./TeamPeople";
+import { TeamAvatars } from "./TeamAvatar";
 import { collectionName, collectionAudience } from "./presentation";
 import { SavedAnswers } from "./SavedAnswers";
 import { TeamChat } from "./TeamChat";
@@ -284,12 +285,14 @@ export function TeamWorkspace({
         </p>
       )}
       {org ? (
-        <TeamLibrary
-          key={org}
-          org={org}
-          onOpenLibrary={onOpenLibrary}
-          onTeamUpdate={updateTeam}
-        />
+        <TeamAvatars key={org}>
+          <TeamLibrary
+            key={org}
+            org={org}
+            onOpenLibrary={onOpenLibrary}
+            onTeamUpdate={updateTeam}
+          />
+        </TeamAvatars>
       ) : (
         <p className="team-empty">
           You don’t have access to a team. Ask an admin for a new invitation.

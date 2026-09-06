@@ -55,3 +55,12 @@ CREATE INDEX IF NOT EXISTS chat_rooms_org ON chat_rooms(org_id,kind);
 CREATE INDEX IF NOT EXISTS chat_participant_user ON chat_participants(user_id,room_id);
 CREATE INDEX IF NOT EXISTS chat_message_history ON chat_messages(room_id,created_seq);
 CREATE INDEX IF NOT EXISTS chat_room_events ON chat_events(room_id,seq);
+
+CREATE TABLE IF NOT EXISTS user_profiles (
+ user_id TEXT PRIMARY KEY REFERENCES users(id), title TEXT NOT NULL DEFAULT '', about TEXT NOT NULL DEFAULT '',
+ avatar_data TEXT NOT NULL DEFAULT '', avatar_version TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS chat_reactions (
+ message_id TEXT NOT NULL REFERENCES chat_messages(id), user_id TEXT NOT NULL REFERENCES users(id),
+ emoji TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(message_id,user_id,emoji)
+);

@@ -1,7 +1,9 @@
 import { MessageSquare, Settings, Users } from "lucide-react";
 import { useState } from "react";
 import type { TeamSnapshot } from "./types";
-import { initials } from "./presentation";
+import { TeamAvatar } from "./TeamAvatar";
+import { TeamProfileCard } from "./TeamProfile";
+import type { TeamUser } from "./types";
 
 export function TeamPeople({
   data,
@@ -12,6 +14,7 @@ export function TeamPeople({
   onMessage: (member: string) => Promise<void>;
   onManage: () => void;
 }) {
+  const [profile, setProfile] = useState<TeamUser | null>(null);
   const [query, setQuery] = useState("");
   const [pending, setPending] = useState("");
   const [error, setError] = useState("");
@@ -49,14 +52,23 @@ export function TeamPeople({
       <div className="team-people-list">
         {members.map((person) => (
           <div className="team-person-row" key={person.id}>
-            <span className="team-person-avatar" aria-hidden="true">
-              {initials(person.name)}
-            </span>
+            <button
+              className="team-avatar-button"
+              aria-label={`View ${person.name}'s profile`}
+              onClick={() => setProfile(person)}
+            >
+              <TeamAvatar
+                org={data.org.id}
+                person={person}
+                className="team-person-avatar"
+              />
+            </button>
             <div>
               <strong>
                 {person.name}
                 {person.id === data.user.id && <small> you</small>}
               </strong>
+              {person.title && <p>{person.title}</p>}
               <p>
                 {person.role === "owner"
                   ? "Team owner"
@@ -92,6 +104,13 @@ export function TeamPeople({
       </div>
       {!members.length && (
         <p className="team-empty">No teammates match that name.</p>
+      )}
+      {profile && (
+        <TeamProfileCard
+          org={data.org.id}
+          person={profile}
+          onClose={() => setProfile(null)}
+        />
       )}
     </main>
   );

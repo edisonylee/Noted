@@ -81,6 +81,10 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
         store.signout(token);
         return respond({});
       }
+      if (path.length === 2 && path[1] === "profile") {
+        if (method === "GET") return respond(store.profile(user));
+        if (method === "PATCH") return respond(store.updateProfile(user, body));
+      }
       if (path[1] !== "orgs") throw new TeamError(404, "Not found");
       if (path.length === 2) {
         if (method === "GET") return respond(store.orgs(user));
@@ -101,7 +105,10 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
           !(
             (resource === "notes" && action === "restore") ||
             (resource === "spaces" && action === "grants") ||
-            (resource === "chat-rooms" && ["messages", "read"].includes(action))
+            (resource === "chat-rooms" &&
+              ["messages", "read"].includes(action)) ||
+            (resource === "chat-messages" && action === "reactions") ||
+            (resource === "profiles" && action === "avatar")
           ))
       )
         throw new TeamError(404, "Not found");
@@ -122,13 +129,46 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
           return respond(store.chatRoom(user, org, id));
         if (id && !action && method === "PATCH")
           return respond(store.updateChatRoom(user, org, id, body));
-        if (id && action === "messages" && method === "GET")
-          return respond(store.chatMessages(user, org, id, url.searchParams));
+        if (id && action === "messages" && method === "GET") {
+          const wait = Number(url.searchParams.get("wait") ?? 0);
+          if (
+            !Number.isInteger(wait) ||
+            wait < 0 ||
+            wait > 20_000 ||
+            (wait && !url.searchParams.has("after"))
+          )
+            throw new TeamError(400, "Invalid wait duration");
+          const page = store.chatMessages(user, org, id, url.searchParams);
+          if (
+            wait &&
+            !page.has_more &&
+            page.cursor === Number(url.searchParams.get("after"))
+          ) {
+            await store.waitForChat(id, page.cursor, request.signal, wait);
+            store.authenticate(token);
+            return respond(store.chatMessages(user, org, id, url.searchParams));
+          }
+          return respond(page);
+        }
         if (id && action === "messages" && method === "POST")
           return respond(store.sendChatMessage(user, org, id, body), 201);
         if (id && action === "read" && method === "POST")
           return respond(store.readChat(user, org, id, body.cursor));
       }
+      if (
+        resource === "profiles" &&
+        id &&
+        action === "avatar" &&
+        method === "GET"
+      )
+        return respond(store.profileAvatar(user, org, id));
+      if (
+        resource === "chat-messages" &&
+        id &&
+        action === "reactions" &&
+        method === "PUT"
+      )
+        return respond(store.reactToMessage(user, org, id, body));
       if (resource === "chat-messages" && id && !action) {
         if (method === "PATCH")
           return respond(store.changeChatMessage(user, org, id, body));

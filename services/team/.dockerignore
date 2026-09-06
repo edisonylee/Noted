@@ -3,3 +3,5 @@
 !server.ts
 !store.ts
 !schema.sql
+
+!reactions.ts

@@ -1726,6 +1726,7 @@ export class TeamStore {
       attachments_enabled: true,
       unread_navigation: true,
       pins_enabled: true,
+      saved_messages_enabled: true,
       first_unread_root_id: this.get(
         "SELECT COALESCE(thread_id,id) AS id FROM chat_messages WHERE room_id=? AND author_id<>? AND deleted_at IS NULL AND created_seq>COALESCE((SELECT seq FROM chat_reads WHERE room_id=? AND user_id=?),0) ORDER BY created_seq LIMIT 1",
         id,
@@ -2212,6 +2213,11 @@ export class TeamStore {
       has_meeting:
         !row.deleted_at &&
         !!this.get("SELECT 1 FROM chat_meeting_refs WHERE message_id=?", id),
+      saved: !!this.get(
+        "SELECT 1 FROM chat_saved_messages WHERE user_id=? AND message_id=?",
+        user,
+        id,
+      ),
       pinned: !!this.get("SELECT 1 FROM chat_pins WHERE message_id=?", id),
       author_id: String(row.author_id),
       author_name: String(row.author_name),
@@ -2544,6 +2550,7 @@ export class TeamStore {
         this.run("DELETE FROM chat_attachments WHERE message_id=?", id);
         this.run("DELETE FROM chat_pins WHERE message_id=?", id);
         this.run("DELETE FROM chat_meeting_refs WHERE message_id=?", id);
+        this.run("DELETE FROM chat_saved_messages WHERE message_id=?", id);
       }
       this.messageChanged(room.id, id, message.thread_id);
       return this.chatMessage(user, org, id, room);
@@ -2659,6 +2666,83 @@ export class TeamStore {
         return { available: false };
       throw e;
     }
+  }
+  saveMessage(user: string, org: string, id: string, active: unknown) {
+    if (typeof active !== "boolean") fail(400, "Invalid saved state");
+    return this.db.transaction(() => {
+      this.role(user, org);
+      if (!active) {
+        this.run(
+          "DELETE FROM chat_saved_messages WHERE user_id=? AND message_id=? AND message_id IN (SELECT m.id FROM chat_messages m JOIN chat_rooms r ON r.id=m.room_id WHERE r.org_id=?)",
+          user,
+          id,
+          org,
+        );
+        return {};
+      }
+      this.messageLocation(user, org, id);
+      if (
+        this.get(
+          "SELECT 1 FROM chat_saved_messages WHERE user_id=? AND message_id=?",
+          user,
+          id,
+        )
+      )
+        return {};
+      if (
+        Number(
+          this.get(
+            "SELECT count(*) n FROM chat_saved_messages s JOIN chat_messages m ON m.id=s.message_id JOIN chat_rooms r ON r.id=m.room_id WHERE s.user_id=? AND r.org_id=?",
+            user,
+            org,
+          )!.n,
+        ) >= 2000
+      )
+        fail(400, "Remove a saved message before adding more (2,000 maximum)");
+      this.run(
+        "INSERT INTO chat_saved_messages(user_id,message_id,saved_at) VALUES(?,?,?)",
+        user,
+        id,
+        now(),
+      );
+      return {};
+    })();
+  }
+  savedMessages(user: string, org: string, query: URLSearchParams) {
+    this.role(user, org);
+    let before = query.has("before")
+      ? this.chatCursor(Number(query.get("before")), "saved cursor")
+      : Number.MAX_SAFE_INTEGER;
+    const items: (ReturnType<TeamStore["messageLocation"]> & {
+      saved_at: string;
+    })[] = [];
+    for (let batch = 0; batch < 20; batch++) {
+      const rows = this.all<{
+        seq: number;
+        message_id: string;
+        saved_at: string;
+      }>(
+        "SELECT s.seq,s.message_id,s.saved_at FROM chat_saved_messages s JOIN chat_messages m ON m.id=s.message_id JOIN chat_rooms r ON r.id=m.room_id WHERE s.user_id=? AND r.org_id=? AND s.seq<? ORDER BY s.seq DESC LIMIT 100",
+        user,
+        org,
+        before,
+      );
+      for (const row of rows) {
+        before = row.seq;
+        try {
+          items.push({
+            ...this.messageLocation(user, org, row.message_id),
+            saved_at: row.saved_at,
+          });
+        } catch (e) {
+          if (!(e instanceof TeamError && [403, 404].includes(e.status)))
+            throw e;
+        }
+        if (items.length === 30) return { items, next_before: before };
+      }
+      if (rows.length < 100) return { items, next_before: null };
+    }
+    return { items, next_before: before };
   }
   pinMessage(user: string, org: string, id: string, active: unknown) {
     if (typeof active !== "boolean") fail(400, "Invalid pin state");

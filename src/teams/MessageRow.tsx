@@ -8,6 +8,8 @@ import {
   Trash2,
   Mail,
   Pin,
+  Bookmark,
+  MoreHorizontal,
 } from "lucide-react";
 import { REACTIONS, REACTION_NAMES } from "../../services/team/reactions";
 import { TeamAvatar } from "./TeamAvatar";
@@ -29,6 +31,7 @@ export function MessageRow({
   onMarkUnread,
   onMeeting,
   pinsEnabled = false,
+  savedEnabled = false,
   renderBody,
   showReplies = true,
   extras,
@@ -47,6 +50,7 @@ export function MessageRow({
   onMarkUnread?: () => void;
   onMeeting?: (id: string) => void;
   pinsEnabled?: boolean;
+  savedEnabled?: boolean;
   /** Lets the caller decorate the body (mention marks) without this row
    *  knowing what a mention is. Plain text when omitted. */
   renderBody?: (body: string) => ReactNode;
@@ -54,6 +58,7 @@ export function MessageRow({
   extras: boolean;
   highlighted?: boolean;
 }) {
+  const [moreOpen, setMoreOpen] = useState(false);
   const [pinConfirm, setPinConfirm] = useState(false);
   const [picker, setPicker] = useState(false);
   const [search, setSearch] = useState("");
@@ -104,6 +109,11 @@ export function MessageRow({
               minute: "2-digit",
             })}
           </time>
+          {message.saved && (
+            <small title="Saved privately">
+              <Bookmark size={11} aria-label="Saved privately" />
+            </small>
+          )}
           {message.pinned && (
             <small className="message-pin-label">
               <Pin size={11} /> Pinned
@@ -171,26 +181,17 @@ export function MessageRow({
         )}
       </div>
       <div className="messages-actions">
-        {!message.deleted_at && pinsEnabled && canSend && (
-          <button
-            className="team-text-button"
-            title={message.pinned ? "Unpin message" : "Pin message"}
-            aria-label={message.pinned ? "Unpin message" : "Pin message"}
-            onClick={() => setPinConfirm(true)}
-          >
-            <Pin size={14} />
-          </button>
-        )}
-        {!message.deleted_at && onMarkUnread && (
-          <button
-            className="team-text-button"
-            title="Mark unread from here"
-            aria-label={`Mark message from ${person.name} unread`}
-            onClick={onMarkUnread}
-          >
-            <Mail size={14} />
-          </button>
-        )}
+        {!message.deleted_at &&
+          (pinsEnabled || savedEnabled || onMarkUnread) && (
+            <button
+              className="team-text-button"
+              title="More message actions"
+              aria-label={`More actions for message from ${person.name}`}
+              onClick={() => setMoreOpen(true)}
+            >
+              <MoreHorizontal size={15} />
+            </button>
+          )}
         {!message.deleted_at && canSend && extras && (
           <>
             <button
@@ -236,6 +237,80 @@ export function MessageRow({
           </button>
         )}
       </div>
+      {moreOpen && (
+        <TeamDialog
+          title="Message actions"
+          busy={busy}
+          onClose={() => setMoreOpen(false)}
+        >
+          <div className="message-action-list">
+            {savedEnabled && (
+              <button
+                className="team-text-button"
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  setError("");
+                  try {
+                    await team.request(
+                      "PUT",
+                      orgPath(org, `/chat-messages/${message.id}/saved`),
+                      { active: !message.saved },
+                    );
+                    onChanged({ ...message, saved: !message.saved });
+                    setMoreOpen(false);
+                  } catch (e) {
+                    setError(String(e));
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                <Bookmark size={15} />
+                {message.saved
+                  ? "Remove from saved messages"
+                  : "Save message privately"}
+              </button>
+            )}
+            {!message.deleted_at && pinsEnabled && canSend && (
+              <button
+                className="team-text-button"
+                title={message.pinned ? "Unpin message" : "Pin message"}
+                aria-label={message.pinned ? "Unpin message" : "Pin message"}
+                onClick={() => {
+                  setMoreOpen(false);
+                  setPinConfirm(true);
+                }}
+              >
+                <Pin size={14} />{" "}
+                {message.pinned ? "Unpin for everyone" : "Pin for everyone"}
+              </button>
+            )}
+            {!message.deleted_at && onMarkUnread && (
+              <button
+                className="team-text-button"
+                title="Mark unread from here"
+                aria-label={`Mark message from ${person.name} unread`}
+                onClick={() => {
+                  setMoreOpen(false);
+                  onMarkUnread?.();
+                }}
+              >
+                <Mail size={14} /> Mark unread from here
+              </button>
+            )}
+            {error && (
+              <p className="team-error" role="alert">
+                {error}
+              </p>
+            )}
+            <p className="team-muted">
+              Saved messages are private to you. Pins are shared with the
+              conversation.
+            </p>
+          </div>
+        </TeamDialog>
+      )}
       {pinConfirm && (
         <TeamDialog
           title={message.pinned ? "Unpin this message?" : "Pin this message?"}

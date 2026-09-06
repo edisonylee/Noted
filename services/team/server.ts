@@ -134,7 +134,7 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
                 action,
               )) ||
             (resource === "chat-messages" &&
-              ["reactions", "pin", "source"].includes(action)) ||
+              ["reactions", "pin", "source", "saved"].includes(action)) ||
             (resource === "mentions" && action === "read") ||
             (resource === "profiles" && action === "avatar")
           ))
@@ -165,6 +165,15 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
         method === "GET"
       )
         return respond(store.meetingReference(user, org, id));
+      if (resource === "saved-messages" && !id && method === "GET")
+        return respond(store.savedMessages(user, org, url.searchParams));
+      if (
+        resource === "chat-messages" &&
+        id &&
+        action === "saved" &&
+        method === "PUT"
+      )
+        return respond(store.saveMessage(user, org, id, body.active));
       if (resource === "search" && !id && method === "GET")
         return respond(store.search(user, org, url.searchParams));
       if (

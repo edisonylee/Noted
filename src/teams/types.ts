@@ -119,6 +119,7 @@ export type TeamChatRoom = {
   attachments_enabled?: boolean;
   unread_navigation?: boolean;
   pins_enabled?: boolean;
+  saved_messages_enabled?: boolean;
   read_version?: number;
   read_held?: boolean;
   read_cursor?: number;
@@ -163,6 +164,7 @@ export type TeamAttachment = {
 export type TeamChatMessage = {
   attachments?: TeamAttachment[];
   pinned?: boolean;
+  saved?: boolean;
   has_meeting?: boolean;
   id: string;
   room_id: string;

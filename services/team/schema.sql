@@ -107,3 +107,12 @@ CREATE TABLE IF NOT EXISTS chat_meeting_refs (
   quote_start INTEGER NOT NULL DEFAULT 0,
   quote_length INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS chat_saved_messages (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  message_id TEXT NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  saved_at TEXT NOT NULL,
+  UNIQUE(user_id,message_id)
+);
+CREATE INDEX IF NOT EXISTS chat_saved_user_seq ON chat_saved_messages(user_id,seq);

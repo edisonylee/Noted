@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import {
   AtSign,
+  Bookmark,
   BellOff,
   ChevronDown,
   Hash,
@@ -21,6 +22,8 @@ export function MessageSidebar({
   rooms,
   selected,
   inbox,
+  saved,
+  onSaved,
   drafts,
   filter,
   onFilter,
@@ -32,6 +35,8 @@ export function MessageSidebar({
   rooms: TeamChatRoom[];
   selected: string;
   inbox: boolean;
+  saved: boolean;
+  onSaved: () => void;
   drafts: Record<string, string>;
   filter: string;
   onFilter: (value: string) => void;
@@ -54,11 +59,11 @@ export function MessageSidebar({
         ? "direct"
         : "channels";
   useEffect(() => {
-    if (!inbox && selectedGroup)
+    if (!inbox && !saved && selectedGroup)
       setCollapsed((old) =>
         old[selectedGroup] ? { ...old, [selectedGroup]: false } : old,
       );
-  }, [selected, selectedGroup, inbox]);
+  }, [selected, selectedGroup, inbox, saved]);
   const query = filter.trim().toLocaleLowerCase();
   const matches = (room: TeamChatRoom) =>
     roomLabel(room, user).toLocaleLowerCase().includes(query);
@@ -106,8 +111,10 @@ export function MessageSidebar({
     return (
       <button
         key={room.id}
-        className={`message-list-row${selected === room.id && !inbox ? " is-selected" : ""}${unread ? " is-unread" : ""}`}
-        aria-current={selected === room.id && !inbox ? "page" : undefined}
+        className={`message-list-row${selected === room.id && !inbox && !saved ? " is-selected" : ""}${unread ? " is-unread" : ""}`}
+        aria-current={
+          selected === room.id && !inbox && !saved ? "page" : undefined
+        }
         title={title}
         onClick={() => onSelect(room.id)}
       >
@@ -248,6 +255,16 @@ export function MessageSidebar({
             </span>
           )}
         </button>
+        {rooms.some((r) => r.saved_messages_enabled) && (
+          <button
+            className={`message-mentions-link${saved ? " is-selected" : ""}`}
+            aria-current={saved ? "page" : undefined}
+            onClick={onSaved}
+          >
+            <Bookmark size={17} />
+            <span>Saved messages</span>
+          </button>
+        )}
       </header>
       <div className="message-sidebar-scroll">
         {query && !directs.length && !channels.length && !archived.length ? (

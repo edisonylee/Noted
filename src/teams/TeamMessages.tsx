@@ -1,3 +1,4 @@
+import { SavedMessages } from "./SavedMessages";
 import { PinnedMessages } from "./PinnedMessages";
 import { AttachmentPicker, type PendingAttachment } from "./MessageAttachments";
 import { MessageSidebar } from "./MessageSidebar";
@@ -81,6 +82,10 @@ export function TeamMessages({
   const org = data.org.id,
     user = data.user.id;
   const [rooms, setRooms] = useState<TeamChatRoom[]>([]);
+  const [savedView, setSavedView] = useNavigationState(
+    `team:${org}:${user}:saved-messages-view`,
+    false,
+  );
   const [inbox, setInbox] = useNavigationState(
     `team:${org}:${user}:mentions-inbox`,
     false,
@@ -115,6 +120,7 @@ export function TeamMessages({
         setSelected(location.room.id);
         setJump({ ...location, nonce: epoch });
         setInbox(false);
+        setSavedView(false);
         setListVisible(false);
         // Opening one mention does not mark the entire conversation as read.
         await team.request(
@@ -269,6 +275,7 @@ export function TeamMessages({
       updateRoom(requestedRoom);
       setSelected(requestedRoom.id);
       setInbox(false);
+      setSavedView(false);
       setJump(null);
       setListVisible(false);
       setSearch("");
@@ -280,16 +287,19 @@ export function TeamMessages({
   const current = rooms.find((r) => r.id === selected);
   useEffect(() => {
     setViewedMessageRoom(
-      active && !inbox && (!compact || !listVisible) ? selected : null,
+      active && !inbox && !savedView && (!compact || !listVisible)
+        ? selected
+        : null,
     );
     return () => setViewedMessageRoom(null);
-  }, [active, selected, inbox, compact, listVisible]);
+  }, [active, selected, inbox, savedView, compact, listVisible]);
   const selectRoom = (id: string) => {
     ++openEpoch.current;
     setOpening(false);
     setOpenError("");
     setSelected(id);
     setInbox(false);
+    setSavedView(false);
     setJump(null);
     setListVisible(false);
   };
@@ -303,6 +313,15 @@ export function TeamMessages({
           rooms={rooms}
           selected={selected}
           inbox={inbox}
+          saved={savedView}
+          onSaved={() => {
+            ++openEpoch.current;
+            setOpening(false);
+            setOpenError("");
+            setSavedView(true);
+            setInbox(false);
+            setListVisible(false);
+          }}
           drafts={drafts}
           filter={search}
           onFilter={setSearch}
@@ -313,6 +332,7 @@ export function TeamMessages({
             setOpening(false);
             setOpenError("");
             setInbox(true);
+            setSavedView(false);
             setListVisible(false);
           }}
         />
@@ -335,6 +355,12 @@ export function TeamMessages({
           )}
           {opening ? (
             <p className="messages-empty">Opening message…</p>
+          ) : savedView ? (
+            <SavedMessages
+              org={org}
+              user={user}
+              onOpen={(id) => void openMessage(id)}
+            />
           ) : inbox ? (
             <MentionsInbox
               org={org}
@@ -1145,6 +1171,7 @@ function MessageRoom({
         showReplies={showReplies}
         extras={!!room.message_extras}
         pinsEnabled={!!room.pins_enabled}
+        savedEnabled={!!room.saved_messages_enabled}
         onMeeting={onMeeting}
         onChanged={changed}
         onReply={() =>

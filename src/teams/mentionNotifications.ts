@@ -1,0 +1,36 @@
+import type { TeamChatRoom } from "./types";
+
+const preferenceKey = "noted:team-mention-notifications";
+export const notificationPreferenceEvent = "noted:team-notifications-changed";
+export function mentionNotificationsEnabled() {
+  try { return localStorage.getItem(preferenceKey) === "true"; }
+  catch { return false; }
+}
+export function setMentionNotificationsEnabled(enabled: boolean) {
+  localStorage.setItem(preferenceKey, String(enabled));
+  window.dispatchEvent(new Event(notificationPreferenceEvent));
+}
+
+let viewedRoom: string | null = null;
+export function setViewedMessageRoom(room: string | null) { viewedRoom = room; }
+export function isViewingMessageRoom(room: string) {
+  return viewedRoom === room && document.visibilityState === "visible" && document.hasFocus();
+}
+
+// Baseline each room on first sight. A read marker or a message edit must not
+// replay older mentions. Advance even when alerts are suppressed in the UI.
+export class MentionNotificationTracker {
+  private cursors = new Map<string, number>();
+  update(scope: string, rooms: TeamChatRoom[]) {
+    const notify: TeamChatRoom[] = [];
+    for (const room of rooms) {
+      const key = `${scope}:${room.notification_user_id ?? ""}:${room.id}`;
+      const previous = this.cursors.get(key);
+      const cursor = room.notification_cursor;
+      if (cursor == null) continue; // Compatible with older team servers.
+      this.cursors.set(key, Math.max(previous ?? 0, cursor));
+      if (previous != null && !room.archived_at && (room.latest_unread_mention_seq ?? 0) > previous) notify.push(room);
+    }
+    return notify;
+  }
+}

@@ -124,6 +124,10 @@ export type TeamChatRoom = {
   is_default: boolean;
   participants: (TeamUser & { active: boolean })[];
   unread: number;
+  unread_mentions?: number;
+  latest_unread_mention_seq?: number;
+  notification_cursor?: number;
+  notification_user_id?: string;
   last_activity: string;
   last_message?: {
     author_id: string;

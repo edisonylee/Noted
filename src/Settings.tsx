@@ -1,4 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
+import { useNavigationState } from "./useNavigationState";
+import { mentionNotificationsEnabled, setMentionNotificationsEnabled } from "./teams/mentionNotifications";
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -138,7 +140,7 @@ function AppleCalendarSettings() {
 }
 
 export function SettingsModal({ onClose, page = false, onOpenTeam }: { onClose: () => void; page?: boolean; onOpenTeam?: () => void }) {
-  const [section, setSection] = useState<SettingsSection>("system");
+  const [section, setSection] = useNavigationState<SettingsSection>("settings:section", "system");
   const [savedHint, setSavedHint] = useState(false);
   const [s, setS] = useState<ProviderSettings | null>(null);
   const [mode, setMode] = useState<ProviderMode>("local");
@@ -175,6 +177,9 @@ export function SettingsModal({ onClose, page = false, onOpenTeam }: { onClose: 
   const [gcalBusy, setGcalBusy] = useState<"" | "saving" | "connecting">("");
   const [gcalMsg, setGcalMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const [reminders, setReminders] = useState<ReminderSettings | null>(null);
+  const [mentionAlerts, setMentionAlerts] = useState(mentionNotificationsEnabled);
+  const [mentionAlertMessage, setMentionAlertMessage] = useState("");
+  const [mentionAlertBusy, setMentionAlertBusy] = useState(false);
   const [reminderPermission, setReminderPermission] = useState<boolean | null>(null);
   const [reminderBusy, setReminderBusy] = useState(false);
   const [reminderMsg, setReminderMsg] = useState<string | null>(null);
@@ -1615,10 +1620,34 @@ export function SettingsModal({ onClose, page = false, onOpenTeam }: { onClose: 
           <>
         <h3>Notifications</h3>
         <p className="settings-sub">
-          Choose when Noted gives you an audible heads-up for what is next.
+          Choose when Noted sends desktop alerts.
         </p>
 
         <div className="settings-fields notification-settings">
+          <section className="settings-group">
+            <header className="settings-group-head">
+              <h4>Team mentions</h4>
+              <p>Get a Mac notification when a teammate @mentions you while Noted is running.</p>
+            </header>
+            <label className="vault-auto reminder-toggle">
+              <input type="checkbox" checked={mentionAlerts} disabled={mentionAlertBusy} onChange={async (event) => {
+                const enabled = event.target.checked;
+                setMentionAlertBusy(true);
+                setMentionAlertMessage("");
+                try {
+                  if (enabled && !(await isPermissionGranted()) && (await requestPermission()) !== "granted") {
+                    setMentionAlertMessage("Allow notifications for Noted in macOS System Settings to enable mention alerts.");
+                    return;
+                  }
+                  setMentionNotificationsEnabled(enabled);
+                  setMentionAlerts(enabled);
+                } catch (error) { setMentionAlertMessage(`Could not update mention alerts: ${String(error)}`); }
+                finally { setMentionAlertBusy(false); }
+              }} />
+              <span>Notify me about @mentions<em>Across all your teams. The conversation you are viewing stays quiet. Focus and macOS notification settings apply.</em></span>
+            </label>
+            {mentionAlertMessage && <p className="field-hint" role="status">{mentionAlertMessage}</p>}
+          </section>
           <section className="settings-group">
             <header className="settings-group-head">
               <h4>Upcoming meetings and plans</h4>

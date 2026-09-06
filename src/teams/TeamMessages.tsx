@@ -1,3 +1,5 @@
+import { useNavigationState } from "../useNavigationState";
+import { setViewedMessageRoom } from "./mentionNotifications";
 import {
   Fragment,
   useCallback,
@@ -32,6 +34,8 @@ import type {
   TeamUser,
 } from "./types";
 import { mergeMessages, roomLabel } from "./messaging";
+import { draftKey as draftStorageKey, readDrafts, writeDrafts } from "./messageDrafts";
+import { findMentions, mentionQuery } from "./mentions";
 import { TeamAvatar } from "./TeamAvatar";
 import { TeamProfileCard } from "./TeamProfile";
 import { MessageRow } from "./MessageRow";
@@ -51,13 +55,24 @@ export function TeamMessages({
   const org = data.org.id,
     user = data.user.id;
   const [rooms, setRooms] = useState<TeamChatRoom[]>([]);
-  const [selected, setSelected] = useState("");
-  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useNavigationState(`team:${org}:${user}:room`, "");
+  const [search, setSearch] = useNavigationState(`team:${org}:${user}:room-search`, "");
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
-  const [showArchived, setShowArchived] = useState(false);
+  const [showArchived, setShowArchived] = useNavigationState(`team:${org}:${user}:archived`, false);
   const [dialog, setDialog] = useState<"channel" | "direct" | null>(null);
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  // Master keys drafts by thread-or-room; persist that same map so a
+  // half-written message survives a reload, not just a room switch.
+  const storageKey = draftStorageKey(org, user);
+  const [drafts, setDraftState] = useState(() => readDrafts(storageKey));
+  const draftsRef = useRef(drafts);
+  const [draftError, setDraftError] = useState(false);
+  const setDrafts = (update: (old: Record<string, string>) => Record<string, string>) => {
+    const next = update(draftsRef.current);
+    draftsRef.current = next;
+    setDraftState(next);
+    setDraftError(!writeDrafts(storageKey, next));
+  };
   const attempts = useRef<Record<string, { body: string; id: string }>>({});
   const [retry, setRetry] = useState(0);
   useEffect(() => {
@@ -113,7 +128,7 @@ export function TeamMessages({
   const markRead = useCallback(
     (id: string) =>
       setRooms((old) =>
-        old.map((r) => (r.id === id ? { ...r, unread: 0 } : r)),
+        old.map((r) => (r.id === id ? { ...r, unread: 0, unread_mentions: 0 } : r)),
       ),
     [],
   );
@@ -135,6 +150,10 @@ export function TeamMessages({
     if (!active) setDialog(null);
   }, [active]);
   const current = rooms.find((r) => r.id === selected);
+  useEffect(() => {
+    setViewedMessageRoom(active ? selected : null);
+    return () => setViewedMessageRoom(null);
+  }, [active, selected]);
   const matches = (room: TeamChatRoom) =>
     roomLabel(room, user).toLowerCase().includes(search.trim().toLowerCase());
   const directRooms = rooms
@@ -212,6 +231,7 @@ export function TeamMessages({
                     : "Team channel"}
         </small>
       </span>
+      {(room.unread_mentions ?? 0) > 0 && <b className="messages-unread" aria-label={`${room.unread_mentions} unread mentions`}>@</b>}
       {room.unread > 0 && (
         <b
           className="messages-unread"
@@ -224,6 +244,7 @@ export function TeamMessages({
   );
   return (
     <div className="team-messages">
+      {draftError && <p role="alert">Draft could not be saved on this device. Keep this workspace open to retain it.</p>}
       <aside
         className="team-sidebar messages-nav"
         aria-label="Team conversations"
@@ -606,6 +627,7 @@ function MessageRoom({
     async (seq: number) => {
       if (
         !visible.current ||
+        !document.hasFocus() ||
         seq <= readCursor.current ||
         document.visibilityState !== "visible"
       )
@@ -785,6 +807,38 @@ function MessageRoom({
       if (alive.current) setSending(false);
     }
   };
+  const [caret, setCaret] = useState(0);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
+  const eligible = room.kind === "direct"
+    ? members.filter((m) => room.participants.some((p) => p.id === m.id && p.active))
+    : members;
+  const query = dismissed ? null : mentionQuery(draft, caret);
+  const suggestions = query
+    ? eligible.filter((m) => m.name.toLocaleLowerCase().startsWith(query.query.toLocaleLowerCase())).slice(0, 8)
+    : [];
+  const chooseMention = (member: TeamUser) => {
+    if (!query) return;
+    const insertion = `@${member.name} `;
+    const next = draft.slice(0, query.start) + insertion + draft.slice(query.end);
+    if (next.length > 10_000) return;
+    setDraft(next);
+    setDismissed(true);
+    requestAnimationFrame(() => {
+      composer.current?.focus();
+      composer.current?.setSelectionRange(query.start + insertion.length, query.start + insertion.length);
+    });
+  };
+  // Passed to MessageRow so the row itself stays unaware of mentions.
+  const renderBody = (body: string) => {
+    let end = 0;
+    const parts = findMentions(body, eligible).map((mention) => {
+      const before = body.slice(end, mention.start);
+      end = mention.end;
+      return <Fragment key={mention.start}>{before}<mark className={mention.user.id === user ? "messages-mention self" : "messages-mention"}>{body.slice(mention.start, mention.end)}</mark></Fragment>;
+    });
+    return <>{parts}{body.slice(end)}</>;
+  };
   const label = roomLabel(room, user);
   const renderEpoch = accessEpoch.current;
   const changed = (message: TeamChatMessage) => {
@@ -805,6 +859,7 @@ function MessageRoom({
         message={message}
         person={person}
         canSend={canSend}
+        renderBody={renderBody}
         showReplies={showReplies}
         extras={!!room.message_extras}
         onChanged={changed}
@@ -1003,7 +1058,13 @@ function MessageRoom({
                 ? `Message #${label}`
                 : `Message ${label}`}
           </label>
+          {suggestions.length > 0 && <div className="messages-mention-picker" id={`mentions-${draftKey}`} role="listbox" aria-label="Mention a teammate">
+            {suggestions.map((member, index) => <button type="button" role="option" id={`mention-${draftKey}-${index}`} aria-selected={index === mentionIndex % suggestions.length} key={member.id} onMouseDown={(e) => e.preventDefault()} onClick={() => chooseMention(member)}>@{member.name}</button>)}
+          </div>}
           <textarea
+            aria-autocomplete="list"
+            aria-controls={suggestions.length ? `mentions-${draftKey}` : undefined}
+            aria-activedescendant={suggestions.length ? `mention-${draftKey}-${mentionIndex % suggestions.length}` : undefined}
             id={`compose-${draftKey}`}
             ref={composer}
             value={draft}
@@ -1017,8 +1078,15 @@ function MessageRoom({
                   : `Message ${room.kind === "channel" && !room.is_default ? "#" : ""}${label}`
                 : "This conversation is read-only"
             }
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => { setDraft(e.target.value); setCaret(e.target.selectionStart); setMentionIndex(0); setDismissed(false); }}
+            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
+              if (suggestions.length) {
+                if (e.key === "Escape") { e.preventDefault(); setDismissed(true); return; }
+                if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setMentionIndex((old) => (old + (e.key === "ArrowDown" ? 1 : suggestions.length - 1)) % suggestions.length); return; }
+                if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") { e.preventDefault(); chooseMention(suggestions[mentionIndex % suggestions.length]); return; }
+              }
               if (
                 e.key === "Enter" &&
                 !e.shiftKey &&
@@ -1030,7 +1098,7 @@ function MessageRoom({
             }}
           />
           <div className="messages-compose-foot">
-            <span>Enter to send · Shift + Enter for a new line</span>
+            <span>@ to mention · Enter to send · Shift + Enter for a new line</span>
             <button
               className="team-primary"
               disabled={sending || !canSend || !draft.trim() || !!error}

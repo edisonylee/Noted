@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { MessageSquare, Pencil, SmilePlus, Trash2 } from "lucide-react";
 import { REACTIONS, REACTION_NAMES } from "../../services/team/reactions";
 import { TeamAvatar } from "./TeamAvatar";
@@ -17,6 +17,7 @@ export function MessageRow({
   onEdit,
   onDelete,
   onProfile,
+  renderBody,
   showReplies = true,
   extras,
 }: {
@@ -30,6 +31,9 @@ export function MessageRow({
   onEdit: () => void;
   onDelete: () => void;
   onProfile: () => void;
+  /** Lets the caller decorate the body (mention marks) without this row
+   *  knowing what a mention is. Plain text when omitted. */
+  renderBody?: (body: string) => ReactNode;
   showReplies?: boolean;
   extras: boolean;
 }) {
@@ -85,7 +89,7 @@ export function MessageRow({
         {message.deleted_at ? (
           <p className="messages-deleted">Message deleted</p>
         ) : (
-          <p>{message.body}</p>
+          <p>{renderBody ? renderBody(message.body) : message.body}</p>
         )}
         {!message.deleted_at && !!message.reactions?.length && (
           <div className="message-reactions" aria-label="Reactions">

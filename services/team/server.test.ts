@@ -1797,3 +1797,29 @@ describe("persistent local service startup", () => {
     }
   });
 });
+
+test("unread mention indicators follow edits, reads, deletions and conversation access", () => {
+  const { s, owner, org, join } = fixture();
+  const edison = join("Edison Chen").id;
+  const other = join("Taylor").id;
+  const room = s.chatRooms(owner, org)[0].id;
+  const send = (body: string, roomId = room) => s.sendChatMessage(owner, org, roomId, { body, client_id: crypto.randomUUID() });
+  const first = send("Hello @Edison");
+  expect(s.chatRoom(edison, org, room).latest_unread_mention_seq).toBe(first.created_seq);
+  expect(s.chatRoom(edison, org, room).notification_cursor).toBe(first.created_seq);
+  expect(s.chatRoom(edison, org, room).notification_user_id).toBe(edison);
+  expect(s.chatRoom(other, org, room).latest_unread_mention_seq).toBe(0);
+  expect(s.chatRoom(edison, org, room).unread_mentions).toBe(1);
+  expect(s.chatRoom(other, org, room).unread_mentions).toBe(0);
+  s.changeChatMessage(owner, org, first.id, { revision: 1, body: "Hello team" });
+  expect(s.chatRoom(edison, org, room).unread_mentions).toBe(0);
+  const second = send("@Edison Chen, review this");
+  s.readChat(edison, org, room, second.created_seq);
+  expect(s.chatRoom(edison, org, room).unread_mentions).toBe(0);
+  const third = send("@Edison again");
+  s.changeChatMessage(owner, org, third.id, { revision: 1 }, true);
+  expect(s.chatRoom(edison, org, room).unread_mentions).toBe(0);
+  const dm = s.createChatRoom(owner, org, { kind: "direct", member_id: other });
+  send("@Edison private", dm.id);
+  expect(s.chatRooms(edison, org).some((r) => r.id === dm.id)).toBe(false);
+});

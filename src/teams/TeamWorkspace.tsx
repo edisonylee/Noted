@@ -1,3 +1,4 @@
+import { useNavigationState, clearNavigationState } from "../useNavigationState";
 import {
   useCallback,
   useEffect,
@@ -172,7 +173,7 @@ export function TeamWorkspace({
   onOpenLibrary,
 }: { onOpenLibrary?: () => void } = {}) {
   const [orgs, setOrgs] = useState<TeamOrg[] | null>(null);
-  const [org, setOrg] = useState("");
+  const [org, setOrg] = useNavigationState("team:org", "");
   const [connected, setConnected] = useState<boolean | null>(null);
   const [error, setError] = useState("");
   const [addWorkspace, setAddWorkspace] = useState(false);
@@ -187,7 +188,7 @@ export function TeamWorkspace({
           const values = await team.request<TeamOrg[]>("GET", "/v1/orgs");
           if (active) {
             setOrgs(values);
-            setOrg(values[0]?.id ?? "");
+            setOrg((previous) => values.some((value) => value.id === previous) ? previous : values[0]?.id ?? "");
           }
         }
       })
@@ -266,6 +267,7 @@ export function TeamWorkspace({
               onClick={async () => {
                 try {
                   await team.disconnect();
+                  clearNavigationState("team:");
                   setConnected(false);
                   setOrgs(null);
                   setOrg("");
@@ -398,22 +400,22 @@ function TeamLibrary({
   onTeamUpdate: (team: TeamOrg) => void;
 }) {
   const [data, setData] = useState<TeamSnapshot | null>(null);
-  const [space, setSpace] = useState("");
-  const [folder, setFolder] = useState("");
-  const [view, setView] = useState<
+  const [space, setSpace] = useNavigationState(`team:${org}:space`, "");
+  const [folder, setFolder] = useNavigationState(`team:${org}:folder`, "");
+  const [view, setView] = useNavigationState<
     "notes" | "admin" | "trash" | "answers" | "messages" | "people"
-  >("notes");
+  >(`team:${org}:view`, "notes");
   const [unread, setUnread] = useState(0);
   const [requestedRoom, setRequestedRoom] = useState<TeamChatRoom | null>(null);
   const [shareHelp, setShareHelp] = useState(false);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useNavigationState(`team:${org}:query`, "");
   const [rows, setRows] = useState<TeamNoteRow[]>([]);
   const [more, setMore] = useState(false);
-  const [selected, setSelected] = useState<string[]>([]);
-  const [noteId, setNoteId] = useState<string | null>(null);
+  const [selected, setSelected] = useNavigationState<string[]>(`team:${org}:selected`, []);
+  const [noteId, setNoteId] = useNavigationState<string | null>(`team:${org}:note`, null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversationId, setConversationId] = useNavigationState<string | null>(`team:${org}:conversation`, null);
   const [editor, setEditor] = useState<
     "space" | "folder" | "editFolder" | null
   >(null);
@@ -442,6 +444,8 @@ function TeamLibrary({
       setAccessEpoch((v) => v + 1);
     }
     accessVersion.current = next.access_version;
+    setSpace((current) => next.spaces.some((item) => item.id === current) ? current : "");
+    setFolder((current) => next.folders.some((item) => item.id === current) ? current : "");
     setData(next);
     onTeamUpdate(next.org);
     return next;
@@ -482,12 +486,17 @@ function TeamLibrary({
   useEffect(() => {
     refresh().catch((e) => setError(String(e)));
   }, [refresh]);
+  const location = JSON.stringify([space, folder, query, view]);
+  const previousLocation = useRef(location);
   useEffect(() => {
     ++requestVersion.current;
     setRows([]);
-    setSelected([]);
-    setConversationId(null);
-    setNoteId(null);
+    if (previousLocation.current !== location) {
+      previousLocation.current = location;
+      setSelected([]);
+      setConversationId(null);
+      setNoteId(null);
+    }
     const timer = window.setTimeout(() => {
       if (view === "notes" || view === "trash") void loadRows();
     }, 180);
@@ -495,7 +504,7 @@ function TeamLibrary({
       clearTimeout(timer);
       ++requestVersion.current;
     };
-  }, [loadRows, view]);
+  }, [loadRows, view, location]);
   useEffect(() => {
     if (loadedAccessEpoch.current === accessEpoch) return;
     loadedAccessEpoch.current = accessEpoch;
@@ -623,6 +632,7 @@ function TeamLibrary({
       {data && (
         <div hidden={view !== "messages"}>
           <TeamMessages
+            key={`${data.org.id}:${data.user.id}`}
             data={data}
             active={view === "messages"}
             requestedRoom={requestedRoom}

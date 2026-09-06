@@ -1,3 +1,4 @@
+import { useMentionNotifications } from "./teams/useMentionNotifications";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { save } from "@tauri-apps/plugin-dialog";
 import { listen } from "./events";
@@ -142,6 +143,7 @@ function homeGreeting(): { dateLine: string; title: string } {
 }
 
 export default function App() {
+  useMentionNotifications();
   const { theme, toggle } = useTheme();
   const [appTimeZone, setAppTimeZone] = useState(APP_TZ);
   const [view, setView] = useState<View>("ask");

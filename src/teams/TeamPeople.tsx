@@ -1,3 +1,4 @@
+import { useNavigationState } from "../useNavigationState";
 import { MessageSquare, Settings, Users } from "lucide-react";
 import { useState } from "react";
 import type { TeamSnapshot } from "./types";
@@ -15,7 +16,7 @@ export function TeamPeople({
   onManage: () => void;
 }) {
   const [profile, setProfile] = useState<TeamUser | null>(null);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useNavigationState(`team:${data.org.id}:${data.user.id}:people-query`, "");
   const [pending, setPending] = useState("");
   const [error, setError] = useState("");
   const members = data.members.filter((person) =>

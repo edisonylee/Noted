@@ -35,3 +35,58 @@ test("out-of-order history and send acknowledgments cannot replace newer edits o
   expect(rows[0].body).toBe("");
   expect(rows[1].body).toBe("Edited");
 });
+
+import { findMentions, mentionQuery } from "../src/teams/mentions";
+import { draftKey, readDrafts, writeDrafts } from "../src/teams/messageDrafts";
+
+test("mentions match full names and unique first names, avoiding emails and ambiguous pings", () => {
+  const members = [{ id: "a", name: "Edison Chen" }, { id: "b", name: "Ed Smith" }];
+  expect(findMentions("@Edison, ask @Ed Smith. mail@Edison.com @Edisonx", members).map((m) => m.user.id)).toEqual(["a", "b"]);
+  expect(findMentions("@Edison", [...members, { id: "c", name: "Edison Lee" }])).toEqual([]);
+  expect(findMentions("@Edison Chen", [...members, { id: "c", name: "Edison Lee" }])[0].user.id).toBe("a");
+  expect(mentionQuery("Hi @Edi later", 7)).toEqual({ start: 3, end: 7, query: "Edi" });
+  expect(mentionQuery("hi@Edi", 6)).toBeNull();
+});
+
+test("drafts restore independently by account and room and remove only cleared drafts", () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const values = new Map<string, string>();
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+  } });
+  try {
+    const key = draftKey("org", "alice");
+    expect(writeDrafts(key, { first: "Unsent\ntext", second: "Other" })).toBe(true);
+    expect(readDrafts(key)).toEqual({ first: "Unsent\ntext", second: "Other" });
+    expect(readDrafts(draftKey("org", "bob"))).toEqual({});
+    expect(readDrafts(draftKey("other", "alice"))).toEqual({});
+    writeDrafts(key, { ...readDrafts(key), first: "" });
+    expect(readDrafts(key)).toEqual({ second: "Other" });
+    values.set(key, "invalid JSON");
+    expect(readDrafts(key)).toEqual({});
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "localStorage", previous);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  }
+});
+
+import { MentionNotificationTracker } from "../src/teams/mentionNotifications";
+import type { TeamChatRoom } from "../src/teams/types";
+
+test("desktop mentions baseline history, deduplicate polls and isolate recipients", () => {
+  const tracker = new MentionNotificationTracker();
+  const room = (cursor: number, mention: number, user = "alice", archived = false) => ({
+    id: "room", notification_cursor: cursor, latest_unread_mention_seq: mention,
+    notification_user_id: user, archived_at: archived ? "now" : null,
+  }) as TeamChatRoom;
+  expect(tracker.update("server:org", [room(10, 9)])).toHaveLength(0);
+  expect(tracker.update("server:org", [room(11, 11)])).toHaveLength(1);
+  expect(tracker.update("server:org", [room(11, 11)])).toHaveLength(0);
+  expect(tracker.update("server:org", [room(12, 0)])).toHaveLength(0);
+  expect(tracker.update("server:org", [room(13, 11)])).toHaveLength(0);
+  expect(tracker.update("server:org", [room(14, 14, "bob")])).toHaveLength(0);
+  expect(tracker.update("server:org", [room(15, 15, "alice", true)])).toHaveLength(0);
+  expect(tracker.update("server:org", [room(15, 15)])).toHaveLength(0);
+  expect(tracker.update("other:org", [room(20, 20)])).toHaveLength(0);
+});

@@ -1,3 +1,4 @@
+import { useNavigationState } from "../useNavigationState";
 import { useEffect, useState, type FormEvent } from "react";
 import { Copy, Plus, Users } from "lucide-react";
 import { api, isDesktop } from "../api";
@@ -34,7 +35,7 @@ export function TeamAdministration({
   data: TeamSnapshot;
   refresh: () => Promise<TeamSnapshot>;
 }) {
-  const [tab, setTab] = useState("members"),
+  const [tab, setTab] = useNavigationState(`team:${data.org.id}:${data.user.id}:admin-tab`, "members"),
     [error, setError] = useState("");
   const [busy, setBusy] = useState(false),
     [message, setMessage] = useState("");

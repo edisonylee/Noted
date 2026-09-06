@@ -1,3 +1,4 @@
+import { useNavigationState } from "./useNavigationState";
 // Library is the cross-source organizer; Documents is the focused authoring
 // workspace. They share filing and editor behavior without sharing navigation
 // hierarchy or inferring content type from formatting.
@@ -499,8 +500,9 @@ function LibraryWorkspace({
   mode,
 }: LibraryWorkspaceProps & { mode: LibraryWorkspaceMode }) {
   const documentsMode = mode === "documents";
-  const [selection, setSelection] = useState(documentsMode ? "documents" : "all");
-  const [query, setQuery] = useState("");
+  const navigationScope = documentsMode ? "documents" : "library";
+  const [selection, setSelection] = useNavigationState(`${navigationScope}:selection`, documentsMode ? "documents" : "all");
+  const [query, setQuery] = useNavigationState(`${navigationScope}:query`, "");
   const [openNote, setOpenNote] = useState<NoteRow | null>(null);
   const [openMeeting, setOpenMeeting] = useState<MeetingTarget | null>(null);
   const [meetings, setMeetings] = useState<MeetingListRow[]>([]);

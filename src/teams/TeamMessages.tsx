@@ -1,7 +1,13 @@
+import { MessageSidebar } from "./MessageSidebar";
 import { ConversationNotifications } from "./ConversationNotifications";
 import { MentionsInbox } from "./MentionsInbox";
 import type { TeamMessageLocation, TeamNotificationTarget } from "./types";
-import { captureMessagePosition, readMessagePosition, restoreMessagePosition, saveMessagePosition } from "./messageScroll";
+import {
+  captureMessagePosition,
+  readMessagePosition,
+  restoreMessagePosition,
+  saveMessagePosition,
+} from "./messageScroll";
 import { useNavigationState } from "../useNavigationState";
 import { setViewedMessageRoom } from "./mentionNotifications";
 import {
@@ -15,19 +21,16 @@ import {
 } from "react";
 import {
   ArrowDown,
-  BellOff,
-  AtSign,
+  ChevronLeft,
   Hash,
   Lock,
   Loader,
   MessageSquare,
-  Plus,
   RefreshCw,
   Send,
   Settings2,
   Users,
   Search,
-  SquarePen,
   X,
 } from "lucide-react";
 import { orgPath, team } from "./client";
@@ -40,9 +43,12 @@ import type {
   TeamUser,
 } from "./types";
 import { mergeMessages, roomLabel } from "./messaging";
-import { draftKey as draftStorageKey, readDrafts, writeDrafts } from "./messageDrafts";
+import {
+  draftKey as draftStorageKey,
+  readDrafts,
+  writeDrafts,
+} from "./messageDrafts";
 import { findMentions, mentionQuery } from "./mentions";
-import { TeamAvatar } from "./TeamAvatar";
 import { TeamProfileCard } from "./TeamProfile";
 import { MessageRow } from "./MessageRow";
 import "./messages.css";
@@ -51,7 +57,12 @@ export function TeamMessages({
   data,
   active,
   requestedRoom,
-  onUnread, notificationTarget, onNotificationHandled, requestedMessage, onSearch, onRequestedMessageHandled,
+  onUnread,
+  notificationTarget,
+  onNotificationHandled,
+  requestedMessage,
+  onSearch,
+  onRequestedMessageHandled,
 }: {
   requestedMessage?: { id: string; nonce: number } | null;
   onRequestedMessageHandled?: () => void;
@@ -66,28 +77,55 @@ export function TeamMessages({
   const org = data.org.id,
     user = data.user.id;
   const [rooms, setRooms] = useState<TeamChatRoom[]>([]);
-  const [inbox, setInbox] = useNavigationState(`team:${org}:${user}:mentions-inbox`, false);
-  const [jump, setJump] = useState<(TeamMessageLocation & { nonce: number }) | null>(null);
+  const [inbox, setInbox] = useNavigationState(
+    `team:${org}:${user}:mentions-inbox`,
+    false,
+  );
+  const [jump, setJump] = useState<
+    (TeamMessageLocation & { nonce: number }) | null
+  >(null);
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState("");
   const openEpoch = useRef(0);
-  useEffect(() => () => { ++openEpoch.current; }, []);
-  const openMessage = useCallback(async (message: string) => {
-    const epoch = ++openEpoch.current;
-    setOpening(true); setOpenError("");
-    try {
-      const location = await team.request<TeamMessageLocation>("GET", orgPath(org, `/chat-messages/${encodeURIComponent(message)}`));
-      if (epoch !== openEpoch.current) return;
-      setRooms((old) => [...old.filter((r) => r.id !== location.room.id), location.room]);
-      setSelected(location.room.id);
-      setJump({ ...location, nonce: epoch });
-      setInbox(false);
-      // Opening one mention does not mark the entire conversation as read.
-      await team.request("POST", orgPath(org, `/mentions/${encodeURIComponent(message)}/read`));
-      if (epoch === openEpoch.current) setRetry((n) => n + 1);
-    } catch (e) { if (epoch === openEpoch.current) setOpenError(String(e)); }
-    finally { if (epoch === openEpoch.current) setOpening(false); }
-  }, [org]);
+  useEffect(
+    () => () => {
+      ++openEpoch.current;
+    },
+    [],
+  );
+  const openMessage = useCallback(
+    async (message: string) => {
+      const epoch = ++openEpoch.current;
+      setOpening(true);
+      setOpenError("");
+      try {
+        const location = await team.request<TeamMessageLocation>(
+          "GET",
+          orgPath(org, `/chat-messages/${encodeURIComponent(message)}`),
+        );
+        if (epoch !== openEpoch.current) return;
+        setRooms((old) => [
+          ...old.filter((r) => r.id !== location.room.id),
+          location.room,
+        ]);
+        setSelected(location.room.id);
+        setJump({ ...location, nonce: epoch });
+        setInbox(false);
+        setListVisible(false);
+        // Opening one mention does not mark the entire conversation as read.
+        await team.request(
+          "POST",
+          orgPath(org, `/mentions/${encodeURIComponent(message)}/read`),
+        );
+        if (epoch === openEpoch.current) setRetry((n) => n + 1);
+      } catch (e) {
+        if (epoch === openEpoch.current) setOpenError(String(e));
+      } finally {
+        if (epoch === openEpoch.current) setOpening(false);
+      }
+    },
+    [org],
+  );
   useEffect(() => {
     if (!notificationTarget) return;
     if (notificationTarget.org !== org || notificationTarget.user !== user) {
@@ -99,13 +137,46 @@ export function TeamMessages({
     onNotificationHandled?.();
   }, [notificationTarget, org, user, openMessage, onNotificationHandled]);
   useEffect(() => {
-    if (requestedMessage) { void openMessage(requestedMessage.id); onRequestedMessageHandled?.(); }
+    if (requestedMessage) {
+      void openMessage(requestedMessage.id);
+      onRequestedMessageHandled?.();
+    }
   }, [requestedMessage, openMessage, onRequestedMessageHandled]);
-  const [selected, setSelected] = useNavigationState(`team:${org}:${user}:room`, "");
-  const [search, setSearch] = useNavigationState(`team:${org}:${user}:room-search`, "");
+  const [selected, setSelected] = useNavigationState(
+    `team:${org}:${user}:room`,
+    "",
+  );
+  const [search, setSearch] = useNavigationState(
+    `team:${org}:${user}:room-search`,
+    "",
+  );
   const [error, setError] = useState("");
   const [loaded, setLoaded] = useState(false);
-  const [showArchived, setShowArchived] = useNavigationState(`team:${org}:${user}:archived`, false);
+  const [listVisible, setListVisible] = useNavigationState(
+    `team:${org}:${user}:message-list`,
+    true,
+  );
+  const shell = useRef<HTMLDivElement>(null);
+  const [compact, setCompact] = useState(false);
+  useEffect(() => {
+    const el = shell.current;
+    if (!compact || !el?.contains(document.activeElement)) return;
+    const target = listVisible
+      ? '.message-sidebar [aria-current="page"], .message-sidebar input'
+      : ".messages-compact-toolbar button";
+    el.querySelector<HTMLElement>(target)?.focus({ preventScroll: true });
+  }, [compact, listVisible]);
+  useLayoutEffect(() => {
+    const el = shell.current;
+    if (!el) return;
+    const measure = () => {
+      if (el.clientWidth) setCompact(el.clientWidth < 700);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   const [dialog, setDialog] = useState<"channel" | "direct" | null>(null);
   // Master keys drafts by thread-or-room; persist that same map so a
   // half-written message survives a reload, not just a room switch.
@@ -113,7 +184,9 @@ export function TeamMessages({
   const [drafts, setDraftState] = useState(() => readDrafts(storageKey));
   const draftsRef = useRef(drafts);
   const [draftError, setDraftError] = useState(false);
-  const setDrafts = (update: (old: Record<string, string>) => Record<string, string>) => {
+  const setDrafts = (
+    update: (old: Record<string, string>) => Record<string, string>,
+  ) => {
     const next = update(draftsRef.current);
     draftsRef.current = next;
     setDraftState(next);
@@ -174,7 +247,9 @@ export function TeamMessages({
   const markRead = useCallback(
     (id: string) =>
       setRooms((old) =>
-        old.map((r) => (r.id === id ? { ...r, unread: 0, unread_mentions: 0 } : r)),
+        old.map((r) =>
+          r.id === id ? { ...r, unread: 0, unread_mentions: 0 } : r,
+        ),
       ),
     [],
   );
@@ -189,7 +264,9 @@ export function TeamMessages({
     if (requestedRoom) {
       updateRoom(requestedRoom);
       setSelected(requestedRoom.id);
-      setInbox(false); setJump(null);
+      setInbox(false);
+      setJump(null);
+      setListVisible(false);
       setSearch("");
     }
   }, [requestedRoom, updateRoom]);
@@ -198,256 +275,141 @@ export function TeamMessages({
   }, [active]);
   const current = rooms.find((r) => r.id === selected);
   useEffect(() => {
-    setViewedMessageRoom(active && !inbox ? selected : null);
+    setViewedMessageRoom(
+      active && !inbox && (!compact || !listVisible) ? selected : null,
+    );
     return () => setViewedMessageRoom(null);
-  }, [active, selected, inbox]);
-  const matches = (room: TeamChatRoom) =>
-    roomLabel(room, user).toLowerCase().includes(search.trim().toLowerCase());
-  const directRooms = rooms
-    .filter((room) => room.kind === "direct" && matches(room))
-    .sort((a, b) => b.last_activity.localeCompare(a.last_activity));
-  const channelRooms = rooms
-    .filter(
-      (room) =>
-        room.kind === "channel" &&
-        !room.is_default &&
-        matches(room) &&
-        (showArchived || !room.archived_at || room.id === selected),
-    )
-    .sort((a, b) => a.name.localeCompare(b.name));
-  const roomButton = (room: TeamChatRoom) => (
-    <button
-      key={room.id}
-      className={`messages-conversation-row${!inbox && selected === room.id ? " on" : ""}`}
-      onClick={() => { ++openEpoch.current; setOpening(false); setSelected(room.id); setInbox(false); setJump(null); }}
-      aria-current={!inbox && selected === room.id ? "page" : undefined}
-    >
-      <span
-        className={`messages-person-mark${room.is_default ? " team" : ""}`}
-        aria-hidden="true"
-      >
-        {room.is_default ? (
-          <Users size={18} />
-        ) : room.kind === "channel" ? (
-          <Hash size={18} />
-        ) : (
-          <TeamAvatar
-            org={org}
-            person={
-              data.members.find(
-                (p) =>
-                  p.id === room.participants.find((p) => p.id !== user)?.id,
-              ) ??
-              room.participants.find((p) => p.id !== user) ?? {
-                id: "",
-                name: roomLabel(room, user),
-              }
-            }
-          />
-        )}
-      </span>
-      <span className="messages-conversation-copy">
-        <span className="messages-conversation-title">
-          <strong>{roomLabel(room, user)}</strong>
-          {room.last_message && (
-            <time dateTime={room.last_message.created_at}>
-              {new Date(room.last_message.created_at).toLocaleDateString() ===
-              new Date().toLocaleDateString()
-                ? new Date(room.last_message.created_at).toLocaleTimeString(
-                    [],
-                    { hour: "numeric", minute: "2-digit" },
-                  )
-                : new Date(room.last_message.created_at).toLocaleDateString(
-                    [],
-                    { month: "short", day: "numeric" },
-                  )}
-            </time>
-          )}
-        </span>
-        <small>
-          {drafts[room.id]?.trim()
-            ? `Draft: ${drafts[room.id]}`
-            : room.archived_at
-              ? "Archived"
-              : room.last_message
-                ? `${room.last_message.author_id === user ? "You" : room.last_message.author_name}: ${room.last_message.body}`
-                : room.is_default
-                  ? `Everyone · ${data.members.length} members`
-                  : room.kind === "direct"
-                    ? "Private conversation"
-                    : "Team channel"}
-        </small>
-      </span>
-      {room.notification_mode === "none" && <BellOff size={14} aria-label="Muted conversation" />}
-      {(room.unread_mentions ?? 0) > 0 && <b className="messages-unread" aria-label={`${room.unread_mentions} unread mentions`}>@</b>}
-      {room.unread > 0 && (
-        <b
-          className="messages-unread"
-          aria-label={`${room.unread} unread messages`}
-        >
-          {room.unread > 99 ? "99+" : room.unread}
-        </b>
-      )}
-    </button>
-  );
+  }, [active, selected, inbox, compact, listVisible]);
+  const selectRoom = (id: string) => {
+    ++openEpoch.current;
+    setOpening(false);
+    setOpenError("");
+    setSelected(id);
+    setInbox(false);
+    setJump(null);
+    setListVisible(false);
+  };
   return (
-    <div className="team-messages">
-      {draftError && <p role="alert">Draft could not be saved on this device. Keep this workspace open to retain it.</p>}
-      <aside
-        className="team-sidebar messages-nav"
-        aria-label="Team conversations"
+    <div className="messages-shell" ref={shell}>
+      <div
+        className={`team-messages${listVisible ? " shows-list" : " shows-detail"}`}
       >
-        <div className="messages-nav-head">
-          <div className="messages-list-heading">
-            <h2>Conversations</h2>
-            <button
-              aria-label="New message"
-              title="New message"
-              onClick={() => setDialog("direct")}
-            >
-              <SquarePen size={18} />
+        <MessageSidebar
+          data={data}
+          rooms={rooms}
+          selected={selected}
+          inbox={inbox}
+          drafts={drafts}
+          filter={search}
+          onFilter={setSearch}
+          onSelect={selectRoom}
+          onCreate={setDialog}
+          onMentions={() => {
+            ++openEpoch.current;
+            setOpening(false);
+            setOpenError("");
+            setInbox(true);
+            setListVisible(false);
+          }}
+        />
+        <div className="messages-detail">
+          <div className="messages-compact-toolbar">
+            <button onClick={() => setListVisible(true)}>
+              <ChevronLeft size={17} /> Conversations
             </button>
           </div>
-          <label className="messages-search">
-            <Search size={14} />
-            <input
-              type="search"
-              aria-label="Find a conversation"
-              placeholder="Find a conversation"
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
+          {draftError && (
+            <p className="messages-draft-error" role="alert">
+              Draft could not be saved on this device. Keep this workspace open
+              to retain it.
+            </p>
+          )}
+          {openError && (
+            <p className="team-error messages-open-error" role="alert">
+              {openError}
+            </p>
+          )}
+          {opening ? (
+            <p className="messages-empty">Opening message…</p>
+          ) : inbox ? (
+            <MentionsInbox
+              org={org}
+              user={user}
+              onOpen={(id) => void openMessage(id)}
             />
-          </label>
-        </div>
-        <button className={`messages-mentions-nav${inbox ? " on" : ""}`} aria-current={inbox ? "page" : undefined} onClick={() => { ++openEpoch.current; setOpening(false); setInbox(true); }}>
-          <AtSign size={17} /> Mentions
-          {rooms.reduce((count, room) => count + (room.unread_mentions ?? 0), 0) > 0 && <b>{rooms.reduce((count, room) => count + (room.unread_mentions ?? 0), 0)}</b>}
-        </button>
-        {rooms
-          .filter((room) => room.is_default && matches(room))
-          .map(roomButton)}
-        <div className="team-sidebar-label">
-          <span>Direct messages</span>
-          <button
-            aria-label="New direct message"
-            onClick={() => setDialog("direct")}
-          >
-            <Plus size={15} />
-          </button>
-        </div>
-        {directRooms.map(roomButton)}
-        {!directRooms.length && (
-          <button
-            className="messages-start-dm"
-            onClick={() => setDialog("direct")}
-          >
-            <MessageSquare size={15} />
-            {search ? "Find a teammate" : "Start a conversation"}
-          </button>
-        )}
-        {(channelRooms.length > 0 || showArchived) && (
-          <>
-            <div className="team-sidebar-label">
-              <span>Team channels</span>
-              <button
-                aria-label="Create channel"
-                onClick={() => setDialog("channel")}
-              >
-                <Plus size={15} />
-              </button>
-            </div>
-            {channelRooms.map(roomButton)}
-          </>
-        )}
-        <div className="messages-nav-bottom">
-          <button
-            className="messages-create-topic"
-            onClick={() => setDialog("channel")}
-          >
-            <Plus size={14} /> Create a team channel
-          </button>
-          <p>A shared conversation for a project or topic. Optional.</p>
-          {rooms.some((room) => room.archived_at) && (
-            <label className="messages-archived">
-              <input
-                type="checkbox"
-                checked={showArchived}
-                onChange={(event) => setShowArchived(event.target.checked)}
-              />{" "}
-              Show archived channels
-            </label>
-          )}
-        </div>
-      </aside>
-      {openError && <p className="team-error messages-open-error" role="alert">{openError}</p>}
-      {opening ? <p className="messages-empty">Opening message…</p> : inbox ? <MentionsInbox org={org} user={user} onOpen={(id) => void openMessage(id)} /> : current ? (
-        <MessageRoom
-          key={`${current.id}:${jump?.nonce ?? "normal"}`}
-          jump={jump?.room.id === current.id ? jump : undefined}
-          onSearch={onSearch}
-          org={org}
-          user={user}
-          room={current}
-          active={active}
-          memberCount={data.members.length}
-          members={data.members}
-          drafts={drafts}
-          setDraftFor={(key, value) =>
-            setDrafts((old) => ({ ...old, [key]: value }))
-          }
-          sendKeyFor={(key, body) => {
-            if (attempts.current[key]?.body !== body)
-              attempts.current[key] = { body, id: crypto.randomUUID() };
-            return attempts.current[key].id;
-          }}
-          onSentFor={(key, body) => {
-            delete attempts.current[key];
-            setDrafts((old) =>
-              old[key]?.trim() === body ? { ...old, [key]: "" } : old,
-            );
-          }}
-          onRoom={updateRoom}
-          onRead={markRead}
-        />
-      ) : (
-        <div className="messages-unavailable">
-          {!loaded ? (
-            <>
-              <Loader size={18} className="spin" /> Loading conversations…
-            </>
+          ) : current ? (
+            <MessageRoom
+              key={`${current.id}:${jump?.nonce ?? "normal"}`}
+              jump={jump?.room.id === current.id ? jump : undefined}
+              onSearch={onSearch}
+              org={org}
+              user={user}
+              room={current}
+              active={active && (!compact || !listVisible)}
+              memberCount={data.members.length}
+              members={data.members}
+              drafts={drafts}
+              setDraftFor={(key, value) =>
+                setDrafts((old) => ({ ...old, [key]: value }))
+              }
+              sendKeyFor={(key, body) => {
+                if (attempts.current[key]?.body !== body)
+                  attempts.current[key] = { body, id: crypto.randomUUID() };
+                return attempts.current[key].id;
+              }}
+              onSentFor={(key, body) => {
+                delete attempts.current[key];
+                setDrafts((old) =>
+                  old[key]?.trim() === body ? { ...old, [key]: "" } : old,
+                );
+              }}
+              onRoom={updateRoom}
+              onRead={markRead}
+            />
           ) : (
-            <>
-              <MessageSquare size={24} />
-              <h2>{error ? "Chat is unavailable" : "Choose a conversation"}</h2>
-              {error && (
-                <p className="team-error" role="alert">
-                  {error}
-                </p>
+            <div className="messages-unavailable">
+              {!loaded ? (
+                <>
+                  <Loader size={18} className="spin" /> Loading conversations…
+                </>
+              ) : (
+                <>
+                  <MessageSquare size={24} />
+                  <h2>
+                    {error ? "Chat is unavailable" : "Choose a conversation"}
+                  </h2>
+                  {error && (
+                    <p className="team-error" role="alert">
+                      {error}
+                    </p>
+                  )}
+                  <button
+                    className="team-text-button"
+                    onClick={() => setRetry((v) => v + 1)}
+                  >
+                    <RefreshCw size={14} /> Retry
+                  </button>
+                </>
               )}
-              <button
-                className="team-text-button"
-                onClick={() => setRetry((v) => v + 1)}
-              >
-                <RefreshCw size={14} /> Retry
-              </button>
-            </>
+            </div>
           )}
         </div>
-      )}
-      {dialog && (
-        <NewConversation
-          key={dialog}
-          onKindChange={setDialog}
-          data={data}
-          kind={dialog}
-          onClose={() => setDialog(null)}
-          onCreated={(room) => {
-            updateRoom(room);
-            setSelected(room.id);
-            setDialog(null);
-          }}
-        />
-      )}
+        {dialog && (
+          <NewConversation
+            key={dialog}
+            onKindChange={setDialog}
+            data={data}
+            kind={dialog}
+            onClose={() => setDialog(null)}
+            onCreated={(room) => {
+              updateRoom(room);
+              selectRoom(room.id);
+              setSearch("");
+              setDialog(null);
+            }}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -618,7 +580,9 @@ function MessageRoom({
   onRoom,
   onRead,
   thread,
-  onCloseThread, jump, onSearch,
+  onCloseThread,
+  jump,
+  onSearch,
 }: {
   jump?: TeamMessageLocation;
   onSearch?: (room: string) => void;
@@ -638,21 +602,37 @@ function MessageRoom({
   onCloseThread?: () => void;
 }) {
   const positionKey = `${org}:${user}:${room.id}:${thread?.id ?? "main"}`;
-  const destination = jump ? (thread ? jump.message : jump.parent ?? jump.message) : undefined;
-  const restorePosition = useRef(destination ? { id: destination.id, seq: destination.created_seq, offset: 40 } : readMessagePosition(positionKey));
+  const destination = jump
+    ? thread
+      ? jump.message
+      : (jump.parent ?? jump.message)
+    : undefined;
+  const restorePosition = useRef(
+    destination
+      ? { id: destination.id, seq: destination.created_seq, offset: 40 }
+      : readMessagePosition(positionKey),
+  );
   const positionReady = useRef(false);
   const holdPosition = useRef(!!restorePosition.current);
   const wasActive = useRef(isActive);
   const historyContent = useRef<HTMLDivElement>(null);
   const rememberPosition = useCallback(() => {
-    if (!positionReady.current || !viewport.current || !visible.current || !viewport.current.clientHeight) return;
+    if (
+      !positionReady.current ||
+      !viewport.current ||
+      !visible.current ||
+      !viewport.current.clientHeight
+    )
+      return;
     const position = captureMessagePosition(viewport.current);
     if (position) saveMessagePosition(positionKey, position);
   }, [positionKey]);
   const draftKey = thread?.id ?? room.id;
   const draft = drafts[draftKey] ?? "";
   const setDraft = (value: string) => setDraftFor(draftKey, value);
-  const [threadRoot, setThreadRoot] = useState<TeamChatMessage | null>(jump?.parent ?? null);
+  const [threadRoot, setThreadRoot] = useState<TeamChatMessage | null>(
+    jump?.parent ?? null,
+  );
   const [parent, setParent] = useState(thread);
   const [profile, setProfile] = useState<TeamUser | null>(null);
   const threadId = thread?.id;
@@ -736,7 +716,10 @@ function MessageRoom({
   }, []);
   useLayoutEffect(() => {
     const el = viewport.current;
-    if (!isActive) { wasActive.current = false; return; }
+    if (!isActive) {
+      wasActive.current = false;
+      return;
+    }
     if (!el || !loaded || error) return;
     if (!wasActive.current) {
       restorePosition.current = readMessagePosition(positionKey);
@@ -747,7 +730,9 @@ function MessageRoom({
     if (!positionReady.current) {
       const saved = restorePosition.current;
       if (saved && restoreMessagePosition(el, saved)) {
-        pinned.current = !holdPosition.current && el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+        pinned.current =
+          !holdPosition.current &&
+          el.scrollHeight - el.scrollTop - el.clientHeight < 8;
       } else {
         el.scrollTop = el.scrollHeight;
         pinned.current = true;
@@ -762,9 +747,20 @@ function MessageRoom({
     } else if (pinned.current) {
       el.scrollTop = el.scrollHeight;
     }
-    if (pinned.current && cursor.current != null) void acknowledge(cursor.current);
+    if (pinned.current && cursor.current != null)
+      void acknowledge(cursor.current);
     rememberPosition();
-  }, [messages, isActive, loaded, scrollVersion, acknowledge, parent, error, rememberPosition, positionKey]);
+  }, [
+    messages,
+    isActive,
+    loaded,
+    scrollVersion,
+    acknowledge,
+    parent,
+    error,
+    rememberPosition,
+    positionKey,
+  ]);
   useLayoutEffect(() => {
     const el = viewport.current;
     const content = historyContent.current;
@@ -793,18 +789,25 @@ function MessageRoom({
         const initial = after == null;
         const params = new URLSearchParams();
         if (threadId) params.set("thread", threadId);
-        if (initial && restorePosition.current) params.set("around", restorePosition.current.id);
+        if (initial && restorePosition.current)
+          params.set("around", restorePosition.current.id);
         if (!initial) {
           params.set("after", String(after));
           params.set("wait", "20000");
         }
         let page: TeamChatPage;
         try {
-          page = await team.request<TeamChatPage>("GET", `${path}/messages?${params}`);
+          page = await team.request<TeamChatPage>(
+            "GET",
+            `${path}/messages?${params}`,
+          );
         } catch (e) {
           if (!initial || !params.has("around") || destination) throw e;
           params.delete("around");
-          page = await team.request<TeamChatPage>("GET", `${path}/messages?${params}`);
+          page = await team.request<TeamChatPage>(
+            "GET",
+            `${path}/messages?${params}`,
+          );
           restorePosition.current = undefined;
         }
         if (!active) return;
@@ -856,7 +859,8 @@ function MessageRoom({
         setParent(undefined);
         setLoaded(true);
         cursor.current = null;
-        newerAfter.current = null; setHasNewer(false);
+        newerAfter.current = null;
+        setHasNewer(false);
         readCursor.current = 0;
         setOlderBefore(null);
         delay = 10_000;
@@ -882,7 +886,10 @@ function MessageRoom({
     try {
       const params = new URLSearchParams({ newer: String(newerAfter.current) });
       if (threadId) params.set("thread", threadId);
-      const page = await team.request<TeamChatPage>("GET", `${path}/messages?${params}`);
+      const page = await team.request<TeamChatPage>(
+        "GET",
+        `${path}/messages?${params}`,
+      );
       if (!alive.current || epoch !== accessEpoch.current) return;
       pinned.current = false;
       holdPosition.current = true;
@@ -893,12 +900,18 @@ function MessageRoom({
     } catch (e) {
       if (alive.current && epoch === accessEpoch.current) {
         ++accessEpoch.current;
-        setMessages([]); setError(String(e));
+        setMessages([]);
+        setError(String(e));
         cursor.current = null;
-        newerAfter.current = null; setHasNewer(false);
-        setThreadRoot(null); setParent(undefined); setProfile(null);
+        newerAfter.current = null;
+        setHasNewer(false);
+        setThreadRoot(null);
+        setParent(undefined);
+        setProfile(null);
       }
-    } finally { if (alive.current) setLoadingNewer(false); }
+    } finally {
+      if (alive.current) setLoadingNewer(false);
+    }
   };
   const older = async () => {
     if (olderBefore == null || loadingOlder) return;
@@ -929,7 +942,8 @@ function MessageRoom({
         setParent(undefined);
         setProfile(null);
         cursor.current = null;
-        newerAfter.current = null; setHasNewer(false);
+        newerAfter.current = null;
+        setHasNewer(false);
         readCursor.current = 0;
         setOlderBefore(null);
       }
@@ -954,7 +968,9 @@ function MessageRoom({
       if (!alive.current || epoch !== accessEpoch.current) return;
       setMessages((old) => mergeMessages(old, [message]));
       toBottom();
-      requestAnimationFrame(() => composer.current?.focus({ preventScroll: true }));
+      requestAnimationFrame(() =>
+        composer.current?.focus({ preventScroll: true }),
+      );
     } catch (e) {
       if (alive.current) setSendError(String(e));
     } finally {
@@ -964,23 +980,36 @@ function MessageRoom({
   const [caret, setCaret] = useState(0);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [dismissed, setDismissed] = useState(false);
-  const eligible = room.kind === "direct"
-    ? members.filter((m) => room.participants.some((p) => p.id === m.id && p.active))
-    : members;
+  const eligible =
+    room.kind === "direct"
+      ? members.filter((m) =>
+          room.participants.some((p) => p.id === m.id && p.active),
+        )
+      : members;
   const query = dismissed ? null : mentionQuery(draft, caret);
   const suggestions = query
-    ? eligible.filter((m) => m.name.toLocaleLowerCase().startsWith(query.query.toLocaleLowerCase())).slice(0, 8)
+    ? eligible
+        .filter((m) =>
+          m.name
+            .toLocaleLowerCase()
+            .startsWith(query.query.toLocaleLowerCase()),
+        )
+        .slice(0, 8)
     : [];
   const chooseMention = (member: TeamUser) => {
     if (!query) return;
     const insertion = `@${member.name} `;
-    const next = draft.slice(0, query.start) + insertion + draft.slice(query.end);
+    const next =
+      draft.slice(0, query.start) + insertion + draft.slice(query.end);
     if (next.length > 10_000) return;
     setDraft(next);
     setDismissed(true);
     requestAnimationFrame(() => {
       composer.current?.focus();
-      composer.current?.setSelectionRange(query.start + insertion.length, query.start + insertion.length);
+      composer.current?.setSelectionRange(
+        query.start + insertion.length,
+        query.start + insertion.length,
+      );
     });
   };
   // Passed to MessageRow so the row itself stays unaware of mentions.
@@ -989,9 +1018,27 @@ function MessageRoom({
     const parts = findMentions(body, eligible).map((mention) => {
       const before = body.slice(end, mention.start);
       end = mention.end;
-      return <Fragment key={mention.start}>{before}<mark className={mention.user.id === user ? "messages-mention self" : "messages-mention"}>{body.slice(mention.start, mention.end)}</mark></Fragment>;
+      return (
+        <Fragment key={mention.start}>
+          {before}
+          <mark
+            className={
+              mention.user.id === user
+                ? "messages-mention self"
+                : "messages-mention"
+            }
+          >
+            {body.slice(mention.start, mention.end)}
+          </mark>
+        </Fragment>
+      );
     });
-    return <>{parts}{body.slice(end)}</>;
+    return (
+      <>
+        {parts}
+        {body.slice(end)}
+      </>
+    );
   };
   const label = roomLabel(room, user);
   const renderEpoch = accessEpoch.current;
@@ -1078,8 +1125,19 @@ function MessageRoom({
               <X size={18} />
             </button>
           )}
-          {!threadId && onSearch && <button className="team-text-button" aria-label="Search this conversation" title="Search this conversation" onClick={() => onSearch(room.id)}><Search size={17} /></button>}
-          {!threadId && <ConversationNotifications org={org} room={room} onSaved={onRoom} />}
+          {!threadId && onSearch && (
+            <button
+              className="team-text-button"
+              aria-label="Search this conversation"
+              title="Search this conversation"
+              onClick={() => onSearch(room.id)}
+            >
+              <Search size={17} />
+            </button>
+          )}
+          {!threadId && (
+            <ConversationNotifications org={org} room={room} onSaved={onRoom} />
+          )}
           {!threadId && room.can_manage && (
             <button
               className="team-text-button"
@@ -1110,15 +1168,25 @@ function MessageRoom({
           aria-label="Message history"
           aria-live="polite"
           aria-relevant="additions text"
-          onWheel={() => { holdPosition.current = false; }}
-          onTouchMove={() => { holdPosition.current = false; }}
-          onPointerDown={() => { holdPosition.current = false; }}
-          onKeyDown={() => { holdPosition.current = false; }}
+          onWheel={() => {
+            holdPosition.current = false;
+          }}
+          onTouchMove={() => {
+            holdPosition.current = false;
+          }}
+          onPointerDown={() => {
+            holdPosition.current = false;
+          }}
+          onKeyDown={() => {
+            holdPosition.current = false;
+          }}
           onScroll={() => {
             const el = viewport.current;
-            if (!el || !positionReady.current || !isActive || !el.clientHeight) return;
+            if (!el || !positionReady.current || !isActive || !el.clientHeight)
+              return;
             pinned.current =
-              !holdPosition.current && el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+              !holdPosition.current &&
+              el.scrollHeight - el.scrollTop - el.clientHeight < 8;
             if (pinned.current) {
               setNewBelow(false);
               if (cursor.current != null) void acknowledge(cursor.current);
@@ -1127,78 +1195,87 @@ function MessageRoom({
           }}
         >
           <div ref={historyContent}>
-          {olderBefore != null && (
-            <button
-              className="team-text-button messages-older"
-              disabled={loadingOlder}
-              onClick={() => void older()}
-            >
-              {loadingOlder ? "Loading…" : "Load earlier messages"}
-            </button>
-          )}
-          {!loaded && (
-            <p className="messages-empty">
-              <Loader size={16} className="spin" /> Loading messages…
-            </p>
-          )}
-          {parent && (
-            <div className="message-thread-parent">
-              {messageRow(parent, false)}
-              <div className="message-thread-divider">
-                {parent.reply_count ?? 0}{" "}
-                {(parent.reply_count ?? 0) === 1 ? "reply" : "replies"}
-              </div>
-            </div>
-          )}
-          {loaded && !error && messages.length === 0 && (
-            <div className="messages-empty">
-              <MessageSquare size={27} />
-              <h2>
-                {threadId
-                  ? "Start the discussion"
-                  : room.kind === "direct"
-                    ? `Your conversation with ${label}`
-                    : room.is_default
-                      ? "A conversation for the whole team"
-                      : `Welcome to #${label}`}
-              </h2>
-              <p>
-                {threadId
-                  ? "Replies stay with this message so the main conversation stays focused."
-                  : room.kind === "direct"
-                    ? "A place to follow up, ask a question, or share a thought."
-                    : "Keep the team in the loop. Everyone in this team can join the conversation."}
+            {olderBefore != null && (
+              <button
+                className="team-text-button messages-older"
+                disabled={loadingOlder}
+                onClick={() => void older()}
+              >
+                {loadingOlder ? "Loading…" : "Load earlier messages"}
+              </button>
+            )}
+            {!loaded && (
+              <p className="messages-empty">
+                <Loader size={16} className="spin" /> Loading messages…
               </p>
-            </div>
-          )}
-          {messages.map((message, index) => {
-            const date = new Date(message.created_at);
-            const day = date.toLocaleDateString(undefined, {
-              month: "long",
-              day: "numeric",
-              year: "numeric",
-            });
-            const newDay =
-              index === 0 ||
-              new Date(messages[index - 1].created_at).toDateString() !==
-                date.toDateString();
-            return (
-              <Fragment key={message.id}>
-                {newDay && (
-                  <div className="messages-date">
-                    <span>{day}</span>
-                  </div>
-                )}
-                {messageRow(message, !threadId)}
-              </Fragment>
-            );
-          })}
-          {hasNewer && <button className="team-text-button messages-older" disabled={loadingNewer} onClick={() => void newer()}>{loadingNewer ? "Loading…" : "Load later messages"}</button>}
+            )}
+            {parent && (
+              <div className="message-thread-parent">
+                {messageRow(parent, false)}
+                <div className="message-thread-divider">
+                  {parent.reply_count ?? 0}{" "}
+                  {(parent.reply_count ?? 0) === 1 ? "reply" : "replies"}
+                </div>
+              </div>
+            )}
+            {loaded && !error && messages.length === 0 && (
+              <div className="messages-empty">
+                <MessageSquare size={27} />
+                <h2>
+                  {threadId
+                    ? "Start the discussion"
+                    : room.kind === "direct"
+                      ? `Your conversation with ${label}`
+                      : room.is_default
+                        ? "A conversation for the whole team"
+                        : `Welcome to #${label}`}
+                </h2>
+                <p>
+                  {threadId
+                    ? "Replies stay with this message so the main conversation stays focused."
+                    : room.kind === "direct"
+                      ? "A place to follow up, ask a question, or share a thought."
+                      : "Keep the team in the loop. Everyone in this team can join the conversation."}
+                </p>
+              </div>
+            )}
+            {messages.map((message, index) => {
+              const date = new Date(message.created_at);
+              const day = date.toLocaleDateString(undefined, {
+                month: "long",
+                day: "numeric",
+                year: "numeric",
+              });
+              const newDay =
+                index === 0 ||
+                new Date(messages[index - 1].created_at).toDateString() !==
+                  date.toDateString();
+              return (
+                <Fragment key={message.id}>
+                  {newDay && (
+                    <div className="messages-date">
+                      <span>{day}</span>
+                    </div>
+                  )}
+                  {messageRow(message, !threadId)}
+                </Fragment>
+              );
+            })}
+            {hasNewer && (
+              <button
+                className="team-text-button messages-older"
+                disabled={loadingNewer}
+                onClick={() => void newer()}
+              >
+                {loadingNewer ? "Loading…" : "Load later messages"}
+              </button>
+            )}
           </div>
         </div>
         {(newBelow || hasNewer) && (
           <button className="messages-new team-primary" onClick={toBottom}>
-            <ArrowDown size={14} /> {hasNewer ? "Jump to latest" : "New messages"}
+            <ArrowDown size={14} />{" "}
+            {hasNewer ? "Jump to latest" : "New messages"}
           </button>
         )}
         <form
@@ -1223,13 +1300,38 @@ function MessageRoom({
                 ? `Message #${label}`
                 : `Message ${label}`}
           </label>
-          {suggestions.length > 0 && <div className="messages-mention-picker" id={`mentions-${draftKey}`} role="listbox" aria-label="Mention a teammate">
-            {suggestions.map((member, index) => <button type="button" role="option" id={`mention-${draftKey}-${index}`} aria-selected={index === mentionIndex % suggestions.length} key={member.id} onMouseDown={(e) => e.preventDefault()} onClick={() => chooseMention(member)}>@{member.name}</button>)}
-          </div>}
+          {suggestions.length > 0 && (
+            <div
+              className="messages-mention-picker"
+              id={`mentions-${draftKey}`}
+              role="listbox"
+              aria-label="Mention a teammate"
+            >
+              {suggestions.map((member, index) => (
+                <button
+                  type="button"
+                  role="option"
+                  id={`mention-${draftKey}-${index}`}
+                  aria-selected={index === mentionIndex % suggestions.length}
+                  key={member.id}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => chooseMention(member)}
+                >
+                  @{member.name}
+                </button>
+              ))}
+            </div>
+          )}
           <textarea
             aria-autocomplete="list"
-            aria-controls={suggestions.length ? `mentions-${draftKey}` : undefined}
-            aria-activedescendant={suggestions.length ? `mention-${draftKey}-${mentionIndex % suggestions.length}` : undefined}
+            aria-controls={
+              suggestions.length ? `mentions-${draftKey}` : undefined
+            }
+            aria-activedescendant={
+              suggestions.length
+                ? `mention-${draftKey}-${mentionIndex % suggestions.length}`
+                : undefined
+            }
             id={`compose-${draftKey}`}
             ref={composer}
             value={draft}
@@ -1243,14 +1345,36 @@ function MessageRoom({
                   : `Message ${room.kind === "channel" && !room.is_default ? "#" : ""}${label}`
                 : "This conversation is read-only"
             }
-            onChange={(e) => { setDraft(e.target.value); setCaret(e.target.selectionStart); setMentionIndex(0); setDismissed(false); }}
+            onChange={(e) => {
+              setDraft(e.target.value);
+              setCaret(e.target.selectionStart);
+              setMentionIndex(0);
+              setDismissed(false);
+            }}
             onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
             onKeyDown={(e) => {
               if (e.nativeEvent.isComposing) return;
               if (suggestions.length) {
-                if (e.key === "Escape") { e.preventDefault(); setDismissed(true); return; }
-                if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setMentionIndex((old) => (old + (e.key === "ArrowDown" ? 1 : suggestions.length - 1)) % suggestions.length); return; }
-                if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") { e.preventDefault(); chooseMention(suggestions[mentionIndex % suggestions.length]); return; }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setDismissed(true);
+                  return;
+                }
+                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setMentionIndex(
+                    (old) =>
+                      (old +
+                        (e.key === "ArrowDown" ? 1 : suggestions.length - 1)) %
+                      suggestions.length,
+                  );
+                  return;
+                }
+                if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+                  e.preventDefault();
+                  chooseMention(suggestions[mentionIndex % suggestions.length]);
+                  return;
+                }
               }
               if (
                 e.key === "Enter" &&
@@ -1263,7 +1387,9 @@ function MessageRoom({
             }}
           />
           <div className="messages-compose-foot">
-            <span>@ to mention · Enter to send · Shift + Enter for a new line</span>
+            <span>
+              @ to mention · Enter to send · Shift + Enter for a new line
+            </span>
             <button
               className="team-primary"
               disabled={sending || !canSend || !draft.trim() || !!error}
@@ -1298,7 +1424,9 @@ function MessageRoom({
             onRead={onRead}
             onCloseThread={() => {
               setThreadRoot(null);
-              requestAnimationFrame(() => composer.current?.focus({ preventScroll: true }));
+              requestAnimationFrame(() =>
+                composer.current?.focus({ preventScroll: true }),
+              );
             }}
           />
         </div>

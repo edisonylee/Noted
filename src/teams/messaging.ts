@@ -21,3 +21,18 @@ export function mergeMessages(
   }
   return [...byId.values()].sort((a, b) => a.created_seq - b.created_seq);
 }
+
+// Mirrors the server's previewBody() wording so a sidebar row and a thread
+// row never describe the same message differently.
+export function messagePreview(message: TeamChatMessage) {
+  if (message.deleted_at) return "Message deleted";
+  return message.body || "Shared an attachment or meeting";
+}
+
+// Today's messages read as a clock time; anything older as a short date.
+export function shortTime(iso: string, now = new Date()) {
+  const date = new Date(iso);
+  return date.toDateString() === now.toDateString()
+    ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : date.toLocaleDateString([], { month: "short", day: "numeric" });
+}

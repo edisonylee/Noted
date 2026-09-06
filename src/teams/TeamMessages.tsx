@@ -35,6 +35,7 @@ import {
   Lock,
   Loader,
   MessageSquare,
+  MessagesSquare,
   Paperclip,
   RefreshCw,
   Send,
@@ -61,6 +62,7 @@ import {
 import { findMentions, mentionQuery } from "./mentions";
 import { TeamProfileCard } from "./TeamProfile";
 import { MessageRow } from "./MessageRow";
+import { ThreadList } from "./ThreadList";
 import "./messages.css";
 
 export function TeamMessages({
@@ -620,6 +622,7 @@ function MessageRoom({
   onRead,
   thread,
   onCloseThread,
+  onBackToThreads,
   onOpenMessage,
   onMeeting,
   jump,
@@ -641,6 +644,8 @@ function MessageRoom({
   onRead: (id: string) => void;
   thread?: TeamChatMessage;
   onCloseThread?: () => void;
+  // Present only when the thread was opened from the thread list.
+  onBackToThreads?: () => void;
   onOpenMessage?: (id: string) => void;
   onMeeting?: (id: string) => void;
 }) {
@@ -695,6 +700,20 @@ function MessageRoom({
   const [threadRoot, setThreadRoot] = useState<TeamChatMessage | null>(
     jump?.parent ?? null,
   );
+  // The thread-panel slot shows either the thread list or one thread; these
+  // stay plain state because a jump remounts the room and discards them.
+  const [threadList, setThreadList] = useState(false);
+  const [threadFromList, setThreadFromList] = useState(false);
+  const [threadListFocus, setThreadListFocus] = useState<string | null>(null);
+  const [threadsVersion, setThreadsVersion] = useState(0);
+  const threadsButton = useRef<HTMLButtonElement>(null);
+  // Every exit from the panel goes through here so no caller forgets a piece.
+  const resetThreadPanel = useCallback(() => {
+    setThreadRoot(null);
+    setThreadList(false);
+    setThreadFromList(false);
+    setThreadListFocus(null);
+  }, []);
   const [parent, setParent] = useState(thread);
   const [profile, setProfile] = useState<TeamUser | null>(null);
   const threadId = thread?.id;
@@ -912,6 +931,15 @@ function MessageRoom({
               ),
         );
         if (initial) setOlderBefore(page.older_before);
+        // Reply sends, edits and deletes re-emit their root, so an open
+        // thread list refreshes within long-poll latency. Fan-out events on
+        // roots that merely have replies also match; the list absorbs that.
+        if (
+          !initial &&
+          !threadId &&
+          page.messages.some((m) => m.thread_id || (m.reply_count ?? 0) > 0)
+        )
+          setThreadsVersion((v) => v + 1);
         cursor.current = page.cursor;
         if (
           !pinned.current &&
@@ -929,7 +957,7 @@ function MessageRoom({
         setEditing(null);
         setDeleting(null);
         setSettings(false);
-        setThreadRoot(null);
+        resetThreadPanel();
         setProfile(null);
         setParent(undefined);
         setLoaded(true);
@@ -953,7 +981,7 @@ function MessageRoom({
       clearTimeout(timer);
       window.removeEventListener("focus", wake);
     };
-  }, [path, onRoom, retry, isActive, threadId]);
+  }, [path, onRoom, retry, isActive, threadId, resetThreadPanel]);
   const newer = async () => {
     if (newerAfter.current == null || loadingNewer) return;
     setLoadingNewer(true);
@@ -980,7 +1008,7 @@ function MessageRoom({
         cursor.current = null;
         newerAfter.current = null;
         setHasNewer(false);
-        setThreadRoot(null);
+        resetThreadPanel();
         setParent(undefined);
         setProfile(null);
       }
@@ -1013,7 +1041,7 @@ function MessageRoom({
         setEditing(null);
         setDeleting(null);
         setSettings(false);
-        setThreadRoot(null);
+        resetThreadPanel();
         setParent(undefined);
         setProfile(null);
         cursor.current = null;
@@ -1157,6 +1185,7 @@ function MessageRoom({
     );
   };
   const label = roomLabel(room, user);
+  const unreadThreads = room.unread_threads ?? 0;
   const renderEpoch = accessEpoch.current;
   const changed = (message: TeamChatMessage) => {
     if (!alive.current || renderEpoch !== accessEpoch.current) return;
@@ -1219,6 +1248,9 @@ function MessageRoom({
     <section
       className="messages-room"
       aria-label={threadId ? "Thread" : `Conversation: ${label}`}
+      // Escape precedence, outermost last: autocomplete picker (composer
+      // onKeyDown) → cancel pending reply (future, composer onKeyDown) → back
+      // to threads → close thread. An open <dialog> suppresses all of them.
       onKeyDown={(event) => {
         if (
           threadId &&
@@ -1226,13 +1258,13 @@ function MessageRoom({
           !document.querySelector("dialog[open]")
         ) {
           event.stopPropagation();
-          onCloseThread?.();
+          (onBackToThreads ?? onCloseThread)?.();
         }
       }}
     >
       <div
         className="messages-room-main"
-        inert={!!threadRoot || undefined}
+        inert={!!threadRoot || threadList || undefined}
         onDragEnter={(event) => {
           if (!event.dataTransfer.types.includes("Files")) return;
           event.preventDefault();
@@ -1327,6 +1359,16 @@ function MessageRoom({
                       : room.description || "Open to everyone in this team"}
             </p>
           </div>
+          {threadId && onBackToThreads && (
+            <button
+              className="team-text-button"
+              aria-label="Back to threads"
+              title="Back to threads"
+              onClick={onBackToThreads}
+            >
+              <ChevronLeft size={18} />
+            </button>
+          )}
           {threadId && (
             <button
               className="team-text-button"
@@ -1350,6 +1392,29 @@ function MessageRoom({
               onClick={() => setShowPins(true)}
             >
               Pinned
+            </button>
+          )}
+          {!threadId && room.threads_enabled && (
+            <button
+              ref={threadsButton}
+              className="team-text-button"
+              aria-expanded={threadList}
+              aria-controls={threadList ? `threads-${room.id}` : undefined}
+              aria-label={
+                unreadThreads
+                  ? `Threads, ${unreadThreads} with new replies`
+                  : "Threads"
+              }
+              onClick={() => {
+                const open = !threadList;
+                resetThreadPanel();
+                setThreadList(open);
+              }}
+            >
+              <MessagesSquare size={17} /> Threads
+              {unreadThreads > 0 && (
+                <span className="messages-head-count">{unreadThreads}</span>
+              )}
             </button>
           )}
           {!threadId && onSearch && (
@@ -1676,33 +1741,65 @@ function MessageRoom({
           onOpen={(id) => onOpenMessage?.(id)}
         />
       )}
-      {threadRoot && !threadId && (
+      {(threadRoot || threadList) && !threadId && (
         <div className="messages-thread-panel">
-          <MessageRoom
-            key={threadRoot.id}
-            org={org}
-            user={user}
-            room={room}
-            active={isActive}
-            memberCount={memberCount}
-            members={members}
-            thread={threadRoot}
-            jump={jump?.parent?.id === threadRoot.id ? jump : undefined}
-            drafts={drafts}
-            setDraftFor={setDraftFor}
-            sendKeyFor={sendKeyFor}
-            onSentFor={onSentFor}
-            onRoom={onRoom}
-            onRead={onRead}
-            onOpenMessage={onOpenMessage}
-            onMeeting={onMeeting}
-            onCloseThread={() => {
-              setThreadRoot(null);
-              requestAnimationFrame(() =>
-                composer.current?.focus({ preventScroll: true }),
-              );
-            }}
-          />
+          {threadRoot ? (
+            <MessageRoom
+              key={threadRoot.id}
+              org={org}
+              user={user}
+              room={room}
+              active={isActive}
+              memberCount={memberCount}
+              members={members}
+              thread={threadRoot}
+              jump={jump?.parent?.id === threadRoot.id ? jump : undefined}
+              drafts={drafts}
+              setDraftFor={setDraftFor}
+              sendKeyFor={sendKeyFor}
+              onSentFor={onSentFor}
+              onRoom={onRoom}
+              onRead={onRead}
+              onOpenMessage={onOpenMessage}
+              onMeeting={onMeeting}
+              onBackToThreads={
+                threadFromList
+                  ? () => {
+                      setThreadListFocus(threadRoot.id);
+                      setThreadRoot(null);
+                      setThreadList(true);
+                    }
+                  : undefined
+              }
+              onCloseThread={() => {
+                resetThreadPanel();
+                requestAnimationFrame(() =>
+                  composer.current?.focus({ preventScroll: true }),
+                );
+              }}
+            />
+          ) : (
+            <ThreadList
+              id={`threads-${room.id}`}
+              org={org}
+              user={user}
+              room={room}
+              active={isActive}
+              version={threadsVersion}
+              focusRoot={threadListFocus}
+              onOpen={(root) => {
+                setThreadFromList(true);
+                setThreadList(false);
+                setThreadRoot(root);
+              }}
+              onClose={() => {
+                resetThreadPanel();
+                requestAnimationFrame(() =>
+                  threadsButton.current?.focus({ preventScroll: true }),
+                );
+              }}
+            />
+          )}
         </div>
       )}
       {profile && (

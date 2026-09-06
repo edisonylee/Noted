@@ -8,6 +8,9 @@ validation gate:
 3. [Pinned messages](03-pinned-messages.md)
 4. [Meeting sharing](04-meeting-sharing.md)
 5. [Saved messages](05-saved-messages.md)
+6. [Message formatting](06-message-formatting.md)
+7. [Drop attachments](07-drop-attachments.md)
+8. [Threads](08-threads.md)
 
 ## Implementation and verification
 

@@ -89,7 +89,9 @@ photos, job titles, and bios, with member-authenticated photo access.
 The three-second message polling gap was replaced with authenticated long polling.
 React layout effects position new content before the next paint, preserving the
 reading position when scrolled into earlier history. The thread panel focuses its
-composer on opening and closes with Escape. Profile upload validation rejects
+composer on opening and closes with Escape. A Threads control in the
+conversation header lists a conversation's threads, newest reply first, in that
+same panel. Profile upload validation rejects
 remote URLs and active image formats. Identity and history survive display-name
 changes.
 

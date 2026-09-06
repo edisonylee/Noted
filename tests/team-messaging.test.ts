@@ -7,6 +7,7 @@ const message = (
   seq: number,
   revision = 1,
   body = "Hello",
+  overrides: Partial<TeamChatMessage> = {},
 ): TeamChatMessage => ({
   id,
   created_seq: seq,
@@ -20,6 +21,7 @@ const message = (
   deleted_at: null,
   can_edit: true,
   can_delete: true,
+  ...overrides,
 });
 test("out-of-order history and send acknowledgments cannot replace newer edits or resurrect deletions", () => {
   const deleted = {
@@ -149,4 +151,35 @@ test("conversation overrides support mute, mentions, defaults and unmute without
   expect(tracker.update("org", [room(14, 14, 13, "default")], effective)).toHaveLength(1);
   expect(conversationAlertMode(room(14, 14, 13, "messages"), "mentions")).toBe("messages");
   expect(conversationAlertMode(room(14, 14, 13, "default"), "mentions")).toBe("mentions");
+});
+
+import { messagePreview, shortTime } from "../src/teams/messaging";
+import { mergeThreads, threadParticipants } from "../src/teams/threads";
+import type { TeamThreadSummary, TeamUser } from "../src/teams/types";
+
+test("thread summaries merge by root, label participants and preview roots", () => {
+  const taylor = { id: "t", name: "Taylor" }, alex = { id: "a", name: "Alex" }, me = { id: "me", name: "Me" };
+  const thread = (root: TeamChatMessage, lastSeq: number, participants: TeamUser[] = [taylor]): TeamThreadSummary => ({
+    root, reply_count: 1, unread_replies: 0, last_reply_seq: lastSeq, last_reply_at: "2026-09-05T00:00:00Z",
+    last_reply_by: participants[0], participants, participant_count: participants.length,
+  });
+  const merged = mergeThreads(
+    [thread(message("a", 1), 10), thread(message("b", 2), 20)],
+    [thread(message("a", 1), 30), thread(message("b", 2), 15), thread(message("c", 3), 25)],
+  );
+  expect(merged.map((t) => [t.root.id, t.last_reply_seq])).toEqual([["a", 30], ["c", 25], ["b", 20]]);
+  expect(mergeThreads([thread(message("a", 1), 10)], [thread(message("a", 1), 10, [alex])])[0].participants).toEqual([alex]);
+  expect(threadParticipants([taylor], 1, "me")).toBe("Taylor");
+  expect(threadParticipants([taylor, me], 2, "me")).toBe("Taylor and you");
+  expect(threadParticipants([me, taylor, alex], 3, "me")).toBe("Taylor, Alex and you");
+  expect(threadParticipants([taylor, alex], 5, "me")).toBe("Taylor, Alex and 3 others");
+  expect(threadParticipants([taylor], 2, "me")).toBe("Taylor and 1 other");
+  expect(threadParticipants([], 0, "me")).toBe("");
+  expect(messagePreview(message("d", 4, 1, "", { deleted_at: "2026-09-05T00:01:00Z" }))).toBe("Message deleted");
+  expect(messagePreview(message("f", 5, 1, "", { attachments: [{ id: "x", name: "a.png", mime: "image/png", size: 1 }] }))).toBe("Shared an attachment or meeting");
+  expect(messagePreview(message("m", 6, 1, "", { has_meeting: true }))).toBe("Shared an attachment or meeting");
+  expect(messagePreview(message("r", 7, 1, "Plain body", { thread_id: null, reply_count: 2, last_reply_at: null }))).toBe("Plain body");
+  const now = new Date(2026, 8, 5, 20, 0);
+  expect(shortTime(new Date(2026, 8, 5, 14, 30).toISOString(), now)).toMatch(/2:30/);
+  expect(shortTime(new Date(2026, 8, 4, 14, 30).toISOString(), now)).toMatch(/^Sep 4$/);
 });

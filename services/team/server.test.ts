@@ -398,8 +398,278 @@ describe("threaded chat, reactions, and profiles", () => {
       expect(page.messages[0].reactions?.[0].emoji).toBe("✅");
       expect(page.messages[0].author_name).toBe("New Name");
       expect(s.profile(owner).title).toBe("Founder");
+      // The thread index is created by the constructor on an existing file.
+      expect(
+        s.chatThreads(owner, session.org, room.id, new URLSearchParams())
+          .items[0].reply_count,
+      ).toBe(1);
     } finally {
       s.db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("thread listing", () => {
+  const query = (value = "") => new URLSearchParams(value);
+  const threads = (
+    s: TeamStore,
+    user: string,
+    org: string,
+    room: string,
+    value = "",
+  ) => s.chatThreads(user, org, room, query(value));
+  const sender =
+    (s: TeamStore, org: string, room: string) =>
+    (user: string, body: string, thread_id?: string) =>
+      s.sendChatMessage(user, org, room, {
+        body,
+        thread_id,
+        client_id: crypto.randomUUID(),
+      });
+  test("lists a room's threads newest reply first with counts, participants, last replier, unread and keyset paging", () => {
+    const { s, owner, org, join } = fixture();
+    const taylor = join("Taylor").id,
+      casey = join("Casey").id;
+    const room = s.chatRooms(owner, org)[0];
+    const send = sender(s, org, room.id);
+    const a = send(owner, "A"),
+      b = send(owner, "B"),
+      c = send(owner, "C");
+    send(taylor, "A1", a.id);
+    send(taylor, "A2", a.id);
+    const c1 = send(taylor, "C1", c.id);
+    for (const body of ["B1", "B2", "B3"]) send(casey, body, b.id);
+    const page = threads(s, owner, org, room.id);
+    expect(page.items.map((t) => t.root.id)).toEqual([b.id, c.id, a.id]);
+    expect(page.next_before).toBeNull();
+    const [tb, tc, ta] = page.items;
+    expect(tb.reply_count).toBe(3);
+    expect(tb.participants.map((p) => p.id)).toEqual([casey]);
+    expect(tb.participant_count).toBe(1);
+    expect(ta.participants.map((p) => p.id)).toEqual([taylor]);
+    expect(tc.last_reply_by.name).toBe("Taylor");
+    expect(tc.last_reply_at).toBe(c1.created_at);
+    expect(tc.last_reply_seq).toBe(c1.created_seq);
+    for (const t of page.items) {
+      expect(t.root.thread_id).toBeNull();
+      expect(t.root.reply_count).toBe(t.reply_count);
+    }
+    expect([ta, tb, tc].map((t) => t.unread_replies)).toEqual([2, 3, 1]);
+    const before = s.chatRoom(owner, org, room.id);
+    expect(before.threads_enabled).toBe(true);
+    expect(before.unread_threads).toBe(3);
+    s.readChat(owner, org, room.id, c1.created_seq, 0);
+    const unread = Object.fromEntries(
+      threads(s, owner, org, room.id).items.map((t) => [
+        t.root.id,
+        t.unread_replies,
+      ]),
+    );
+    expect(unread).toEqual({ [a.id]: 0, [b.id]: 3, [c.id]: 0 });
+    expect(s.chatRoom(owner, org, room.id).unread_threads).toBe(1);
+    expect(
+      threads(s, taylor, org, room.id).items.find((t) => t.root.id === a.id)
+        ?.unread_replies,
+    ).toBe(0);
+    for (let i = 0; i < 35; i++)
+      send(taylor, `Follow-up ${i}`, send(owner, `Topic ${i}`).id);
+    const first = threads(s, owner, org, room.id);
+    expect(first.items).toHaveLength(30);
+    expect(first.next_before).toBe(first.items[29].last_reply_seq);
+    const second = threads(
+      s,
+      owner,
+      org,
+      room.id,
+      `before=${first.next_before}`,
+    );
+    expect(second.items).toHaveLength(8);
+    expect(second.next_before).toBeNull();
+    expect(second.items.map((t) => t.last_reply_seq)).toEqual(
+      [...second.items.map((t) => t.last_reply_seq)].sort((x, y) => y - x),
+    );
+    expect(second.items[0].last_reply_seq).toBeLessThan(first.next_before!);
+    expect(
+      new Set([...first.items, ...second.items].map((t) => t.root.id)).size,
+    ).toBe(38);
+    expect(() => threads(s, owner, org, room.id, "before=bad")).toThrow(
+      "Invalid threads cursor",
+    );
+  });
+  test("deleted replies and roots keep the listing consistent with reply counts", () => {
+    const { s, owner, org, join } = fixture();
+    const taylor = join("Taylor").id;
+    const room = s.chatRooms(owner, org)[0];
+    const send = sender(s, org, room.id);
+    const remove = (user: string, id: string) => {
+      const current = s.messageLocation(user, org, id).message;
+      s.changeChatMessage(user, org, id, { revision: current.revision }, true);
+    };
+    const lone = send(owner, "Lone");
+    const loneReply = send(taylor, "Only reply", lone.id);
+    const early = send(owner, "Early");
+    const late = send(owner, "Late");
+    send(taylor, "Late first", late.id);
+    const earlyReply = send(taylor, "Old surviving reply", early.id);
+    const lateReply = send(taylor, "Late latest", late.id);
+    expect(threads(s, owner, org, room.id).items.map((t) => t.root.id)).toEqual(
+      [late.id, early.id, lone.id],
+    );
+    remove(taylor, loneReply.id);
+    expect(
+      threads(s, owner, org, room.id).items.some((t) => t.root.id === lone.id),
+    ).toBe(false);
+    expect(
+      s
+        .chatMessages(owner, org, room.id, query())
+        .messages.find((m) => m.id === lone.id)?.reply_count,
+    ).toBe(0);
+    remove(owner, early.id);
+    const tombstone = threads(s, owner, org, room.id).items.find(
+      (t) => t.root.id === early.id,
+    )!;
+    expect(tombstone.root.deleted_at).toBeTruthy();
+    expect(tombstone.root.body).toBe("");
+    expect(tombstone.reply_count).toBe(1);
+    expect(
+      s
+        .chatMessages(owner, org, room.id, query(`thread=${early.id}`))
+        .messages.map((m) => m.id),
+    ).toEqual([earlyReply.id]);
+    s.changeChatMessage(taylor, org, earlyReply.id, {
+      body: "Edited old reply",
+      revision: earlyReply.revision,
+    });
+    expect(threads(s, owner, org, room.id).items.map((t) => t.root.id)).toEqual(
+      [late.id, early.id],
+    );
+    remove(taylor, lateReply.id);
+    expect(threads(s, owner, org, room.id).items.map((t) => t.root.id)).toEqual(
+      [early.id, late.id],
+    );
+  });
+  test("thread listing enforces conversation, org and membership access", () => {
+    const { s, owner, org, join } = fixture();
+    const alice = join("Alice").id,
+      bob = join("Bob").id,
+      admin = join("Admin", "admin").id;
+    const dm = s.createChatRoom(alice, org, { kind: "direct", member_id: bob });
+    const send = sender(s, org, dm.id);
+    send(bob, "Private reply", send(alice, "Private root").id);
+    for (const outsider of [owner, admin])
+      expect(() => threads(s, outsider, org, dm.id)).toThrow("access removed");
+    expect(threads(s, bob, org, dm.id).items).toHaveLength(1);
+    s.changeMember(owner, org, bob, "remove");
+    expect(() => threads(s, bob, org, dm.id)).toThrow();
+    const remaining = threads(s, alice, org, dm.id);
+    expect(remaining.items).toHaveLength(1);
+    expect(remaining.items[0].root.can_edit).toBe(false);
+    const beta = s.createOrg(owner, "Beta");
+    expect(() => threads(s, owner, org, `general-${beta}`)).toThrow();
+    const channel = s.createChatRoom(owner, org, {
+      kind: "channel",
+      name: "Archive me",
+    });
+    const post = sender(s, org, channel.id);
+    post(alice, "Archived reply", post(owner, "Archived root").id);
+    s.updateChatRoom(owner, org, channel.id, {
+      revision: channel.revision,
+      archived: true,
+    });
+    expect(threads(s, owner, org, channel.id).items).toHaveLength(1);
+    expect(threads(s, owner, org, `general-${org}`)).toEqual({
+      items: [],
+      next_before: null,
+    });
+  });
+  test("HTTP thread listing requires a member session, rejects integration keys and unknown routes", async () => {
+    const { s, owner, org, token, space, join } = fixture();
+    const handler = createHandler(s);
+    const request = (path: string, method = "GET", key = token) =>
+      handler(
+        new Request(`https://team.test/v1/orgs/${org}/${path}`, {
+          method,
+          headers: {
+            Authorization: `Bearer ${key}`,
+            "Content-Type": "application/json",
+          },
+          body: method === "GET" ? undefined : "{}",
+        }),
+      );
+    const room = s.chatRooms(owner, org)[0].id;
+    const taylor = join("Taylor").id;
+    const send = sender(s, org, room);
+    const root = send(owner, "Seeded root");
+    send(taylor, "Seeded reply", root.id);
+    s.updateSpace(owner, org, space, {
+      ...s.space(owner, org, space),
+      api_enabled: true,
+    });
+    const integration = s.createIntegrationKey(owner, org, {
+      name: "Read shared meetings",
+      space_ids: [space],
+      transcripts: false,
+      days: 30,
+    });
+    const ok = await request(`chat-rooms/${room}/threads`);
+    expect(ok.status).toBe(200);
+    const json = await ok.json();
+    expect(Array.isArray(json.items)).toBe(true);
+    expect(json.items.map((t: { root: { id: string } }) => t.root.id)).toEqual([
+      root.id,
+    ]);
+    expect(
+      (await request(`chat-rooms/${room}/threads`, "GET", "")).status,
+    ).toBe(401);
+    expect(
+      (
+        await request(
+          `chat-rooms/${room}/threads`,
+          "GET",
+          String(integration.token),
+        )
+      ).status,
+    ).toBe(401);
+    expect((await request(`chat-rooms/${room}/threads?before=x`)).status).toBe(
+      400,
+    );
+    expect((await request(`chat-rooms/${room}/threadz`)).status).toBe(404);
+    expect((await request(`chat-rooms/${room}/threads/extra`)).status).toBe(
+      404,
+    );
+    expect((await request(`chat-rooms/${room}/threads`, "POST")).status).toBe(
+      404,
+    );
+    expect((await request(`chat-rooms/${room}/threads`, "PATCH")).status).toBe(
+      404,
+    );
+    const dm = s.createChatRoom(taylor, org, {
+      kind: "direct",
+      member_id: join("Morgan").id,
+    });
+    expect((await request(`chat-rooms/${dm.id}/threads`)).status).toBe(404);
+  });
+  test("constructor migrations are idempotent across reopens of the same file", () => {
+    const dir = mkdtempSync(joinPath(tmpdir(), "noted-thread-migrations-"));
+    const path = joinPath(dir, "team.sqlite");
+    try {
+      new TeamStore(path).db.close();
+      const s = new TeamStore(path);
+      try {
+        const columns = s.all<{ name: string }>(
+          "PRAGMA table_info(chat_messages)",
+        );
+        expect(columns.filter((c) => c.name === "thread_id")).toHaveLength(1);
+        const indexes = s
+          .all<{ name: string }>("PRAGMA index_list(chat_messages)")
+          .map((i) => i.name);
+        expect(indexes).toContain("chat_thread_history");
+        expect(indexes).toContain("chat_thread_replies");
+      } finally {
+        s.db.close();
+      }
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });

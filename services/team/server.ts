@@ -130,9 +130,14 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
               ["restore", "share-targets"].includes(action)) ||
             (resource === "spaces" && action === "grants") ||
             (resource === "chat-rooms" &&
-              ["messages", "read", "unread", "notifications", "pins"].includes(
-                action,
-              )) ||
+              [
+                "messages",
+                "read",
+                "unread",
+                "notifications",
+                "pins",
+                "threads",
+              ].includes(action)) ||
             (resource === "chat-messages" &&
               ["reactions", "pin", "source", "saved"].includes(action)) ||
             (resource === "mentions" && action === "read") ||
@@ -195,6 +200,8 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
       if (resource === "chat-rooms") {
         if (id && action === "pins" && method === "GET")
           return respond(store.pinnedMessages(user, org, id));
+        if (id && action === "threads" && method === "GET")
+          return respond(store.chatThreads(user, org, id, url.searchParams));
         if (id && action === "unread" && method === "POST")
           return respond(store.markChatUnread(user, org, id, body.message_id));
         if (id && action === "notifications" && method === "PUT")

@@ -879,3 +879,53 @@
   height: 1px;
   background: var(--line-strong);
 }
+.messages-head-count {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.messages-thread-list {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.messages-thread-list .message-collection-list {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  padding: 0 16px 16px;
+}
+.messages-thread-list-error {
+  margin: 12px 24px;
+}
+.thread-list-row .thread-list-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+.thread-list-row time {
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.thread-list-row small {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.thread-list-row small .message-list-badge {
+  margin-left: auto;
+}
+.thread-list-row.is-unread strong {
+  color: var(--ink);
+  font-weight: 650;
+}
+.thread-list-row .messages-deleted {
+  font-style: italic;
+  color: var(--muted);
+}

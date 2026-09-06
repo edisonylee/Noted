@@ -120,6 +120,10 @@ export type TeamChatRoom = {
   unread_navigation?: boolean;
   pins_enabled?: boolean;
   saved_messages_enabled?: boolean;
+  // Capability flags: each gates one header control so an older server
+  // never shows a control it cannot serve. threads_enabled gates "Threads".
+  threads_enabled?: boolean;
+  unread_threads?: number;
   read_version?: number;
   read_held?: boolean;
   read_cursor?: number;
@@ -207,6 +211,23 @@ export type TeamMessageLocation = {
 };
 export type TeamMentionPage = {
   items: (TeamMessageLocation & { unread: boolean })[];
+  next_before: number | null;
+};
+export type TeamThreadSummary = {
+  root: TeamChatMessage;
+  reply_count: number;
+  // Replies by others past the viewer's room-level read cursor.
+  unread_replies: number;
+  // MAX(created_seq) over live replies; the keyset paging key.
+  last_reply_seq: number;
+  last_reply_at: string;
+  last_reply_by: TeamUser;
+  // Distinct repliers ordered by first reply, capped at five.
+  participants: TeamUser[];
+  participant_count: number;
+};
+export type TeamThreadPage = {
+  items: TeamThreadSummary[];
   next_before: number | null;
 };
 

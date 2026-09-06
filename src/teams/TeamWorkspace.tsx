@@ -1,3 +1,4 @@
+import { TeamSearch } from "./TeamSearch";
 import type { TeamNotificationTarget } from "./types";
 import { useNavigationState, clearNavigationState } from "../useNavigationState";
 import {
@@ -422,8 +423,11 @@ function TeamLibrary({
   const [space, setSpace] = useNavigationState(`team:${org}:space`, "");
   const [folder, setFolder] = useNavigationState(`team:${org}:folder`, "");
   const [view, setView] = useNavigationState<
-    "notes" | "admin" | "trash" | "answers" | "messages" | "people"
+    "notes" | "admin" | "trash" | "answers" | "messages" | "people" | "search"
   >(`team:${org}:view`, "notes");
+  const [searchRoom, setSearchRoom] = useNavigationState(`team:${org}:search-room`, "");
+  const [searchMeeting, setSearchMeeting] = useState<string | null>(null);
+  const [requestedMessage, setRequestedMessage] = useState<{ id: string; nonce: number } | null>(null);
   const [unread, setUnread] = useState(0);
   useEffect(() => {
     if (notificationTarget) setView("messages");
@@ -635,6 +639,7 @@ function TeamLibrary({
             </b>
           )}
         </button>
+        <button aria-current={view === "search" ? "page" : undefined} className={view === "search" ? "on" : ""} onClick={() => { setSearchMeeting(null); setView("search"); }}><Search size={17} /> Search</button>
         <button
           aria-current={view === "people" ? "page" : undefined}
           className={view === "people" ? "on" : ""}
@@ -658,12 +663,20 @@ function TeamLibrary({
             data={data}
             active={view === "messages"}
             requestedRoom={requestedRoom}
+            requestedMessage={requestedMessage}
+            onRequestedMessageHandled={() => setRequestedMessage(null)}
+            onSearch={(room) => { setSearchRoom(room); setSearchMeeting(null); setView("search"); }}
             onUnread={setUnread}
             notificationTarget={notificationTarget}
             onNotificationHandled={onNotificationHandled}
           />
         </div>
       )}
+      {data && view === "search" && (searchMeeting ? <SharedMeeting key={searchMeeting} org={org} id={searchMeeting} folders={data.folders} accessEpoch={accessEpoch} backLabel="Search results" onBack={() => setSearchMeeting(null)} /> :
+        <TeamSearch key={`${org}:${data.user.id}`} data={data} room={searchRoom} onRoom={setSearchRoom} onOpen={(hit) => {
+          if (hit.kind === "meeting") setSearchMeeting(hit.id);
+          else { setRequestedMessage({ id: hit.id, nonce: Date.now() }); setView("messages"); }
+        }} />)}
       {data && view === "people" && (
         <TeamPeople
           data={data}
@@ -1193,6 +1206,7 @@ function CreateTeamLocation({
 }
 
 function SharedMeeting({
+  backLabel = "Shared meetings",
   org,
   id,
   folders,
@@ -1203,6 +1217,7 @@ function SharedMeeting({
   id: string;
   folders: TeamFolder[];
   accessEpoch: number;
+  backLabel?: string;
   onBack: () => void;
 }) {
   const [note, setNote] = useState<TeamNote | null>(null),
@@ -1296,7 +1311,7 @@ function SharedMeeting({
             onBack();
         }}
       >
-        <ArrowLeft size={15} /> Shared meetings
+        <ArrowLeft size={15} /> {backLabel}
       </button>
       {error && (
         <p className="team-error" role="alert">

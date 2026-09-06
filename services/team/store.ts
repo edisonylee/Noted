@@ -1,3 +1,4 @@
+import { initializeSearch, searchExpression, snippetParts } from "./search";
 import { REACTION_NAMES } from "./reactions";
 import { findMentions } from "./mentions";
 import { Database, type SQLQueryBindings } from "bun:sqlite";
@@ -146,6 +147,7 @@ export class TeamStore {
     this.db.exec(
       "CREATE INDEX IF NOT EXISTS chat_thread_history ON chat_messages(room_id,thread_id,created_seq)",
     );
+    initializeSearch(this.db);
     this
       .run(`INSERT OR IGNORE INTO chat_rooms(id,org_id,kind,name,description,created_by,created_at)
       SELECT 'general-' || o.id,o.id,'channel','general','A place for everyone in the workspace.',m.user_id,o.created_at
@@ -849,6 +851,89 @@ export class TeamStore {
       values: [...spaces, folderId, folderId],
     };
   }
+  search(user: string, org: string, query: URLSearchParams) {
+    this.role(user, org);
+    const q = query.get("q") ?? "";
+    let expression: string;
+    try { expression = searchExpression(q); } catch (e) { fail(400, String((e as Error).message)); }
+    const kind = choice(query.get("kind") ?? "all", ["all", "messages", "meetings"], "search kind");
+    const bounded = (key: string, max = 200) => {
+      const value = query.get(key) ?? "";
+      if (value.length > max) fail(400, `Invalid ${key}`);
+      return value;
+    };
+    const room = bounded("room"), author = bounded("author"), space = bounded("space"), folder = bounded("folder");
+    if (room) this.chatRoom(user, org, room);
+    const date = (key: string) => {
+      const value = bounded(key, 10);
+      if (value && (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value)) fail(400, `Invalid ${key} date`);
+      return value;
+    };
+    const since = date("since"), until = date("until");
+    if (since && until && since > until) fail(400, "Start date must be before end date");
+    const limitValue = query.get("limit") ?? "20";
+    if (!/^\d{1,3}$/.test(limitValue) || Number(limitValue) < 1) fail(400, "Invalid search limit");
+    const limit = Math.min(50, Number(limitValue));
+    const scope = this.noteScope(user, org, space, folder);
+    // Cursors contain only bounded offsets. Scope binding prevents accidental
+    // reuse across filters/accounts; authorization is rerun for every page.
+    const fingerprint = createHash("sha256").update(JSON.stringify([user, org, expression, room, author, space, folder, since, until])).digest("hex");
+    const offset = (key: string) => {
+      const value = bounded(key, 512);
+      if (!value) return 0;
+      try {
+        const parsed = JSON.parse(Buffer.from(value, "base64url").toString());
+        if (parsed.scope !== fingerprint || parsed.group !== key || !Number.isSafeInteger(parsed.offset) || parsed.offset < 0 || parsed.offset > 10000) throw new Error();
+        return parsed.offset as number;
+      } catch { fail(400, "Invalid search cursor. Start a new search."); }
+    };
+    const messageOffset = offset("messages_cursor"), meetingOffset = offset("meetings_cursor");
+    const cursor = (group: string, count: number, start: number) => count > limit && start + limit <= 10000
+      ? Buffer.from(JSON.stringify({ scope: fingerprint, group, offset: start + limit })).toString("base64url") : null;
+    const start = `\u0001${randomBytes(16).toString("hex")}\u0002`, end = `\u0001${randomBytes(16).toString("hex")}\u0002`;
+    const page: import("../../src/teams/types").TeamSearchPage = {
+      messages: { hits: [], cursor: null }, meetings: { hits: [], cursor: null },
+    };
+    if (!expression) return page;
+    if (kind !== "meetings") {
+      const rows = this.all<{ id: string; room_id: string; author_id: string; author_name: string; created_at: string; excerpt: string }>(
+        `SELECT m.id,m.room_id,m.author_id,u.name AS author_name,m.created_at,
+         substr(snippet(chat_messages_fts,0,?,?,'…',40),1,4096) AS excerpt
+         FROM chat_messages_fts JOIN chat_messages m ON m.rowid=chat_messages_fts.rowid
+         JOIN chat_rooms r ON r.id=m.room_id JOIN users u ON u.id=m.author_id
+         WHERE chat_messages_fts MATCH ? AND r.org_id=? AND m.deleted_at IS NULL
+         AND (r.kind='channel' OR EXISTS(SELECT 1 FROM chat_participants p WHERE p.room_id=r.id AND p.user_id=?))
+         AND (?='' OR r.id=?) AND (?='' OR m.author_id=?)
+         AND (?='' OR substr(m.created_at,1,10)>=?) AND (?='' OR substr(m.created_at,1,10)<=?)
+         ORDER BY bm25(chat_messages_fts),m.created_seq DESC,m.id LIMIT ? OFFSET ?`,
+        start, end, expression, org, user, room, room, author, author, since, since, until, until, limit + 1, messageOffset,
+      );
+      const labels = new Map<string, string>();
+      page.messages.hits = rows.slice(0, limit).map(({ excerpt, ...hit }) => {
+        let label = labels.get(hit.room_id);
+        if (!label) {
+          const r = this.chatRoom(user, org, hit.room_id);
+          label = r.kind === "channel" ? (r.is_default ? "Team chat" : `#${r.name}`) : r.participants.filter((p) => p.id !== user).map((p) => p.name).join(", ") || "Direct message";
+          labels.set(hit.room_id, label);
+        }
+        return { ...hit, kind: "message", room_label: label, snippet: snippetParts(excerpt, start, end) };
+      });
+      page.messages.cursor = cursor("messages_cursor", rows.length, messageOffset);
+    }
+    if (kind !== "messages" && !room) {
+      const rows = this.all<{ id: string; space_id: string; title: string; occurred_at: string; excerpt: string }>(
+        `SELECT n.id,n.space_id,n.title,n.occurred_at,substr(snippet(notes_fts,-1,?,?,'…',40),1,4096) AS excerpt
+         FROM notes_fts JOIN notes n ON n.rowid=notes_fts.rowid
+         WHERE notes_fts MATCH ? AND ${scope.sql} AND n.trashed_at IS NULL
+         AND (?='' OR n.owner_id=?) AND (?='' OR substr(n.occurred_at,1,10)>=?) AND (?='' OR substr(n.occurred_at,1,10)<=?)
+         ORDER BY bm25(notes_fts,5.0,2.0,1.0),n.occurred_at DESC,n.id LIMIT ? OFFSET ?`,
+        start, end, expression, ...scope.values, author, author, since, since, until, until, limit + 1, meetingOffset,
+      );
+      page.meetings.hits = rows.slice(0, limit).map(({ excerpt, ...hit }) => ({ ...hit, kind: "meeting", snippet: snippetParts(excerpt, start, end) }));
+      page.meetings.cursor = cursor("meetings_cursor", rows.length, meetingOffset);
+    }
+    return page;
+  }
   listNotes(
     user: string,
     org: string,
@@ -860,15 +945,15 @@ export class TeamStore {
     offset = 0,
   ): TeamNoteRow[] {
     const scope = this.noteScope(user, org, spaceId, folderId);
+    let expression: string;
+    try { expression = searchExpression(query); } catch (e) { fail(400, (e as Error).message); }
+    if (query.trim() && !expression) return [];
     const rows = this.all<{ id: string }>(
-      `SELECT n.id FROM notes n WHERE ${scope.sql} AND n.trashed_at IS ${trash ? "NOT " : ""}NULL
-      AND (?='' OR instr(lower(n.title||char(10)||n.summary||char(10)||n.transcript),lower(?))>0)
-      ORDER BY n.occurred_at DESC,n.id LIMIT ? OFFSET ?`,
-      ...scope.values,
-      query,
-      query,
-      Math.min(100, limit),
-      offset,
+      `SELECT n.id FROM notes n ${expression ? "JOIN notes_fts ON notes_fts.rowid=n.rowid" : ""}
+       WHERE ${scope.sql} AND n.trashed_at IS ${trash ? "NOT " : ""}NULL
+       ${expression ? "AND notes_fts MATCH ?" : ""}
+       ORDER BY ${expression ? "bm25(notes_fts,5.0,2.0,1.0)," : ""}n.occurred_at DESC,n.id LIMIT ? OFFSET ?`,
+      ...scope.values, ...(expression ? [expression] : []), Math.min(100, limit), offset,
     );
     return rows.map(({ id }) => {
       const n = this.note(user, org, id),
@@ -1905,14 +1990,42 @@ export class TeamStore {
   ): TeamChatPage {
     return this.db.transaction(() => {
       const room = this.chatRoom(user, org, id);
-      if (query.has("before") && query.has("after"))
-        fail(400, "Choose history or updates, not both");
+      if (["before", "after", "around", "newer"].filter((key) => query.has(key)).length > 1)
+        fail(400, "Choose one history direction or live updates");
       const thread = query.get("thread") || null;
       const parent = thread
         ? this.chatMessage(user, org, thread, room)
         : undefined;
       if (parent?.thread_id) fail(400, "Reply in the original thread");
       const latest = this.latestChatCursor(id);
+      if (query.has("around") || query.has("newer")) {
+        let rows: { id: string; created_seq: number }[];
+        if (query.has("around")) {
+          const anchorId = query.get("around")!;
+          const anchor = this.chatMessage(user, org, anchorId, room);
+          if (anchor.room_id !== id || (anchor.thread_id ?? null) !== thread || anchor.deleted_at)
+            fail(404, "Message not found in this conversation");
+          const before = this.all<{ id: string; created_seq: number }>(
+            "SELECT id,created_seq FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq<=? ORDER BY created_seq DESC LIMIT 26", id, thread, anchor.created_seq,
+          ).reverse();
+          const after = this.all<{ id: string; created_seq: number }>(
+            "SELECT id,created_seq FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq>? ORDER BY created_seq LIMIT 25", id, thread, anchor.created_seq,
+          );
+          rows = [...before, ...after];
+        } else {
+          const after = this.chatCursor(Number(query.get("newer")), "history cursor");
+          rows = this.all<{ id: string; created_seq: number }>(
+            "SELECT id,created_seq FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq>? ORDER BY created_seq LIMIT 50", id, thread, after,
+          );
+        }
+        const first = rows[0]?.created_seq, last = rows.at(-1)?.created_seq;
+        const older = first != null && this.get("SELECT 1 FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq<? LIMIT 1", id, thread, first);
+        const newer = last != null && this.get("SELECT 1 FROM chat_messages WHERE room_id=? AND thread_id IS ? AND created_seq>? LIMIT 1", id, thread, last);
+        return {
+          room, parent, live: true, messages: rows.map((row) => this.chatMessage(user, org, row.id, room)),
+          cursor: latest, has_more: false, older_before: older ? first! : null, newer_after: newer ? last! : null,
+        };
+      }
       if (query.has("after")) {
         const after = this.chatCursor(
           Number(query.get("after")),

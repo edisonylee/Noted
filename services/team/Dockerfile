@@ -1,7 +1,7 @@
 FROM oven/bun:1.3.14-slim
 
 WORKDIR /app
-COPY server.ts store.ts reactions.ts mentions.ts schema.sql ./
+COPY server.ts store.ts reactions.ts mentions.ts search.ts search.sql schema.sql ./
 RUN mkdir -p /data && chmod 700 /data
 
 ENV NODE_ENV=production \

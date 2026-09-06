@@ -25,6 +25,14 @@ test("the Docker runtime files start independently and expose message notificati
         ));
         if (response.status !== 200) throw new Error("Room request failed");
         const [room] = await response.json();
+        const owner = store.authenticate(session.token);
+        store.sendChatMessage(owner, session.org, room.id, { body: "packagedword", client_id: crypto.randomUUID() });
+        const searchResponse = await createHandler(store)(new Request(
+          "https://test.invalid/v1/orgs/" + session.org + "/search?q=packagedword",
+          { headers: { Authorization: "Bearer " + session.token } },
+        ));
+        const search = await searchResponse.json();
+        if (searchResponse.status !== 200 || search.messages.hits.length !== 1) throw new Error("Packaged search failed");
         for (const field of ["notification_cursor", "latest_unread_message_seq", "notification_mode"])
           if (!(field in room)) throw new Error("Missing " + field);
       } finally { store.db.close(); }

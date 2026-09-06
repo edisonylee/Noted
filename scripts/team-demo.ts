@@ -116,6 +116,7 @@ const handler = createHandler(store, [
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 8790,
+  idleTimeout: 30,
   maxRequestBodySize: 1_500_000,
   fetch: (req, s) => handler(req, s.requestIP(req)?.address),
 });

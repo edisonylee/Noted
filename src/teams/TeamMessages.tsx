@@ -51,8 +51,11 @@ export function TeamMessages({
   data,
   active,
   requestedRoom,
-  onUnread, notificationTarget, onNotificationHandled,
+  onUnread, notificationTarget, onNotificationHandled, requestedMessage, onSearch, onRequestedMessageHandled,
 }: {
+  requestedMessage?: { id: string; nonce: number } | null;
+  onRequestedMessageHandled?: () => void;
+  onSearch?: (room: string) => void;
   notificationTarget?: TeamNotificationTarget | null;
   onNotificationHandled?: () => void;
   data: TeamSnapshot;
@@ -95,6 +98,9 @@ export function TeamMessages({
     void openMessage(notificationTarget.message);
     onNotificationHandled?.();
   }, [notificationTarget, org, user, openMessage, onNotificationHandled]);
+  useEffect(() => {
+    if (requestedMessage) { void openMessage(requestedMessage.id); onRequestedMessageHandled?.(); }
+  }, [requestedMessage, openMessage, onRequestedMessageHandled]);
   const [selected, setSelected] = useNavigationState(`team:${org}:${user}:room`, "");
   const [search, setSearch] = useNavigationState(`team:${org}:${user}:room-search`, "");
   const [error, setError] = useState("");
@@ -378,6 +384,7 @@ export function TeamMessages({
         <MessageRoom
           key={`${current.id}:${jump?.nonce ?? "normal"}`}
           jump={jump?.room.id === current.id ? jump : undefined}
+          onSearch={onSearch}
           org={org}
           user={user}
           room={current}
@@ -611,9 +618,10 @@ function MessageRoom({
   onRoom,
   onRead,
   thread,
-  onCloseThread, jump,
+  onCloseThread, jump, onSearch,
 }: {
   jump?: TeamMessageLocation;
+  onSearch?: (room: string) => void;
   org: string;
   user: string;
   room: TeamChatRoom;
@@ -655,6 +663,9 @@ function MessageRoom({
     [sendError, setSendError] = useState("");
   const [sending, setSending] = useState(false),
     [loadingOlder, setLoadingOlder] = useState(false);
+  const newerAfter = useRef<number | null>(null);
+  const [hasNewer, setHasNewer] = useState(false);
+  const [loadingNewer, setLoadingNewer] = useState(false);
   const [olderBefore, setOlderBefore] = useState<number | null>(null),
     [newBelow, setNewBelow] = useState(false);
   const [deleting, setDeleting] = useState<TeamChatMessage | null>(null);
@@ -688,6 +699,7 @@ function MessageRoom({
     async (seq: number) => {
       if (
         !visible.current ||
+        newerAfter.current != null ||
         !document.hasFocus() ||
         seq <= readCursor.current ||
         document.visibilityState !== "visible"
@@ -706,6 +718,17 @@ function MessageRoom({
     [path, id, onRead],
   );
   const toBottom = useCallback(() => {
+    if (newerAfter.current != null) {
+      ++accessEpoch.current;
+      setMessages([]);
+      newerAfter.current = null;
+      setHasNewer(false);
+      restorePosition.current = undefined;
+      positionReady.current = false;
+      cursor.current = null;
+      setLoaded(false);
+      setRetry((value) => value + 1);
+    }
     holdPosition.current = false;
     pinned.current = true;
     setNewBelow(false);
@@ -770,32 +793,28 @@ function MessageRoom({
         const initial = after == null;
         const params = new URLSearchParams();
         if (threadId) params.set("thread", threadId);
+        if (initial && restorePosition.current) params.set("around", restorePosition.current.id);
         if (!initial) {
           params.set("after", String(after));
           params.set("wait", "20000");
         }
-        const page = await team.request<TeamChatPage>(
-          "GET",
-          `${path}/messages?${params}`,
-        );
+        let page: TeamChatPage;
+        try {
+          page = await team.request<TeamChatPage>("GET", `${path}/messages?${params}`);
+        } catch (e) {
+          if (!initial || !params.has("around") || destination) throw e;
+          params.delete("around");
+          page = await team.request<TeamChatPage>("GET", `${path}/messages?${params}`);
+          restorePosition.current = undefined;
+        }
         if (!active) return;
         if (epoch !== accessEpoch.current) {
           timer = window.setTimeout(poll, 1_000);
           return;
         }
-        // Fetch back to the saved anchor before exposing the initial history.
-        // Keep the original live cursor so updates during pagination are replayed.
-        const saved = restorePosition.current;
-        if (initial && saved) {
-          while (page.older_before != null && page.messages[0]?.created_seq > saved.seq) {
-            const previous = await team.request<TeamChatPage>(
-              "GET", `${path}/messages?before=${page.older_before}${threadId ? `&thread=${threadId}` : ""}`,
-            );
-            if (!active || epoch !== accessEpoch.current) return;
-            page.messages = mergeMessages(previous.messages, page.messages);
-            if (previous.older_before === page.older_before) break;
-            page.older_before = previous.older_before;
-          }
+        if (initial) {
+          newerAfter.current = page.newer_after ?? null;
+          setHasNewer(newerAfter.current != null);
         }
         onRoom(page.room);
         if (threadId) setParent(page.parent);
@@ -809,7 +828,7 @@ function MessageRoom({
                 old,
                 page.messages.filter(
                   (m) =>
-                    m.created_seq > after! ||
+                    (newerAfter.current == null && m.created_seq > after!) ||
                     old.some((existing) => existing.id === m.id),
                 ),
               ),
@@ -837,6 +856,7 @@ function MessageRoom({
         setParent(undefined);
         setLoaded(true);
         cursor.current = null;
+        newerAfter.current = null; setHasNewer(false);
         readCursor.current = 0;
         setOlderBefore(null);
         delay = 10_000;
@@ -855,6 +875,31 @@ function MessageRoom({
       window.removeEventListener("focus", wake);
     };
   }, [path, onRoom, retry, isActive, threadId]);
+  const newer = async () => {
+    if (newerAfter.current == null || loadingNewer) return;
+    setLoadingNewer(true);
+    const epoch = accessEpoch.current;
+    try {
+      const params = new URLSearchParams({ newer: String(newerAfter.current) });
+      if (threadId) params.set("thread", threadId);
+      const page = await team.request<TeamChatPage>("GET", `${path}/messages?${params}`);
+      if (!alive.current || epoch !== accessEpoch.current) return;
+      pinned.current = false;
+      holdPosition.current = true;
+      newerAfter.current = page.newer_after ?? null;
+      setHasNewer(newerAfter.current != null);
+      setMessages((old) => mergeMessages(old, page.messages));
+      onRoom(page.room);
+    } catch (e) {
+      if (alive.current && epoch === accessEpoch.current) {
+        ++accessEpoch.current;
+        setMessages([]); setError(String(e));
+        cursor.current = null;
+        newerAfter.current = null; setHasNewer(false);
+        setThreadRoot(null); setParent(undefined); setProfile(null);
+      }
+    } finally { if (alive.current) setLoadingNewer(false); }
+  };
   const older = async () => {
     if (olderBefore == null || loadingOlder) return;
     setLoadingOlder(true);
@@ -884,6 +929,7 @@ function MessageRoom({
         setParent(undefined);
         setProfile(null);
         cursor.current = null;
+        newerAfter.current = null; setHasNewer(false);
         readCursor.current = 0;
         setOlderBefore(null);
       }
@@ -1032,6 +1078,7 @@ function MessageRoom({
               <X size={18} />
             </button>
           )}
+          {!threadId && onSearch && <button className="team-text-button" aria-label="Search this conversation" title="Search this conversation" onClick={() => onSearch(room.id)}><Search size={17} /></button>}
           {!threadId && <ConversationNotifications org={org} room={room} onSaved={onRoom} />}
           {!threadId && room.can_manage && (
             <button
@@ -1146,11 +1193,12 @@ function MessageRoom({
               </Fragment>
             );
           })}
+          {hasNewer && <button className="team-text-button messages-older" disabled={loadingNewer} onClick={() => void newer()}>{loadingNewer ? "Loading…" : "Load later messages"}</button>}
           </div>
         </div>
-        {newBelow && (
+        {(newBelow || hasNewer) && (
           <button className="messages-new team-primary" onClick={toBottom}>
-            <ArrowDown size={14} /> New messages
+            <ArrowDown size={14} /> {hasNewer ? "Jump to latest" : "New messages"}
           </button>
         )}
         <form

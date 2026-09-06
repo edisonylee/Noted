@@ -169,8 +169,18 @@ export type TeamChatPage = {
   cursor: number;
   has_more: boolean;
   older_before: number | null;
+  newer_after?: number | null;
 };
 
 export type TeamNotificationTarget = { server: string; org: string; user: string; message: string };
 export type TeamMessageLocation = { message: TeamChatMessage; room: TeamChatRoom; parent?: TeamChatMessage };
 export type TeamMentionPage = { items: (TeamMessageLocation & { unread: boolean })[]; next_before: number | null };
+
+export type SearchSnippet = { text: string; match: boolean }[];
+export type TeamMessageSearchHit = { kind: "message"; id: string; room_id: string; room_label: string; author_id: string; author_name: string; created_at: string; snippet: SearchSnippet };
+export type TeamMeetingSearchHit = { kind: "meeting"; id: string; space_id: string; title: string; occurred_at: string; snippet: SearchSnippet };
+export type TeamSearchHit = TeamMessageSearchHit | TeamMeetingSearchHit;
+export type TeamSearchPage = {
+  messages: { hits: TeamMessageSearchHit[]; cursor: string | null };
+  meetings: { hits: TeamMeetingSearchHit[]; cursor: string | null };
+};

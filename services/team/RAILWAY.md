@@ -54,9 +54,9 @@ The current Railway CLI supports `variable set NOTED_TEAM_SETUP_KEY --stdin`
 so the secret need not appear in command history. Use the CLI's own authenticated
 session, never browser cookies. CLI authentication may need user interaction.
 
-For a local upload, stage only these seven files in a clean directory outside
+For a local upload, stage only these nine files in a clean directory outside
 the repository: `Dockerfile`, `.dockerignore`, `server.ts`, `store.ts`,
-`schema.sql`, `reactions.ts`, and `mentions.ts`. Link that directory to the
+`schema.sql`, `reactions.ts`, `mentions.ts`, `search.ts`, and `search.sql`. Link that directory to the
 intended project/service, then run
 `railway up . --path-as-root --detach`. This avoids uploading unrelated source
 or development state. Keep the project/service IDs in local deployment records.

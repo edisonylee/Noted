@@ -122,6 +122,8 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
         return respond(store.snapshot(user, org));
       if (path.length === 3 && method === "PATCH")
         return respond(store.renameOrg(user, org, body.name));
+      if (resource === "search" && !id && method === "GET")
+        return respond(store.search(user, org, url.searchParams));
       if (resource === "mentions" && id && action === "read" && method === "POST")
         return respond(store.readMention(user, org, id));
       if (resource === "mentions" && !id && method === "GET")

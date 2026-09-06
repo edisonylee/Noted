@@ -850,6 +850,10 @@ export const api = {
   teamAsk: (org: string, body: unknown) => invoke<import("./teams/types").TeamAnswer>("team_ask", { org, body }),
   teamPublishMeeting: (args: { org: string; id: number; spaceId: string; folderIds: string[]; summaryId: number | null; includeTranscript: boolean; sourceKey: string; reviewedContent: { title: string; summary: string; transcript: string; accessVersion: number } }) =>
     invoke<import("./teams/types").TeamNote>("team_publish_meeting", args),
+  teamDocumentIdentity: (id: number) => invoke<string>("team_document_identity", { id }),
+  teamDocumentLocalId: (sourceKey: string) => invoke<number | null>("team_document_local_id", { sourceKey }),
+  teamPublishDocument: (args: { existingId?: string; revision?: number; roomId?: string; org: string; id: number; spaceId: string; folderIds: string[]; sourceKey: string; reviewedContent: { title: string; markdown: string; accessVersion: number } }) =>
+    invoke<import("./teams/types").TeamNote>("team_publish_document", args),
 
   // Vendor-neutral local MCP clients. All content release still requires an
   // exact approval in the trusted desktop app.

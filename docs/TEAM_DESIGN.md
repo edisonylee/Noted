@@ -114,6 +114,21 @@ when the channel is archived) that closes any thread panel and opens the
 channel in place. Unresolved names, code spans and URL fragments stay plain,
 and a channel reference never pings anyone.
 
+Library documents travel the same road as meetings. `/document` (or the plus
+menu's "Share a document", on the desktop only, when the room reports
+`document_references_enabled`) lists the viewer's own Library documents; one
+already shared in the team is staged at once, and one that is not opens the
+publish sheet first — team, title, collection, audience, the exported Markdown
+preview with a "Not included" list for images and anything else the export
+dropped, and a 300,000-character refusal — so nothing leaves the Mac without a
+deliberate act. The sent message carries only a revision-pinned reference;
+the source card is derived per viewer from live permissions, shows "Updated
+since shared" when the copy has moved on, and opens the shared note reader,
+which for a document reads collection · publisher · last updated. A Media
+control in the conversation header lists the conversation's images, files and
+documents. The same sheet is reachable from a document's own header as
+**Share to team**, which becomes **Update shared copy** once a copy exists.
+
 The service suite now has 44 passing tests (338 assertions), plus the message-merge
 regression test. New checks cover thread pagination and isolation, idempotent
 reactions, live wake-up/revocation, profile authority and upload validation, and

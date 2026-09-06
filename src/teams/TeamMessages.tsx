@@ -10,6 +10,9 @@ import { MessageComposer, type MessageComposerHandle } from "./MessageComposer";
 import { MessageMarkdown } from "./MessageMarkdown";
 import { SavedMessages } from "./SavedMessages";
 import { PinnedMessages } from "./PinnedMessages";
+import { DocumentPicker } from "./DocumentPicker";
+import { MediaPanel } from "./MediaPanel";
+import { isDesktop } from "../api";
 import {
   AttachmentPicker,
   type AttachmentPickerHandle,
@@ -42,6 +45,7 @@ import {
   ChevronLeft,
   CornerUpLeft,
   Hash,
+  Images,
   Lock,
   Loader,
   MessageSquare,
@@ -61,6 +65,7 @@ import type {
   TeamChatRoom,
   TeamReplyReference,
   TeamSnapshot,
+  TeamSpace,
   TeamUser,
 } from "./types";
 import {
@@ -428,6 +433,7 @@ export function TeamMessages({
               active={active && (!compact || !listVisible)}
               memberCount={data.members.length}
               members={data.members}
+              spaces={data.spaces}
               channels={channels}
               onOpenRoom={openRoom}
               drafts={drafts}
@@ -657,6 +663,7 @@ function MessageRoom({
   active: isActive,
   memberCount,
   members,
+  spaces,
   channels,
   onOpenRoom,
   drafts,
@@ -681,6 +688,9 @@ function MessageRoom({
   active: boolean;
   memberCount: number;
   members: TeamUser[];
+  // Names the collection on a staged document card; the picker looks a
+  // published note's space_id up here.
+  spaces: TeamSpace[];
   // The reader's own channel list, archived ones included; #references in
   // bodies resolve against it and nowhere else.
   channels: TeamChatRoom[];
@@ -748,6 +758,7 @@ function MessageRoom({
     null,
   );
   const [meetingPicker, setMeetingPicker] = useState(false);
+  const [documentPicker, setDocumentPicker] = useState(false);
   // Same lifecycle as staged attachments: survives room and thread switches
   // and the jump remount, dropped on reload. Never the full message.
   const [replyTo, setReplyTo] = useNavigationState<TeamReplyReference | null>(
@@ -763,17 +774,22 @@ function MessageRoom({
   const [threadRoot, setThreadRoot] = useState<TeamChatMessage | null>(
     jump?.parent ?? null,
   );
-  // The thread-panel slot shows either the thread list or one thread; these
-  // stay plain state because a jump remounts the room and discards them.
+  // The thread-panel slot shows exactly one of the thread list, one thread or
+  // the media panel; these stay plain state because a jump remounts the room
+  // and discards them.
   const [threadList, setThreadList] = useState(false);
+  const [mediaPanel, setMediaPanel] = useState(false);
   const [threadFromList, setThreadFromList] = useState(false);
   const [threadListFocus, setThreadListFocus] = useState<string | null>(null);
   const [threadsVersion, setThreadsVersion] = useState(0);
+  const [mediaVersion, setMediaVersion] = useState(0);
   const threadsButton = useRef<HTMLButtonElement>(null);
+  const mediaButton = useRef<HTMLButtonElement>(null);
   // Every exit from the panel goes through here so no caller forgets a piece.
   const resetThreadPanel = useCallback(() => {
     setThreadRoot(null);
     setThreadList(false);
+    setMediaPanel(false);
     setThreadFromList(false);
     setThreadListFocus(null);
   }, []);
@@ -1020,6 +1036,15 @@ function MessageRoom({
           page.messages.some((m) => m.thread_id || (m.reply_count ?? 0) > 0)
         )
           setThreadsVersion((v) => v + 1);
+        // Attachments and source references are what the Media panel lists,
+        // so a page carrying either refreshes it the way replies refresh
+        // Threads.
+        if (
+          !initial &&
+          !threadId &&
+          page.messages.some((m) => m.attachments?.length || m.has_meeting)
+        )
+          setMediaVersion((v) => v + 1);
         cursor.current = page.cursor;
         if (
           !pinned.current &&
@@ -1231,6 +1256,10 @@ function MessageRoom({
       ? ["attach" as const]
       : []),
     ...(room.meeting_references_enabled ? ["meeting" as const] : []),
+    // The picker reads the local Library, which the web preview has none of.
+    ...(room.document_references_enabled && isDesktop
+      ? ["document" as const]
+      : []),
   ];
   const commandBoundary = useRef<HTMLFormElement>(null);
   const commands =
@@ -1255,6 +1284,7 @@ function MessageRoom({
       requestAnimationFrame(() => composer.current?.setSelectionRange(0, 0));
     }
     if (action === "meeting") setMeetingPicker(true);
+    else if (action === "document") setDocumentPicker(true);
     else attachmentPicker.current?.open();
   };
   const eligible =
@@ -1448,8 +1478,9 @@ function MessageRoom({
       aria-label={threadId ? "Thread" : `Conversation: ${label}`}
       // Escape precedence, outermost last: autocomplete picker → cancel
       // pending reply (both in the composer onKeyDown, which stops
-      // propagation) → back to threads → close thread. An open <dialog>
-      // suppresses all of them.
+      // propagation) → back to threads / close thread / close media (the
+      // panel in the slot handles its own). An open <dialog> suppresses all
+      // of them.
       onKeyDown={(event) => {
         if (
           threadId &&
@@ -1463,7 +1494,7 @@ function MessageRoom({
     >
       <div
         className="messages-room-main"
-        inert={!!threadRoot || threadList || undefined}
+        inert={!!threadRoot || threadList || mediaPanel || undefined}
         onDragEnter={(event) => {
           if (!event.dataTransfer.types.includes("Files")) return;
           event.preventDefault();
@@ -1614,6 +1645,21 @@ function MessageRoom({
               {unreadThreads > 0 && (
                 <span className="messages-head-count">{unreadThreads}</span>
               )}
+            </button>
+          )}
+          {!threadId && room.media_enabled && (
+            <button
+              ref={mediaButton}
+              className="team-text-button"
+              aria-expanded={mediaPanel}
+              aria-controls={mediaPanel ? `media-${room.id}` : undefined}
+              onClick={() => {
+                const open = !mediaPanel;
+                resetThreadPanel();
+                setMediaPanel(open);
+              }}
+            >
+              <Images size={17} /> Media
             </button>
           )}
           {!threadId && onSearch && (
@@ -2060,6 +2106,22 @@ function MessageRoom({
           }}
         />
       )}
+      {documentPicker && isActive && canSend && (
+        <DocumentPicker
+          roomId={room.id}
+          org={org}
+          spaces={spaces}
+          onClose={() => {
+            setDocumentPicker(false);
+            requestAnimationFrame(() => composer.current?.focus());
+          }}
+          onChoose={(value) => {
+            setMeeting(value);
+            setDocumentPicker(false);
+            requestAnimationFrame(() => composer.current?.focus());
+          }}
+        />
+      )}
       {showPins && (
         <PinnedMessages
           org={org}
@@ -2068,7 +2130,7 @@ function MessageRoom({
           onOpen={(id) => onOpenMessage?.(id)}
         />
       )}
-      {(threadRoot || threadList) && !threadId && (
+      {(threadRoot || threadList || mediaPanel) && !threadId && (
         <div className="messages-thread-panel">
           {threadRoot ? (
             <MessageRoom
@@ -2079,6 +2141,7 @@ function MessageRoom({
               active={isActive}
               memberCount={memberCount}
               members={members}
+              spaces={spaces}
               channels={channels}
               onOpenRoom={openRoom}
               thread={threadRoot}
@@ -2104,6 +2167,36 @@ function MessageRoom({
                 resetThreadPanel();
                 requestAnimationFrame(() =>
                   composer.current?.focus({ preventScroll: true }),
+                );
+              }}
+            />
+          ) : mediaPanel ? (
+            <MediaPanel
+              id={`media-${room.id}`}
+              org={org}
+              user={user}
+              room={room}
+              active={isActive}
+              version={mediaVersion}
+              // The message is shown in place, so the panel gives way first:
+              // the flash lands on a pane that is no longer inert.
+              onJump={(target) => {
+                resetThreadPanel();
+                jumpToMessage(target);
+                requestAnimationFrame(() =>
+                  mediaButton.current?.focus({ preventScroll: true }),
+                );
+              }}
+              // The reader replaces the room; the panel must not outlive it
+              // and leave the main pane inert on return.
+              onOpenDocument={(target) => {
+                resetThreadPanel();
+                onMeeting?.(target);
+              }}
+              onClose={() => {
+                resetThreadPanel();
+                requestAnimationFrame(() =>
+                  mediaButton.current?.focus({ preventScroll: true }),
                 );
               }}
             />

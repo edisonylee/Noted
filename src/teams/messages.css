@@ -933,6 +933,92 @@
   font-style: italic;
   color: var(--muted);
 }
+/* Media panel: the thread list's frame with filter chips above the list. The
+   image grid is the inline attachment card's thumbnail idea at tile size. */
+.media-panel-filters {
+  display: flex;
+  gap: 6px;
+  padding: 0 16px 12px;
+}
+.media-panel-filters [role="tab"] {
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.media-panel-filters [role="tab"]:hover {
+  background: var(--hover-soft);
+}
+.media-panel-filters [role="tab"][aria-selected="true"] {
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink);
+}
+/* Two rows in a tall slot must not be stretched apart by the grid's default
+   track alignment. */
+.messages-media-panel .message-collection-list {
+  align-content: start;
+}
+.media-panel-row .media-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.media-panel-row .media-panel-head > svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.media-panel-row .media-panel-head strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.media-panel-row time {
+  font-variant-numeric: tabular-nums;
+}
+/* Rows are sized here, not by the tiles' aspect ratio: a stretched grid item
+   contributes only its content height to an auto track, so tiles would
+   overlap once the column is wider than the spinner. */
+.message-collection-list.media-panel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  grid-auto-rows: 96px;
+  gap: 8px;
+}
+.media-panel-grid > .messages-older {
+  grid-column: 1 / -1;
+}
+.media-panel-thumb {
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: pointer;
+}
+.media-panel-thumb:hover {
+  border-color: var(--line-strong);
+}
+.media-panel-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.media-panel-thumb > span {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+}
 /* Scoped under the content column so the rules outrank the body-paragraph
    rule above: the deleted-original tombstone is a <p>, and both states of the
    reference line must share one size and rhythm. */

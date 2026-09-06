@@ -3,6 +3,10 @@ import type { TeamAttachment } from "./types";
 export const MAX_PREVIEW_BYTES = 5 * 1024 * 1024;
 export const MAX_TEXT_PREVIEW_CHARACTERS = 200_000;
 export type PreviewKind = "image" | "pdf" | "text";
+export const sizeLabel = (size: number) =>
+  size < 1024 * 1024
+    ? `${Math.ceil(size / 1024)} KB`
+    : `${(size / 1024 / 1024).toFixed(1)} MB`;
 export function attachmentPreviewKind(mime: string): PreviewKind | null {
   if (mime === "image/png" || mime === "image/jpeg") return "image";
   if (mime === "application/pdf") return "pdf";

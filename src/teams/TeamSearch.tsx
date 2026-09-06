@@ -4,6 +4,7 @@ import {
   Loader,
   MessageSquare,
   BookOpen,
+  FileText,
   ChevronDown,
   SlidersHorizontal,
   RotateCcw,
@@ -173,6 +174,8 @@ export function TeamSearch({
       <span className="team-search-result-icon">
         {hit.kind === "message" ? (
           <MessageSquare size={17} />
+        ) : hit.kind === "document" ? (
+          <FileText size={17} />
         ) : (
           <BookOpen size={17} />
         )}

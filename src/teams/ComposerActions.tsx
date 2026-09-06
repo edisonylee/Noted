@@ -1,11 +1,16 @@
 import { useRef, useState } from "react";
-import { BookOpen, Paperclip, Plus } from "lucide-react";
+import { BookOpen, FileText, Paperclip, Plus } from "lucide-react";
 import { useOutsideDismiss } from "../ui/useDismissal";
 import { composerActions, type ComposerAction } from "./composerCommands";
 import "./composer-actions.css";
 
 export function ActionIcon({ action }: { action: ComposerAction }) {
-  const Icon = action === "meeting" ? BookOpen : Paperclip;
+  const Icon =
+    action === "meeting"
+      ? BookOpen
+      : action === "document"
+        ? FileText
+        : Paperclip;
   return <Icon size={16} aria-hidden="true" />;
 }
 

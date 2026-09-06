@@ -10,7 +10,7 @@ import { api, isDesktop } from "../api";
 import { team, orgPath } from "./client";
 import type { TeamAttachment } from "./types";
 import { AttachmentPreview } from "./AttachmentPreview";
-import { attachmentPreviewKind } from "./attachmentPreviewData";
+import { attachmentPreviewKind, sizeLabel } from "./attachmentPreviewData";
 import { useAttachmentPreview } from "./useAttachmentPreview";
 import "./message-attachments.css";
 
@@ -21,10 +21,6 @@ export type PendingAttachment = {
   data: string;
 };
 const limit = 5 * 1024 * 1024;
-const sizeLabel = (size: number) =>
-  size < 1024 * 1024
-    ? `${Math.ceil(size / 1024)} KB`
-    : `${(size / 1024 / 1024).toFixed(1)} MB`;
 export type AttachmentPickerHandle = {
   addFiles: (files: File[]) => void;
   open: () => void;

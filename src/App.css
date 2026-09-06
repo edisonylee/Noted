@@ -15447,6 +15447,35 @@ a.cal-btn {
   outline-offset: 1px;
 }
 
+/* Sits beside the Move control and borrows its metrics so the header actions
+   read as one row. */
+.note-document-share {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  border: var(--border-width, 1px) solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 0 10px;
+  background: var(--surface-2);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 570;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.note-document-share:hover {
+  color: var(--ink);
+  background: var(--hover-soft);
+}
+
+.note-document-share:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .note-filing-message {
   align-self: flex-end;
   margin-top: -12px;

@@ -1,4 +1,4 @@
-export type ComposerAction = "meeting" | "attach";
+export type ComposerAction = "meeting" | "document" | "attach";
 export const composerActions = [
   {
     id: "attach" as const,
@@ -9,6 +9,11 @@ export const composerActions = [
     id: "meeting" as const,
     label: "Reference a meeting",
     description: "Add a link to shared meeting notes",
+  },
+  {
+    id: "document" as const,
+    label: "Share a document",
+    description: "Publish a Library document and link it",
   },
 ];
 

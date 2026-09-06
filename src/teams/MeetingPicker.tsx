@@ -1,14 +1,18 @@
 import { useEffect, useState } from "react";
-import { BookOpen, Search, X } from "lucide-react";
+import { BookOpen, FileText, Search, X } from "lucide-react";
 import { TeamDialog } from "./TeamDialog";
 import { orgPath, team } from "./client";
+import type { TeamNoteKind } from "./types";
 
+// One staged source reference per message, meeting or document alike: the
+// send payload, retry key and clearing never look at kind, only the card does.
 export type PendingMeeting = {
   id: string;
   revision: number;
   title: string;
   occurred_at: string;
   collection: string;
+  kind?: TeamNoteKind;
 };
 type Page = { meetings: PendingMeeting[]; next_offset: number | null };
 const date = (value: string) =>
@@ -27,13 +31,20 @@ export function StagedMeeting({
   disabled: boolean;
   onRemove: () => void;
 }) {
+  const document = meeting.kind === "document";
+  const Icon = document ? FileText : BookOpen;
+  const noun = document ? "Document" : "Meeting";
   return (
-    <div className="composer-staged-meeting" aria-label="Meeting ready to send">
-      <BookOpen size={18} aria-hidden="true" />
+    <div
+      className="composer-staged-meeting"
+      aria-label={`${noun} ready to send`}
+    >
+      <Icon size={18} aria-hidden="true" />
       <span>
         <strong>{meeting.title}</strong>
         <small>
-          {date(meeting.occurred_at)} · {meeting.collection} · Ready to send
+          {noun} · {date(meeting.occurred_at)}
+          {meeting.collection && ` · ${meeting.collection}`} · Ready to send
         </small>
       </span>
       <button
@@ -41,7 +52,7 @@ export function StagedMeeting({
         className="icon-btn"
         disabled={disabled}
         onClick={onRemove}
-        aria-label="Remove meeting reference"
+        aria-label={`Remove ${noun.toLowerCase()} reference`}
       >
         <X size={15} />
       </button>

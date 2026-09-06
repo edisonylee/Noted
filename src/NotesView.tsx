@@ -34,11 +34,13 @@ import {
   Plus,
   RotateCcw,
   Search,
+  Share2,
   Trash2,
   X,
 } from "lucide-react";
 import {
   api,
+  isDesktop,
   type CategoryInfo,
   type MeetingListRow,
   type NoteSortOrder,
@@ -55,6 +57,9 @@ import { NoteDocumentEditor } from "./NoteDocumentEditor";
 import { easternDay, formatDay, relativeDay } from "./day";
 import { emptyDocument } from "./editor/document";
 import { isDocumentNote } from "./library";
+import { team } from "./teams/client";
+import { PublishDocument, findSharedDocument } from "./teams/PublishDocument";
+import type { TeamOrg } from "./teams/types";
 import {
   hasStoredFilingContext,
   isFilingContext,
@@ -511,6 +516,41 @@ function LibraryWorkspace({
   const [query, setQuery] = useNavigationState(`${navigationScope}:query`, "");
   const [openNote, setOpenNote] = useState<NoteRow | null>(null);
   const [openMeeting, setOpenMeeting] = useState<MeetingTarget | null>(null);
+  // Team sharing for the open document. The button exists only once the team
+  // answers, and reads "Update shared copy" when some team already holds one.
+  const [sharingDocument, setSharingDocument] = useState(false);
+  const [teamReachable, setTeamReachable] = useState(false);
+  const [sharedCopyOrg, setSharedCopyOrg] = useState<string | null>(null);
+  const [sharedLookup, setSharedLookup] = useState(0);
+  const shareButton = useRef<HTMLButtonElement>(null);
+  const openDocumentId =
+    openNote && isDocumentNote(openNote) && !openNote.trashed_at ? openNote.id : null;
+  useEffect(() => setSharingDocument(false), [openDocumentId]);
+  useEffect(() => {
+    setSharedCopyOrg(null);
+    setTeamReachable(false);
+    if (!isDesktop || openDocumentId == null) return;
+    let active = true;
+    (async () => {
+      const orgs = await team.request<TeamOrg[]>("GET", "/v1/orgs");
+      if (!active) return;
+      // A reachable server with no teams has nowhere to share to.
+      setTeamReachable(orgs.length > 0);
+      for (const org of orgs) {
+        const copy = await findSharedDocument(org.id, openDocumentId);
+        if (!active) return;
+        if (copy) {
+          setSharedCopyOrg(org.id);
+          return;
+        }
+      }
+    })().catch(() => {
+      // No team, or it is unreachable: sharing is simply not offered here.
+    });
+    return () => {
+      active = false;
+    };
+  }, [openDocumentId, sharedLookup]);
   useEffect(() => {
     if (!requestedNote) return;
     setOpenMeeting(null);
@@ -2078,26 +2118,39 @@ function LibraryWorkspace({
           )}
           placement={placement}
           controls={(
-            <label className="note-file-select">
-              <span className="sr-only">Move {openItemLabel.toLowerCase()} to a folder</span>
-              <select
-                value=""
-                disabled={filing}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  if (value) void fileOpenNote(Number(value));
-                }}
-              >
-                <option value="">Move to…</option>
-                {filingTargets
-                  .filter((folder) => folder.id !== explicitPlacement?.folder.id)
-                  .map((folder) => (
-                    <option key={folder.id} value={folder.id}>
-                      {filingTargetLabel(folder)}
-                    </option>
-                  ))}
-              </select>
-            </label>
+            <>
+              {teamReachable && openDocumentId != null && (
+                <button
+                  ref={shareButton}
+                  type="button"
+                  className="note-document-share"
+                  onClick={() => setSharingDocument(true)}
+                >
+                  <Share2 size={13} aria-hidden="true" />
+                  {sharedCopyOrg ? "Update shared copy" : "Share to team"}
+                </button>
+              )}
+              <label className="note-file-select">
+                <span className="sr-only">Move {openItemLabel.toLowerCase()} to a folder</span>
+                <select
+                  value=""
+                  disabled={filing}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (value) void fileOpenNote(Number(value));
+                  }}
+                >
+                  <option value="">Move to…</option>
+                  {filingTargets
+                    .filter((folder) => folder.id !== explicitPlacement?.folder.id)
+                    .map((folder) => (
+                      <option key={folder.id} value={folder.id}>
+                        {filingTargetLabel(folder)}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            </>
           )}
           onBack={() => {
             setEditingNote(false);
@@ -2108,6 +2161,26 @@ function LibraryWorkspace({
             await onChanged?.();
           }}
         >
+          {sharingDocument && (
+            <PublishDocument
+              document={{
+                id: openNote.id,
+                title: openNote.title,
+                documentJson: openNote.document_json,
+                updatedAt: openNote.updated_at,
+              }}
+              preferredOrg={sharedCopyOrg ?? undefined}
+              // The sheet held focus; hand it back to the control that opened
+              // it, as the composer path does after the picker.
+              onClose={() => {
+                setSharingDocument(false);
+                requestAnimationFrame(() =>
+                  shareButton.current?.focus({ preventScroll: true }),
+                );
+              }}
+              onPublished={() => setSharedLookup((n) => n + 1)}
+            />
+          )}
           {filingMsg && <div className="note-filing-message">{filingMsg}</div>}
           {openNote.entries.some(
             (entry) => entry.data && Object.keys(entry.data).length > 0

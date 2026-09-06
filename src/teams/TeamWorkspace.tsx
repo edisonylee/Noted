@@ -1,3 +1,4 @@
+import { api, isDesktop, type NoteRow } from "../api";
 import { useOutsideDismiss } from "../ui/useDismissal";
 import { ShareMeetingDialog } from "./ShareMeetingDialog";
 import { TeamSearch } from "./TeamSearch";
@@ -183,7 +184,7 @@ export function TeamWorkspace({
   notificationTarget,
   onNotificationHandled,
 }: {
-  onOpenLibrary?: () => void;
+  onOpenLibrary?: (note?: NoteRow) => void;
   notificationTarget?: TeamNotificationTarget | null;
   onNotificationHandled?: () => void;
 } = {}) {
@@ -470,7 +471,7 @@ function TeamLibrary({
   notificationTarget?: TeamNotificationTarget | null;
   onNotificationHandled?: () => void;
   org: string;
-  onOpenLibrary?: () => void;
+  onOpenLibrary?: (note?: NoteRow) => void;
   onTeamUpdate: (team: TeamOrg) => void;
 }) {
   const [data, setData] = useState<TeamSnapshot | null>(null);
@@ -565,6 +566,9 @@ function TeamLibrary({
           space,
           folder,
           trash: String(view === "trash"),
+          // Shared documents are reached from Search and from the conversation
+          // they were linked in; this tab stays a meetings tab.
+          kind: "meeting",
           offset: String(offset),
         });
         const next = await team.request<TeamNoteRow[]>(
@@ -773,10 +777,13 @@ function TeamLibrary({
         </div>
       )}
       {data && view === "messages" && messageMeeting && (
-        <SharedMeeting
+        <SharedNote
           org={org}
           id={messageMeeting}
+          viewer={data.user.id}
           folders={data.folders}
+          spaces={data.spaces}
+          onOpenLibrary={onOpenLibrary}
           accessEpoch={accessEpoch}
           backLabel="Conversation"
           onBack={() => setMessageMeeting(null)}
@@ -786,11 +793,14 @@ function TeamLibrary({
       {data &&
         view === "search" &&
         (searchMeeting ? (
-          <SharedMeeting
+          <SharedNote
             key={searchMeeting}
             org={org}
             id={searchMeeting}
+            viewer={data.user.id}
             folders={data.folders}
+            spaces={data.spaces}
+            onOpenLibrary={onOpenLibrary}
             accessEpoch={accessEpoch}
             onShared={openSharedMessage}
             backLabel="Search results"
@@ -803,7 +813,7 @@ function TeamLibrary({
             room={searchRoom}
             onRoom={setSearchRoom}
             onOpen={(hit) => {
-              if (hit.kind === "meeting") setSearchMeeting(hit.id);
+              if (hit.kind !== "message") setSearchMeeting(hit.id);
               else {
                 setRequestedMessage({ id: hit.id, nonce: Date.now() });
                 setView("messages");
@@ -951,12 +961,15 @@ function TeamLibrary({
               onSource={(id) => setNoteId(id)}
             />
           ) : data && noteId ? (
-            <SharedMeeting
+            <SharedNote
               key={noteId}
               org={org}
               id={noteId}
+              viewer={data.user.id}
               onShared={openSharedMessage}
               folders={data.folders}
+              spaces={data.spaces}
+              onOpenLibrary={onOpenLibrary}
               accessEpoch={accessEpoch}
               onBack={() => {
                 setNoteId(null);
@@ -1367,22 +1380,28 @@ function CreateTeamLocation({
   );
 }
 
-function SharedMeeting({
+function SharedNote({
   backLabel = "Shared meetings",
   onShared,
   org,
   id,
+  viewer,
   folders,
+  spaces,
   accessEpoch,
   onBack,
+  onOpenLibrary,
 }: {
   org: string;
   id: string;
+  viewer: string;
   folders: TeamFolder[];
+  spaces: TeamSpace[];
   accessEpoch: number;
   backLabel?: string;
   onShared?: (id: string) => void;
   onBack: () => void;
+  onOpenLibrary?: (note?: NoteRow) => void;
 }) {
   const [sharing, setSharing] = useState(false);
   const [shareQuote, setShareQuote] = useState("");
@@ -1395,6 +1414,37 @@ function SharedMeeting({
     [copied, setCopied] = useState(false);
   const [editRevision, setEditRevision] = useState<number | null>(null);
   const [editFolders, setEditFolders] = useState<string[]>([]);
+  const isDocument = note?.kind === "document",
+    noun = isDocument ? "document" : "meeting";
+  // Only the Mac that published a document holds its original; everywhere
+  // else the shared copy stands alone and the button is absent. The local id
+  // is only meaningful for the publisher: a teammate's Library can hold an
+  // unrelated note under the same number.
+  const [localNote, setLocalNote] = useState<NoteRow | null>(null);
+  const localSourceKey =
+    note?.kind === "document" && note.owner_id === viewer
+      ? note.source_key
+      : null;
+  useEffect(() => {
+    setLocalNote(null);
+    if (!isDesktop || !localSourceKey?.startsWith("document:v2:")) return;
+    let active = true;
+    (async () => {
+      const id = await api.teamDocumentLocalId(localSourceKey);
+      if (id == null || !active) return;
+      const rows = await api.listNotes();
+      if (active)
+        setLocalNote(
+          rows.find(
+            (row) =>
+              row.id === id && row.note_kind === "document" && !row.trashed_at,
+          ) ?? null,
+        );
+    })().catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [localSourceKey, viewer, org]);
   const transcriptPanel = useRef<HTMLDetailsElement>(null);
   const transcriptRows = useRef<(HTMLParagraphElement | null)[]>([]);
   const [highlight, setHighlight] = useState(-1);
@@ -1472,7 +1522,7 @@ function SharedMeeting({
         onClick={() => {
           if (
             !editing ||
-            confirm("Discard unsaved changes to this shared meeting?")
+            confirm(`Discard unsaved changes to this shared ${noun}?`)
           )
             onBack();
         }}
@@ -1494,15 +1544,31 @@ function SharedMeeting({
           </button>
         </p>
       )}
-      {!note && !error && <p>Loading meeting…</p>}
+      {!note && !error && <p>Loading…</p>}
       {note && (
         <>
           <header>
             <h1>{note.title}</h1>
             <p className="team-muted">
-              Shared by {note.owner_name} ·{" "}
-              {new Date(note.occurred_at).toLocaleDateString()} · Revision{" "}
-              {note.revision}
+              {isDocument ? (
+                <>
+                  {collectionName(
+                    spaces.find((s) => s.id === note.space_id) ?? {
+                      name: "Shared",
+                      description: "",
+                    },
+                  )}{" "}
+                  · {note.owner_name} · Updated{" "}
+                  {new Date(note.updated_at).toLocaleDateString()} · Revision{" "}
+                  {note.revision}
+                </>
+              ) : (
+                <>
+                  Shared by {note.owner_name} ·{" "}
+                  {new Date(note.occurred_at).toLocaleDateString()} · Revision{" "}
+                  {note.revision}
+                </>
+              )}
             </p>
           </header>
           <div className="team-note-actions">
@@ -1537,6 +1603,11 @@ function SharedMeeting({
               {copied ? <Check size={14} /> : <Copy size={14} />}
               {copied ? "Copied" : "Copy Markdown"}
             </button>
+            {localNote && onOpenLibrary && (
+              <button onClick={() => onOpenLibrary(localNote)}>
+                <BookOpen size={14} /> Open in Library
+              </button>
+            )}
             {note.can_edit && !note.trashed_at && !editing && (
               <button
                 onClick={() => {
@@ -1547,7 +1618,7 @@ function SharedMeeting({
                   setEditing(true);
                 }}
               >
-                Edit shared notes
+                {isDocument ? "Edit shared copy" : "Edit shared notes"}
               </button>
             )}
             {note.can_manage && (
@@ -1557,7 +1628,7 @@ function SharedMeeting({
                   if (
                     !note.trashed_at &&
                     !confirm(
-                      "Move this shared copy to team Trash? Your local meeting is kept.",
+                      `Move this shared copy to team Trash? Your local ${noun} is kept.`,
                     )
                   )
                     return;
@@ -1597,10 +1668,10 @@ function SharedMeeting({
           )}
           {editing ? (
             <TeamDialog
-              title="Edit shared meeting"
+              title={`Edit shared ${noun}`}
               busy={busy}
               onClose={() => {
-                if (confirm("Discard unsaved changes to this shared meeting?"))
+                if (confirm(`Discard unsaved changes to this shared ${noun}?`))
                   setEditing(false);
               }}
             >
@@ -1646,7 +1717,7 @@ function SharedMeeting({
                   />
                 </label>
                 <label>
-                  Shared notes
+                  {isDocument ? "Markdown" : "Shared notes"}
                   <textarea
                     value={summary}
                     required
@@ -1678,7 +1749,7 @@ function SharedMeeting({
                 </fieldset>
                 <div className="team-form-actions">
                   <button className="team-primary" disabled={busy}>
-                    Save shared notes
+                    {isDocument ? "Save shared copy" : "Save shared notes"}
                   </button>
                   <button
                     type="button"
@@ -1691,7 +1762,10 @@ function SharedMeeting({
               </form>
             </TeamDialog>
           ) : (
-            <MdBlock md={note.summary} onSource={openSource} />
+            <MdBlock
+              md={note.summary}
+              onSource={isDocument ? undefined : openSource}
+            />
           )}
           {!!note.transcript && (
             <details ref={transcriptPanel} className="team-transcript">
@@ -1713,7 +1787,7 @@ function SharedMeeting({
           )}
           <p className="team-muted team-note-provenance">
             This is a shared copy. Changes here do not overwrite the publisher’s
-            local meeting.
+            local {noun}.
           </p>
         </>
       )}

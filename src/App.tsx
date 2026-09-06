@@ -1046,7 +1046,12 @@ export default function App() {
           </WeatherHome>
         ) : view === "team" ? (
           <Suspense fallback={<p role="status">Opening team workspace…</p>}>
-            <TeamWorkspace onOpenLibrary={() => setView("library")} notificationTarget={notificationTarget} onNotificationHandled={() => setNotificationTarget(null)} />
+            <TeamWorkspace onOpenLibrary={(note) => {
+              // A shared document's "Open in Library" lands on the note itself,
+              // through the same requested-note path search results use.
+              if (note) setNavigationNote(note);
+              setView(note && isDocumentNote(note) ? "documents" : "library");
+            }} notificationTarget={notificationTarget} onNotificationHandled={() => setNotificationTarget(null)} />
           </Suspense>
         ) : view === "documents" ? (
           <DocumentsView key="documents" notes={notes} cats={cats} requestedNote={navigationNote} onRequestedNoteOpened={() => setNavigationNote(null)} onChanged={() => refresh().catch(handleErr)} />

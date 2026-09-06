@@ -704,6 +704,16 @@
   padding: 18px;
   font-size: 12px;
 }
+.team-omitted {
+  font-size: 12px;
+}
+.team-omitted ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  max-height: 120px;
+  overflow-y: auto;
+  color: var(--muted);
+}
 .team-audience {
   display: flex;
   align-items: start;

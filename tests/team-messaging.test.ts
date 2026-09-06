@@ -90,3 +90,30 @@ test("desktop mentions baseline history, deduplicate polls and isolate recipient
   expect(tracker.update("server:org", [room(15, 15)])).toHaveLength(0);
   expect(tracker.update("other:org", [room(20, 20)])).toHaveLength(0);
 });
+
+import { captureMessagePosition, restoreMessagePosition, saveMessagePosition, readMessagePosition } from "../src/teams/messageScroll";
+
+test("scroll anchors preserve a partially visible message when history and viewport change", () => {
+  let scrollTop = 120;
+  let contentShift = 0;
+  const rows = [0, 100, 200].map((offset, index) => ({
+    dataset: { messageId: `m${index}`, messageSeq: String(index + 1) },
+    getBoundingClientRect: () => ({ top: 50 + offset + contentShift - scrollTop, bottom: 150 + offset + contentShift - scrollTop }),
+  }));
+  const viewport = {
+    get scrollTop() { return scrollTop; },
+    set scrollTop(value: number) { scrollTop = value; },
+    getBoundingClientRect: () => ({ top: 50 }),
+    querySelectorAll: () => rows,
+  } as unknown as HTMLElement;
+  const anchor = captureMessagePosition(viewport)!;
+  expect(anchor).toEqual({ id: "m1", seq: 2, offset: -20 });
+  saveMessagePosition("org:alice:dm:main", anchor);
+  expect(readMessagePosition("org:bob:dm:main")).toBeUndefined();
+  contentShift = 400; // Older history was added above the saved message.
+  scrollTop = 0;
+  expect(restoreMessagePosition(viewport, anchor)).toBe(true);
+  expect(scrollTop).toBe(520);
+  expect(captureMessagePosition(viewport)).toEqual(anchor);
+  expect(restoreMessagePosition(viewport, { ...anchor, id: "missing" })).toBe(false);
+});

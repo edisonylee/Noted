@@ -1,3 +1,4 @@
+import { captureMessagePosition, readMessagePosition, restoreMessagePosition, saveMessagePosition } from "./messageScroll";
 import { useNavigationState } from "../useNavigationState";
 import { setViewedMessageRoom } from "./mentionNotifications";
 import {
@@ -580,6 +581,17 @@ function MessageRoom({
   thread?: TeamChatMessage;
   onCloseThread?: () => void;
 }) {
+  const positionKey = `${org}:${user}:${room.id}:${thread?.id ?? "main"}`;
+  const restorePosition = useRef(readMessagePosition(positionKey));
+  const positionReady = useRef(false);
+  const holdPosition = useRef(!!restorePosition.current);
+  const wasActive = useRef(isActive);
+  const historyContent = useRef<HTMLDivElement>(null);
+  const rememberPosition = useCallback(() => {
+    if (!positionReady.current || !viewport.current || !visible.current || !viewport.current.clientHeight) return;
+    const position = captureMessagePosition(viewport.current);
+    if (position) saveMessagePosition(positionKey, position);
+  }, [positionKey]);
   const draftKey = thread?.id ?? room.id;
   const draft = drafts[draftKey] ?? "";
   const setDraft = (value: string) => setDraftFor(draftKey, value);
@@ -645,22 +657,55 @@ function MessageRoom({
     [path, id, onRead],
   );
   const toBottom = useCallback(() => {
+    holdPosition.current = false;
     pinned.current = true;
     setNewBelow(false);
     setScrollVersion((value) => value + 1);
   }, []);
   useLayoutEffect(() => {
     const el = viewport.current;
-    if (!el || !isActive) return;
-    if (prepend.current) {
+    if (!isActive) { wasActive.current = false; return; }
+    if (!el || !loaded || error) return;
+    if (!wasActive.current) {
+      restorePosition.current = readMessagePosition(positionKey);
+      positionReady.current = false;
+      holdPosition.current = !!restorePosition.current;
+    }
+    wasActive.current = true;
+    if (!positionReady.current) {
+      const saved = restorePosition.current;
+      if (saved && restoreMessagePosition(el, saved)) {
+        pinned.current = !holdPosition.current && el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+      } else {
+        el.scrollTop = el.scrollHeight;
+        pinned.current = true;
+      }
+      positionReady.current = true;
+      restorePosition.current = undefined;
+      setNewBelow(el.scrollHeight - el.scrollTop - el.clientHeight >= 8);
+    } else if (prepend.current) {
       el.scrollTop =
         prepend.current.top + el.scrollHeight - prepend.current.height;
       prepend.current = null;
     } else if (pinned.current) {
       el.scrollTop = el.scrollHeight;
-      if (cursor.current != null) void acknowledge(cursor.current);
     }
-  }, [messages, isActive, loaded, scrollVersion, acknowledge, parent]);
+    if (pinned.current && cursor.current != null) void acknowledge(cursor.current);
+    rememberPosition();
+  }, [messages, isActive, loaded, scrollVersion, acknowledge, parent, error, rememberPosition, positionKey]);
+  useLayoutEffect(() => {
+    const el = viewport.current;
+    const content = historyContent.current;
+    if (!el || !content) return;
+    const observer = new ResizeObserver(() => {
+      if (!visible.current || !positionReady.current) return;
+      if (pinned.current) el.scrollTop = el.scrollHeight;
+      rememberPosition();
+    });
+    observer.observe(el);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [rememberPosition]);
   useEffect(() => {
     let active = true;
     let timer: number;
@@ -688,6 +733,20 @@ function MessageRoom({
         if (epoch !== accessEpoch.current) {
           timer = window.setTimeout(poll, 1_000);
           return;
+        }
+        // Fetch back to the saved anchor before exposing the initial history.
+        // Keep the original live cursor so updates during pagination are replayed.
+        const saved = restorePosition.current;
+        if (initial && saved) {
+          while (page.older_before != null && page.messages[0]?.created_seq > saved.seq) {
+            const previous = await team.request<TeamChatPage>(
+              "GET", `${path}/messages?before=${page.older_before}${threadId ? `&thread=${threadId}` : ""}`,
+            );
+            if (!active || epoch !== accessEpoch.current) return;
+            page.messages = mergeMessages(previous.messages, page.messages);
+            if (previous.older_before === page.older_before) break;
+            page.older_before = previous.older_before;
+          }
         }
         onRoom(page.room);
         if (threadId) setParent(page.parent);
@@ -800,7 +859,7 @@ function MessageRoom({
       if (!alive.current || epoch !== accessEpoch.current) return;
       setMessages((old) => mergeMessages(old, [message]));
       toBottom();
-      requestAnimationFrame(() => composer.current?.focus());
+      requestAnimationFrame(() => composer.current?.focus({ preventScroll: true }));
     } catch (e) {
       if (alive.current) setSendError(String(e));
     } finally {
@@ -953,17 +1012,23 @@ function MessageRoom({
           aria-label="Message history"
           aria-live="polite"
           aria-relevant="additions text"
+          onWheel={() => { holdPosition.current = false; }}
+          onTouchMove={() => { holdPosition.current = false; }}
+          onPointerDown={() => { holdPosition.current = false; }}
+          onKeyDown={() => { holdPosition.current = false; }}
           onScroll={() => {
             const el = viewport.current;
-            if (!el) return;
+            if (!el || !positionReady.current || !isActive || !el.clientHeight) return;
             pinned.current =
-              el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+              !holdPosition.current && el.scrollHeight - el.scrollTop - el.clientHeight < 8;
             if (pinned.current) {
               setNewBelow(false);
               if (cursor.current != null) void acknowledge(cursor.current);
             }
+            rememberPosition();
           }}
         >
+          <div ref={historyContent}>
           {olderBefore != null && (
             <button
               className="team-text-button messages-older"
@@ -1030,6 +1095,7 @@ function MessageRoom({
               </Fragment>
             );
           })}
+          </div>
         </div>
         {newBelow && (
           <button className="messages-new team-primary" onClick={toBottom}>
@@ -1132,7 +1198,7 @@ function MessageRoom({
             onRead={onRead}
             onCloseThread={() => {
               setThreadRoot(null);
-              requestAnimationFrame(() => composer.current?.focus());
+              requestAnimationFrame(() => composer.current?.focus({ preventScroll: true }));
             }}
           />
         </div>

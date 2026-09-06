@@ -62,6 +62,8 @@ export function MessageRow({
   };
   return (
     <article
+      data-message-id={message.id}
+      data-message-seq={message.created_seq}
       className={`messages-message${message.author_id === user ? " own" : ""}`}
       aria-label={`Message from ${person.name}`}
     >

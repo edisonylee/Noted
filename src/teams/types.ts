@@ -116,6 +116,13 @@ export type TeamChatRoom = {
   notification_mode?: ConversationAlertMode;
   message_extras?: boolean;
   attachments_enabled?: boolean;
+  unread_navigation?: boolean;
+  read_version?: number;
+  read_held?: boolean;
+  read_cursor?: number;
+  first_unread_id?: string;
+  first_unread_root_id?: string;
+  first_unread_seq?: number;
   id: string;
   org_id: string;
   kind: "channel" | "direct";

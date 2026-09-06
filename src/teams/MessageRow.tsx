@@ -1,6 +1,6 @@
 import { MessageAttachments } from "./MessageAttachments";
 import { useState, type ReactNode } from "react";
-import { MessageSquare, Pencil, SmilePlus, Trash2 } from "lucide-react";
+import { MessageSquare, Pencil, SmilePlus, Trash2, Mail } from "lucide-react";
 import { REACTIONS, REACTION_NAMES } from "../../services/team/reactions";
 import { TeamAvatar } from "./TeamAvatar";
 import { TeamDialog } from "./TeamDialog";
@@ -18,6 +18,7 @@ export function MessageRow({
   onEdit,
   onDelete,
   onProfile,
+  onMarkUnread,
   renderBody,
   showReplies = true,
   extras,
@@ -33,6 +34,7 @@ export function MessageRow({
   onEdit: () => void;
   onDelete: () => void;
   onProfile: () => void;
+  onMarkUnread?: () => void;
   /** Lets the caller decorate the body (mention marks) without this row
    *  knowing what a mention is. Plain text when omitted. */
   renderBody?: (body: string) => ReactNode;
@@ -144,6 +146,16 @@ export function MessageRow({
         )}
       </div>
       <div className="messages-actions">
+        {!message.deleted_at && onMarkUnread && (
+          <button
+            className="team-text-button"
+            title="Mark unread from here"
+            aria-label={`Mark message from ${person.name} unread`}
+            onClick={onMarkUnread}
+          >
+            <Mail size={14} />
+          </button>
+        )}
         {!message.deleted_at && canSend && extras && (
           <>
             <button

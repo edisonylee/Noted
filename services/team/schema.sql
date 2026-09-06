@@ -85,3 +85,11 @@ CREATE TABLE IF NOT EXISTS chat_attachments (
   data BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chat_attachments_message ON chat_attachments(message_id);
+
+CREATE TABLE IF NOT EXISTS chat_read_state (
+  room_id TEXT NOT NULL REFERENCES chat_rooms(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL DEFAULT 0,
+  held INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(room_id,user_id)
+);

@@ -129,7 +129,9 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
             (resource === "notes" && action === "restore") ||
             (resource === "spaces" && action === "grants") ||
             (resource === "chat-rooms" &&
-              ["messages", "read", "notifications"].includes(action)) ||
+              ["messages", "read", "unread", "notifications"].includes(
+                action,
+              )) ||
             (resource === "chat-messages" && action === "reactions") ||
             (resource === "mentions" && action === "read") ||
             (resource === "profiles" && action === "avatar")
@@ -159,6 +161,8 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
       if (resource === "mentions" && !id && method === "GET")
         return respond(store.mentions(user, org, url.searchParams));
       if (resource === "chat-rooms") {
+        if (id && action === "unread" && method === "POST")
+          return respond(store.markChatUnread(user, org, id, body.message_id));
         if (id && action === "notifications" && method === "PUT")
           return respond(
             store.setConversationNotifications(user, org, id, body),
@@ -194,7 +198,16 @@ export function createHandler(store: TeamStore, allowedOrigins: string[] = []) {
         if (id && action === "messages" && method === "POST")
           return respond(store.sendChatMessage(user, org, id, body), 201);
         if (id && action === "read" && method === "POST")
-          return respond(store.readChat(user, org, id, body.cursor));
+          return respond(
+            store.readChat(
+              user,
+              org,
+              id,
+              body.cursor,
+              body.version,
+              body.resume === true,
+            ),
+          );
       }
       if (
         resource === "profiles" &&

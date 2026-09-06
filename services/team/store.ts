@@ -1039,13 +1039,11 @@ export class TeamStore {
         limit + 1,
         meetingOffset,
       );
-      page.meetings.hits = rows
-        .slice(0, limit)
-        .map(({ excerpt, ...hit }) => ({
-          ...hit,
-          kind: "meeting",
-          snippet: snippetParts(excerpt, start, end),
-        }));
+      page.meetings.hits = rows.slice(0, limit).map(({ excerpt, ...hit }) => ({
+        ...hit,
+        kind: "meeting",
+        snippet: snippetParts(excerpt, start, end),
+      }));
       page.meetings.cursor = cursor(
         "meetings_cursor",
         rows.length,
@@ -1725,6 +1723,49 @@ export class TeamStore {
       is_default: id === `general-${org}`,
       message_extras: true,
       attachments_enabled: true,
+      unread_navigation: true,
+      first_unread_root_id: this.get(
+        "SELECT COALESCE(thread_id,id) AS id FROM chat_messages WHERE room_id=? AND author_id<>? AND deleted_at IS NULL AND created_seq>COALESCE((SELECT seq FROM chat_reads WHERE room_id=? AND user_id=?),0) ORDER BY created_seq LIMIT 1",
+        id,
+        user,
+        id,
+        user,
+      )?.id as string | undefined,
+      read_version: Number(
+        this.get(
+          "SELECT version FROM chat_read_state WHERE room_id=? AND user_id=?",
+          id,
+          user,
+        )?.version ?? 0,
+      ),
+      read_held: !!this.get(
+        "SELECT held FROM chat_read_state WHERE room_id=? AND user_id=?",
+        id,
+        user,
+      )?.held,
+      read_cursor: Number(
+        this.get(
+          "SELECT seq FROM chat_reads WHERE room_id=? AND user_id=?",
+          id,
+          user,
+        )?.seq ?? 0,
+      ),
+      first_unread_id: this.get(
+        "SELECT id FROM chat_messages WHERE room_id=? AND author_id<>? AND deleted_at IS NULL AND created_seq>COALESCE((SELECT seq FROM chat_reads WHERE room_id=? AND user_id=?),0) ORDER BY created_seq LIMIT 1",
+        id,
+        user,
+        id,
+        user,
+      )?.id as string | undefined,
+      first_unread_seq: Number(
+        this.get(
+          "SELECT MIN(created_seq) AS seq FROM chat_messages WHERE room_id=? AND author_id<>? AND deleted_at IS NULL AND created_seq>COALESCE((SELECT seq FROM chat_reads WHERE room_id=? AND user_id=?),0)",
+          id,
+          user,
+          id,
+          user,
+        )?.seq ?? 0,
+      ),
       participants,
       unread,
       unread_mentions: unreadMentions.length,
@@ -2505,18 +2546,65 @@ export class TeamStore {
       data: Buffer.from(row.data).toString("base64"),
     };
   }
-  readChat(user: string, org: string, id: string, value: unknown) {
-    this.chatRoom(user, org, id);
-    const seq = this.chatCursor(value, "read cursor");
-    if (seq > this.latestChatCursor(id))
-      fail(400, "Read cursor is ahead of this conversation");
-    this.run(
-      "INSERT INTO chat_reads(room_id,user_id,seq) VALUES(?,?,?) ON CONFLICT(room_id,user_id) DO UPDATE SET seq=MAX(seq,excluded.seq)",
-      id,
-      user,
-      seq,
-    );
-    return {};
+  markChatUnread(
+    user: string,
+    org: string,
+    roomId: string,
+    messageId: unknown,
+  ) {
+    return this.db.transaction(() => {
+      const room = this.chatRoom(user, org, roomId);
+      const message = this.chatMessage(
+        user,
+        org,
+        text(messageId, "message", 100),
+        room,
+      );
+      if (message.deleted_at) fail(404, "Message unavailable");
+      this.run(
+        "INSERT INTO chat_reads(room_id,user_id,seq) VALUES(?,?,?) ON CONFLICT(room_id,user_id) DO UPDATE SET seq=excluded.seq",
+        roomId,
+        user,
+        Math.max(0, message.created_seq - 1),
+      );
+      this.run(
+        "INSERT INTO chat_read_state(room_id,user_id,version,held) VALUES(?,?,1,1) ON CONFLICT(room_id,user_id) DO UPDATE SET version=version+1,held=1",
+        roomId,
+        user,
+      );
+      return this.chatRoom(user, org, roomId);
+    })();
+  }
+  readChat(
+    user: string,
+    org: string,
+    id: string,
+    value: unknown,
+    version?: unknown,
+    resume = false,
+  ) {
+    return this.db.transaction(() => {
+      const room = this.chatRoom(user, org, id);
+      if ((version ?? 0) !== room.read_version)
+        fail(409, "Read state changed. Refresh the conversation.");
+      const seq = this.chatCursor(value, "read cursor");
+      if (seq > this.latestChatCursor(id))
+        fail(400, "Read cursor is ahead of this conversation");
+      if (room.read_held && !resume) return { held: true };
+      this.run(
+        "INSERT INTO chat_reads(room_id,user_id,seq) VALUES(?,?,?) ON CONFLICT(room_id,user_id) DO UPDATE SET seq=MAX(seq,excluded.seq)",
+        id,
+        user,
+        seq,
+      );
+      if (resume)
+        this.run(
+          "UPDATE chat_read_state SET held=0 WHERE room_id=? AND user_id=?",
+          id,
+          user,
+        );
+      return { held: false };
+    })();
   }
   snapshot(user: string, org: string) {
     const role = this.role(user, org);

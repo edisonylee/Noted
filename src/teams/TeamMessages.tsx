@@ -366,6 +366,7 @@ export function TeamMessages({
               }}
               onRoom={updateRoom}
               onRead={markRead}
+              onOpenMessage={openMessage}
             />
           ) : (
             <div className="messages-unavailable">
@@ -582,6 +583,7 @@ function MessageRoom({
   onRead,
   thread,
   onCloseThread,
+  onOpenMessage,
   jump,
   onSearch,
 }: {
@@ -601,7 +603,14 @@ function MessageRoom({
   onRead: (id: string) => void;
   thread?: TeamChatMessage;
   onCloseThread?: () => void;
+  onOpenMessage?: (id: string) => void;
 }) {
+  const [unreadBoundary, setUnreadBoundary] = useState(
+    room.first_unread_seq ?? 0,
+  );
+  const readState = useRef(room);
+  readState.current = room;
+  const [readBusy, setReadBusy] = useState(false);
   const positionKey = `${org}:${user}:${room.id}:${thread?.id ?? "main"}`;
   const destination = jump
     ? thread
@@ -611,7 +620,14 @@ function MessageRoom({
   const restorePosition = useRef(
     destination
       ? { id: destination.id, seq: destination.created_seq, offset: 40 }
-      : readMessagePosition(positionKey),
+      : (readMessagePosition(positionKey) ??
+          (!thread && room.first_unread_root_id
+            ? {
+                id: room.first_unread_root_id,
+                seq: room.first_unread_seq ?? 0,
+                offset: 40,
+              }
+            : undefined)),
   );
   const positionReady = useRef(false);
   const holdPosition = useRef(!!restorePosition.current);
@@ -684,6 +700,7 @@ function MessageRoom({
   const acknowledge = useCallback(
     async (seq: number) => {
       if (
+        readState.current.read_held ||
         !visible.current ||
         newerAfter.current != null ||
         !document.hasFocus() ||
@@ -692,7 +709,13 @@ function MessageRoom({
       )
         return;
       try {
-        await team.request("POST", `${path}/read`, { cursor: seq });
+        const version = readState.current.read_version;
+        const result = await team.request<{ held?: boolean }>(
+          "POST",
+          `${path}/read`,
+          { cursor: seq, version },
+        );
+        if (result.held || version !== readState.current.read_version) return;
         if (alive.current) {
           readCursor.current = Math.max(seq, readCursor.current);
           onRead(id);
@@ -825,6 +848,9 @@ function MessageRoom({
           newerAfter.current = page.newer_after ?? null;
           setHasNewer(newerAfter.current != null);
         }
+        readState.current = page.room;
+        if (page.room.first_unread_seq)
+          setUnreadBoundary((old) => old || page.room.first_unread_seq!);
         onRoom(page.room);
         if (threadId) setParent(page.parent);
         delay = page.live ? 0 : 3_000;
@@ -1085,6 +1111,28 @@ function MessageRoom({
         message={message}
         highlighted={destination?.id === message.id}
         person={person}
+        onMarkUnread={
+          room.unread_navigation
+            ? async () => {
+                if (readBusy) return;
+                setReadBusy(true);
+                try {
+                  const updated = await team.request<TeamChatRoom>(
+                    "POST",
+                    `${path}/unread`,
+                    { message_id: message.id },
+                  );
+                  readState.current = updated;
+                  onRoom(updated);
+                  setUnreadBoundary(message.created_seq);
+                } catch (e) {
+                  setSendError(String(e));
+                } finally {
+                  setReadBusy(false);
+                }
+              }
+            : undefined
+        }
         canSend={canSend}
         renderBody={renderBody}
         showReplies={showReplies}
@@ -1115,6 +1163,36 @@ function MessageRoom({
       }}
     >
       <div className="messages-room-main" inert={!!threadRoot || undefined}>
+        {room.read_held && (
+          <div className="message-unread-notice" role="status">
+            <span>Marked unread · Kept unread until you mark it read</span>
+            <button
+              className="team-text-button"
+              disabled={readBusy}
+              onClick={async () => {
+                setReadBusy(true);
+                try {
+                  await team.request("POST", `${path}/read`, {
+                    cursor: room.notification_cursor ?? 0,
+                    version: room.read_version,
+                    resume: true,
+                  });
+                  const updated = await team.request<TeamChatRoom>("GET", path);
+                  readState.current = updated;
+                  onRoom(updated);
+                  setUnreadBoundary(0);
+                  onRead(id);
+                } catch (e) {
+                  setSendError(String(e));
+                } finally {
+                  setReadBusy(false);
+                }
+              }}
+            >
+              Mark read
+            </button>
+          </div>
+        )}
         <header className="messages-room-head">
           <div>
             <h1>
@@ -1148,6 +1226,14 @@ function MessageRoom({
               onClick={onCloseThread}
             >
               <X size={18} />
+            </button>
+          )}
+          {!threadId && room.unread_navigation && room.first_unread_id && (
+            <button
+              className="team-text-button"
+              onClick={() => onOpenMessage?.(room.first_unread_id!)}
+            >
+              Jump to unread
             </button>
           )}
           {!threadId && onSearch && (
@@ -1282,6 +1368,13 @@ function MessageRoom({
                       <span>{day}</span>
                     </div>
                   )}
+                  {unreadBoundary > 0 &&
+                    message.created_seq >= unreadBoundary &&
+                    !messages
+                      .slice(0, index)
+                      .some((m) => m.created_seq >= unreadBoundary) && (
+                      <div className="message-new-divider">New messages</div>
+                    )}
                   {messageRow(message, !threadId)}
                 </Fragment>
               );
@@ -1461,6 +1554,7 @@ function MessageRoom({
             onSentFor={onSentFor}
             onRoom={onRoom}
             onRead={onRead}
+            onOpenMessage={onOpenMessage}
             onCloseThread={() => {
               setThreadRoot(null);
               requestAnimationFrame(() =>

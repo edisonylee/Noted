@@ -20,3 +20,20 @@ export function findMentions<T extends { id: string; name: string }>(body: strin
   }
   return found;
 }
+
+// Channel references are exact, case-insensitive slug matches; they never ping
+// anyone, so nothing here may ever feed unreadMentions() or mentions().
+export function findChannelMentions<T extends { id: string; name: string }>(body: string, channels: T[]) {
+  const byName = new Map<string, T>();
+  for (const room of channels) if (room.name) byName.set(room.name.toLocaleLowerCase(), room);
+  const found: { start: number; end: number; room: T }[] = [];
+  for (const match of body.matchAll(/#([A-Za-z0-9][A-Za-z0-9_-]*)/g)) {
+    const start = match.index!;
+    // The "/" guard keeps URL fragments (https://x.test/#design) plain; the
+    // letter/digit guard already covers page#design and C#design.
+    if (start > 0 && /[\p{L}\p{N}_#\/]/u.test(body[start - 1])) continue;
+    const room = byName.get(match[1].toLocaleLowerCase());
+    if (room) found.push({ start, end: start + match[0].length, room });
+  }
+  return found;
+}

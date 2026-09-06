@@ -739,6 +739,10 @@
   padding: 1px 3px;
 }
 .messages-mention.self {
+  /* App.css's Self knowledge-graph view owns a bare .self rule (display: flex;
+     flex: 1) that would otherwise stretch this mark across the whole line. */
+  display: inline;
+  flex: none;
   background: var(--accent-tint);
   color: var(--ink);
   box-shadow: inset 0 -1px 0 var(--accent);
@@ -1009,4 +1013,37 @@
   .messages-message-content .message-reply-ref {
     padding-right: 180px;
   }
+}
+/* A resolved #channel reference: the "#" glyph is the icon, so no Lucide mark;
+   the accent stays reserved for the self @ mark and the .message-target flash. */
+.messages-channel-link {
+  display: inline;
+  font: inherit;
+  font-weight: 550;
+  color: var(--ink);
+  background: var(--hover-soft);
+  border: 0;
+  border-radius: 4px;
+  padding: 1px 3px;
+  cursor: pointer;
+}
+.messages-channel-link:hover,
+.messages-channel-link:focus-visible {
+  background: var(--line);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.messages-channel-link.is-archived {
+  color: var(--muted);
+}
+/* Muted text on the --line hover background is 4.3:1 in the light theme;
+   archived chips keep the rest background and signal hover by underline only. */
+.messages-channel-link.is-archived:hover,
+.messages-channel-link.is-archived:focus-visible {
+  background: var(--hover-soft);
+}
+.messages-mention-picker button small {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--muted);
 }

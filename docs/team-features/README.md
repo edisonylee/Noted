@@ -12,12 +12,16 @@ validation gate:
 7. [Drop attachments](07-drop-attachments.md)
 8. [Threads](08-threads.md)
 9. [Inline replies](09-inline-replies.md)
+10. [Channel mentions](10-channel-mentions.md)
 
 ## Implementation and verification
 
-All five are implemented. The full Team regression suite passes **75 tests**,
-including HTTP authorization and isolated Docker runtime packaging. The frontend
-build passes; `cargo check --lib` passes for the native attachment Save command.
+All ten are implemented. The team service suite passes **81 tests** across its
+eight files, including HTTP authorization and isolated Docker runtime packaging,
+and `tests/team-messaging.test.ts` passes **12**; the two root-suite failures
+that remain (alpha bundle packaging and backup destination defaults) predate
+these features and are unrelated to team messaging. The frontend build passes;
+`cargo check --lib` passes for the native attachment Save command.
 Source is formatted with Prettier; the native teams module uses rustfmt.
 
 Synthetic UI checks exercised attachment cards, first-unread history, explicit
@@ -46,6 +50,14 @@ overwrite a newer manual mark with stale read acknowledgments. Meeting sharing
 stores references and quote offsets, not copied source content; viewing rechecks
 current permissions, and quotes disappear when the source revision changes.
 Saved messages are private; pins are shared with the conversation.
+
+Threads add a read endpoint and a partial index created in the store
+constructor only, so deploy the team server before the client. Inline replies
+add a nullable `reply_to_id` column as an additive constructor migration; back
+up the SQLite database first, and note that editing or deleting a quoted
+original re-emits at most 100 quoting rows per change. Channel mentions change
+neither schema nor endpoints, so they carry no ordering constraint between
+server and client.
 
 Commits remain local on master for review. Pushing, production server deployment,
 and installed-app testing are left to the user.

@@ -76,8 +76,48 @@ test("inline reply helpers key sends by target, preview quotes on one line and m
   expect(canReplyInline(message("root", 8, 1, "Hi", { thread_id: null }), "root")).toBe(false);
 });
 
-import { findMentions, mentionQuery } from "../src/teams/mentions";
+import { bodyMentions, channelQuery, findChannelMentions, findMentions, mentionQuery } from "../src/teams/mentions";
 import { draftKey, readDrafts, writeDrafts } from "../src/teams/messageDrafts";
+
+test("channel references resolve only exact visible names and never inside words or URLs", () => {
+  const channels = [
+    { id: "d", name: "design" },
+    { id: "g", name: "general" },
+    { id: "a", name: "old-topic", archived_at: "2026-09-01T00:00:00Z" },
+  ];
+  const body = "see #design, #Design. (#general) #design-system #nope C#design issue#12 ##design https://x/p#design https://x.test/#design # heading";
+  expect(findChannelMentions(body, channels).map((h) => [h.room.id, h.start, h.end])).toEqual([["d", 4, 11], ["d", 13, 20], ["g", 23, 31]]);
+  expect(findChannelMentions("back in #old-topic", channels).map((h) => h.room.id)).toEqual(["a"]);
+  expect(findChannelMentions("#design-", channels)).toEqual([]);
+  expect(findChannelMentions("", channels)).toEqual([]);
+  expect(findChannelMentions("#", channels)).toEqual([]);
+  expect(findChannelMentions("#design", [])).toEqual([]);
+});
+
+test("channel query opens on # after whitespace, filters without spaces, and takes precedence over a mention query", () => {
+  expect(channelQuery("see #des", 8)).toEqual({ start: 4, end: 8, query: "des" });
+  expect(channelQuery("#", 1)).toEqual({ start: 0, end: 1, query: "" });
+  expect(channelQuery("a#b", 3)).toBeNull();
+  expect(channelQuery("#des ign", 8)).toBeNull();
+  expect(channelQuery("# title", 7)).toBeNull();
+  // mentionQuery's [^@\n]* swallows "#de", so the component must evaluate
+  // channelQuery first for "@Ed #de" to reach the channel picker.
+  expect(channelQuery("@Ed #de", 7)).toEqual({ start: 4, end: 7, query: "de" });
+  expect(mentionQuery("@Ed #de", 7)).not.toBeNull();
+  expect(channelQuery("#design @Ed", 11)).toBeNull();
+  expect(mentionQuery("#design @Ed", 11)?.query).toBe("Ed");
+});
+
+test("body mentions merge people and channels in order and drop overlaps", () => {
+  const members = [{ id: "a", name: "Edison Chen" }, { id: "b", name: "Ed Smith" }];
+  const channels = [{ id: "d", name: "design" }];
+  const hits = bodyMentions("@Edison see #design and @Ed Smith", members, channels);
+  expect(hits.map((h) => h.kind)).toEqual(["member", "channel", "member"]);
+  for (let i = 1; i < hits.length; i++) expect(hits[i].start).toBeGreaterThanOrEqual(hits[i - 1].end);
+  const overlap = bodyMentions("@Team #1", [{ id: "t", name: "Team #1" }], [{ id: "one", name: "1" }]);
+  expect(overlap).toHaveLength(1);
+  expect(overlap[0].kind).toBe("member");
+});
 
 test("mentions match full names and unique first names, avoiding emails and ambiguous pings", () => {
   const members = [{ id: "a", name: "Edison Chen" }, { id: "b", name: "Ed Smith" }];

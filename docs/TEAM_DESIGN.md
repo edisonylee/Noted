@@ -105,6 +105,15 @@ original becomes a non-interactive tombstone. Escape is layered: it dismisses
 the mention picker first, then cancels a pending reply, then acts on the thread
 panel as usual (Back when the thread came from the list, Close otherwise).
 
+Channel references round out the composer: `#` opens the same picker as `@`,
+labelled "Link a channel", listing Team chat first and then the other open
+channels by prefix, and inserts the canonical slug. The body stores the text
+as typed; at render time a name matching one of the reader's own channels
+becomes a quiet inline chip (hover-soft background, `--line` on hover, muted
+when the channel is archived) that closes any thread panel and opens the
+channel in place. Unresolved names, code spans and URL fragments stay plain,
+and a channel reference never pings anyone.
+
 The service suite now has 44 passing tests (338 assertions), plus the message-merge
 regression test. New checks cover thread pagination and isolation, idempotent
 reactions, live wake-up/revocation, profile authority and upload validation, and

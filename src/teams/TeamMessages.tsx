@@ -24,6 +24,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -68,7 +69,7 @@ import {
   readDrafts,
   writeDrafts,
 } from "./messageDrafts";
-import { findMentions, mentionQuery } from "./mentions";
+import { bodyMentions, channelQuery, mentionQuery } from "./mentions";
 import { TeamProfileCard } from "./TeamProfile";
 import { MessageRow } from "./MessageRow";
 import { ThreadList } from "./ThreadList";
@@ -303,6 +304,12 @@ export function TeamMessages({
     if (!active) setDialog(null);
   }, [active]);
   const current = rooms.find((r) => r.id === selected);
+  // Archived and default rooms included: old #references keep resolving to
+  // their read-only history. Memoized so row rendering sees a stable prop.
+  const channels = useMemo(
+    () => rooms.filter((r) => r.kind === "channel"),
+    [rooms],
+  );
   useEffect(() => {
     setViewedMessageRoom(
       active && !inbox && !savedView && (!compact || !listVisible)
@@ -320,6 +327,24 @@ export function TeamMessages({
     setSavedView(false);
     setJump(null);
     setListVisible(false);
+  };
+  // A #channel chip: the same path as a sidebar click, plus the filter clear
+  // the sidebar's own handlers do. Focus is best-effort: the new room's
+  // composer when it is editable, otherwise its first header control, so a
+  // chip activated by keyboard never strands focus on <body> — in the compact
+  // layout the toolbar focus effect does not re-run because the list is
+  // already hidden, and a read-only room has no editable composer.
+  const openRoom = (id: string) => {
+    selectRoom(id);
+    setSearch("");
+    requestAnimationFrame(() => {
+      const root = shell.current;
+      const target =
+        root?.querySelector<HTMLElement>(
+          '.messages-room-main .message-composer-editor .ProseMirror[contenteditable="true"]',
+        ) ?? root?.querySelector<HTMLElement>(".messages-room-head button");
+      target?.focus({ preventScroll: true });
+    });
   };
   return (
     <div className="messages-shell" ref={shell}>
@@ -396,6 +421,8 @@ export function TeamMessages({
               active={active && (!compact || !listVisible)}
               memberCount={data.members.length}
               members={data.members}
+              channels={channels}
+              onOpenRoom={openRoom}
               drafts={drafts}
               setDraftFor={(key, value) =>
                 setDrafts((old) => ({ ...old, [key]: value }))
@@ -623,6 +650,8 @@ function MessageRoom({
   active: isActive,
   memberCount,
   members,
+  channels,
+  onOpenRoom,
   drafts,
   setDraftFor,
   sendKeyFor,
@@ -645,6 +674,10 @@ function MessageRoom({
   active: boolean;
   memberCount: number;
   members: TeamUser[];
+  // The reader's own channel list, archived ones included; #references in
+  // bodies resolve against it and nowhere else.
+  channels: TeamChatRoom[];
+  onOpenRoom?: (id: string) => void;
   drafts: Record<string, string>;
   setDraftFor: (key: string, value: string) => void;
   sendKeyFor: (key: string, body: string) => string;
@@ -732,6 +765,14 @@ function MessageRoom({
     setThreadFromList(false);
     setThreadListFocus(null);
   }, []);
+  // A chip inside the thread panel reaches the main room's handler through the
+  // nested instance's onOpenRoom, so the panel closes explicitly here: a
+  // same-room chip never remounts, and a stale list would keep the main pane
+  // inert.
+  const openRoom = (id: string) => {
+    resetThreadPanel();
+    onOpenRoom?.(id);
+  };
   const [parent, setParent] = useState(thread);
   const [profile, setProfile] = useState<TeamUser | null>(null);
   const threadId = thread?.id;
@@ -1169,50 +1210,99 @@ function MessageRoom({
           room.participants.some((p) => p.id === m.id && p.active),
         )
       : members;
-  const query = dismissed ? null : mentionQuery(draft, caret);
-  const suggestions = query
-    ? eligible
-        .filter((m) =>
-          m.name
-            .toLocaleLowerCase()
-            .startsWith(query.query.toLocaleLowerCase()),
+  // One picker for every trigger. The trigger closest to the caret wins:
+  // channelQuery forbids whitespace while mentionQuery's [^@\n]* swallows
+  // "#des", so "@Ed #de" belongs to the channel picker and "#design @Ed" to
+  // the member picker. A third trigger adds a query function and a branch
+  // here, and a render branch in the listbox; keys, Escape and arrows are
+  // shared. No channels yet (rooms still loading) means no empty listbox.
+  type Suggestion =
+    | { kind: "member"; member: TeamUser }
+    | { kind: "channel"; room: TeamChatRoom };
+  const channelQ =
+    dismissed || !channels.length ? null : channelQuery(draft, caret);
+  const query = dismissed || channelQ ? null : mentionQuery(draft, caret);
+  const target = channelQ ?? query;
+  const suggestions: Suggestion[] = channelQ
+    ? channels
+        .filter(
+          (r) =>
+            !r.archived_at &&
+            r.name.startsWith(channelQ.query.toLocaleLowerCase()),
+        )
+        // Same order as the sidebar: Team chat first, then alphabetical.
+        .sort(
+          (a, b) =>
+            Number(b.is_default) - Number(a.is_default) ||
+            a.name.localeCompare(b.name),
         )
         .slice(0, 8)
-    : [];
-  const chooseMention = (member: TeamUser) => {
-    if (!query) return;
-    const insertion = `@${member.name} `;
+        .map((room) => ({ kind: "channel" as const, room }))
+    : query
+      ? eligible
+          .filter((m) =>
+            m.name
+              .toLocaleLowerCase()
+              .startsWith(query.query.toLocaleLowerCase()),
+          )
+          .slice(0, 8)
+          .map((member) => ({ kind: "member" as const, member }))
+      : [];
+  const chooseSuggestion = (s: Suggestion) => {
+    if (!target) return;
+    const insertion =
+      s.kind === "channel" ? `#${s.room.name} ` : `@${s.member.name} `;
     const next =
-      draft.slice(0, query.start) + insertion + draft.slice(query.end);
+      draft.slice(0, target.start) + insertion + draft.slice(target.end);
     if (next.length > 10_000) return;
     setDraft(next);
     setDismissed(true);
     requestAnimationFrame(() => {
       composer.current?.focus();
       composer.current?.setSelectionRange(
-        query.start + insertion.length,
-        query.start + insertion.length,
+        target.start + insertion.length,
+        target.start + insertion.length,
       );
     });
   };
-  // Passed to MessageRow so the row itself stays unaware of mentions.
+  // Passed to MessageRow so the row itself stays unaware of mentions. A
+  // channel chip shows the text exactly as typed; resolution is the reader's
+  // own room list, so a name never links across workspaces.
   const renderPlainBody = (body: string) => {
     let end = 0;
-    const parts = findMentions(body, eligible).map((mention) => {
-      const before = body.slice(end, mention.start);
-      end = mention.end;
+    const parts = bodyMentions(body, eligible, channels).map((hit) => {
+      const before = body.slice(end, hit.start);
+      end = hit.end;
+      const text = body.slice(hit.start, hit.end);
       return (
-        <Fragment key={mention.start}>
+        <Fragment key={hit.start}>
           {before}
-          <mark
-            className={
-              mention.user.id === user
-                ? "messages-mention self"
-                : "messages-mention"
-            }
-          >
-            {body.slice(mention.start, mention.end)}
-          </mark>
+          {hit.kind === "member" ? (
+            <mark
+              className={
+                hit.user.id === user
+                  ? "messages-mention self"
+                  : "messages-mention"
+              }
+            >
+              {text}
+            </mark>
+          ) : (
+            <button
+              type="button"
+              className={`messages-channel-link${hit.room.archived_at ? " is-archived" : ""}`}
+              title={
+                hit.room.is_default
+                  ? "Open Team chat"
+                  : hit.room.archived_at
+                    ? `Open #${hit.room.name} · Archived channel`
+                    : `Open #${hit.room.name}`
+              }
+              onClick={() => openRoom(hit.room.id)}
+            >
+              {text}
+            </button>
+          )}
         </Fragment>
       );
     });
@@ -1704,19 +1794,31 @@ function MessageRoom({
               className="messages-mention-picker"
               id={`mentions-${draftKey}`}
               role="listbox"
-              aria-label="Mention a teammate"
+              aria-label={channelQ ? "Link a channel" : "Mention a teammate"}
             >
-              {suggestions.map((member, index) => (
+              {suggestions.map((s, index) => (
                 <button
                   type="button"
                   role="option"
                   id={`mention-${draftKey}-${index}`}
                   aria-selected={index === mentionIndex % suggestions.length}
-                  key={member.id}
+                  key={s.kind === "channel" ? s.room.id : s.member.id}
                   onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => chooseMention(member)}
+                  onClick={() => chooseSuggestion(s)}
                 >
-                  @{member.name}
+                  {s.kind === "channel" ? (
+                    <>
+                      #{s.room.name}
+                      {s.room.is_default && (
+                        <>
+                          {" "}
+                          <small>Team chat</small>
+                        </>
+                      )}
+                    </>
+                  ) : (
+                    `@${s.member.name}`
+                  )}
                 </button>
               ))}
             </div>
@@ -1782,7 +1884,9 @@ function MessageRoom({
                 }
                 if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
                   e.preventDefault();
-                  chooseMention(suggestions[mentionIndex % suggestions.length]);
+                  chooseSuggestion(
+                    suggestions[mentionIndex % suggestions.length],
+                  );
                   return;
                 }
               }
@@ -1840,7 +1944,8 @@ function MessageRoom({
           </div>
           </div>
           <p className="messages-compose-hint">
-            Markdown · @ to mention · Enter to send · Shift + Enter for a new line
+            Markdown · @ mention · # channel · Enter to send · Shift + Enter for
+            a new line
           </p>
         </form>
       </div>
@@ -1863,6 +1968,8 @@ function MessageRoom({
               active={isActive}
               memberCount={memberCount}
               members={members}
+              channels={channels}
+              onOpenRoom={openRoom}
               thread={threadRoot}
               jump={jump?.parent?.id === threadRoot.id ? jump : undefined}
               drafts={drafts}

@@ -143,7 +143,9 @@ weighted FTS ordering. Empty search preserves the ordinary date-ordered list.
 ## Opening results and browsing context
 
 Search reuses the message-location endpoint and the navigation introduced for
-mentions. History accepts one of:
+mentions; a quoted original outside the loaded window opens through the same
+`around=` path, while rows in a conversation's thread list never scroll or
+highlight the timeline. History accepts one of:
 
 - `around=<message ID>`: up to 26 messages through the target and 25 after it.
 - `before=<sequence>`: existing earlier-history paging.

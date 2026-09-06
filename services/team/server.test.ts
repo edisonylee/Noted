@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join as joinPath } from "node:path";
 import { createMcpHandler, apiClient } from "./mcp";
 import { ensureExampleWorkspace } from "./examples";
+import { findChannelMentions } from "./mentions";
 const stores: TeamStore[] = [];
 afterEach(() => {
   stores.splice(0).forEach((s) => s.db.close());
@@ -1088,6 +1089,80 @@ describe("team member messaging", () => {
     expect(() =>
       s.updateChatRoom(owner, org, general.id, { revision: 1, archived: true }),
     ).toThrow("general");
+  });
+  test("channel references are plain text: verbatim, unpinged, searchable, and resolvable by every member", () => {
+    const { s, owner, org, join } = fixture();
+    const member = join("Taylor").id;
+    const design = s.createChatRoom(owner, org, {
+      kind: "channel",
+      name: "Design Review",
+    });
+    expect(design.name).toBe("design-review");
+    const general = s.chatRooms(member, org).find((r) => r.is_default)!;
+    const sent = s.sendChatMessage(
+      owner,
+      org,
+      general.id,
+      message("see #design-review and #General"),
+    );
+    expect(s.messageLocation(member, org, sent.id).message.body).toBe(
+      "see #design-review and #General",
+    );
+    // A channel reference is not a people mention: nothing here may ever
+    // count as unread mentions or reach the inbox.
+    const room = s.chatRoom(member, org, general.id);
+    expect(room.unread).toBe(1);
+    expect(room.unread_mentions).toBe(0);
+    expect(room.latest_unread_mention_seq ?? 0).toBe(0);
+    expect(s.mentions(member, org, query()).items).toHaveLength(0);
+    const resolve = (user: string) =>
+      findChannelMentions(
+        sent.body,
+        s.chatRooms(user, org).filter((r) => r.kind === "channel"),
+      ).map((h) => h.room.id);
+    expect(resolve(member)).toEqual([design.id, general.id]);
+    const hits = (q: string) =>
+      s.search(member, org, query(`q=${encodeURIComponent(q)}&kind=messages`))
+        .messages.hits.some((h) => h.id === sent.id);
+    expect(hits("design")).toBe(true);
+    expect(hits("#design")).toBe(true);
+    const renamed = s.updateChatRoom(owner, org, design.id, {
+      name: "Design Ops",
+      revision: design.revision,
+    });
+    expect(renamed.name).toBe("design-ops");
+    expect(renamed.name).toMatch(/^[a-z0-9][a-z0-9_-]*$/);
+    // Rename rot is the accepted cost of plain text: the old text degrades
+    // to readable prose rather than pointing at the wrong room.
+    expect(resolve(member)).toEqual([general.id]);
+    const archived = s.updateChatRoom(owner, org, design.id, {
+      archived: true,
+      revision: renamed.revision,
+    });
+    expect(archived.can_send).toBe(false);
+    expect(
+      s.chatRooms(member, org).some((r) => r.id === design.id && r.archived_at),
+    ).toBe(true);
+    const mention = s.sendChatMessage(
+      member,
+      org,
+      general.id,
+      message("history lives in #design-ops"),
+    );
+    const resolveOps = () =>
+      findChannelMentions(
+        mention.body,
+        s.chatRooms(member, org).filter((r) => r.kind === "channel"),
+      ).map((h) => [h.room.id, !!h.room.archived_at]);
+    expect(resolveOps()).toEqual([[design.id, true]]);
+    const restored = s.updateChatRoom(owner, org, design.id, {
+      archived: false,
+      revision: archived.revision,
+    });
+    expect(restored.can_send).toBe(true);
+    expect(resolveOps()).toEqual([[design.id, false]]);
+    s.changeMember(owner, org, member, "remove");
+    expect(() => s.chatRooms(member, org)).toThrow("access removed");
   });
   test("direct messages are private even from workspace owners and admins; cross-workspace IDs fail", async () => {
     const { s, owner, org, join, token } = fixture();

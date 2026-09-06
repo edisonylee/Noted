@@ -35,6 +35,7 @@ import {
   Lock,
   Loader,
   MessageSquare,
+  Paperclip,
   RefreshCw,
   Send,
   Settings2,
@@ -1555,6 +1556,16 @@ function MessageRoom({
               ))}
             </div>
           )}
+          <div className="messages-compose-box">
+          {room.attachments_enabled && (
+            <AttachmentPicker
+              ref={attachmentPicker}
+              files={attachments}
+              onChange={setAttachments}
+              disabled={sending || !canSend}
+              onBusy={setReadingFiles}
+            />
+          )}
           <MessageComposer
             aria-controls={
               suggestions.length ? `mentions-${draftKey}` : undefined
@@ -1613,22 +1624,27 @@ function MessageRoom({
               }
             }}
           />
-          {room.attachments_enabled && (
-            <AttachmentPicker
-              ref={attachmentPicker}
-              files={attachments}
-              onChange={setAttachments}
-              disabled={sending || !canSend}
-              onBusy={setReadingFiles}
-            />
-          )}
-          <div className="messages-compose-foot">
-            <span>
-              Markdown supported · @ to mention · Enter to send · Shift + Enter
-              for a new line
-            </span>
+          <div className="messages-compose-bar">
+            {room.attachments_enabled && (
+              <button
+                type="button"
+                className="icon-btn messages-compose-attach"
+                disabled={
+                  sending || readingFiles || !canSend || attachments.length >= 3
+                }
+                onClick={() => attachmentPicker.current?.open()}
+                aria-label="Attach files"
+                title="Attach files · PNG, JPEG, PDF, or text · 5 MiB total"
+              >
+                {readingFiles ? (
+                  <Loader size={15} className="spin" />
+                ) : (
+                  <Paperclip size={15} />
+                )}
+              </button>
+            )}
             <button
-              className="team-primary"
+              className="messages-compose-send"
               disabled={
                 sending ||
                 readingFiles ||
@@ -1636,15 +1652,20 @@ function MessageRoom({
                 (!draft.trim() && !attachments.length) ||
                 !!error
               }
+              aria-label={threadId ? "Reply" : "Send"}
+              title={threadId ? "Reply · Enter" : "Send · Enter"}
             >
               {sending ? (
                 <Loader size={14} className="spin" />
               ) : (
                 <Send size={14} />
-              )}{" "}
-              {threadId ? "Reply" : "Send"}
+              )}
             </button>
           </div>
+          </div>
+          <p className="messages-compose-hint">
+            Markdown · @ to mention · Enter to send · Shift + Enter for a new line
+          </p>
         </form>
       </div>
       {showPins && (

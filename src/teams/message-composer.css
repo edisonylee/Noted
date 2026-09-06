@@ -1,8 +1,8 @@
 .message-composer-editor .ProseMirror {
-  min-height: 56px;
+  min-height: 24px;
   max-height: 220px;
   overflow-y: auto;
-  padding: 10px 0;
+  padding: 6px 0;
   outline: none;
   white-space: pre-wrap;
   overflow-wrap: anywhere;

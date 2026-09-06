@@ -199,60 +199,68 @@
 .messages-actions button {
   padding: 6px;
 }
+/* The composer is one quiet rounded box: staged files, the editor, then an
+   action bar with attach on the left and a compact send on the right. The
+   hint sits under the box so it never competes with the message itself. */
 .messages-compose {
-  margin: 0 26px 22px;
-  padding: 12px 14px 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  background: var(--surface);
-}
-.messages-compose:focus-within {
-  border-color: var(--accent);
-}
-.messages-compose-label {
-  display: block;
-  color: var(--muted);
-  font-size: 10px;
-  margin-bottom: 5px;
-}
-.messages-compose textarea {
-  display: block;
-  width: 100%;
-  min-height: 58px;
-  max-height: 220px;
-  resize: vertical;
-  border: 0;
-  border-radius: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--ink);
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.6;
-  padding: 3px 0;
-}
-.messages-compose textarea::placeholder {
-  color: var(--faint);
-}
-.messages-compose-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 7px;
-}
-.messages-compose-foot > span {
-  color: var(--muted);
-  font-size: 10px;
-}
-.messages-compose-foot .team-primary {
-  min-height: 31px;
-  padding: 6px 11px;
-  font-size: 11px;
+  margin: 0 20px 14px;
 }
 .messages-compose .team-error {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   font-size: 12px;
+}
+.messages-compose-box {
+  padding: 8px 8px 6px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.messages-compose-box:focus-within {
+  border-color: var(--accent);
+}
+.messages-compose-box .message-attachment-picker ul {
+  margin: 2px 0 8px;
+}
+.messages-compose-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+}
+/* Two class names, not one: the base .icon-btn lives in App.css and the
+   team stylesheet is a lazy chunk, so a single-class override would depend
+   on which sheet happened to load last. */
+.messages-compose-bar .messages-compose-attach {
+  width: 30px;
+  height: 30px;
+  margin-left: -6px;
+  border-radius: 50%;
+}
+.messages-compose-send {
+  margin-left: auto;
+  width: 30px;
+  height: 30px;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: var(--ink);
+  color: var(--on-ink);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease);
+}
+.messages-compose-send:hover:not(:disabled) {
+  background: var(--ink-hover);
+}
+.messages-compose-send:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.messages-compose-hint {
+  margin: 6px 0 0;
+  text-align: center;
+  color: var(--faint);
+  font-size: 10.5px;
 }
 .messages-empty,
 .messages-unavailable {
@@ -287,7 +295,7 @@
 }
 .messages-new {
   position: absolute;
-  bottom: 183px;
+  bottom: 136px;
   align-self: center;
   padding: 7px 12px;
   min-height: 32px;
@@ -359,8 +367,8 @@
     margin-top: 12px;
     padding-top: 0;
   }
-  .messages-compose-foot > span {
-    font-size: 9px;
+  .messages-compose-hint {
+    font-size: 9.5px;
   }
   .messages-actions {
     opacity: 1;
@@ -532,22 +540,6 @@
 }
 .messages-room-head h1 {
   font-size: 19px;
-}
-.messages-compose {
-  margin: 0 20px 18px;
-  padding: 10px 13px;
-}
-.messages-compose textarea {
-  min-height: 42px;
-}
-.messages-compose-label.sr-only {
-  margin: 0;
-}
-.messages-compose-foot {
-  margin-top: 3px;
-}
-.messages-new {
-  bottom: 140px;
 }
 @media (max-width: 1050px) {
   .team-messages {
